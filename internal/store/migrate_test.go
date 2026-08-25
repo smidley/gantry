@@ -22,6 +22,10 @@ func TestOpenDBCreatesSchema(t *testing.T) {
 	var mode string
 	require.NoError(t, db.QueryRow(`PRAGMA journal_mode`).Scan(&mode))
 	require.Equal(t, "wal", mode)
+
+	var av int
+	require.NoError(t, db.QueryRow(`PRAGMA auto_vacuum`).Scan(&av))
+	require.Equal(t, 2, av) // 2 = INCREMENTAL
 }
 
 func TestOpenDBIsIdempotent(t *testing.T) {

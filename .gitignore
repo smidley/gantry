@@ -1,0 +1,10 @@
+/gantry
+/spikeprobe
+*.db
+*.db-wal
+*.db-shm
+/config/
+dist/
+node_modules/
+.DS_Store
+.superpowers/

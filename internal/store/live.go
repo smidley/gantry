@@ -74,3 +74,14 @@ func (l *Live) ForEach(fn func(key SeriesKey, ring *Ring)) {
 		fn(k, r)
 	}
 }
+
+// Evict deletes every ring whose SeriesKey matches kind and entity.
+func (l *Live) Evict(kind, entity string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k := range l.rings {
+		if k.Kind == kind && k.Entity == entity {
+			delete(l.rings, k)
+		}
+	}
+}

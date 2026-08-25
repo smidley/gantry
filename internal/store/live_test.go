@@ -39,3 +39,26 @@ func TestLiveConcurrentRecord(t *testing.T) {
 		require.Len(t, l.Since(k, 0), 100)
 	}
 }
+
+func TestLiveEvict(t *testing.T) {
+	l := NewLive(8)
+	k1 := SeriesKey{Kind: "container", Entity: "app1", Metric: "cpu"}
+	k2 := SeriesKey{Kind: "container", Entity: "app1", Metric: "mem"}
+	k3 := SeriesKey{Kind: "container", Entity: "app2", Metric: "cpu"}
+
+	// Record two metrics for entity app1
+	l.Record(k1, 100, 42.0)
+	l.Record(k2, 100, 100.0)
+	// Record one metric for entity app2
+	l.Record(k3, 100, 50.0)
+
+	require.Len(t, l.Keys(), 3)
+
+	// Evict all rings for container:app1
+	l.Evict("container", "app1")
+
+	// k1 and k2 should be gone, k3 should remain
+	keys := l.Keys()
+	require.Len(t, keys, 1)
+	require.Equal(t, k3, keys[0])
+}

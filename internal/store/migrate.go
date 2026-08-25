@@ -7,6 +7,8 @@ import (
 	"embed"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -48,8 +50,15 @@ func applyMigrations(db *sql.DB) error {
 	}
 	sort.Strings(names)
 
-	for i, name := range names {
-		version := i + 1
+	for _, name := range names {
+		numStr, _, ok := strings.Cut(name, "_")
+		if !ok {
+			return fmt.Errorf("migration %s: name must be <number>_<desc>.sql", name)
+		}
+		version, err := strconv.Atoi(numStr)
+		if err != nil {
+			return fmt.Errorf("migration %s: bad version prefix: %w", name, err)
+		}
 		var n int
 		if err := db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version=?`, version).Scan(&n); err != nil {
 			return err

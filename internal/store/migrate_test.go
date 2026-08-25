@@ -40,5 +40,26 @@ func TestOpenDBIsIdempotent(t *testing.T) {
 
 	var v int
 	require.NoError(t, db2.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&v))
-	require.Equal(t, 1, v)
+	require.Equal(t, 2, v)
+}
+
+func TestMigrationVersionsComeFromFilenamePrefix(t *testing.T) {
+	db, err := OpenDB(filepath.Join(t.TempDir(), "g.db"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT version FROM schema_migrations ORDER BY version`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var versions []int
+	for rows.Next() {
+		var v int
+		require.NoError(t, rows.Scan(&v))
+		versions = append(versions, v)
+	}
+	require.Equal(t, []int{1, 2}, versions) // 001_core.sql, 002_ts_indexes.sql
+
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_samples_1m_ts'`).Scan(&n))
+	require.Equal(t, 1, n)
 }

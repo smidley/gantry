@@ -9,6 +9,9 @@ type Ring struct {
 }
 
 func NewRing(capacity int) *Ring {
+	if capacity < 1 {
+		capacity = 1
+	}
 	return &Ring{buf: make([]Sample, capacity)}
 }
 

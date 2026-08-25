@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -60,13 +61,21 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	cfg := config.New(st, getenv)
 	port := cfg.Int("port", 8380)
 
+	var wg sync.WaitGroup
+
 	if cfg.Bool("fake_data", false) {
 		log.Println("fake data mode: synthesizing a demo fleet")
-		go fake.New(st, time.Now().UnixNano()).Run(ctx, 2*time.Second, nil)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fake.New(st, time.Now().UnixNano()).Run(ctx, 2*time.Second, nil)
+		}()
 	}
 
 	// Maintenance: flush every minute; downsample + prune every 10 minutes.
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		flush := time.NewTicker(60 * time.Second)
 		deep := time.NewTicker(10 * time.Minute)
 		defer flush.Stop()
@@ -92,12 +101,14 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	}()
 
 	log.Printf("gantry %s listening on :%d", ver, port)
-	return server.New(server.Options{
+	err = server.New(server.Options{
 		Port:    port,
 		Version: ver,
 		Store:   st,
 		Started: time.Now(),
 	}).ListenAndServe(ctx)
+	wg.Wait()
+	return err
 }
 
 func healthcheck(getenv func(string) string) error {

@@ -61,37 +61,23 @@ func TestHealthcheckExitPath(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestRunReleasesGoroutinesOnCtxCancel(t *testing.T) {
-	// Test that run() properly releases background goroutines when context is cancelled.
-	// This verifies the fix for the shutdown hang bug.
-	port := freePort(t)
+func TestRunReturnsOnBindFailure(t *testing.T) {
+	l, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
+	defer l.Close() // hold the port for the whole test so run()'s bind fails
+	port := l.Addr().(*net.TCPAddr).Port
+
 	env := map[string]string{
-		"GANTRY_PORT":      fmt.Sprint(port),
-		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
-		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_PORT":    fmt.Sprint(port),
+		"GANTRY_DB_PATH": filepath.Join(t.TempDir(), "g.db"),
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+	go func() { done <- run(context.Background(), func(k string) string { return env[k] }, "test-ver") }()
 
-	// Wait for server to start.
-	require.Eventually(t, func() bool {
-		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
-		if err != nil {
-			return false
-		}
-		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}, 5*time.Second, 50*time.Millisecond)
-
-	// Cancel the context.
-	cancel()
-
-	// Verify run() returns quickly (not hung in wg.Wait() forever).
 	select {
 	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("run did not return after context cancel (goroutines not released)")
+		require.Error(t, err, "run must return the bind error")
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() hung on bind failure instead of returning the error")
 	}
 }

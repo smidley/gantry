@@ -85,15 +85,21 @@ func (s *Store) PruneOnce(now time.Time, ret Retention) error {
 
 	// Size cap: trim oldest R1 data in 6h bites until under cap (R1 is
 	// always the bulk; give up after 8 bites rather than loop forever).
+	// Measure occupied bytes as (page_count - freelist_count) * page_size
+	// to account for freed pages that haven't been returned to the OS yet.
 	for i := 0; i < 8; i++ {
-		var pages, pageSize int64
+		var pages, pageSize, freelistCount int64
 		if err := s.db.QueryRow(`PRAGMA page_count`).Scan(&pages); err != nil {
 			return err
 		}
 		if err := s.db.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
 			return err
 		}
-		if pages*pageSize <= ret.SizeCapBytes {
+		if err := s.db.QueryRow(`PRAGMA freelist_count`).Scan(&freelistCount); err != nil {
+			return err
+		}
+		occupiedBytes := (pages - freelistCount) * pageSize
+		if occupiedBytes <= ret.SizeCapBytes {
 			break
 		}
 		var oldest sql.NullInt64
@@ -104,6 +110,10 @@ func (s *Store) PruneOnce(now time.Time, ret Retention) error {
 			break
 		}
 		if _, err := s.db.Exec(`DELETE FROM samples_1m WHERE ts < ?`, oldest.Int64+6*3600); err != nil {
+			return err
+		}
+		// Reclaim freed pages to the OS when auto_vacuum is active
+		if _, err := s.db.Exec(`PRAGMA incremental_vacuum`); err != nil {
 			return err
 		}
 	}

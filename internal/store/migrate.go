@@ -25,6 +25,12 @@ func OpenDB(path string) (*sql.DB, error) {
 	}
 	db.SetMaxOpenConns(1) // single writer; a dedicated read pool arrives with the query API phase
 
+	// Enable incremental auto_vacuum before any writes (must happen on fresh DB)
+	if _, err := db.Exec(`PRAGMA auto_vacuum=INCREMENTAL`); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
 		db.Close()

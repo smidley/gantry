@@ -58,6 +58,9 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	}
 	defer st.Close()
 
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	cfg := config.New(st, getenv)
 	port := cfg.Int("port", 8380)
 
@@ -68,7 +71,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			fake.New(st, time.Now().UnixNano()).Run(ctx, 2*time.Second, nil)
+			fake.New(st, time.Now().UnixNano()).Run(runCtx, 2*time.Second, nil)
 		}()
 	}
 
@@ -83,7 +86,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		ret := store.DefaultRetention()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			case <-flush.C:
 				if _, err := st.FlushMinutes(time.Now()); err != nil {
@@ -106,7 +109,8 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Version: ver,
 		Store:   st,
 		Started: time.Now(),
-	}).ListenAndServe(ctx)
+	}).ListenAndServe(runCtx)
+	cancel()
 	wg.Wait()
 	return err
 }

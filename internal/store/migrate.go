@@ -18,18 +18,12 @@ var migrationFS embed.FS
 // OpenDB opens (creating if needed) the Gantry SQLite database at path,
 // sets connection pragmas, and applies any unapplied embedded migrations.
 func OpenDB(path string) (*sql.DB, error) {
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)"
+	dsn := "file:" + path + "?_pragma=auto_vacuum(INCREMENTAL)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // single writer; a dedicated read pool arrives with the query API phase
-
-	// Enable incremental auto_vacuum before any writes (must happen on fresh DB)
-	if _, err := db.Exec(`PRAGMA auto_vacuum=INCREMENTAL`); err != nil {
-		db.Close()
-		return nil, err
-	}
 
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {

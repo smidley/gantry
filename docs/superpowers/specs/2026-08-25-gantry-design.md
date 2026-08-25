@@ -109,6 +109,7 @@ Every source is probed at boot and re-probed every 60s. Missing source ⇒ the c
 - Client: official Docker Go SDK over the unix socket, API version-negotiated.
 - **Inventory/metadata** (10s + on docker events): name, image, state, health, restart count, exit code, started-at, ports, mounts, labels. The events stream also feeds the events table (start/stop/die/oom/health_status) in realtime.
 - **Hot-loop stats** (2s): fast path reads cgroup v2 directly under `/host/sys/fs/cgroup/docker/<id>/` — `cpu.stat`, `memory.current`, `memory.stat`, `io.stat`, `pids.current`. Fallback path (cgroup v1 boxes or unreadable cgroupfs): docker stats API one-shot. Fast path is what keeps 2s × N-containers cheap.
+- **Insight enablers** (2s, cgroup v2 fast path only — collected from day one so the §16 engine has history to analyze): per-container PSI (`cpu.pressure`, `io.pressure`, `memory.pressure` — "% of time stalled waiting"), CPU throttling counters from `cpu.stat` (`nr_throttled`, `throttled_usec`), and **per-device** IO from `io.stat` (rows are per major:minor → mapped to sdX/nvme/md device identity, which the Unraid collector ties to array disk/pool). Host PSI from `/proc/pressure/*`. All are flat-file reads; readability is verified by spike S3.
 - **Per-container network** (2s): read `/proc/<container-init-pid>/net/dev` (pid from inspect; we share the host PID namespace). Containers in `network_mode=host` are labeled "host network" and excluded from per-container net attribution honestly.
 - **Memory metric definition:** report `memory.current − inactive_file` (what `docker stats` calls "used"), plus the raw value in drill-down.
 - **Logs:** `docker logs --follow --tail=500` equivalent via SDK, streamed to the UI over a chunked endpoint; bounded buffers; never persisted to SQLite.
@@ -247,3 +248,30 @@ testdata/              emhttp fixtures, fdinfo fixtures, cgroup layouts
 ## 15. Deferred to v2 (recorded, not designed)
 
 VM (libvirt) metrics · Unraid GraphQL API enrichment (needs key) · browser push notifications · full multi-channel alert integrations (Shoutrrr) · SMART attribute drill-down · container update-available indicators · multi-user/auth providers.
+
+(Cross-container impact insights are NOT on this list — they are designed in §16; only the engine's release phase is a scheduling decision.)
+
+## 16. Cross-container impact insights
+
+**Goal:** Gantry doesn't just show metrics — it tells you *who is hurting whom*. Plain-English, evidence-backed findings such as "qbittorrent is saturating disk3 — jellyfin's IO was stalled 38% of the last 10 minutes" or "parity check is running 55% below its usual speed while sabnzbd writes to the array". No other Unraid monitor does this; it is a headline differentiator.
+
+**Two ingredients per finding:**
+
+1. **Victim signal — measured stall, not inference:** cgroup v2 PSI per container (`cpu.pressure`, `io.pressure`, `memory.pressure`) reports the share of time a container's tasks were stalled waiting on each resource. This is kernel ground truth for "X is being impacted." Complemented by CPU throttling counters, parity-speed-vs-baseline, and OOM/health events.
+2. **Culprit attribution — who holds the contended resource:** per-device IO share (io.stat major:minor → array disk/pool identity via the Unraid collector), host CPU share, memory footprint, GPU engine busy share, mover/parity state.
+
+**Detection:** a fixed library of explainable rules evaluated every 60s over rolling windows (live ring + 1m rollups). A rule fires only when BOTH sides are present — a victim's pressure signal AND a culprit's dominant share of the same contended resource in the same window. Correlation alone never fires. Rule categories:
+
+- **Disk-IO contention (per device):** container X `io.pressure` sustained high while container Y drives ≥60% of that device's IO bps → "Y is starving X on disk3."
+- **Array-operation impact:** parity check speed below its rolling baseline (median of past checks; first-ever check baselines on its own opening rate) while containers drive IO to array devices → "parity ~N% slower while Y writes to disk3." Also: container IO repeatedly waking / keeping array disks spun up.
+- **CPU contention:** X `cpu.pressure` high (or `nr_throttled` rising) while Y holds a dominant host-CPU share.
+- **Memory pressure:** host+container `memory.pressure` high with Y's footprint dominant; recent OOM events strengthen severity.
+- **GPU engine contention:** an engine (e.g. video) near-saturated with 2+ containers active on it → "jellyfin and frigate are contending for the iGPU video engine."
+
+**Each finding carries:** a one-sentence statement, severity, the evidence bundle (series ids, window, the actual numbers), and links to the relevant charts. Findings are stored as events (`insight.*` kinds) — history and chart markers come free.
+
+**Anti-noise:** sustained-for windows, per-(victim, culprit, resource) cooldown, auto-resolve when pressure clears, and a confidence floor (attribution share + pressure magnitude thresholds). Insights must be rare enough to be read.
+
+**Surfacing:** an Insights card on Overview + a dedicated Insights view (active + resolved history). High-severity insights can optionally notify through the §8 alert channels.
+
+**Phasing:** the data enablers (PSI, per-device IO, throttle counters — see §4.1) land in **Phase 2** collection so every install accumulates the raw material from day one; the engine + UI are a distinct phase whose release slot (pre- vs post-CA-launch) is a scheduling decision, not a design one.

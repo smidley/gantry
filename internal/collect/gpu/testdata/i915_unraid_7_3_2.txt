@@ -1,0 +1,17 @@
+drm-driver:	i915
+drm-client-id:	940
+drm-pdev:	0000:00:02.0
+drm-total-system0:	251808 KiB
+drm-shared-system0:	0
+drm-active-system0:	71608 KiB
+drm-resident-system0:	164476 KiB
+drm-purgeable-system0:	908 KiB
+drm-total-stolen-system0:	0
+drm-shared-stolen-system0:	0
+drm-active-stolen-system0:	0
+drm-resident-stolen-system0:	0
+drm-purgeable-stolen-system0:	0
+drm-engine-render:	315136210141 ns
+drm-engine-copy:	0 ns
+drm-engine-video:	118615034512 ns
+drm-engine-video-enhance:	0 ns

@@ -35,3 +35,13 @@ func TestNonDRMFileRejected(t *testing.T) {
 	_, ok := parseFixture(t, "not_drm.txt")
 	require.False(t, ok)
 }
+
+func TestParseRealUnraidI915Capture(t *testing.T) {
+	info, ok := parseFixture(t, "i915_unraid_7_3_2.txt")
+	require.True(t, ok)
+	require.Equal(t, "i915", info.Driver)
+	require.Equal(t, "940", info.ClientID)
+	require.Equal(t, "315136210141 ns", info.Fields["drm-engine-render"])
+	require.Equal(t, "118615034512 ns", info.Fields["drm-engine-video"])
+	require.Equal(t, "251808 KiB", info.Fields["drm-total-system0"])
+}

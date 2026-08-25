@@ -16,6 +16,10 @@ type Store struct {
 
 	idMu sync.Mutex
 	ids  map[SeriesKey]int64
+
+	lastFlushed int64 // unix seconds of the last fully-flushed minute boundary
+	// (FlushMinutes is called from a single goroutine — the wiring loop — so
+	// lastFlushed needs no lock)
 }
 
 func Open(path string, clock func() time.Time) (*Store, error) {

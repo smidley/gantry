@@ -51,6 +51,33 @@ func TestDownsample1mTo10m(t *testing.T) {
 	require.Equal(t, 2, n)
 }
 
+func TestDownsampleFullWindowFidelity(t *testing.T) {
+	s := newTestStore(t, nil)
+	k := SeriesKey{Kind: "host", Metric: "cpu.total"}
+	id, err := s.seriesID(k)
+	require.NoError(t, err)
+
+	base := at("12:00:00")
+	for i := 0; i < 10; i++ { // ts = base+0m..base+9m; avg and max both 0..9, distinct per row
+		_, err := s.DB().Exec(`INSERT OR REPLACE INTO samples_1m (series_id, ts, avg, max) VALUES (?,?,?,?)`,
+			id, base.Unix()+int64(i)*60, float64(i), float64(i))
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, s.DownsampleOnce(base.Add(11*time.Minute)))
+
+	var n int
+	require.NoError(t, s.DB().QueryRow(`SELECT count(*) FROM samples_10m`).Scan(&n))
+	require.Equal(t, 1, n)
+
+	var ts int64
+	var avg, max float64
+	require.NoError(t, s.DB().QueryRow(`SELECT ts, avg, max FROM samples_10m`).Scan(&ts, &avg, &max))
+	require.Equal(t, base.Unix(), ts)
+	require.InDelta(t, 4.5, avg, 0.001) // avg-of-avgs over 0..9; only correct if the full window is present
+	require.Equal(t, 9.0, max)
+}
+
 func TestPruneEnforcesAges(t *testing.T) {
 	s := newTestStore(t, nil)
 	k := SeriesKey{Kind: "host", Metric: "cpu.total"}

@@ -93,6 +93,9 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 					log.Println("flush:", err)
 				}
 			case <-deep.C:
+				if _, err := st.FlushMinutes(time.Now()); err != nil {
+					log.Println("flush:", err)
+				}
 				if err := st.DownsampleOnce(time.Now()); err != nil {
 					log.Println("downsample:", err)
 				}

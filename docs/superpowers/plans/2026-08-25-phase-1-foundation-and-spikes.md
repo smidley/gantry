@@ -68,6 +68,7 @@ Create `.gitignore`:
 dist/
 node_modules/
 .DS_Store
+.superpowers/
 ```
 
 Create `LICENSE` with the standard MIT text, copyright line: `Copyright (c) 2026 Scott Brant`.

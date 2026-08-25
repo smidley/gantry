@@ -76,6 +76,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	}
 
 	// Maintenance: flush every minute; downsample + prune every 10 minutes.
+	ret := store.RetentionFromConfig(cfg.Int)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -83,7 +84,6 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		deep := time.NewTicker(10 * time.Minute)
 		defer flush.Stop()
 		defer deep.Stop()
-		ret := store.DefaultRetention()
 		for {
 			select {
 			case <-runCtx.Done():
@@ -93,14 +93,8 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 					log.Println("flush:", err)
 				}
 			case <-deep.C:
-				if _, err := st.FlushMinutes(time.Now()); err != nil {
-					log.Println("flush:", err)
-				}
-				if err := st.DownsampleOnce(time.Now()); err != nil {
-					log.Println("downsample:", err)
-				}
-				if err := st.PruneOnce(time.Now(), ret); err != nil {
-					log.Println("prune:", err)
+				if err := st.Maintain(time.Now(), ret); err != nil {
+					log.Println("maintain:", err)
 				}
 			}
 		}
@@ -115,6 +109,9 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	}).ListenAndServe(runCtx)
 	cancel()
 	wg.Wait()
+	if _, ferr := st.FlushMinutes(time.Now()); ferr != nil {
+		log.Println("final flush:", ferr)
+	}
 	return err
 }
 

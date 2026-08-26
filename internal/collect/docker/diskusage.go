@@ -53,6 +53,10 @@ func (c *DiskUsageCollector) Probe(ctx context.Context) collect.Status {
 	if _, err := c.cli.Ping(ctx); err != nil {
 		return collect.Status{Available: false, Detail: "mount the docker socket read-only at " + c.sockPath}
 	}
+	// Settled eagerly for the same reason Collector.Probe does: the SDK's
+	// lazy version negotiation is not goroutine-safe against a concurrent
+	// reader of the same client's negotiated state.
+	c.cli.NegotiateAPIVersion(ctx)
 	return collect.Status{Available: true}
 }
 

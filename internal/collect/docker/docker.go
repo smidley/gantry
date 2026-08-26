@@ -87,6 +87,10 @@ func (c *Collector) Probe(ctx context.Context) collect.Status {
 	if _, err := c.cli.Ping(ctx); err != nil {
 		return collect.Status{Available: false, Detail: "mount the docker socket read-only at " + c.sockPath}
 	}
+	// The SDK's lazy version negotiation is not goroutine-safe; settle it here
+	// before the stream goroutine exists (startEvents, below), rather than
+	// leaving it to race the first concurrent API calls that need it.
+	c.cli.NegotiateAPIVersion(ctx)
 	c.startEvents(ctx)
 	return collect.Status{Available: true}
 }

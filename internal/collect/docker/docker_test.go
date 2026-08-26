@@ -59,6 +59,10 @@ func TestDockerCollectorAgainstRealDaemon(t *testing.T) {
 	sink := newFakeSink()
 	evSink := &fakeEventSink{}
 	dc := New(sink, evSink, func(string, string) {}, "/var/run/docker.sock")
+	// Probe below starts dc's event-stream goroutine; ctx is already
+	// cancelled by the deferred cancel() above by the time Cleanups run, so
+	// this just has to join it — nothing from this test should outlive it.
+	t.Cleanup(dc.Drain)
 
 	st := dc.Probe(ctx)
 	require.True(t, st.Available, "probe: %s", st.Detail)

@@ -3,19 +3,14 @@ package server
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"time"
 
 	"github.com/smidley/gantry/internal/store"
 )
-
-//go:embed webdist
-var webFS embed.FS
 
 type Options struct {
 	Port    int
@@ -107,25 +102,28 @@ type Server struct {
 func New(o Options) *Server {
 	s := &Server{opts: o, mux: http.NewServeMux(), drain: make(chan struct{})}
 
-	s.mux.HandleFunc("GET /api/healthz", s.handleHealthz)
-	s.mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, _ *http.Request) {
+	// Every route gets gzip EXCEPT /api/live and the logs stream: both
+	// are long-lived streaming responses that must flush each write
+	// uncompressed as it's produced -- buffering into a gzip frame
+	// would defeat the entire point of either stream (see withGzip's
+	// own doc). Registered individually (rather than one blanket
+	// wrapper around the whole mux) so that exclusion is visible right
+	// here, at the point each route is declared.
+	s.mux.Handle("GET /api/healthz", withGzip(http.HandlerFunc(s.handleHealthz)))
+	s.mux.Handle("GET /api/version", withGzip(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]string{"version": s.opts.Version})
-	})
-	s.mux.HandleFunc("GET /api/live/snapshot", s.handleSnapshot)
-	s.mux.HandleFunc("GET /api/containers", s.handleContainers)
-	s.mux.HandleFunc("GET /api/series", s.handleSeries)
-	s.mux.HandleFunc("GET /api/top", s.handleTop)
-	s.mux.HandleFunc("GET /api/events", s.handleEvents)
-	s.mux.HandleFunc("GET /api/live", s.handleLive)
-	s.mux.HandleFunc("GET /api/containers/{name}/logs", s.handleLogs)
-	s.mux.HandleFunc("GET /api/settings", s.handleSettingsGet)
-	s.mux.HandleFunc("PUT /api/settings", s.handleSettingsPut)
+	})))
+	s.mux.Handle("GET /api/live/snapshot", withGzip(http.HandlerFunc(s.handleSnapshot)))
+	s.mux.Handle("GET /api/containers", withGzip(http.HandlerFunc(s.handleContainers)))
+	s.mux.Handle("GET /api/series", withGzip(http.HandlerFunc(s.handleSeries)))
+	s.mux.Handle("GET /api/top", withGzip(http.HandlerFunc(s.handleTop)))
+	s.mux.Handle("GET /api/events", withGzip(http.HandlerFunc(s.handleEvents)))
+	s.mux.HandleFunc("GET /api/live", s.handleLive)                   // no gzip: SSE flushes each event uncompressed
+	s.mux.HandleFunc("GET /api/containers/{name}/logs", s.handleLogs) // no gzip: unbounded follow=1 stream
+	s.mux.Handle("GET /api/settings", withGzip(http.HandlerFunc(s.handleSettingsGet)))
+	s.mux.Handle("PUT /api/settings", withGzip(http.HandlerFunc(s.handleSettingsPut)))
 
-	dist, err := fs.Sub(webFS, "webdist")
-	if err != nil {
-		panic(err) // embedded FS shape is a compile-time property
-	}
-	s.mux.Handle("GET /", http.FileServerFS(dist))
+	s.mux.Handle("GET /", withGzip(webHandler()))
 	return s
 }
 

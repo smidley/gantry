@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+/* Tailwind v4 CSS-first config: fonts + the desktop-sidebar breakpoint
+   (768px, "Sidebar (desktop >=768px) / bottom TabBar (mobile)") live in
+   Tailwind's own theme namespace so utilities like font-sans/font-mono/
+   font-display and the md: variant are available everywhere. Color
+   tokens are NOT here -- they're plain CSS custom properties in
+   lib/tokens.css, switched by [data-theme] rather than Tailwind's
+   dark: variant, since the design needs an explicit system|light|dark
+   toggle, not just a prefers-color-scheme mirror. */
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --breakpoint-md: 48rem;
+}
+
+html {
+  font-family: var(--font-sans);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}

@@ -1,9 +1,20 @@
 VERSION ?= dev
 
-.PHONY: build test lint fmt docker
+.PHONY: build web release test lint fmt docker
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o gantry ./cmd/gantry
+
+# web builds the Vite SPA into internal/server/webdist/, which
+# webfs_dist.go (-tags webdist) then embeds. Not needed for `build` or
+# `test` above -- only `release` and `docker` need a node toolchain.
+web:
+	cd web && npm ci && npm run build
+
+# release builds the real app shell into internal/server/webdist/ first,
+# then compiles the binary with that directory embedded (-tags webdist).
+release: web
+	CGO_ENABLED=0 go build -trimpath -tags webdist -ldflags "-s -w -X main.version=$(VERSION)" -o gantry ./cmd/gantry
 
 test:
 	go test ./...

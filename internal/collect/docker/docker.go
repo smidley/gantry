@@ -162,7 +162,7 @@ func (c *Collector) Running() []Meta { return c.reg.running() }
 // any single call.
 func (c *Collector) Tick(ctx context.Context, now time.Time) error {
 	if c.lastInventory.IsZero() || now.Sub(c.lastInventory) >= inventoryInterval {
-		if err := c.refreshInventory(ctx); err != nil {
+		if err := c.refreshInventory(ctx, now); err != nil {
 			return err
 		}
 		c.lastInventory = now
@@ -177,7 +177,7 @@ func (c *Collector) Tick(ctx context.Context, now time.Time) error {
 // container and replaces the registry's contents. A container that fails
 // to inspect (removed mid-poll) is simply dropped from this snapshot;
 // the next refresh (or the destroy event) settles it.
-func (c *Collector) refreshInventory(ctx context.Context) error {
+func (c *Collector) refreshInventory(ctx context.Context, now time.Time) error {
 	summaries, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
 		return err
@@ -192,7 +192,37 @@ func (c *Collector) refreshInventory(ctx context.Context) error {
 		metas = append(metas, metaFromInspect(resp))
 	}
 	c.reg.applyInventory(metas, c.events, c.evictContainer)
+	c.recordMeta(metas, now)
 	return nil
+}
+
+// recordMeta emits meta.started_at/meta.restart_count for every currently
+// running container -- ContainerDTO carries no StartedAt/RestartCount
+// fields of its own (Sample.Val is float64-only; see store.MetricSink),
+// so both flow through as ordinary per-container metrics that land in
+// ContainerDTO.Metrics via buildSnapshot's existing generic per-sample
+// grouping, the same path cgroupv2.go's cpu.pct/mem.bytes already use --
+// no DTO or main.go change needed for the UI's uptime/restart-count
+// display to have real data.
+//
+// Deliberately restricted to State=="running": metas here includes every
+// container ContainerList(All) returns, including long-exited ones the
+// registry still remembers (see lookupByName's doc) -- recording a fresh
+// sample for one of those every 10s inventory poll would keep resetting
+// its sampleAge in buildSnapshot's stopped-container filter, which would
+// never let it age out of the live frame the way an exited container's
+// naturally-aging cgroup stats already do today.
+func (c *Collector) recordMeta(metas []Meta, now time.Time) {
+	ts := now.Unix()
+	for _, m := range metas {
+		if m.State != "running" {
+			continue
+		}
+		if !m.StartedAt.IsZero() {
+			c.sink.Record(store.SeriesKey{Kind: "container", Entity: m.Name, Metric: "meta.started_at"}, ts, float64(m.StartedAt.Unix()))
+		}
+		c.sink.Record(store.SeriesKey{Kind: "container", Entity: m.Name, Metric: "meta.restart_count"}, ts, float64(m.RestartCount))
+	}
 }
 
 func metaFromInspect(resp container.InspectResponse) Meta {

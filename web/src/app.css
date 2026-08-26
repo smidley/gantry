@@ -56,6 +56,18 @@ body {
   }
 }
 
+/* Page title convention: every route's own <h1>, Space Grotesk per the
+   design direction ("Space Grotesk display for page titles + hero
+   numbers") -- Layout's header carries the constant "Gantry" wordmark,
+   not a per-route title, so each view renders its own. */
+.page-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.4rem;
+  color: var(--ink);
+  margin: 0 0 1rem 0;
+}
+
 /* Equipment-tag micro-label convention: metric names, table headers,
    chart eyebrows. */
 .microlabel {

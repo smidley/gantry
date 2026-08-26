@@ -27,9 +27,16 @@ const placeholderHTML = `<!doctype html>
 
 // webHandler serves the inline placeholder page at "/" -- the !webdist
 // build has no real SPA to route within, so every path gets the same
-// simple 200 rather than any attempt at file-shaped dispatch.
+// simple 200 rather than any attempt at file-shaped dispatch. The one
+// exception is an unmatched /api/* path (see isAPIPath): that must 404
+// rather than get the placeholder's misleading 200, same as the -tags
+// webdist build's SPA fallback.
 func webHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isAPIPath(r.URL.Path) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(placeholderHTML)) // write failure here means the client already disconnected
 	})

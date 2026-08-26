@@ -243,6 +243,27 @@ func TestTickEmitsParityMetricsOnlyWhileRunning(t *testing.T) {
 	require.InDelta(t, 128000000, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}], 1e-9)
 }
 
+// TestTickAlwaysEmitsArrayStartedMetric pins array.started as an
+// unconditional-every-tick metric (unlike parity.progress_pct/speed_bps,
+// gated on ParityRunning) -- the UI's Overview array-card state badge
+// needs a live-frame value even on a box that has never once transitioned
+// state (transitionEvents' array.state event only fires ON A CHANGE, so
+// a box that boots already STARTED and stays that way would otherwise
+// never surface its state at all).
+func TestTickAlwaysEmitsArrayStartedMetric(t *testing.T) {
+	dir := t.TempDir()
+	sink := newFakeSink()
+	c := New(sink, &fakeEvents{}, dir, t.TempDir())
+
+	copyFixture(t, "testdata/var_started.ini", filepath.Join(dir, "var.ini"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+	require.Equal(t, 1.0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "array.started"}])
+
+	copyFixture(t, "testdata/var_stopped.ini", filepath.Join(dir, "var.ini"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1010, 0)))
+	require.Equal(t, 0.0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "array.started"}])
+}
+
 func TestTickTwiceEmitsArrayStateEventInIsolation(t *testing.T) {
 	dir := t.TempDir()
 	events := &fakeEvents{}

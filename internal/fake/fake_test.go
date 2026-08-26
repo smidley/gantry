@@ -68,6 +68,41 @@ func TestTickEmitsHostAndContainerSeries(t *testing.T) {
 	}
 }
 
+func TestFakeContainerStartedAtIsPastAndVariesByIndex(t *testing.T) {
+	boot := time.Unix(5_000_000, 0)
+	first := fakeContainerStartedAt(boot, 0)
+	second := fakeContainerStartedAt(boot, 1)
+
+	require.True(t, first.Before(boot), "a container's synthetic start must be before boot, not after")
+	require.True(t, second.Before(boot))
+	require.NotEqual(t, first, second, "different fleet indices must get different synthetic uptimes")
+	require.Equal(t, first, fakeContainerStartedAt(boot, 0), "must be a pure function of (boot, i) -- no hidden randomness")
+}
+
+// TestTickEmitsContainerMetaMetricsStableAcrossTicks pins meta.started_at/
+// meta.restart_count as the fake-mode counterpart of the real docker
+// collector's Meta.StartedAt/RestartCount: present per running fake
+// container, and -- unlike cpu.pct etc., which vary every tick --
+// started_at must read IDENTICAL across ticks (a real container's start
+// instant doesn't move once it's running) and restart_count must stay
+// the fixed 0 Metas()'s own "identity never changes" convention already
+// promises.
+func TestTickEmitsContainerMetaMetricsStableAcrossTicks(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 7)
+	boot := time.Unix(2_000_000, 0)
+	g.Tick(boot)
+	g.Tick(boot.Add(2 * time.Second))
+
+	startedAtKey := store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "meta.started_at"}
+	restartKey := store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "meta.restart_count"}
+	require.Len(t, sink.recs[startedAtKey], 2)
+	require.Less(t, sink.recs[startedAtKey][0].Val, float64(boot.Unix()), "a container's synthetic start must be in the past relative to boot")
+	require.Equal(t, sink.recs[startedAtKey][0].Val, sink.recs[startedAtKey][1].Val, "started_at must stay stable across ticks, not rejitter")
+	require.Equal(t, 0.0, sink.recs[restartKey][0].Val)
+	require.Equal(t, 0.0, sink.recs[restartKey][1].Val)
+}
+
 func TestDeterministicWithSameSeed(t *testing.T) {
 	a, b := &capture{}, &capture{}
 	now := time.Unix(1_000_000, 0)

@@ -117,6 +117,18 @@ func (c *Collector) tickArray(now time.Time) error {
 	c.mu.Unlock()
 
 	ts := now.Unix()
+	// array.started is 1/0 rather than mdState's raw string -- Sample.Val
+	// is float64-only (see store.MetricSink), and the UI's Overview array
+	// card needs a live-frame-visible "is the array up" signal that
+	// doesn't depend on ever having observed a STATE TRANSITION (unlike
+	// the array.state event below, which only fires on change and so
+	// never fires at all for a box that's stayed STARTED the whole time
+	// this collector has been running).
+	started := 0.0
+	if next.State == "STARTED" {
+		started = 1.0
+	}
+	c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "array.started"}, ts, started)
 	if next.ParityRunning {
 		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, ts, next.ParityProgress)
 		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}, ts, next.ParitySpeedBps)

@@ -161,6 +161,20 @@ func New(sink store.MetricSink, events EventSink, seed int64) *Generator {
 
 func clamp(v, lo, hi float64) float64 { return math.Max(lo, math.Min(hi, v)) }
 
+// fakeContainerStartedAt gives fleet member i a plausible, fixed synthetic
+// "container started" instant: boot (this generator's own first-Tick
+// instant) minus an index-derived offset that grows with i^2 -- an
+// arbitrary but deterministic spread from tens of minutes to several days
+// across the 20-member fleet, so the UI's uptime column/header shows
+// varied, plausible-looking figures instead of an identical one for every
+// container. Pure and boot-relative (not wall-clock `time.Now()`) so it
+// stays in step with every other "N after boot" schedule in this file and
+// is exercised the same deterministic way by a test driving Tick with an
+// injected clock.
+func fakeContainerStartedAt(boot time.Time, i int) time.Time {
+	return boot.Add(-time.Duration(37*(i+1)*(i+1)) * time.Minute)
+}
+
 // appendEvent stamps ts explicitly rather than leaving Event.TS zero
 // for AppendEvent's own clock to fill in, so a synthesized event's
 // timestamp always matches the simulated `now` that triggered it, not
@@ -207,6 +221,27 @@ func (g *Generator) Tick(now time.Time) {
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "mem.bytes"}, ts, mem)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "net.rx_bps"}, ts, rx)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "net.tx_bps"}, ts, tx)
+		// meta.started_at/meta.restart_count are the fake-mode counterpart
+		// of the real docker collector's own same-named metrics (see
+		// docker.go's refreshInventory) -- ContainerDTO carries no
+		// StartedAt/RestartCount fields of its own (Sample.Val is
+		// float64-only), so both flow through as ordinary per-container
+		// metrics that land in ContainerDTO.Metrics via buildSnapshot's
+		// existing generic per-sample grouping, no DTO/main.go change
+		// needed. started_at uses g.boot (safe: only Tick's own
+		// single goroutine ever reads or writes it) minus a fixed,
+		// index-derived offset -- deterministic and STABLE across ticks
+		// (never rejittered), so uptime reads as a plausible, varied,
+		// steadily-climbing figure per container rather than either an
+		// identical one for all of them or a value that jumps around.
+		// restart_count stays a constant 0 for every fake container,
+		// mirroring Metas()' own "identity never stops/restarts"
+		// convention -- it is deliberately NOT tied to
+		// emitContainerEvents' lastRestartBoundary (that field belongs to
+		// the periodic-event schedule, not container identity, and Metas
+		// is called from other goroutines, so reading it here would race).
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "meta.started_at"}, ts, float64(fakeContainerStartedAt(g.boot, i).Unix()))
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "meta.restart_count"}, ts, 0)
 	}
 
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "cpu.total"}, ts, clamp(hostCPU/3+5, 0, 100))
@@ -284,6 +319,13 @@ func parityState(elapsed time.Duration) (running bool, progressPct float64) {
 // -- the same edge-triggered shape real var.go's transitionEvents uses,
 // just driven by a synthetic schedule instead of var.ini.
 func (g *Generator) emitArray(ts int64, elapsed time.Duration) {
+	// array.started mirrors real var.go's own unconditional-every-tick
+	// metric of the same name (see its doc): the fake array is always
+	// modeled as started, matching Metas()' own "identity never
+	// stops/restarts" convention -- there's no fake "array stopped"
+	// scenario anywhere in this generator.
+	g.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "array.started"}, ts, 1.0)
+
 	moverOn := int64(elapsed/moverTogglePeriod)%2 == 1
 	moverVal := 0.0
 	if moverOn {

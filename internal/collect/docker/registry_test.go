@@ -585,6 +585,59 @@ func TestCollectorLookupByNameDelegatesToRegistry(t *testing.T) {
 	require.False(t, ok)
 }
 
+// TestRecordMetaEmitsStartedAtAndRestartCountForRunningOnly pins
+// recordMeta (refreshInventory's new per-poll metric emission): a
+// running container gets both meta.started_at (its StartedAt, as unix
+// seconds) and meta.restart_count; a non-running one gets neither --
+// recording either for a stopped-but-still-known container would keep
+// resetting its sampleAge in buildSnapshot's stopped-container filter
+// (see recordMeta's own doc), which must stay driven only by the
+// per-container stats cgroupv2.go/apistats.go already restrict to
+// running containers.
+func TestRecordMetaEmitsStartedAtAndRestartCountForRunningOnly(t *testing.T) {
+	sink := newFakeSink()
+	c := New(sink, nil, func(string, string) {}, "/var/run/docker.sock")
+
+	started := time.Unix(1_600_000_000, 0)
+	metas := []Meta{
+		{ID: "a", Name: "web", State: "running", StartedAt: started, RestartCount: 3},
+		{ID: "b", Name: "batch", State: "exited", StartedAt: started, RestartCount: 9},
+	}
+	c.recordMeta(metas, time.Unix(1_700_000_000, 0))
+
+	gotStarted, ok := sink.value("web", "meta.started_at")
+	require.True(t, ok)
+	require.Equal(t, float64(started.Unix()), gotStarted)
+	gotRestarts, ok := sink.value("web", "meta.restart_count")
+	require.True(t, ok)
+	require.Equal(t, 3.0, gotRestarts)
+
+	_, ok = sink.value("batch", "meta.started_at")
+	require.False(t, ok, "a non-running container must not get a fresh sample")
+	_, ok = sink.value("batch", "meta.restart_count")
+	require.False(t, ok, "a non-running container must not get a fresh sample")
+}
+
+// TestRecordMetaSkipsStartedAtWhenZeroButStillEmitsRestartCount pins the
+// defensive half of recordMeta: a Meta whose StartedAt was never
+// resolved (e.g. inspect's StartedAt string failed to parse --
+// metaFromInspect leaves the field at its zero value in that case) must
+// not emit a nonsensical "started in 1" timestamp, but restart_count
+// (always a real int, defaulting sensibly to 0) is unaffected by that
+// and still emitted.
+func TestRecordMetaSkipsStartedAtWhenZeroButStillEmitsRestartCount(t *testing.T) {
+	sink := newFakeSink()
+	c := New(sink, nil, func(string, string) {}, "/var/run/docker.sock")
+
+	c.recordMeta([]Meta{{ID: "a", Name: "web", State: "running"}}, time.Unix(1_700_000_000, 0))
+
+	_, ok := sink.value("web", "meta.started_at")
+	require.False(t, ok, "a zero-value StartedAt must not be recorded as a fake unix-epoch timestamp")
+	got, ok := sink.value("web", "meta.restart_count")
+	require.True(t, ok)
+	require.Equal(t, 0.0, got)
+}
+
 // TestDrainReturnsImmediatelyWhenEventsNeverStarted pins I4's Drain()
 // against the case where the daemon was never reachable: Probe never got
 // past Ping, so startEvents never fired and eventsWG's counter is still

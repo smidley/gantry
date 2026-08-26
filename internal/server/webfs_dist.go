@@ -37,6 +37,14 @@ func webHandler() http.Handler {
 	fileServer := http.FileServerFS(sub)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isAPIPath(r.URL.Path) {
+			// An /api/* path that didn't match one of server.go's specific
+			// route patterns (a typo, a route from a future version, ...)
+			// falling through to this catch-all must 404, not silently
+			// receive the app shell -- see isAPIPath's own doc.
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
 		upath := strings.TrimPrefix(r.URL.Path, "/")
 		if upath == "" {
 			upath = "."

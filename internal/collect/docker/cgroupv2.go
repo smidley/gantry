@@ -256,26 +256,43 @@ func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time)
 
 	c.sink.Record(key("pids"), ts, float64(cg.Pids))
 
-	var totalRead, totalWrite uint64
+	// io.read_bps/write_bps are the SUM of each device's own rate, not a
+	// rate computed on the summed counters: a device's cumulative counter
+	// can be large the first time it's ever seen (e.g. it existed before
+	// this container was tracked, or just appeared in io.stat), and an
+	// aggregate-counter rate would fold that whole history into one
+	// tick's delta as soon as it joins an already-warm sum. Keying each
+	// device's Rate call by its own major:minor makes a new device's
+	// first observation return ok=false — same "first sample is silent"
+	// rule as everywhere else — so it's correctly excluded from the total
+	// until its own second reading, one tick later, gives a real delta.
+	// Unresolved (unnamed) devices still get their own rate key and still
+	// count toward the total; they only miss out on the live: per-device
+	// series, which needs a name.
+	var totalReadBps, totalWriteBps float64
+	var haveRead, haveWrite bool
 	for majMin, dev := range cg.IO {
-		totalRead += dev.RBytes
-		totalWrite += dev.WBytes
+		devName, named := c.DeviceName(majMin)
 
-		devName, ok := c.DeviceName(majMin)
-		if !ok {
-			continue // unresolvable major:minor: counted in the total above, no per-device series
+		if bps, ok := c.rates.Rate(name+".io."+majMin+".read", now, float64(dev.RBytes)); ok {
+			totalReadBps += bps
+			haveRead = true
+			if named {
+				c.sink.Record(key("live:io."+devName+".read_bps"), ts, bps)
+			}
 		}
-		if bps, ok := c.rates.Rate(name+".io."+devName+".read", now, float64(dev.RBytes)); ok {
-			c.sink.Record(key("live:io."+devName+".read_bps"), ts, bps)
-		}
-		if bps, ok := c.rates.Rate(name+".io."+devName+".write", now, float64(dev.WBytes)); ok {
-			c.sink.Record(key("live:io."+devName+".write_bps"), ts, bps)
+		if bps, ok := c.rates.Rate(name+".io."+majMin+".write", now, float64(dev.WBytes)); ok {
+			totalWriteBps += bps
+			haveWrite = true
+			if named {
+				c.sink.Record(key("live:io."+devName+".write_bps"), ts, bps)
+			}
 		}
 	}
-	if bps, ok := c.rates.Rate(name+".io.read", now, float64(totalRead)); ok {
-		c.sink.Record(key("io.read_bps"), ts, bps)
+	if haveRead {
+		c.sink.Record(key("io.read_bps"), ts, totalReadBps)
 	}
-	if bps, ok := c.rates.Rate(name+".io.write", now, float64(totalWrite)); ok {
-		c.sink.Record(key("io.write_bps"), ts, bps)
+	if haveWrite {
+		c.sink.Record(key("io.write_bps"), ts, totalWriteBps)
 	}
 }

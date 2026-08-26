@@ -11,13 +11,13 @@ import (
 
 // statsFromAPI converts one docker stats API response into the same
 // cgStats shape readCgroupStats produces, so recordContainerStats runs
-// identically regardless of source. Throttling counters (nr_throttled /
-// throttled_usec) aren't mapped here — the API fallback path reports
-// cpu.pct/mem/pids/io but not cpu.throttled_pct; that's a fast-path-only
-// signal for this phase.
+// identically regardless of source — including cpu.throttled_pct, which
+// needs ThrottlingData mapped here just like the cgroup path's cpu.stat.
 func statsFromAPI(resp container.StatsResponse) cgStats {
 	cg := cgStats{
-		CPUUsageUsec:    resp.CPUStats.CPUUsage.TotalUsage / 1000, // ns -> usec
+		CPUUsageUsec:    resp.CPUStats.CPUUsage.TotalUsage / 1000,          // ns -> usec
+		ThrottledUsec:   resp.CPUStats.ThrottlingData.ThrottledTime / 1000, // ns -> usec
+		NrThrottled:     resp.CPUStats.ThrottlingData.ThrottledPeriods,
 		MemCurrent:      resp.MemoryStats.Usage,
 		MemInactiveFile: resp.MemoryStats.Stats["inactive_file"],
 		Pids:            resp.PidsStats.Current,

@@ -201,6 +201,80 @@ func TestRecordContainerStatsComputesRatesAcrossTwoTicks(t *testing.T) {
 	require.False(t, ok, "unresolved major:minor must not get a per-device series")
 }
 
+// Regression: io totals must be sum-of-per-device-rates, not a rate
+// computed on the sum of raw counters. The latter lets a device that
+// first appears mid-run (its whole cumulative counter, never seen
+// before) fold straight into one tick's aggregate delta, producing a
+// spurious massive spike. Four ticks: A only (baseline), A advances
+// (totals = A), B appears with a huge cumulative counter while A
+// advances normally (totals must reflect only A — B's first sight is
+// suppressed, same as any other counter's first observation), then B
+// advances from its own new baseline (totals now include B's real rate).
+func TestRecordContainerStatsIOTotalsSuppressFirstSightOfNewDevice(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+	c.DeviceName = func(majMin string) (string, bool) {
+		switch majMin {
+		case "8:0":
+			return "sda", true
+		case "8:16":
+			return "sdb", true
+		default:
+			return "", false
+		}
+	}
+
+	c.recordContainerStats("web", cgStats{
+		IO: map[string]ioCounters{"8:0": {RBytes: 1_000_000, WBytes: 500_000}},
+	}, time.Unix(1000, 0))
+	_, ok := sink.value("web", "io.read_bps")
+	require.False(t, ok, "tick 1: baseline only, nothing has a prior sample yet")
+
+	c.recordContainerStats("web", cgStats{
+		IO: map[string]ioCounters{"8:0": {RBytes: 1_200_000, WBytes: 600_000}}, // +200,000 / +100,000 over 2s
+	}, time.Unix(1002, 0))
+	readBps, ok := sink.value("web", "io.read_bps")
+	require.True(t, ok)
+	require.InDelta(t, 100_000.0, readBps, 1e-9, "tick 2: A's rate only")
+	writeBps, ok := sink.value("web", "io.write_bps")
+	require.True(t, ok)
+	require.InDelta(t, 50_000.0, writeBps, 1e-9)
+	devReadA, ok := sink.value("web", "live:io.sda.read_bps")
+	require.True(t, ok)
+	require.InDelta(t, 100_000.0, devReadA, 1e-9)
+
+	c.recordContainerStats("web", cgStats{
+		IO: map[string]ioCounters{
+			"8:0":  {RBytes: 1_400_000, WBytes: 700_000},     // +200,000 / +100,000 over 2s: normal
+			"8:16": {RBytes: 50_000_000, WBytes: 20_000_000}, // brand new device, huge cumulative counter
+		},
+	}, time.Unix(1004, 0))
+	readBps, ok = sink.value("web", "io.read_bps")
+	require.True(t, ok)
+	require.InDelta(t, 100_000.0, readBps, 1e-9, "tick 3: B's huge first-sight counter must be suppressed, not folded into the total")
+	writeBps, ok = sink.value("web", "io.write_bps")
+	require.True(t, ok)
+	require.InDelta(t, 50_000.0, writeBps, 1e-9)
+	_, ok = sink.value("web", "live:io.sdb.read_bps")
+	require.False(t, ok, "tick 3: B's own first observation must not get a live: series either")
+
+	c.recordContainerStats("web", cgStats{
+		IO: map[string]ioCounters{
+			"8:0":  {RBytes: 1_600_000, WBytes: 800_000},     // +200,000 / +100,000 over 2s
+			"8:16": {RBytes: 50_500_000, WBytes: 20_200_000}, // +500,000 / +200,000 over 2s: B's real rate now
+		},
+	}, time.Unix(1006, 0))
+	readBps, ok = sink.value("web", "io.read_bps")
+	require.True(t, ok)
+	require.InDelta(t, 350_000.0, readBps, 1e-9, "tick 4: A(100,000) + B(250,000)")
+	writeBps, ok = sink.value("web", "io.write_bps")
+	require.True(t, ok)
+	require.InDelta(t, 150_000.0, writeBps, 1e-9, "tick 4: A(50,000) + B(100,000)")
+	devReadB, ok := sink.value("web", "live:io.sdb.read_bps")
+	require.True(t, ok)
+	require.InDelta(t, 250_000.0, devReadB, 1e-9)
+}
+
 func TestRecordContainerStatsSkipsMemPctWhenMemTotalZero(t *testing.T) {
 	sink := newFakeSink()
 	c := newStatsCollector(sink)

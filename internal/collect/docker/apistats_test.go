@@ -14,7 +14,8 @@ import (
 func TestStatsFromAPIMapsFields(t *testing.T) {
 	resp := container.StatsResponse{
 		CPUStats: container.CPUStats{
-			CPUUsage: container.CPUUsage{TotalUsage: 5_000_000_000}, // ns
+			CPUUsage:       container.CPUUsage{TotalUsage: 5_000_000_000}, // ns
+			ThrottlingData: container.ThrottlingData{ThrottledTime: 750_000_000, ThrottledPeriods: 25},
 		},
 		MemoryStats: container.MemoryStats{
 			Usage: 209715200,
@@ -35,6 +36,8 @@ func TestStatsFromAPIMapsFields(t *testing.T) {
 	cg := statsFromAPI(resp)
 
 	require.Equal(t, uint64(5_000_000), cg.CPUUsageUsec, "ns -> usec")
+	require.Equal(t, uint64(750_000), cg.ThrottledUsec, "ns -> usec")
+	require.Equal(t, uint64(25), cg.NrThrottled)
 	require.Equal(t, uint64(209715200), cg.MemCurrent)
 	require.Equal(t, uint64(41943040), cg.MemInactiveFile)
 	require.Equal(t, uint64(7), cg.Pids)

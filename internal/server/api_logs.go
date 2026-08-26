@@ -49,6 +49,11 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	// rc.Close is called from up to two places (this defer, and the
+	// drain watcher below) -- every ReadCloser this handler is ever
+	// handed (StreamLogs' io.Pipe in production, io.NopCloser or a
+	// plain io.Pipe in tests) tolerates a second Close as a harmless
+	// no-op, which is all a discarded `_ =` return value needs.
 	defer func() { _ = rc.Close() }()
 
 	flusher, ok := w.(http.Flusher)
@@ -59,6 +64,47 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
+	// Flush immediately: WriteHeader alone only records the status --
+	// net/http doesn't actually put it on the wire until the first
+	// Write or an explicit Flush. Without this, a follow=1 client whose
+	// container has nothing new to log yet would see no response at
+	// all (not even headers) until the first log line arrives, which
+	// for a quiet container could be a very long wait.
+	flusher.Flush()
+
+	// handlerDone closes the moment this handler returns, for ANY
+	// reason (stream end, client gone, or the watcher's own drain-
+	// triggered rc.Close() below) -- an explicit, local signal for the
+	// watcher goroutine to stop, rather than relying solely on
+	// r.Context() eventually going Done() (which net/http does
+	// guarantee once ServeHTTP returns, but a second, local channel
+	// makes the exit condition self-contained and doesn't depend on
+	// inferring that ordering across goroutines).
+	handlerDone := make(chan struct{})
+	defer close(handlerDone)
+
+	// A follow=1 stream with nothing new to log yet blocks on rc.Read
+	// below exactly the way a connected /api/live client blocks on its
+	// Broadcaster channel -- with no client disconnect and no server
+	// shutdown, that's correct (this is what "follow" means); Task 9's
+	// contract already ends it on client disconnect via ctx binding
+	// inside StreamLogs itself. What it does NOT already end on is a
+	// graceful server shutdown: net/http's Shutdown doesn't cancel an
+	// in-flight request's context just because it's waiting for
+	// connections to finish, so this handler would otherwise burn
+	// Shutdown's whole budget the same way handleLive used to before
+	// the carried fix. This watcher closes rc on the server's drain
+	// signal, which unblocks rc.Read (an io.Pipe read returns
+	// io.ErrClosedPipe once its writer or reader end is closed) the
+	// same way a client disconnect already does.
+	go func() {
+		select {
+		case <-s.drain:
+			_ = rc.Close()
+		case <-r.Context().Done():
+		case <-handlerDone:
+		}
+	}()
 
 	buf := make([]byte, 32*1024)
 	for {
@@ -70,7 +116,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 		if rerr != nil {
-			return // stream end (non-follow) or ctx-cancel-induced error (follow, client gone)
+			return // stream end (non-follow), ctx-cancel (client gone), or drain (server shutting down -- matters most for a still-blocked follow=1 read, but applies to any in-flight request)
 		}
 	}
 }

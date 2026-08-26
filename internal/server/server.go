@@ -90,10 +90,22 @@ type Options struct {
 type Server struct {
 	opts Options
 	mux  *http.ServeMux
+
+	// drain is closed by ListenAndServe the moment ctx fires, before
+	// hs.Shutdown -- the general form of the signal Broadcaster.Drain
+	// already gives SSE clients (see its doc), for every OTHER long-
+	// lived streaming handler in this package (currently just
+	// handleLogs' follow=1 case) that would otherwise block
+	// indefinitely on something with no reason to return during a
+	// graceful shutdown. A nil check is never needed: it's unbuffered
+	// and always allocated by New, and a nil channel in a select
+	// simply never becomes ready, which is the correct default for any
+	// caller that somehow got a zero-value Server.
+	drain chan struct{}
 }
 
 func New(o Options) *Server {
-	s := &Server{opts: o, mux: http.NewServeMux()}
+	s := &Server{opts: o, mux: http.NewServeMux(), drain: make(chan struct{})}
 
 	s.mux.HandleFunc("GET /api/healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, _ *http.Request) {
@@ -168,8 +180,13 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	go func() { errCh <- hs.ListenAndServe() }()
 	select {
 	case <-ctx.Done():
-		// Drain live SSE clients BEFORE Shutdown: see Broadcaster.Drain for
-		// why Shutdown alone can't get them to disconnect on its own.
+		// Drain every long-lived streaming handler BEFORE Shutdown: see
+		// Broadcaster.Drain and the drain field's own doc for why
+		// Shutdown alone can't get them to return on their own. Order
+		// between these two doesn't matter -- they're independent
+		// signals for independent handler kinds -- only that both
+		// happen before hs.Shutdown.
+		close(s.drain)
 		if s.opts.Live != nil {
 			s.opts.Live.Drain()
 		}

@@ -2,6 +2,7 @@ package collect
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,6 +118,44 @@ func TestRateTrackerChurnReturnsToBaseline(t *testing.T) {
 	}
 
 	require.Equal(t, baseline, rt.Len(), "churned keys must not accumulate")
+}
+
+// TestRateTrackerConcurrentRateAndEvictPrefixIsRace is a regression guard
+// for a real production shape: docker's event-stream goroutine calls
+// EvictPrefix (container destroy/remove) while the collector's own tick
+// goroutine concurrently calls Rate on the same *RateTracker
+// (internal/collect/docker/docker.go's evictContainer, called from
+// applyEventRecovered, races recordContainerStats's Rate calls). Without
+// internal synchronization this is an unsynchronized map read/write —
+// under -race it's reported directly; without -race it can crash the
+// whole process with a fatal error that bypasses recover(). Meaningful
+// only under `go test -race`.
+func TestRateTrackerConcurrentRateAndEvictPrefixIsRace(t *testing.T) {
+	rt := NewRateTracker()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		now := time.Now()
+		for i := 0; i < 1000; i++ {
+			rt.Rate("c1.cpu", now.Add(time.Duration(i)*time.Millisecond), float64(i))
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			rt.EvictPrefix("c1.")
+			rt.EvictPrefix("c2.")
+		}
+	}()
+
+	wg.Wait()
+
+	require.GreaterOrEqual(t, rt.Len(), 0, "Len() must return a sane count, not corrupted map state")
+	require.LessOrEqual(t, rt.Len(), 1, "only c1.cpu can possibly remain, and only if it landed after the last evict")
 }
 
 func TestRateUsesFractionalSecondElapsed(t *testing.T) {

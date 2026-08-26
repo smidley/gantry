@@ -8,10 +8,15 @@ import (
 	"time"
 )
 
-const (
+// reprobeEvery and backoffFloor are vars, not consts, so tests can shrink
+// them to exercise the reprobe/backoff paths without real multi-second
+// waits.
+var (
 	reprobeEvery = 60 * time.Second
-	backoffCap   = 5 * time.Minute
+	backoffFloor = time.Second
 )
+
+const backoffCap = 5 * time.Minute
 
 type entry struct {
 	c      Collector
@@ -65,6 +70,13 @@ func (r *Registry) Run(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
+// maxConsecutiveErrorsBeforeDowngrade is how many Tick failures in a row
+// (each one already bounded by safeTick's own per-tick timeout, so this
+// can't be "5 indefinite hangs") it takes before Sources() stops
+// reporting a collector as "ok" — otherwise a wedged dependency that
+// keeps erroring on every bounded attempt would report healthy forever.
+const maxConsecutiveErrorsBeforeDowngrade = 5
+
 func (r *Registry) runOne(ctx context.Context, e *entry) {
 	setStatus := func(s Status) { e.mu.Lock(); e.status = s; e.mu.Unlock() }
 	consecutive := 0
@@ -91,13 +103,24 @@ func (r *Registry) runOne(ctx context.Context, e *entry) {
 		}
 
 		if !available {
-			setStatus(e.c.Probe(ctx))
+			// A Probe succeeding here is the only recovery path once a
+			// collector has been downgraded (below): it always starts
+			// consecutive fresh, so a stale error streak from before the
+			// downgrade can't linger into the recovered run.
+			st := e.c.Probe(ctx)
+			setStatus(st)
+			if st.Available {
+				consecutive = 0
+			}
 			continue
 		}
 		if err := safeTick(ctx, e.c); err != nil {
 			consecutive++
 			if consecutive == 1 || consecutive%10 == 0 {
 				log.Printf("collector %s: %v (consecutive=%d)", e.c.Name(), err, consecutive)
+			}
+			if consecutive == maxConsecutiveErrorsBeforeDowngrade {
+				setStatus(Status{Available: false, Detail: "failing: " + err.Error()})
 			}
 		} else {
 			consecutive = 0
@@ -106,7 +129,7 @@ func (r *Registry) runOne(ctx context.Context, e *entry) {
 }
 
 func backoff(consecutive int, base time.Duration) time.Duration {
-	d := time.Second
+	d := backoffFloor
 	for i := 1; i < consecutive; i++ {
 		d *= 2
 		if d >= backoffCap {
@@ -119,11 +142,19 @@ func backoff(consecutive int, base time.Duration) time.Duration {
 	return d
 }
 
+// safeTick runs one Tick call under a deadline of 5x the collector's own
+// Interval, so a wedged dependency (e.g. a docker daemon that stops
+// answering) can't block this collector's goroutine forever with
+// Sources() still reporting "ok" — it times out, is counted as a tick
+// error like any other, and eventually downgrades via runOne's
+// consecutive-error counter.
 func safeTick(ctx context.Context, c Collector) (err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("panic: %v", p)
 		}
 	}()
-	return c.Tick(ctx, time.Now())
+	tctx, cancel := context.WithTimeout(ctx, 5*c.Interval())
+	defer cancel()
+	return c.Tick(tctx, time.Now())
 }

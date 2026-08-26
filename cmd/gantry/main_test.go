@@ -81,6 +81,21 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	require.Equal(t, http.StatusOK, snapResp.StatusCode)
 	require.Greater(t, snapBody.TS, int64(0))
 
+	// /api/series smoke check: Query is now wired straight to
+	// st.QuerySeries (Task 7) -- only the response shape (200, JSON array,
+	// one entry per requested metric) is asserted, not its data, since
+	// whether anything has flushed to samples_1m yet is a timing accident.
+	seriesResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/series?kind=host&metrics=cpu.total", port))
+	require.NoError(t, err)
+	var seriesBody []struct {
+		Metric string `json:"metric"`
+	}
+	require.NoError(t, json.NewDecoder(seriesResp.Body).Decode(&seriesBody))
+	drainAndClose(seriesResp)
+	require.Equal(t, http.StatusOK, seriesResp.StatusCode)
+	require.Len(t, seriesBody, 1)
+	require.Equal(t, "cpu.total", seriesBody[0].Metric)
+
 	// Every request above went through http.DefaultTransport, which keeps
 	// the underlying connection open (keep-alive) for reuse even after its
 	// response body is drained and closed. An idle-but-open connection

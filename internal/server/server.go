@@ -36,6 +36,24 @@ type Options struct {
 	// directly) for /api/containers. Nil in tests that don't wire one —
 	// the route then reports an empty JSON array rather than panicking.
 	Containers func() []ContainerInfo
+
+	// Query looks up history for one kind+entity's metrics over [from,to)
+	// (main wiring points this at store.QuerySeries) for /api/series. Nil
+	// in tests that don't wire one — the route then reports an empty JSON
+	// array rather than panicking.
+	Query func(ctx context.Context, kind, entity string, metrics []string, from, to int64) ([]store.SeriesResult, error)
+	// Top looks up one metric's per-entity leaderboard over [from,to) (main
+	// wiring points this at store.TopEntities; kind is always "container"
+	// for every resource /api/top exposes today) for /api/top's non-"now"
+	// windows — the resource->metric(s) mapping, multi-metric summing, and
+	// the window="now" short-circuit via Snapshot all live in the handler,
+	// keeping this closure a thin, generic passthrough. Nil in tests that
+	// don't wire one — see Query.
+	Top func(ctx context.Context, kind, metric string, from, to int64, agg string, limit int) ([]TopRow, error)
+	// Events looks up historical events (main wiring points this at
+	// store.QueryEvents, a straight passthrough) for /api/events. Nil in
+	// tests that don't wire one — see Query.
+	Events func(f store.EventFilter) ([]store.Event, error)
 }
 
 type Server struct {
@@ -52,6 +70,9 @@ func New(o Options) *Server {
 	})
 	s.mux.HandleFunc("GET /api/live/snapshot", s.handleSnapshot)
 	s.mux.HandleFunc("GET /api/containers", s.handleContainers)
+	s.mux.HandleFunc("GET /api/series", s.handleSeries)
+	s.mux.HandleFunc("GET /api/top", s.handleTop)
+	s.mux.HandleFunc("GET /api/events", s.handleEvents)
 
 	dist, err := fs.Sub(webFS, "webdist")
 	if err != nil {
@@ -79,6 +100,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v) // a write failure here means the client already disconnected
+}
+
+// writeError writes a {"error":"..."} body with the given status code —
+// the shared shape for every 4xx/5xx response across the /api surface.
+func writeError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg}) // see writeJSON: write failure means the client's gone
 }
 
 // ListenAndServe serves until ctx is cancelled, then shuts down gracefully.

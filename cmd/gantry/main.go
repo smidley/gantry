@@ -164,6 +164,9 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Sources:    registry.Sources,
 		Snapshot:   buildSnapshot(st, dc, ur, registry.Sources),
 		Containers: buildContainersList(dc),
+		Query:      st.QuerySeries,
+		Top:        buildTop(st),
+		Events:     st.QueryEvents,
 	}).ListenAndServe(runCtx)
 	cancel()
 	wg.Wait()
@@ -333,6 +336,24 @@ func buildContainersList(dc *docker.Collector) func() []server.ContainerInfo {
 			out = append(out, server.ContainerInfo{Name: m.Name, State: m.State, Health: m.Health, Image: m.Image})
 		}
 		return out
+	}
+}
+
+// buildTop adapts store.TopEntities' anonymous-struct return type to
+// server.TopRow for server.Options.Top: the two are structurally identical
+// (same field names/types/order) but Go doesn't let a []struct{...} stand
+// in for a []server.TopRow without converting element by element.
+func buildTop(st *store.Store) func(ctx context.Context, kind, metric string, from, to int64, agg string, limit int) ([]server.TopRow, error) {
+	return func(ctx context.Context, kind, metric string, from, to int64, agg string, limit int) ([]server.TopRow, error) {
+		rows, err := st.TopEntities(ctx, kind, metric, from, to, agg, limit)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]server.TopRow, len(rows))
+		for i, row := range rows {
+			out[i] = server.TopRow{Entity: row.Entity, Value: row.Value}
+		}
+		return out, nil
 	}
 }
 

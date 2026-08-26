@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -192,4 +193,117 @@ func TestHostMemTotalUpdatesEachTick(t *testing.T) {
 
 	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
 	require.Equal(t, uint64(1000000*1024), c.MemTotal())
+}
+
+const netDevA = `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+  eth0: 1000000     900    0    0    0     0          0         5   200000      300    0    0    0     0       0          0
+docker0:     500       5    0    0    0     0          0         0      500        5    0    0    0     0       0          0
+`
+
+const netDevB = `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+  eth0: 1004000     920    0    0    0     0          0         6   200800      310    0    0    0     0       0          0
+docker0:     600       6    0    0    0     0          0         0      600        6    0    0    0     0       0          0
+`
+
+const diskstatsA = `   8       0 sda 1000 5 1000 100 2000 10 2000 200 0 300 300
+   8       1 sda1 900 4 900 90 1800 9 1800 180 0 270 270
+`
+
+const diskstatsB = `   8       0 sda 1010 5 1100 110 2010 10 2200 220 0 330 330
+   8       1 sda1 905 4 950 95 1810 9 1900 190 0 280 280
+`
+
+func TestHostTickEmitsNetDiskIOAndHwmon(t *testing.T) {
+	dir := t.TempDir()
+	sysRoot := buildHwmonTree(t)
+	writeFile(t, dir, "stat", statA)
+	writeFile(t, dir, "meminfo", meminfoA)
+	writeFile(t, dir, "1/net/dev", netDevA)
+	writeFile(t, dir, "diskstats", diskstatsA)
+
+	sink := newFakeSink()
+	c := New(sink, dir, sysRoot)
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	// rate metrics need a second sample; gauges (hwmon) show up immediately.
+	_, ok := sink.value("net.eth0.rx_bps")
+	require.False(t, ok, "first tick has no baseline yet for rate metrics")
+	_, ok = sink.value("diskio.sda.read_bps")
+	require.False(t, ok, "first tick has no baseline yet for rate metrics")
+
+	tempVal, ok := sink.value("temp.coretemp_package_id_0.c")
+	require.True(t, ok)
+	require.InDelta(t, 45.0, tempVal, 1e-9)
+	fanVal, ok := sink.value("fan.nct6779_fan1.rpm")
+	require.True(t, ok)
+	require.Equal(t, 1200.0, fanVal)
+
+	name, ok := c.DeviceName("8:0")
+	require.True(t, ok)
+	require.Equal(t, "sda", name)
+	name, ok = c.DeviceName("8:1")
+	require.True(t, ok)
+	require.Equal(t, "sda1", name, "DeviceMap includes partitions even though diskio.* metrics don't")
+
+	writeFile(t, dir, "1/net/dev", netDevB)
+	writeFile(t, dir, "diskstats", diskstatsB)
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1002, 0)))
+
+	rxBps, ok := sink.value("net.eth0.rx_bps")
+	require.True(t, ok)
+	require.InDelta(t, 2000.0, rxBps, 1e-6) // (1004000-1000000)/2s
+	txBps, ok := sink.value("net.eth0.tx_bps")
+	require.True(t, ok)
+	require.InDelta(t, 400.0, txBps, 1e-6) // (200800-200000)/2s
+
+	readBps, ok := sink.value("diskio.sda.read_bps")
+	require.True(t, ok)
+	require.InDelta(t, 25600.0, readBps, 1e-6) // (1100-1000)*512/2s
+	writeBps, ok := sink.value("diskio.sda.write_bps")
+	require.True(t, ok)
+	require.InDelta(t, 51200.0, writeBps, 1e-6) // (2200-2000)*512/2s
+
+	_, ok = sink.value("net.docker0.rx_bps")
+	require.False(t, ok, "docker0 must be filtered")
+	_, ok = sink.value("diskio.sda1.read_bps")
+	require.False(t, ok, "partitions must be filtered from emitted diskio metrics")
+}
+
+func TestHostDeviceNameBeforeFirstTick(t *testing.T) {
+	c := New(newFakeSink(), t.TempDir(), t.TempDir())
+	_, ok := c.DeviceName("8:0")
+	require.False(t, ok)
+}
+
+func TestHostDeviceNameSafeDuringConcurrentTicks(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stat", statA)
+	writeFile(t, dir, "meminfo", meminfoA)
+	writeFile(t, dir, "diskstats", diskstatsA)
+
+	c := New(newFakeSink(), dir, t.TempDir())
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				c.DeviceName("8:0")
+			}
+		}
+	}()
+
+	for i := 0; i < 50; i++ {
+		require.NoError(t, c.Tick(context.Background(), time.Unix(int64(1001+i), 0)))
+	}
+	close(stop)
+	wg.Wait()
 }

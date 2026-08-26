@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"strings"
 	"time"
 )
@@ -9,7 +10,7 @@ const flushCatchUpMax = 15 // ring holds 15 minutes; older windows are gone anyw
 
 // FlushMinutes writes 1-minute (avg, max) aggregates for every complete
 // minute since the previous call. The first call only records a baseline.
-func (s *Store) FlushMinutes(now time.Time) (int, error) {
+func (s *Store) FlushMinutes(ctx context.Context, now time.Time) (int, error) {
 	nowMin := now.Unix() - now.Unix()%60
 
 	if s.lastFlushed == 0 {
@@ -58,7 +59,7 @@ func (s *Store) FlushMinutes(now time.Time) (int, error) {
 			}
 			var aggsWithID []aggWithID
 			for _, a := range aggs {
-				id, err := s.seriesID(a.key)
+				id, err := s.seriesID(ctx, a.key)
 				if err != nil {
 					return written, err
 				}
@@ -69,12 +70,12 @@ func (s *Store) FlushMinutes(now time.Time) (int, error) {
 				})
 			}
 
-			tx, err := s.db.Begin()
+			tx, err := s.db.BeginTx(ctx, nil)
 			if err != nil {
 				return written, err
 			}
 			for _, a := range aggsWithID {
-				if _, err := tx.Exec(`INSERT OR REPLACE INTO samples_1m (series_id, ts, avg, max)
+				if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO samples_1m (series_id, ts, avg, max)
 					VALUES (?,?,?,?)`, a.id, m, a.avg, a.max); err != nil {
 					tx.Rollback()
 					return written, err

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"time"
 )
@@ -21,18 +22,18 @@ func DefaultRetention() Retention {
 
 // DownsampleOnce cascades complete windows: samples_1m → samples_10m,
 // then samples_10m → samples_1h. Watermarks persist in settings.
-func (s *Store) DownsampleOnce(now time.Time) error {
-	if err := s.cascade(now, "samples_1m", "samples_10m", 600, "ds.last_10m"); err != nil {
+func (s *Store) DownsampleOnce(ctx context.Context, now time.Time) error {
+	if err := s.cascade(ctx, now, "samples_1m", "samples_10m", 600, "ds.last_10m"); err != nil {
 		return err
 	}
-	return s.cascade(now, "samples_10m", "samples_1h", 3600, "ds.last_1h")
+	return s.cascade(ctx, now, "samples_10m", "samples_1h", 3600, "ds.last_1h")
 }
 
-func (s *Store) cascade(now time.Time, from, to string, window int64, watermarkKey string) error {
+func (s *Store) cascade(ctx context.Context, now time.Time, from, to string, window int64, watermarkKey string) error {
 	upTo := (now.Unix() / window) * window // start of the current (incomplete) window
 
 	var last int64
-	err := s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, watermarkKey).Scan(&last)
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?`, watermarkKey).Scan(&last)
 	if err == sql.ErrNoRows {
 		last = 0
 	} else if err != nil {
@@ -42,12 +43,12 @@ func (s *Store) cascade(now time.Time, from, to string, window int64, watermarkK
 		return nil
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	// avg-of-avgs is exact here: source windows are uniform width.
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO `+to+` (series_id, ts, avg, max)
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO `+to+` (series_id, ts, avg, max)
 		SELECT series_id, (ts/?)*?, AVG(avg), MAX(max) FROM `+from+`
 		WHERE ts >= ? AND ts < ?
 		GROUP BY series_id, ts/?`,
@@ -55,7 +56,7 @@ func (s *Store) cascade(now time.Time, from, to string, window int64, watermarkK
 		tx.Rollback()
 		return err
 	}
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,?)`,
 		watermarkKey, upTo, now.Unix()); err != nil {
 		tx.Rollback()
 		return err
@@ -65,9 +66,9 @@ func (s *Store) cascade(now time.Time, from, to string, window int64, watermarkK
 
 // PruneOnce deletes rows past each tier's retention, prunes events past R3,
 // and enforces the DB size cap by trimming the oldest samples_1m first.
-func (s *Store) PruneOnce(now time.Time, ret Retention) error {
+func (s *Store) PruneOnce(ctx context.Context, now time.Time, ret Retention) error {
 	cut := func(table string, age time.Duration) error {
-		_, err := s.db.Exec(`DELETE FROM `+table+` WHERE ts < ?`, now.Add(-age).Unix())
+		_, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE ts < ?`, now.Add(-age).Unix())
 		return err
 	}
 	if err := cut("samples_1m", ret.R1); err != nil {
@@ -89,13 +90,13 @@ func (s *Store) PruneOnce(now time.Time, ret Retention) error {
 	// to account for freed pages that haven't been returned to the OS yet.
 	for i := 0; i < 8; i++ {
 		var pages, pageSize, freelistCount int64
-		if err := s.db.QueryRow(`PRAGMA page_count`).Scan(&pages); err != nil {
+		if err := s.db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pages); err != nil {
 			return err
 		}
-		if err := s.db.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+		if err := s.db.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
 			return err
 		}
-		if err := s.db.QueryRow(`PRAGMA freelist_count`).Scan(&freelistCount); err != nil {
+		if err := s.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freelistCount); err != nil {
 			return err
 		}
 		occupiedBytes := (pages - freelistCount) * pageSize
@@ -103,17 +104,17 @@ func (s *Store) PruneOnce(now time.Time, ret Retention) error {
 			break
 		}
 		var oldest sql.NullInt64
-		if err := s.db.QueryRow(`SELECT min(ts) FROM samples_1m`).Scan(&oldest); err != nil {
+		if err := s.db.QueryRowContext(ctx, `SELECT min(ts) FROM samples_1m`).Scan(&oldest); err != nil {
 			return err
 		}
 		if !oldest.Valid {
 			break
 		}
-		if _, err := s.db.Exec(`DELETE FROM samples_1m WHERE ts < ?`, oldest.Int64+6*3600); err != nil {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM samples_1m WHERE ts < ?`, oldest.Int64+6*3600); err != nil {
 			return err
 		}
 		// Reclaim freed pages to the OS when auto_vacuum is active
-		if _, err := s.db.Exec(`PRAGMA incremental_vacuum`); err != nil {
+		if _, err := s.db.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
 			return err
 		}
 	}

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -13,14 +14,14 @@ func TestMaintainFlushesBeforeDownsampling(t *testing.T) {
 	s := newTestStore(t, nil)
 	k := SeriesKey{Kind: "host", Metric: "cpu.total"}
 	base := at("12:00:00")
-	_, err := s.FlushMinutes(base) // baseline
+	_, err := s.FlushMinutes(context.Background(), base) // baseline
 	require.NoError(t, err)
 
 	for m := int64(0); m < 10; m++ { // one sample per minute, values 0..9
 		s.Record(k, base.Unix()+m*60+30, float64(m))
 	}
 	// Maintain at the boundary: minute 12:09 is only in the ring at this point.
-	require.NoError(t, s.Maintain(at("12:10:05"), DefaultRetention()))
+	require.NoError(t, s.Maintain(context.Background(), at("12:10:05"), DefaultRetention()))
 
 	var avg, max float64
 	require.NoError(t, s.DB().QueryRow(`SELECT avg, max FROM samples_10m WHERE ts=?`, base.Unix()).Scan(&avg, &max))

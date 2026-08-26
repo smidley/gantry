@@ -1,15 +1,18 @@
 package store
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
-func (s *Store) Maintain(now time.Time, ret Retention) error {
-	if _, err := s.FlushMinutes(now); err != nil {
+func (s *Store) Maintain(ctx context.Context, now time.Time, ret Retention) error {
+	if _, err := s.FlushMinutes(ctx, now); err != nil {
 		return err
 	}
-	if err := s.DownsampleOnce(now); err != nil {
+	if err := s.DownsampleOnce(ctx, now); err != nil {
 		return err
 	}
-	return s.PruneOnce(now, ret)
+	return s.PruneOnce(ctx, now, ret)
 }
 
 func RetentionFromConfig(get func(key string, def int) int) Retention {

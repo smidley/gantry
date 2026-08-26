@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./lib/tokens.css";
 
 /* Tailwind v4 CSS-first config: fonts + the desktop-sidebar breakpoint
    (768px, "Sidebar (desktop >=768px) / bottom TabBar (mobile)") live in
@@ -15,6 +16,12 @@
   --breakpoint-md: 48rem;
 }
 
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 html {
   font-family: var(--font-sans);
 }
@@ -22,4 +29,64 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
+  background: var(--page);
+  color: var(--ink);
+}
+
+/* Quality floor: a visible focus ring everywhere, never suppressed --
+   2px, offset 2px, in a series color rather than a status color (focus
+   is not a health signal). */
+:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
+}
+
+/* Quality floor: prefers-reduced-motion kills every animation/
+   transition globally, including LivePulse's per-frame pulse -- it
+   still changes color/text on state change, since those aren't
+   animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Equipment-tag micro-label convention: metric names, table headers,
+   chart eyebrows. */
+.microlabel {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
+}
+
+/* Card surface -- shadow in light mode only; dark mode relies on the
+   border alone (a shadow reads as noise on a near-black surface). */
+.card {
+  background: var(--surface);
+  border: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--ink) 12%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .card {
+    box-shadow: none;
+  }
+}
+
+:root[data-theme='dark'] .card {
+  box-shadow: none;
+}
+
+/* Tabular numerals everywhere data ticks -- a value must not jitter
+   horizontally as its digits change. */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }

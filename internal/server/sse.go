@@ -33,10 +33,30 @@ type Broadcaster struct {
 	mu      sync.Mutex
 	clients map[int]chan []byte
 	nextID  int
+
+	// done is closed exactly once, by Drain, to nudge every connected
+	// handleLive call to return on its own -- see Drain's own doc for why
+	// that's necessary at all.
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 func NewBroadcaster() *Broadcaster {
-	return &Broadcaster{clients: make(map[int]chan []byte), PingInterval: defaultPingInterval}
+	return &Broadcaster{clients: make(map[int]chan []byte), PingInterval: defaultPingInterval, done: make(chan struct{})}
+}
+
+// Drain signals every connected /api/live handler to return, by closing
+// the package-internal done channel handleLive's select also watches.
+// It exists because net/http's graceful Shutdown only closes IDLE
+// connections and then waits for active ones to finish on their own --
+// it never force-closes a StateActive connection -- and handleLive's
+// stream loop otherwise only returns when the CLIENT disconnects
+// (ctx.Done() on the *request* context), which for a still-open SSE tab
+// never happens during a server shutdown. Without this, one connected
+// client makes ListenAndServe's Shutdown call wait out its whole budget.
+// Safe to call more than once; only the first call closes the channel.
+func (b *Broadcaster) Drain() {
+	b.doneOnce.Do(func() { close(b.done) })
 }
 
 // Register adds a new client, returning a receive-only channel of frames,
@@ -119,6 +139,8 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-s.opts.Live.done:
+			return // shutdown draining: see Broadcaster.Drain
 		case frame := <-ch:
 			writeSSEFrame(w, frame)
 			flusher.Flush()

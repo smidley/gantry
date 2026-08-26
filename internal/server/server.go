@@ -134,6 +134,11 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	go func() { errCh <- hs.ListenAndServe() }()
 	select {
 	case <-ctx.Done():
+		// Drain live SSE clients BEFORE Shutdown: see Broadcaster.Drain for
+		// why Shutdown alone can't get them to disconnect on its own.
+		if s.opts.Live != nil {
+			s.opts.Live.Drain()
+		}
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return hs.Shutdown(shutCtx)

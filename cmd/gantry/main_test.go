@@ -134,6 +134,47 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	drainAndClose(logsResp)
 	require.Equal(t, http.StatusNotFound, logsResp.StatusCode, "a fake-mode container name must 404, not error, against the real Logs closure")
 
+	// /api/settings smoke check (Task 10): exercises the real
+	// settingsAdapter end to end (config resolution + SettingSet), not
+	// just a fake. GET first reflects the compiled defaults with
+	// nothing overridden (none of the four retention env vars are set
+	// for this run), then a PUT's new value is visible on the very next
+	// GET -- the read path doesn't wait on the maintenance loop's own
+	// 10-minute tick, only Maintain's actual retention-pruning behavior
+	// does (see the per-tick RetentionFromConfig comment above).
+	settingsResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/settings", port))
+	require.NoError(t, err)
+	var settingsBody struct {
+		Retention struct {
+			R1Hours int `json:"r1_hours"`
+		} `json:"retention"`
+		EnvOverridden []string `json:"env_overridden"`
+	}
+	require.NoError(t, json.NewDecoder(settingsResp.Body).Decode(&settingsBody))
+	drainAndClose(settingsResp)
+	require.Equal(t, http.StatusOK, settingsResp.StatusCode)
+	require.Equal(t, 48, settingsBody.Retention.R1Hours, "default r1_hours")
+	require.Empty(t, settingsBody.EnvOverridden)
+
+	putReq, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%d/api/settings", port),
+		strings.NewReader(`{"retention":{"r1_hours":72,"r2_days":30,"r3_days":390,"size_cap_mb":512}}`))
+	require.NoError(t, err)
+	putResp, err := http.DefaultClient.Do(putReq)
+	require.NoError(t, err)
+	drainAndClose(putResp)
+	require.Equal(t, http.StatusOK, putResp.StatusCode)
+
+	settingsResp2, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/settings", port))
+	require.NoError(t, err)
+	var settingsBody2 struct {
+		Retention struct {
+			R1Hours int `json:"r1_hours"`
+		} `json:"retention"`
+	}
+	require.NoError(t, json.NewDecoder(settingsResp2.Body).Decode(&settingsBody2))
+	drainAndClose(settingsResp2)
+	require.Equal(t, 72, settingsBody2.Retention.R1Hours, "PUT must persist through the real store, visible on the very next GET")
+
 	// Every request above went through http.DefaultTransport, which keeps
 	// the underlying connection open (keep-alive) for reuse even after its
 	// response body is drained and closed. An idle-but-open connection

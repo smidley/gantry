@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -132,7 +133,6 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	registry.Run(runCtx, &wg)
 
 	// Maintenance: flush every minute; downsample + prune every 10 minutes.
-	ret := store.RetentionFromConfig(cfg.Int)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -149,6 +149,11 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 					log.Println("flush:", err)
 				}
 			case <-deep.C:
+				// Resolved fresh on every tick -- NOT once before the loop
+				// (Phase 2's original shape) -- so a PUT /api/settings
+				// retention change (Task 10) takes effect on the very next
+				// tick, without a restart.
+				ret := store.RetentionFromConfig(cfg.Int)
 				if err := st.Maintain(runCtx, time.Now(), ret); err != nil {
 					log.Println("maintain:", err)
 				}
@@ -202,6 +207,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Live:       live,
 		Current:    func() []byte { b, _ := json.Marshal(snapshotFn()); return b },
 		Logs:       dc.StreamLogs,
+		Settings:   settingsAdapter{st: st, cfg: cfg},
 	}).ListenAndServe(runCtx)
 	cancel()
 	wg.Wait()
@@ -390,6 +396,53 @@ func buildTop(st *store.Store) func(ctx context.Context, kind, metric string, fr
 		}
 		return out, nil
 	}
+}
+
+// retentionConfigKeys maps each /api/settings wire field name
+// (server.RetentionSettings' json tags) to its store/config dotted key
+// -- the one place that mapping is spelled out, shared by both
+// settingsAdapter methods below.
+var retentionConfigKeys = map[string]string{
+	"r1_hours":    "retention.r1_hours",
+	"r2_days":     "retention.r2_days",
+	"r3_days":     "retention.r3_days",
+	"size_cap_mb": "retention.size_cap_mb",
+}
+
+// settingsAdapter implements server.SettingsIface (Task 10): Get reuses
+// store.RetentionFromConfig -- the same resolution the maintenance loop
+// itself now calls every tick (see the per-tick comment above) -- so
+// this can never drift from what's actually in effect, plus cfg's own
+// env-override check per key; Set writes through to the settings table
+// via st.SettingSet. Keeping this in main, not the server package,
+// keeps server store/config-shape-agnostic the same way buildTop/
+// buildContainersList already do for Query/Top/Containers.
+type settingsAdapter struct {
+	st  *store.Store
+	cfg *config.Config
+}
+
+func (a settingsAdapter) Get() (server.RetentionSettings, map[string]bool) {
+	ret := store.RetentionFromConfig(a.cfg.Int)
+	out := server.RetentionSettings{
+		R1Hours:   int(ret.R1 / time.Hour),
+		R2Days:    int(ret.R2 / (24 * time.Hour)),
+		R3Days:    int(ret.R3 / (24 * time.Hour)),
+		SizeCapMB: int(ret.SizeCapBytes >> 20),
+	}
+	overridden := make(map[string]bool, len(retentionConfigKeys))
+	for wire, key := range retentionConfigKeys {
+		overridden[wire] = a.cfg.EnvOverridden(key)
+	}
+	return out, overridden
+}
+
+func (a settingsAdapter) Set(field string, value int) error {
+	key, ok := retentionConfigKeys[field]
+	if !ok {
+		return fmt.Errorf("settings: unknown field %q", field) // unreached: handler only calls Set with its own whitelisted names
+	}
+	return a.st.SettingSet(key, strconv.Itoa(value))
 }
 
 func healthcheck(getenv func(string) string) error {

@@ -76,6 +76,15 @@ type Options struct {
 	// which the fake-mode UI's log viewer relies on for a graceful empty
 	// state rather than a hard error.
 	Logs func(ctx context.Context, name string, follow bool, tail int) (io.ReadCloser, error)
+
+	// Settings backs GET/PUT /api/settings (main wiring points this at a
+	// small adapter over *config.Config + *store.Store — see
+	// api_settings.go for why the interface stays this minimal). Nil in
+	// tests that don't wire one: GET then reports a zero-valued,
+	// unlocked retention object (there's a meaningful "empty" here,
+	// unlike Logs), and PUT — which has no meaningful no-op success for
+	// a write with nowhere to write to — answers 404.
+	Settings SettingsIface
 }
 
 type Server struct {
@@ -97,6 +106,8 @@ func New(o Options) *Server {
 	s.mux.HandleFunc("GET /api/events", s.handleEvents)
 	s.mux.HandleFunc("GET /api/live", s.handleLive)
 	s.mux.HandleFunc("GET /api/containers/{name}/logs", s.handleLogs)
+	s.mux.HandleFunc("GET /api/settings", s.handleSettingsGet)
+	s.mux.HandleFunc("PUT /api/settings", s.handleSettingsPut)
 
 	dist, err := fs.Sub(webFS, "webdist")
 	if err != nil {
@@ -124,6 +135,18 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v) // a write failure here means the client already disconnected
+}
+
+// writeJSONStatus is writeJSON with an explicit non-200 status -- for a
+// structured (non-{"error":"..."}) body that still needs a status other
+// than 200, e.g. /api/settings' 409/400 bodies which carry extra fields
+// alongside "error". The status must be set before Encode's first
+// Write, which otherwise implicitly flushes 200 -- see writeError for
+// the same ordering.
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v) // see writeJSON: write failure means the client's gone
 }
 
 // writeError writes a {"error":"..."} body with the given status code —

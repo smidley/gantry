@@ -36,3 +36,12 @@ func TestBoolAndKeyMapping(t *testing.T) {
 	c2, _ := testCfg(t, map[string]string{"GANTRY_RETENTION_R1_HOURS": "24"})
 	require.Equal(t, 24, c2.Int("retention.r1_hours", 48)) // dots → underscores
 }
+
+func TestEnvOverridden(t *testing.T) {
+	c, _ := testCfg(t, map[string]string{"GANTRY_RETENTION_R1_HOURS": "24"})
+	require.True(t, c.EnvOverridden("retention.r1_hours"))
+	require.False(t, c.EnvOverridden("retention.r2_days"), "no env var set for this key")
+
+	c2, _ := testCfg(t, map[string]string{"GANTRY_RETENTION_R1_HOURS": ""})
+	require.False(t, c2.EnvOverridden("retention.r1_hours"), "an empty env var is the same as unset")
+}

@@ -15,34 +15,44 @@ type ArrayState struct {
 	State          string  // mdState, e.g. "STARTED" | "STOPPED"
 	ParityRunning  bool    // mdResyncPos > 0
 	ParityProgress float64 // mdResyncPos / mdResyncSize * 100
-	ParitySpeedBps float64 // mdResyncSpeed (KB/s) * 1024
+	ParitySpeedBps float64 // (mdResyncDb / mdResyncDt) * 1024; 0 if Dt absent or 0
 	Version        string
 }
 
 // interpretVar derives ArrayState from a parsed var.ini. mdResyncPos and
 // mdResyncSize are both 1024-byte-block counts (emhttp's mdResync* units);
 // ParityRunning is pos > 0, ParityProgress is pos/size*100 guarded
-// against a zero size (0, not +Inf/NaN). mdResyncSpeed is KB/s;
-// ParitySpeedBps is that figure times 1024. Any missing/malformed numeric
-// key defaults to 0 rather than erroring — var.ini has no "malformed
-// content" error path, only absent-or-zero.
+// against a zero size (0, not +Inf/NaN). ParitySpeedBps is derived from
+// mdResyncDb (1KB blocks transferred) over mdResyncDt (seconds) — emhttp's
+// resync-rate block convention — times 1024, guarded to 0 when Dt is
+// absent or 0 the same way ParityProgress guards a zero size. There is no
+// mdResyncSpeed key on a real Unraid box (see docs/superpowers/
+// fixtures.md discrepancy 5) — it must not be read. Any missing/malformed
+// numeric key defaults to 0 rather than erroring — var.ini has no
+// "malformed content" error path, only absent-or-zero.
 func interpretVar(kv map[string]map[string]string) ArrayState {
 	v := kv[""]
 
 	pos, _ := parseFloatOK(v["mdResyncPos"])
 	size, _ := parseFloatOK(v["mdResyncSize"])
-	speed, _ := parseFloatOK(v["mdResyncSpeed"])
+	db, _ := parseFloatOK(v["mdResyncDb"])
+	dt, _ := parseFloatOK(v["mdResyncDt"])
 
 	var progress float64
 	if size > 0 {
 		progress = pos / size * 100
 	}
 
+	var speedBps float64
+	if dt > 0 {
+		speedBps = db / dt * 1024
+	}
+
 	return ArrayState{
 		State:          v["mdState"],
 		ParityRunning:  pos > 0,
 		ParityProgress: progress,
-		ParitySpeedBps: speed * 1024,
+		ParitySpeedBps: speedBps,
 		Version:        v["version"],
 	}
 }

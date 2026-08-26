@@ -97,13 +97,43 @@ func TestInterpretVarRealCaptureToleratesEveryUnreadKey(t *testing.T) {
 
 func TestInterpretVarProgressGuardsZeroSize(t *testing.T) {
 	state := interpretVar(map[string]map[string]string{"": {
-		"mdState":       "STARTED",
-		"mdResyncPos":   "500",
-		"mdResyncSize":  "0",
-		"mdResyncSpeed": "0",
+		"mdState":      "STARTED",
+		"mdResyncPos":  "500",
+		"mdResyncSize": "0",
+		"mdResyncDb":   "0",
+		"mdResyncDt":   "0",
 	}})
 	require.True(t, state.ParityRunning, "pos > 0 alone marks parity as running, independent of size")
 	require.InDelta(t, 0, state.ParityProgress, 1e-9, "a zero size must guard the division, not produce +Inf/NaN")
+}
+
+// TestInterpretVarSpeedDerivedFromResyncDbOverDt pins the real derivation:
+// mdResyncSpeed does not exist on a real Unraid box (see
+// docs/superpowers/fixtures.md discrepancy 5) — only mdResyncDb (1KB
+// blocks transferred) and mdResyncDt (seconds) do, per emhttp's resync-
+// rate block convention. 250000 blocks / 2s * 1024 bytes/block =
+// 128,000,000 bytes/s.
+func TestInterpretVarSpeedDerivedFromResyncDbOverDt(t *testing.T) {
+	state := interpretVar(map[string]map[string]string{"": {
+		"mdResyncDb": "250000",
+		"mdResyncDt": "2",
+	}})
+	require.InDelta(t, 128000000, state.ParitySpeedBps, 1e-9)
+}
+
+func TestInterpretVarSpeedGuardsZeroDt(t *testing.T) {
+	state := interpretVar(map[string]map[string]string{"": {
+		"mdResyncDb": "500",
+		"mdResyncDt": "0",
+	}})
+	require.InDelta(t, 0, state.ParitySpeedBps, 1e-9, "a zero Dt must guard the division, not produce +Inf")
+}
+
+func TestInterpretVarSpeedZeroWhenKeysAbsent(t *testing.T) {
+	state := interpretVar(map[string]map[string]string{"": {
+		"mdState": "STARTED",
+	}})
+	require.InDelta(t, 0, state.ParitySpeedBps, 1e-9, "absent mdResyncDb/mdResyncDt must default to 0, not error")
 }
 
 // --- transitionEvents: pure edge-detector tests ---

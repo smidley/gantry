@@ -201,6 +201,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Events:     st.QueryEvents,
 		Live:       live,
 		Current:    func() []byte { b, _ := json.Marshal(snapshotFn()); return b },
+		Logs:       dc.StreamLogs,
 	}).ListenAndServe(runCtx)
 	cancel()
 	wg.Wait()

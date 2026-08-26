@@ -122,6 +122,18 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	require.True(t, sawData, "connect frame must carry a data: line")
 	_ = liveResp.Body.Close() // unread rest of body: transport closes the connection, freeing the Broadcaster slot
 
+	// /api/containers/{name}/logs smoke check (Task 9): Logs is now wired
+	// to the real dc.StreamLogs, but fake-data mode's synthetic
+	// containers never touch dc's registry (the fake generator writes
+	// straight to the store, bypassing the docker collector entirely) --
+	// so a fake container name must 404 gracefully, exactly the contract
+	// the fake-mode log viewer relies on, rather than erroring some other
+	// way once a real Logs closure is wired.
+	logsResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/containers/jellyfin/logs", port))
+	require.NoError(t, err)
+	drainAndClose(logsResp)
+	require.Equal(t, http.StatusNotFound, logsResp.StatusCode, "a fake-mode container name must 404, not error, against the real Logs closure")
+
 	// Every request above went through http.DefaultTransport, which keeps
 	// the underlying connection open (keep-alive) for reuse even after its
 	// response body is drained and closed. An idle-but-open connection

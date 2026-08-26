@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"time"
@@ -66,6 +67,15 @@ type Options struct {
 	// at buildSnapshot + json.Marshal). Nil in tests that don't wire one —
 	// the route then skips straight to streaming, no connect frame.
 	Current func() []byte
+
+	// Logs streams one container's demuxed stdout+stderr as plain text
+	// (main wiring points this at docker.Collector.StreamLogs) for
+	// GET /api/containers/{name}/logs. Nil in tests that don't wire one,
+	// and in fake-data mode (no real docker.Collector at all) — the route
+	// then answers 404 the same way an unknown container name does,
+	// which the fake-mode UI's log viewer relies on for a graceful empty
+	// state rather than a hard error.
+	Logs func(ctx context.Context, name string, follow bool, tail int) (io.ReadCloser, error)
 }
 
 type Server struct {
@@ -86,6 +96,7 @@ func New(o Options) *Server {
 	s.mux.HandleFunc("GET /api/top", s.handleTop)
 	s.mux.HandleFunc("GET /api/events", s.handleEvents)
 	s.mux.HandleFunc("GET /api/live", s.handleLive)
+	s.mux.HandleFunc("GET /api/containers/{name}/logs", s.handleLogs)
 
 	dist, err := fs.Sub(webFS, "webdist")
 	if err != nil {

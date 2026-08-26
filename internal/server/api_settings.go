@@ -24,8 +24,10 @@ type SettingsIface interface {
 	// Get returns the four retention keys' current effective values
 	// plus which of those four (by their wire name, e.g. "r1_hours")
 	// currently have their GANTRY_* env var set. Env always overrides a
-	// stored setting (see internal/config), so PUT refuses to write an
-	// overridden field at all rather than silently no-op it.
+	// stored setting (see internal/config), so PUT never actually
+	// writes an overridden field: a PUT that submits it unchanged is a
+	// silent no-op, and one that submits a different value 409s naming
+	// it (see handleSettingsPut's own doc for the full per-field logic).
 	Get() (RetentionSettings, map[string]bool)
 	// Set persists one already-validated field (by its wire name) to
 	// the settings store. Effective on the next maintenance tick, not
@@ -106,11 +108,24 @@ type settingsPutRequest struct {
 // success for a write with nowhere to write to, so this answers 404 the
 // same way Logs does for the same reason.
 //
-// Validation order: decode/whitelist (400) -> env-lock (409) -> range
-// (400) -> persist. Env-lock is checked before range so a field that's
-// both out-of-range AND env-overridden reports the more actionable
-// "you can't change this at all" rather than a range error the caller
-// might otherwise "fix" and resubmit, still fruitlessly.
+// Env-lock is per-field, not all-or-nothing (batch D review Finding 2):
+// the UI's retention editor always submits all four fields together, so
+// blocking the ENTIRE PUT just because ONE field happens to be locked
+// would make every other field uneditable too as soon as any single
+// env var is set. Instead, each locked field is compared against its
+// own current (env-resolved) value -- submitted equal to current is a
+// no-op, silently skipped (no write, no range check, since it isn't
+// being changed at all); submitted different from current is a genuine
+// conflict (env always wins, so this write could never actually take
+// effect) and 409s, naming only the fields that actually conflict. A
+// conflict on even one field still blocks the WHOLE write, including
+// otherwise-valid changes to unlocked fields -- a partial apply would
+// leave the response's reported state confusingly different from what
+// was submitted.
+//
+// Validation order overall: decode/whitelist (400) -> per-field env-
+// conflict check (409) -> range, for unlocked/skip-eligible fields only
+// (400) -> persist, for unlocked fields only.
 func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Settings == nil {
 		writeError(w, http.StatusNotFound, "settings unavailable")
@@ -125,19 +140,38 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, overridden := s.opts.Settings.Get()
-	if locked := overriddenNames(overridden); len(locked) > 0 {
+	current, overridden := s.opts.Settings.Get()
+	submitted := retentionValues(body.Retention)
+	currentValues := retentionValues(current)
+
+	// Partition the four fields: a locked field either matches its
+	// current value (skip entirely -- no validation, no write) or
+	// conflicts (named in a 409, blocking the whole request); every
+	// other field is free to validate and write normally. Iterated in
+	// retentionFields' fixed order for deterministic output.
+	var conflicts []string
+	toWrite := make([]retentionField, 0, len(retentionFields))
+	for _, f := range retentionFields {
+		if overridden[f.name] {
+			if submitted[f.name] != currentValues[f.name] {
+				conflicts = append(conflicts, f.name)
+			}
+			continue
+		}
+		toWrite = append(toWrite, f)
+	}
+
+	if len(conflicts) > 0 {
 		writeJSONStatus(w, http.StatusConflict, struct {
 			Error         string   `json:"error"`
 			EnvOverridden []string `json:"env_overridden"`
-		}{"env-overridden fields cannot be changed here", locked})
+		}{"env-overridden fields cannot be changed here", conflicts})
 		return
 	}
 
-	values := retentionValues(body.Retention)
 	fieldErrs := map[string]string{}
-	for _, f := range retentionFields {
-		if v := values[f.name]; v < f.min || v > f.max {
+	for _, f := range toWrite {
+		if v := submitted[f.name]; v < f.min || v > f.max {
 			fieldErrs[f.name] = fmt.Sprintf("must be between %d and %d", f.min, f.max)
 		}
 	}
@@ -149,8 +183,8 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, f := range retentionFields {
-		if err := s.opts.Settings.Set(f.name, values[f.name]); err != nil {
+	for _, f := range toWrite {
+		if err := s.opts.Settings.Set(f.name, submitted[f.name]); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

@@ -203,25 +203,85 @@ func TestSettingsPutBoundaryValuesAreAccepted(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp2.StatusCode, "the documented range maximums must be accepted, not rejected")
 }
 
-func TestSettingsPutRejectsEnvOverriddenFieldsWith409(t *testing.T) {
+// TestSettingsPutSkipsLockedFieldWhenSubmittedValueMatchesCurrent pins
+// batch D review Finding 2's per-field semantics: a locked field
+// submitted at its own current (env-resolved) value is a legitimate
+// no-op -- the UI's retention editor always submits all four fields
+// together, so a bare "save the other three" action must not be
+// blocked just because the form also echoed back a locked field's
+// unchanged value. That field must be silently skipped (no write, no
+// range check, no error) while the other three still land.
+func TestSettingsPutSkipsLockedFieldWhenSubmittedValueMatchesCurrent(t *testing.T) {
 	fs := newFakeSettings()
-	fs.overridden["r1_hours"] = true
-	fs.overridden["size_cap_mb"] = true
+	fs.overridden["r1_hours"] = true // current value (from newFakeSettings) is 48
 	s := New(Options{Version: "test-1", Started: time.Now(), Settings: fs})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := putSettings(t, ts.URL+"/api/settings", validRetentionBody)
+	resp := putSettings(t, ts.URL+"/api/settings", `{"retention":{"r1_hours":48,"r2_days":14,"r3_days":400,"size_cap_mb":1024}}`)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	require.Len(t, fs.setCalls, 3, "the locked-but-unchanged field must not be written; the other three must")
+	for _, c := range fs.setCalls {
+		require.NotEqual(t, "r1_hours", c.Field, "a locked field must never reach Set, even when its submitted value matches")
+	}
+
+	var body struct {
+		Retention RetentionSettings `json:"retention"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, RetentionSettings{R1Hours: 48, R2Days: 14, R3Days: 400, SizeCapMB: 1024}, body.Retention)
+}
+
+// TestSettingsPutRejectsChangedLockedFieldWith409NamingOnlyIt pins the
+// other half of Finding 2: submitting a DIFFERENT value for a locked
+// field is a genuine conflict (env always wins, so this PUT could
+// never actually take effect) and must 409 -- naming only that field,
+// and blocking the whole write (including the other three, otherwise-
+// valid changes) rather than partially applying them.
+func TestSettingsPutRejectsChangedLockedFieldWith409NamingOnlyIt(t *testing.T) {
+	fs := newFakeSettings()
+	fs.overridden["r1_hours"] = true // current value is 48; this PUT asks for 72
+	s := New(Options{Version: "test-1", Started: time.Now(), Settings: fs})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := putSettings(t, ts.URL+"/api/settings", `{"retention":{"r1_hours":72,"r2_days":14,"r3_days":400,"size_cap_mb":1024}}`)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusConflict, resp.StatusCode)
-	require.Empty(t, fs.setCalls, "an env-locked field must reject the whole PUT before anything is persisted")
+	require.Empty(t, fs.setCalls, "a conflicting locked field must block the ENTIRE write, including the other three valid changes")
 
 	var body struct {
 		Error         string   `json:"error"`
 		EnvOverridden []string `json:"env_overridden"`
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
-	require.ElementsMatch(t, []string{"r1_hours", "size_cap_mb"}, body.EnvOverridden, "the 409 body must name every locked field")
+	require.Equal(t, []string{"r1_hours"}, body.EnvOverridden, "the 409 body must name only the field that actually conflicts")
+}
+
+// TestSettingsPutMultipleLockedFieldsOnlyNamesTheConflictingOne further
+// pins "naming only it": with TWO fields locked but only one actually
+// submitted at a different value, the 409 must name just that one, not
+// both merely-locked fields.
+func TestSettingsPutMultipleLockedFieldsOnlyNamesTheConflictingOne(t *testing.T) {
+	fs := newFakeSettings()
+	fs.overridden["r1_hours"] = true    // current 48, submitted 48 below: matches, not a conflict
+	fs.overridden["size_cap_mb"] = true // current 512, submitted 1024 below: conflicts
+	s := New(Options{Version: "test-1", Started: time.Now(), Settings: fs})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := putSettings(t, ts.URL+"/api/settings", `{"retention":{"r1_hours":48,"r2_days":14,"r3_days":400,"size_cap_mb":1024}}`)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	require.Empty(t, fs.setCalls, "any conflict blocks the whole write, even the r2/r3 changes that were otherwise fine")
+
+	var body struct {
+		EnvOverridden []string `json:"env_overridden"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, []string{"size_cap_mb"}, body.EnvOverridden, "r1_hours matched its current value and must not be named")
 }
 
 func TestSettingsGetNilOptionReturnsEmptyNotPanic(t *testing.T) {

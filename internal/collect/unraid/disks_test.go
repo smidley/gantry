@@ -94,6 +94,118 @@ rotational="1"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "disks.ini"), []byte(content), 0o644))
 }
 
+// TestTickDisksDiskNPDsblStatusTreatedAsAbsent is driven by a shape found
+// on a real Unraid 7.3.2 box: a parity slot with no parity disk assigned
+// reports status "DISK_NP_DSBL", not the bare "DISK_NP" an empty data
+// slot uses -- both must be treated as absent.
+func TestTickDisksDiskNPDsblStatusTreatedAsAbsent(t *testing.T) {
+	dir := t.TempDir()
+	content := `["parity"]
+idx="0"
+name="parity"
+device=""
+id=""
+spundown="0"
+status="DISK_NP_DSBL"
+temp="*"
+numErrors="0"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "disks.ini"), []byte(content), 0o644))
+	sink := newFakeSink()
+	c := New(sink, &fakeEvents{}, dir, t.TempDir())
+
+	c.tickDisks(time.Unix(1000, 0))
+
+	require.Empty(t, sink.records, "a DISK_NP_DSBL slot must emit nothing, same as DISK_NP")
+}
+
+// TestTickDisksFsUsedBytesPrefersAuthoritativeFsUsedOverDerived is driven
+// by a real Unraid 7.3.2 btrfs cache pool where fsUsed is smaller than
+// fsSize-fsFree (btrfs free-space accounting doesn't subtract to the same
+// figure fsUsed reports) -- fsUsed must win when present.
+func TestTickDisksFsUsedBytesPrefersAuthoritativeFsUsedOverDerived(t *testing.T) {
+	dir := t.TempDir()
+	content := `["cache"]
+name="cache"
+status="DISK_OK"
+spundown="0"
+temp="36"
+numErrors="0"
+fsSize="976761560"
+fsFree="364180176"
+fsUsed="610420272"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "disks.ini"), []byte(content), 0o644))
+	sink := newFakeSink()
+	c := New(sink, &fakeEvents{}, dir, t.TempDir())
+
+	c.tickDisks(time.Unix(1000, 0))
+
+	require.InDelta(t, 625070358528.0,
+		sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.used_bytes"}], 1e-6,
+		"fs.used_bytes must come from fsUsed (real value); fsSize-fsFree would wrongly give 627283337216 here")
+	require.InDelta(t, 372920500224.0,
+		sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.free_bytes"}], 1e-6)
+}
+
+// TestTickDisksRealCaptureFromLiveUnraidBox replays a trimmed, anonymized
+// disks.ini captured from a live Unraid 7.3.2 box (see
+// docs/superpowers/fixtures.md), exercising both real-shape fixes above
+// together against the actual file shape rather than a hand-minimized
+// reproduction.
+func TestTickDisksRealCaptureFromLiveUnraidBox(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "testdata/disks_real.ini", filepath.Join(dir, "disks.ini"))
+	sink := newFakeSink()
+	c := New(sink, &fakeEvents{}, dir, t.TempDir())
+
+	c.tickDisks(time.Unix(1000, 0))
+
+	// parity: DISK_NP_DSBL on this real box (no active parity disk) -- must emit nothing.
+	for _, metric := range []string{"temp.c", "spun_up", "errors", "fs.used_bytes", "fs.free_bytes"} {
+		_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: metric}]
+		require.False(t, ok, "DISK_NP_DSBL slot parity must emit nothing for metric %s", metric)
+	}
+
+	// disk1: present, xfs -- fsUsed equals fsSize-fsFree in reality, both formulas agree here.
+	require.InDelta(t, 38, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "temp.c"}], 1e-9)
+	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "spun_up"}], 1e-9)
+	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "errors"}], 1e-9)
+	require.InDelta(t, 16375065784320.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.used_bytes"}], 1e-6)
+	require.InDelta(t, 1623005102080.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.free_bytes"}], 1e-6)
+
+	// disk6: present, xfs, a different vendor/model and size class.
+	require.InDelta(t, 34, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk6", Metric: "temp.c"}], 1e-9)
+	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk6", Metric: "spun_up"}], 1e-9)
+	require.InDelta(t, 24695444688896.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk6", Metric: "fs.used_bytes"}], 1e-6)
+	require.InDelta(t, 1302864769024.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk6", Metric: "fs.free_bytes"}], 1e-6)
+
+	// disk9: DISK_NP empty data slot -- must emit nothing.
+	for _, metric := range []string{"temp.c", "spun_up", "errors", "fs.used_bytes", "fs.free_bytes"} {
+		_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "disk9", Metric: metric}]
+		require.False(t, ok, "DISK_NP slot disk9 must emit nothing for metric %s", metric)
+	}
+
+	// cache: present, btrfs pool -- fsUsed diverges from fsSize-fsFree; fsUsed must win.
+	require.InDelta(t, 36, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "temp.c"}], 1e-9)
+	require.InDelta(t, 625070358528.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.used_bytes"}], 1e-6)
+	require.InDelta(t, 372920500224.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.free_bytes"}], 1e-6)
+
+	// rocket_pool: a second, differently-named btrfs pool -- proves the
+	// collector doesn't special-case the literal name "cache".
+	require.InDelta(t, 44, sink.records[store.SeriesKey{Kind: "disk", Entity: "rocket_pool", Metric: "temp.c"}], 1e-9)
+	require.InDelta(t, 545635610624.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "rocket_pool", Metric: "fs.used_bytes"}], 1e-6)
+	require.InDelta(t, 449255231488.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "rocket_pool", Metric: "fs.free_bytes"}], 1e-6)
+
+	// flash: boot device -- temp is "*" (no sensor) despite spundown=0 (not
+	// a spin-down case at all, just nothing to report); spun_up still records.
+	_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "temp.c"}]
+	require.False(t, ok, `flash reports temp "*" (no sensor) and must omit temp.c`)
+	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "spun_up"}], 1e-9)
+	require.InDelta(t, 3022356480.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "fs.used_bytes"}], 1e-6)
+	require.InDelta(t, 58987806720.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "fs.free_bytes"}], 1e-6)
+}
+
 func TestTickDisksMissingFileDegradesSilently(t *testing.T) {
 	dir := t.TempDir()
 	sink := newFakeSink()

@@ -81,6 +81,20 @@ func TestInterpretVarParityRunning(t *testing.T) {
 	require.Equal(t, "7.3.2", state.Version)
 }
 
+// TestInterpretVarRealCaptureToleratesEveryUnreadKey parses a full,
+// anonymized var.ini captured from a live Unraid 7.3.2 box (see
+// docs/superpowers/fixtures.md) — roughly 150 keys this package never
+// reads alongside the handful it does — and checks the read subset still
+// comes out right.
+func TestInterpretVarRealCaptureToleratesEveryUnreadKey(t *testing.T) {
+	state := interpretVarFile(t, "testdata/var_real.ini")
+	require.Equal(t, "STARTED", state.State)
+	require.False(t, state.ParityRunning)
+	require.InDelta(t, 0, state.ParityProgress, 1e-9)
+	require.InDelta(t, 0, state.ParitySpeedBps, 1e-9)
+	require.Equal(t, "7.3.2", state.Version)
+}
+
 func TestInterpretVarProgressGuardsZeroSize(t *testing.T) {
 	state := interpretVar(map[string]map[string]string{"": {
 		"mdState":       "STARTED",

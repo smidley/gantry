@@ -65,6 +65,32 @@ name="disk2"
 	require.Equal(t, "disk2", kv["disk2"]["name"])
 }
 
+// TestParseINIHandlesEmptyQuotedValue is driven by a real shape: var.ini
+// captured from a live Unraid 7.3.2 box carries dozens of keys like
+// DOMAIN="" — a pair of adjacent quotes, not a missing value.
+func TestParseINIHandlesEmptyQuotedValue(t *testing.T) {
+	kv, err := ParseINI(strings.NewReader(`DOMAIN=""
+mdState="STARTED"
+`))
+	require.NoError(t, err)
+	value, ok := kv[""]["DOMAIN"]
+	require.True(t, ok, "an empty-quoted value must still produce a present key")
+	require.Equal(t, "", value)
+	require.Equal(t, "STARTED", kv[""]["mdState"])
+}
+
+// TestParseFloatOKHandlesDecimalStringsLikeRealFloorField is driven by a
+// real shape: shares.ini captured from a live Unraid 7.3.2 box has at
+// least one numeric-looking field (a share's "floor") whose value is
+// "17950564.8" — a decimal, not an integer. No field this package reads
+// was observed with a fractional value, but parseFloatOK must not choke
+// if one ever is, since it already uses ParseFloat rather than ParseInt.
+func TestParseFloatOKHandlesDecimalStringsLikeRealFloorField(t *testing.T) {
+	f, ok := parseFloatOK("17950564.8")
+	require.True(t, ok)
+	require.InDelta(t, 17950564.8, f, 1e-9)
+}
+
 // errReader always fails, proving ParseINI surfaces a genuine reader
 // error rather than swallowing it the way it swallows malformed content.
 type errReader struct{}

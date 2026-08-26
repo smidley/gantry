@@ -71,3 +71,24 @@ func TestFlushSkipsEmptyWindows(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, n)
 }
+
+func TestFlushSkipsLivePrefixedMetrics(t *testing.T) {
+	s := newTestStore(t, nil)
+	live := SeriesKey{Kind: "container", Entity: "web", Metric: "live:io.sda.read_bps"}
+	normal := SeriesKey{Kind: "container", Entity: "web", Metric: "cpu.pct"}
+
+	base := at("12:04:00")
+	_, err := s.FlushMinutes(base)
+	require.NoError(t, err)
+
+	s.Record(live, base.Unix()+2, 12345)
+	s.Record(normal, base.Unix()+2, 50)
+
+	n, err := s.FlushMinutes(at("12:05:00"))
+	require.NoError(t, err)
+	require.Equal(t, 1, n, "only the non-live: series should flush to samples_1m")
+
+	var count int
+	require.NoError(t, s.DB().QueryRow(`SELECT count(*) FROM samples_1m`).Scan(&count))
+	require.Equal(t, 1, count)
+}

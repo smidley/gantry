@@ -98,9 +98,9 @@ func (c *Collector) Lookup(containerID string) (Meta, bool) { return c.reg.looku
 func (c *Collector) Running() []Meta { return c.reg.running() }
 
 // Tick starts the event stream on its first call (lazily, so it runs for
-// the lifetime of ctx — the collector runner's ctx, not a per-Tick one)
-// and refreshes inventory every 10s. Per-container stats (cgroupv2.go)
-// and network (net.go) hook into this method in later tasks.
+// the lifetime of ctx — the collector runner's ctx, not a per-Tick one),
+// refreshes inventory every 10s, then records per-container stats
+// (cgroupv2.go/apistats.go). Network (net.go) hooks in during Task 8.
 func (c *Collector) Tick(ctx context.Context, now time.Time) error {
 	c.eventsOnce.Do(func() { go c.runEvents(ctx) })
 
@@ -111,6 +111,7 @@ func (c *Collector) Tick(ctx context.Context, now time.Time) error {
 		c.lastInventory = now
 	}
 
+	c.tickStats(ctx, now)
 	return nil
 }
 

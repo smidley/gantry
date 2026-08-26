@@ -1,6 +1,9 @@
 package store
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const flushCatchUpMax = 15 // ring holds 15 minutes; older windows are gone anyway
 
@@ -28,6 +31,9 @@ func (s *Store) FlushMinutes(now time.Time) (int, error) {
 		}
 		var aggs []agg
 		s.live.ForEach(func(key SeriesKey, ring *Ring) {
+			if strings.HasPrefix(key.Metric, "live:") {
+				return // per-device docker IO etc.: live ring only, never persisted
+			}
 			a := agg{key: key}
 			for _, smp := range ring.Since(m) {
 				if smp.TS >= m+60 {

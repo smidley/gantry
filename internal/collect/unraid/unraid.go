@@ -69,10 +69,15 @@ func (c *Collector) Version() string {
 
 // Tick's only hard requirement is var.ini, matching Probe's contract
 // (the same convention host.go uses for /proc/stat): every other file
-// this collector reads degrades independently and silently when missing.
+// this collector reads — disks.ini, shares.ini, the mover's /proc entry,
+// ups.ini — degrades independently and silently when missing.
 func (c *Collector) Tick(ctx context.Context, now time.Time) error {
 	if err := c.tickArray(now); err != nil {
 		return err
 	}
+	c.tickDisks(now)
+	c.tickShares(now)
+	c.tickMover(now)
+	c.tickUPS(now)
 	return nil
 }

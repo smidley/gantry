@@ -188,7 +188,10 @@ func TestTickEmitsParityMetricsOnlyWhileRunning(t *testing.T) {
 
 	copyFixture(t, "testdata/var_started.ini", filepath.Join(dir, "var.ini"))
 	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
-	require.Empty(t, sink.records, "parity metrics must not be emitted while ParityRunning is false")
+	_, hasProgress := sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}]
+	_, hasSpeed := sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}]
+	require.False(t, hasProgress, "parity.progress_pct must not be emitted while ParityRunning is false")
+	require.False(t, hasSpeed, "parity.speed_bps must not be emitted while ParityRunning is false")
 
 	copyFixture(t, "testdata/var_parity_running.ini", filepath.Join(dir, "var.ini"))
 	require.NoError(t, c.Tick(context.Background(), time.Unix(1015, 0)))

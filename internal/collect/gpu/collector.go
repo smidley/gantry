@@ -68,11 +68,29 @@ func (c *Collector) Probe(context.Context) collect.Status {
 // re-reads every known client's fdinfo every 2s.
 func (c *Collector) Tick(ctx context.Context, now time.Time) error {
 	if c.lastScan.IsZero() || now.Sub(c.lastScan) >= fullScanInterval {
-		c.clients = c.fullScan()
+		next := c.fullScan()
+		c.evictGoneClients(next)
+		c.clients = next
 		c.lastScan = now
 	}
 	c.tickClients(now)
 	return nil
+}
+
+// evictGoneClients diffs the outgoing client set (c.clients, about to be
+// replaced) against the incoming full-scan result and evicts every gone
+// client's RateTracker keys (clientID+"."-prefixed — see engineBusyPct).
+// A client can also vanish via the 2s dead-read path in tickClients,
+// which evicts the same way at the point it drops the client from the
+// cache; this covers the other case, wholesale replacement at a 30s full
+// scan, so RateTracker.prev doesn't grow by one entry per engine per
+// client for the life of the process as DRM clients churn.
+func (c *Collector) evictGoneClients(next map[string]client) {
+	for id := range c.clients {
+		if _, still := next[id]; !still {
+			c.rates.EvictPrefix(id + ".")
+		}
+	}
 }
 
 // fullScan rediscovers every live DRM client and resolves its container
@@ -101,6 +119,7 @@ func (c *Collector) tickClients(now time.Time) {
 		info, ok := readFDInfo(cl.FDPath)
 		if !ok {
 			delete(c.clients, id)
+			c.rates.EvictPrefix(id + ".")
 			continue
 		}
 

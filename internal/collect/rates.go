@@ -1,6 +1,9 @@
 package collect
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type rateSample struct {
 	val float64
@@ -39,4 +42,24 @@ func (r *RateTracker) Rate(key string, now time.Time, counter float64) (float64,
 		return 0, false
 	}
 	return delta / elapsed, true
+}
+
+// EvictPrefix deletes every tracked key with the given prefix. Without
+// it, a RateTracker shared by an ephemeral-identity source (a GPU DRM
+// client id, a container name) grows by one entry per key for the life
+// of the process as those identities churn — this is the counterpart to
+// store.Live.Evict for the per-key rate state Live doesn't hold.
+func (r *RateTracker) EvictPrefix(prefix string) {
+	for k := range r.prev {
+		if strings.HasPrefix(k, prefix) {
+			delete(r.prev, k)
+		}
+	}
+}
+
+// Len reports how many keys are currently tracked. Test-only
+// introspection, for asserting a RateTracker returns to baseline after
+// churn.
+func (r *RateTracker) Len() int {
+	return len(r.prev)
 }

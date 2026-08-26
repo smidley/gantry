@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -66,6 +67,56 @@ func TestRateTrackerZeroElapsedIsFalse(t *testing.T) {
 	rate, ok := rt.Rate("k", now, 20) // same instant, no time passed
 	require.False(t, ok)
 	require.Equal(t, 0.0, rate)
+}
+
+func TestRateTrackerEvictPrefixRemovesOnlyMatchingKeys(t *testing.T) {
+	rt := NewRateTracker()
+	t0 := time.Now()
+	rt.Rate("client1.render", t0, 100)
+	rt.Rate("client1.video", t0, 100)
+	rt.Rate("client2.render", t0, 100)
+	require.Equal(t, 3, rt.Len())
+
+	rt.EvictPrefix("client1.")
+	require.Equal(t, 1, rt.Len())
+
+	// client1's keys must be gone: the tracker has no prior sample for
+	// them, so the very next Rate call is a first observation again.
+	_, ok := rt.Rate("client1.render", t0.Add(time.Second), 200)
+	require.False(t, ok, "evicted key must behave like a brand-new key")
+
+	// client2's key must survive untouched (still has its real baseline).
+	rate, ok := rt.Rate("client2.render", t0.Add(time.Second), 105)
+	require.True(t, ok)
+	require.InDelta(t, 5.0, rate, 1e-9)
+}
+
+func TestRateTrackerEvictPrefixNoMatchIsNoop(t *testing.T) {
+	rt := NewRateTracker()
+	rt.Rate("a.x", time.Now(), 1)
+	rt.EvictPrefix("nonexistent.")
+	require.Equal(t, 1, rt.Len())
+}
+
+// TestRateTrackerChurnReturnsToBaseline simulates N ephemeral keys (e.g.
+// GPU client ids, container names) being created and then fully evicted,
+// as would happen across repeated client/container churn over the
+// process lifetime. Len() must return to the pre-churn baseline every
+// time, not grow unbounded.
+func TestRateTrackerChurnReturnsToBaseline(t *testing.T) {
+	rt := NewRateTracker()
+	rt.Rate("steady.cpu", time.Now(), 1) // one key that never gets evicted
+	baseline := rt.Len()
+
+	const n = 200
+	for i := 0; i < n; i++ {
+		prefix := fmt.Sprintf("ephemeral%d.", i)
+		rt.Rate(prefix+"engine_a", time.Now(), 1)
+		rt.Rate(prefix+"engine_b", time.Now(), 1)
+		rt.EvictPrefix(prefix)
+	}
+
+	require.Equal(t, baseline, rt.Len(), "churned keys must not accumulate")
 }
 
 func TestRateUsesFractionalSecondElapsed(t *testing.T) {

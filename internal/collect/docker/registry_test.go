@@ -2,11 +2,13 @@ package docker
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/events"
+	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
 )
@@ -315,6 +317,112 @@ func TestConsumeEventsRecoversPanicAndKeepsConsumingSubsequentEvents(t *testing.
 	require.Len(t, got, 1, "the panicking event's own append must not land")
 	require.Equal(t, store.Event{Kind: "container.start", Entity: "web", Severity: "info"}, got[0],
 		"the event after the panic must still be consumed and appended")
+}
+
+// newEvictingCollector builds a Collector with a real RateTracker and a
+// store-evict spy, wired exactly like New() wires evictContainer — for
+// tests exercising Task 2's container-removal cleanup without a docker
+// daemon.
+func newEvictingCollector(sink EventSink) (*Collector, *fakeEvictor) {
+	ev := &fakeEvictor{}
+	c := &Collector{
+		reg:    newRegistry(),
+		events: sink,
+		evict:  ev.evict,
+		rates:  collect.NewRateTracker(),
+	}
+	return c, ev
+}
+
+// TestEvictContainerClearsStoreRatesAndLoggedFallback pins Task 2:
+// removing one container must clear all three places its identity can
+// linger — the store (evict, wired to Live.Evict), the RateTracker (the
+// name+"." prefix convention shared by cgroupv2.go/net.go), and the
+// stats-API-fallback dedupe entry (loggedFallback, keyed by name — the
+// stable identity across recreations, spec §5).
+func TestEvictContainerClearsStoreRatesAndLoggedFallback(t *testing.T) {
+	sink := &fakeEventSink{}
+	c, ev := newEvictingCollector(sink)
+
+	c.rates.Rate("web.cpu.usage", time.Now(), 100)
+	c.rates.Rate("web.io.8:0.read", time.Now(), 100)
+	c.loggedFallback.Store("web", struct{}{})
+	require.Equal(t, 2, c.rates.Len())
+
+	c.evictContainer("container", "web")
+
+	require.Equal(t, []string{"container/web"}, ev.snapshot())
+	require.Equal(t, 0, c.rates.Len())
+	_, stillLogged := c.loggedFallback.Load("web")
+	require.False(t, stillLogged)
+}
+
+// TestApplyInventoryRemovalEvictsRateKeysAndLoggedFallback exercises the
+// real wiring: registry.applyInventory calling evictContainer (not a
+// bare store-evict stub) when a container drops out of an inventory
+// refresh.
+func TestApplyInventoryRemovalEvictsRateKeysAndLoggedFallback(t *testing.T) {
+	sink := &fakeEventSink{}
+	c, ev := newEvictingCollector(sink)
+
+	c.reg.applyInventory([]Meta{{ID: "abc", Name: "web", State: "running"}}, sink, c.evictContainer)
+	c.rates.Rate("web.cpu.usage", time.Now(), 100)
+	c.loggedFallback.Store("web", struct{}{})
+
+	c.reg.applyInventory([]Meta{}, sink, c.evictContainer) // "web" removed
+
+	require.Equal(t, []string{"container/web"}, ev.snapshot())
+	require.Equal(t, 0, c.rates.Len())
+	_, stillLogged := c.loggedFallback.Load("web")
+	require.False(t, stillLogged)
+}
+
+// TestApplyEventDestroyEvictsRateKeysAndLoggedFallback is the event-stream
+// counterpart: a destroy event must trigger the same full cleanup as an
+// inventory-diff removal.
+func TestApplyEventDestroyEvictsRateKeysAndLoggedFallback(t *testing.T) {
+	sink := &fakeEventSink{}
+	c, ev := newEvictingCollector(sink)
+
+	c.reg.applyInventory([]Meta{{ID: "abc", Name: "web", State: "running"}}, sink, c.evictContainer)
+	c.rates.Rate("web.cpu.usage", time.Now(), 100)
+	c.loggedFallback.Store("web", struct{}{})
+
+	c.reg.applyEvent(msg(events.ActionDestroy, "abc", map[string]string{"name": "/web"}), sink, c.evictContainer)
+
+	require.Equal(t, []string{"container/web"}, ev.snapshot())
+	require.Equal(t, 0, c.rates.Len())
+	_, stillLogged := c.loggedFallback.Load("web")
+	require.False(t, stillLogged)
+}
+
+// TestChurnManyContainersRateTrackerReturnsToBaseline simulates N
+// containers being created (with real per-container rate keys and a
+// loggedFallback entry) and removed via inventory-diff, asserting the
+// RateTracker's key count and loggedFallback's size both return to
+// their pre-churn baseline every time.
+func TestChurnManyContainersRateTrackerReturnsToBaseline(t *testing.T) {
+	sink := &fakeEventSink{}
+	c, _ := newEvictingCollector(sink)
+
+	c.rates.Rate("steady.cpu.usage", time.Now(), 1) // one key that never gets evicted
+	baseline := c.rates.Len()
+
+	const n = 100
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("churn%d", i)
+		c.reg.applyInventory([]Meta{{ID: name + "-id", Name: name, State: "running"}}, sink, c.evictContainer)
+		c.rates.Rate(name+".cpu.usage", time.Now(), 1)
+		c.rates.Rate(name+".io.8:0.read", time.Now(), 1)
+		c.loggedFallback.Store(name, struct{}{})
+
+		c.reg.applyInventory([]Meta{}, sink, c.evictContainer) // remove it again
+	}
+
+	require.Equal(t, baseline, c.rates.Len(), "churned container rate keys must not accumulate")
+	loggedCount := 0
+	c.loggedFallback.Range(func(_, _ any) bool { loggedCount++; return true })
+	require.Equal(t, 0, loggedCount, "churned containers' loggedFallback entries must not accumulate")
 }
 
 // Collector-level smoke tests (Name/Interval/Probe) — mirrors the host

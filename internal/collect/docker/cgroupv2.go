@@ -198,8 +198,10 @@ func readIOStat(path string) (map[string]ioCounters, error) {
 // path for each container the registry reports as running, falling back
 // to a one-shot docker stats API call (apistats.go) when the cgroup dir
 // can't be read (v1 host, masked path). Selection is automatic and
-// per-container; the fallback is logged once per container id so a
-// whole-fleet v1 box doesn't spam the log every 2s.
+// per-container; the fallback is logged once per container (keyed by
+// name — the stable identity across recreations, spec §5, and what
+// evictContainer prunes on removal) so a whole-fleet v1 box doesn't spam
+// the log every 2s.
 func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 	for _, m := range c.reg.running() {
 		dir := filepath.Join(c.CgroupRoot, "docker", m.ID)
@@ -209,7 +211,7 @@ func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 			if err != nil {
 				continue
 			}
-			if _, alreadyLogged := c.loggedFallback.LoadOrStore(m.ID, struct{}{}); !alreadyLogged {
+			if _, alreadyLogged := c.loggedFallback.LoadOrStore(m.Name, struct{}{}); !alreadyLogged {
 				log.Printf("docker: %s: cgroup v2 stats unavailable, using stats API fallback", m.Name)
 			}
 		}

@@ -52,7 +52,7 @@ type Collector struct {
 	eventsOnce    sync.Once
 	eventsWG      sync.WaitGroup // tracks the runEvents goroutine so Drain can join it at shutdown
 
-	loggedFallback sync.Map // container id -> struct{}: log the API-stats fallback once per container
+	loggedFallback sync.Map // container name -> struct{}: log the API-stats fallback once per container
 }
 
 var _ collect.Collector = (*Collector)(nil)
@@ -129,6 +129,21 @@ func (c *Collector) Drain() {
 // in Task 9).
 func (c *Collector) Lookup(containerID string) (Meta, bool) { return c.reg.lookup(containerID) }
 
+// evictContainer is the registry's removal callback (wired in place of a
+// bare evict at both call sites below): it clears every trace of a
+// removed container, not just its store rings. name+"." is the shared
+// rate-key prefix convention cgroupv2.go/net.go already use for every
+// per-container counter, so RateTracker.EvictPrefix cleans those up the
+// same way Live.Evict cleans up the rings; loggedFallback (also keyed by
+// name) gets pruned too. Without this, both maps would otherwise grow by
+// one entry per container for the life of the process as containers
+// recreate and get removed.
+func (c *Collector) evictContainer(kind, name string) {
+	c.evict(kind, name)
+	c.rates.EvictPrefix(name + ".")
+	c.loggedFallback.Delete(name)
+}
+
 // Running returns a name-sorted snapshot of every currently-running
 // container's Meta.
 func (c *Collector) Running() []Meta { return c.reg.running() }
@@ -170,7 +185,7 @@ func (c *Collector) refreshInventory(ctx context.Context) error {
 		}
 		metas = append(metas, metaFromInspect(resp))
 	}
-	c.reg.applyInventory(metas, c.events, c.evict)
+	c.reg.applyInventory(metas, c.events, c.evictContainer)
 	return nil
 }
 
@@ -286,5 +301,5 @@ func (c *Collector) applyEventRecovered(msg events.Message) {
 			log.Printf("docker: event stream: recovered from panic handling event: %v", p)
 		}
 	}()
-	c.reg.applyEvent(msg, c.events, c.evict)
+	c.reg.applyEvent(msg, c.events, c.evictContainer)
 }

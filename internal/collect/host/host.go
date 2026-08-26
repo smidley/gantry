@@ -180,17 +180,17 @@ func (c *Collector) tickNet(now time.Time) {
 		return
 	}
 	defer f.Close()
-	all, err := parseNetDev(f)
+	all, err := ParseNetDev(f)
 	if err != nil {
 		return
 	}
 
 	ts := now.Unix()
 	for iface, cnt := range filteredIfaces(all) {
-		if bps, ok := c.rates.Rate("net."+iface+".rx", now, float64(cnt.rxBytes)); ok {
+		if bps, ok := c.rates.Rate("net."+iface+".rx", now, float64(cnt.RxBytes)); ok {
 			c.sink.Record(store.SeriesKey{Kind: "host", Metric: "net." + iface + ".rx_bps"}, ts, bps)
 		}
-		if bps, ok := c.rates.Rate("net."+iface+".tx", now, float64(cnt.txBytes)); ok {
+		if bps, ok := c.rates.Rate("net."+iface+".tx", now, float64(cnt.TxBytes)); ok {
 			c.sink.Record(store.SeriesKey{Kind: "host", Metric: "net." + iface + ".tx_bps"}, ts, bps)
 		}
 	}

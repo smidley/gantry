@@ -56,8 +56,9 @@ func TestDockerCollectorAgainstRealDaemon(t *testing.T) {
 		_ = rawCli.ContainerStop(context.Background(), created.ID, container.StopOptions{Timeout: &timeout})
 	})
 
+	sink := newFakeSink()
 	evSink := &fakeEventSink{}
-	dc := New(nil, evSink, func(string, string) {}, "/var/run/docker.sock")
+	dc := New(sink, evSink, func(string, string) {}, "/var/run/docker.sock")
 
 	st := dc.Probe(ctx)
 	require.True(t, st.Available, "probe: %s", st.Detail)
@@ -73,6 +74,20 @@ func TestDockerCollectorAgainstRealDaemon(t *testing.T) {
 		}
 		return false
 	}, 20*time.Second, 500*time.Millisecond, "gantry-dockertest-t6 never appeared in Running() with a live pid")
+
+	// This dev box has no /host/sys/fs/cgroup (that path is only real
+	// inside the CA container on Linux), so readCgroupStats always fails
+	// here and every tick already exercises apistats.go's real
+	// ContainerStatsOneShot round trip against the daemon — exactly the
+	// fallback path Task 8 adds. mem.bytes/pids are unconditional gauges
+	// (no rate warm-up needed), so one more tick is enough to see them.
+	require.NoError(t, dc.Tick(ctx, time.Now()))
+	memBytes, ok := sink.value("gantry-dockertest-t6", "mem.bytes")
+	require.True(t, ok, "mem.bytes must be recorded via the stats API fallback")
+	require.Greater(t, memBytes, 0.0)
+	pids, ok := sink.value("gantry-dockertest-t6", "pids")
+	require.True(t, ok, "pids must be recorded via the stats API fallback")
+	require.GreaterOrEqual(t, pids, 1.0)
 
 	timeout := 2
 	require.NoError(t, rawCli.ContainerStop(ctx, created.ID, container.StopOptions{Timeout: &timeout}))

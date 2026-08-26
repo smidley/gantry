@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -194,13 +195,22 @@ func readIOStat(path string) (map[string]ioCounters, error) {
 
 // tickStats records per-container stats every tick: the cgroup v2 fast
 // path for each container the registry reports as running, falling back
-// (Task 8's statsViaAPI) when the cgroup dir can't be read.
+// to a one-shot docker stats API call (apistats.go) when the cgroup dir
+// can't be read (v1 host, masked path). Selection is automatic and
+// per-container; the fallback is logged once per container id so a
+// whole-fleet v1 box doesn't spam the log every 2s.
 func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 	for _, m := range c.reg.running() {
 		dir := filepath.Join(c.CgroupRoot, "docker", m.ID)
 		cg, err := readCgroupStats(dir)
 		if err != nil {
-			continue
+			cg, err = c.statsViaAPI(ctx, m.ID)
+			if err != nil {
+				continue
+			}
+			if _, alreadyLogged := c.loggedFallback.LoadOrStore(m.ID, struct{}{}); !alreadyLogged {
+				log.Printf("docker: %s: cgroup v2 stats unavailable, using stats API fallback", m.Name)
+			}
 		}
 		c.recordContainerStats(m.Name, cg, now)
 	}

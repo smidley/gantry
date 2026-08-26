@@ -8,8 +8,12 @@ import (
 	"strings"
 )
 
-type ifCounters struct {
-	rxBytes, txBytes uint64
+// IfCounters is one interface's rx/tx byte counters from /proc/net/dev.
+// Exported so the docker collector's per-container net reader (net.go,
+// which reads the same file shape from inside a container's netns) can
+// use ParseNetDev directly instead of duplicating the parser.
+type IfCounters struct {
+	RxBytes, TxBytes uint64
 }
 
 var dropIfacePrefixes = []string{"veth", "virbr", "br-", "tap"}
@@ -19,11 +23,11 @@ var dropIfaceExact = map[string]bool{
 	"docker0": true,
 }
 
-// parseNetDev reads every interface's rx/tx byte counters from
+// ParseNetDev reads every interface's rx/tx byte counters from
 // /proc/net/dev: two header lines, then "<iface>: <16 counters>" per line.
 // Rx bytes is the first counter, tx bytes the ninth.
-func parseNetDev(r io.Reader) (map[string]ifCounters, error) {
-	out := make(map[string]ifCounters)
+func ParseNetDev(r io.Reader) (map[string]IfCounters, error) {
+	out := make(map[string]IfCounters)
 	sc := bufio.NewScanner(r)
 	lineNo := 0
 	for sc.Scan() {
@@ -49,7 +53,7 @@ func parseNetDev(r io.Reader) (map[string]ifCounters, error) {
 		if err != nil {
 			return nil, fmt.Errorf("net/dev: parse tx bytes for %q: %w", name, err)
 		}
-		out[name] = ifCounters{rxBytes: rx, txBytes: tx}
+		out[name] = IfCounters{RxBytes: rx, TxBytes: tx}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
@@ -59,8 +63,8 @@ func parseNetDev(r io.Reader) (map[string]ifCounters, error) {
 
 // filteredIfaces drops loopback and virtual/container networking
 // interfaces that aren't meaningful at the host level.
-func filteredIfaces(all map[string]ifCounters) map[string]ifCounters {
-	out := make(map[string]ifCounters, len(all))
+func filteredIfaces(all map[string]IfCounters) map[string]IfCounters {
+	out := make(map[string]IfCounters, len(all))
 	for name, c := range all {
 		if dropIfaceExact[name] {
 			continue

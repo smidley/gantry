@@ -12,26 +12,26 @@ func TestParseNetDev(t *testing.T) {
 	require.NoError(t, err)
 	defer f.Close()
 
-	all, err := parseNetDev(f)
+	all, err := ParseNetDev(f)
 	require.NoError(t, err)
-	require.Equal(t, ifCounters{rxBytes: 111111, txBytes: 111111}, all["lo"])
-	require.Equal(t, ifCounters{rxBytes: 500000000, txBytes: 100000000}, all["eth0"])
-	require.Equal(t, ifCounters{rxBytes: 2000, txBytes: 3000}, all["vethaaaa11"])
-	require.Equal(t, ifCounters{rxBytes: 2500, txBytes: 3500}, all["vethbbbb22"])
-	require.Equal(t, ifCounters{rxBytes: 9000, txBytes: 8000}, all["docker0"])
+	require.Equal(t, IfCounters{RxBytes: 111111, TxBytes: 111111}, all["lo"])
+	require.Equal(t, IfCounters{RxBytes: 500000000, TxBytes: 100000000}, all["eth0"])
+	require.Equal(t, IfCounters{RxBytes: 2000, TxBytes: 3000}, all["vethaaaa11"])
+	require.Equal(t, IfCounters{RxBytes: 2500, TxBytes: 3500}, all["vethbbbb22"])
+	require.Equal(t, IfCounters{RxBytes: 9000, TxBytes: 8000}, all["docker0"])
 }
 
 func TestFilteredIfacesDropsVirtualInterfaces(t *testing.T) {
-	all := map[string]ifCounters{
-		"lo":         {rxBytes: 1, txBytes: 1},
-		"eth0":       {rxBytes: 500000000, txBytes: 100000000},
-		"vethaaaa11": {rxBytes: 2000, txBytes: 3000},
-		"vethbbbb22": {rxBytes: 2500, txBytes: 3500},
-		"docker0":    {rxBytes: 9000, txBytes: 8000},
-		"virbr0":     {rxBytes: 10, txBytes: 10},
-		"br-abc123":  {rxBytes: 10, txBytes: 10},
-		"tap0":       {rxBytes: 10, txBytes: 10},
+	all := map[string]IfCounters{
+		"lo":         {RxBytes: 1, TxBytes: 1},
+		"eth0":       {RxBytes: 500000000, TxBytes: 100000000},
+		"vethaaaa11": {RxBytes: 2000, TxBytes: 3000},
+		"vethbbbb22": {RxBytes: 2500, TxBytes: 3500},
+		"docker0":    {RxBytes: 9000, TxBytes: 8000},
+		"virbr0":     {RxBytes: 10, TxBytes: 10},
+		"br-abc123":  {RxBytes: 10, TxBytes: 10},
+		"tap0":       {RxBytes: 10, TxBytes: 10},
 	}
 	filtered := filteredIfaces(all)
-	require.Equal(t, map[string]ifCounters{"eth0": {rxBytes: 500000000, txBytes: 100000000}}, filtered)
+	require.Equal(t, map[string]IfCounters{"eth0": {RxBytes: 500000000, TxBytes: 100000000}}, filtered)
 }

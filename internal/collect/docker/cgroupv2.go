@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/store"
 )
 
@@ -273,19 +274,20 @@ func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time)
 	var haveRead, haveWrite bool
 	for majMin, dev := range cg.IO {
 		devName, named := c.DeviceName(majMin)
+		slugName := collect.SlugSegment(devName)
 
 		if bps, ok := c.rates.Rate(name+".io."+majMin+".read", now, float64(dev.RBytes)); ok {
 			totalReadBps += bps
 			haveRead = true
 			if named {
-				c.sink.Record(key("live:io."+devName+".read_bps"), ts, bps)
+				c.sink.Record(key("live:io."+slugName+".read_bps"), ts, bps)
 			}
 		}
 		if bps, ok := c.rates.Rate(name+".io."+majMin+".write", now, float64(dev.WBytes)); ok {
 			totalWriteBps += bps
 			haveWrite = true
 			if named {
-				c.sink.Record(key("live:io."+devName+".write_bps"), ts, bps)
+				c.sink.Record(key("live:io."+slugName+".write_bps"), ts, bps)
 			}
 		}
 	}

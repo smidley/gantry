@@ -275,6 +275,35 @@ func TestRecordContainerStatsIOTotalsSuppressFirstSightOfNewDevice(t *testing.T)
 	require.InDelta(t, 250_000.0, devReadB, 1e-9)
 }
 
+// TestRecordContainerStatsSlugsDeviceNameForLiveSeries pins Task 1's
+// hygiene fix for the live:io.<device>.* series: a resolved device name
+// with characters outside [a-z0-9_-] must be slugged before it becomes
+// part of the metric name, the same as hwmon labels and share names.
+func TestRecordContainerStatsSlugsDeviceNameForLiveSeries(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+	c.DeviceName = func(majMin string) (string, bool) {
+		if majMin == "8:0" {
+			return "My Disk!", true
+		}
+		return "", false
+	}
+
+	c.recordContainerStats("web", cgStats{
+		IO: map[string]ioCounters{"8:0": {RBytes: 1_000_000, WBytes: 500_000}},
+	}, time.Unix(1000, 0))
+	c.recordContainerStats("web", cgStats{
+		IO: map[string]ioCounters{"8:0": {RBytes: 1_200_000, WBytes: 600_000}},
+	}, time.Unix(1002, 0))
+
+	devRead, ok := sink.value("web", "live:io.my_disk.read_bps")
+	require.True(t, ok, "device name must be slugged before entering the metric name")
+	require.InDelta(t, 100_000.0, devRead, 1e-9)
+
+	_, ok = sink.value("web", "live:io.My Disk!.read_bps")
+	require.False(t, ok, "the unslugged device name must never appear in a metric name")
+}
+
 func TestRecordContainerStatsSkipsMemPctWhenMemTotalZero(t *testing.T) {
 	sink := newFakeSink()
 	c := newStatsCollector(sink)

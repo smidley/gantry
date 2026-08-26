@@ -1,10 +1,13 @@
 package host
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/smidley/gantry/internal/collect"
 )
 
 type hwmonKind int
@@ -72,6 +75,7 @@ func scanHwmon(sysRoot string) []hwmonReading {
 			}
 		}
 	}
+	dedupeLabels(out)
 	return out
 }
 
@@ -82,11 +86,32 @@ func hwmonLabel(chipDir, key, chipName string) string {
 	if label == "" {
 		label = key
 	}
-	return slug(chipName + " " + label)
+	return collect.SlugSegment(chipName + " " + label)
 }
 
-func slug(s string) string {
-	return strings.ReplaceAll(strings.ToLower(s), " ", "_")
+// dedupeLabels gives every reading beyond the first a distinct label when
+// its slugged label collides with an earlier reading of the SAME kind
+// (temp/fan are separate collision spaces — tickHwmon already prefixes by
+// kind before the label reaches a metric name). Two hwmon chip instances
+// of the same model (e.g. two NVMe drives, each with a "Composite"
+// sensor) otherwise slug to the same label and collapse into one series.
+// Collisions are resolved in scan order (os.ReadDir's sorted-by-filename
+// listings, both for chips and for each chip's sensor files), so which
+// instance is "_2" vs unsuffixed is deterministic.
+func dedupeLabels(out []hwmonReading) {
+	seen := make(map[hwmonKind]map[string]int, 2)
+	for i := range out {
+		byLabel, ok := seen[out[i].kind]
+		if !ok {
+			byLabel = make(map[string]int)
+			seen[out[i].kind] = byLabel
+		}
+		base := out[i].label
+		byLabel[base]++
+		if n := byLabel[base]; n > 1 {
+			out[i].label = fmt.Sprintf("%s_%d", base, n)
+		}
+	}
 }
 
 func readTrimmed(path string) string {

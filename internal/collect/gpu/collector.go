@@ -114,6 +114,7 @@ func (c *Collector) tickClients(now time.Time) {
 			if !isEngine {
 				continue
 			}
+			engine = collect.SlugSegment(engine)
 			busyPct, ok := c.engineBusyPct(id, engine, val, now)
 			if !ok {
 				continue

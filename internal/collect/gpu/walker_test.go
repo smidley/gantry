@@ -168,6 +168,60 @@ func TestDeadClientDroppedOnNextTickWithoutError(t *testing.T) {
 	require.Empty(t, c.clients, "an unreadable client must be dropped immediately")
 }
 
+// TestEngineNameHyphenPreservedThroughSlugging pins Task 1's hygiene fix
+// for engine names: "-" is in SlugSegment's allowed charset, so a real
+// engine name like i915's "video-enhance" must reach the metric name
+// unchanged.
+func TestEngineNameHyphenPreservedThroughSlugging(t *testing.T) {
+	procRoot := t.TempDir()
+	content := "drm-driver:\ti915\ndrm-client-id:\t40\ndrm-pdev:\t0000:00:02.0\ndrm-engine-video-enhance:\t1000000000 ns\n"
+	writeFile(t, fdinfoPath(procRoot, "400", "0"), content)
+	writeFile(t, cgroupPath(procRoot, "400"), "0::/init.scope\n")
+
+	sink := newFakeSink()
+	c := New(sink, procRoot, func(string) (string, bool) { return "", false })
+
+	t0 := time.Unix(1000, 0)
+	require.NoError(t, c.Tick(context.Background(), t0))
+
+	content = "drm-driver:\ti915\ndrm-client-id:\t40\ndrm-pdev:\t0000:00:02.0\ndrm-engine-video-enhance:\t1200000000 ns\n"
+	writeFile(t, fdinfoPath(procRoot, "400", "0"), content)
+	t1 := t0.Add(2 * time.Second)
+	require.NoError(t, c.Tick(context.Background(), t1))
+
+	pct, ok := sink.value("gpu", "0000:00:02.0", "engine.video-enhance.busy_pct")
+	require.True(t, ok, "engine name must keep its hyphen after slugging")
+	require.InDelta(t, 10.0, pct, 1e-9)
+}
+
+// TestEngineNameIsSlugged pins the other half of Task 1's hygiene fix:
+// an engine name isn't guaranteed clean (it comes straight off a
+// kernel/driver-supplied fdinfo key), so it must go through SlugSegment
+// like every other dynamic metric-name segment. No real driver is known
+// to report a mixed-case engine today; this exercises the safety net
+// directly against a synthetic dirty name.
+func TestEngineNameIsSlugged(t *testing.T) {
+	procRoot := t.TempDir()
+	content := "drm-driver:\ti915\ndrm-client-id:\t41\ndrm-pdev:\t0000:00:02.0\ndrm-engine-RENDER:\t1000000000 ns\n"
+	writeFile(t, fdinfoPath(procRoot, "410", "0"), content)
+	writeFile(t, cgroupPath(procRoot, "410"), "0::/init.scope\n")
+
+	sink := newFakeSink()
+	c := New(sink, procRoot, func(string) (string, bool) { return "", false })
+
+	t0 := time.Unix(1000, 0)
+	require.NoError(t, c.Tick(context.Background(), t0))
+
+	content = "drm-driver:\ti915\ndrm-client-id:\t41\ndrm-pdev:\t0000:00:02.0\ndrm-engine-RENDER:\t1200000000 ns\n"
+	writeFile(t, fdinfoPath(procRoot, "410", "0"), content)
+	t1 := t0.Add(2 * time.Second)
+	require.NoError(t, c.Tick(context.Background(), t1))
+
+	pct, ok := sink.value("gpu", "0000:00:02.0", "engine.render.busy_pct")
+	require.True(t, ok, "engine name must be slugged (lowercased) before entering the metric name")
+	require.InDelta(t, 10.0, pct, 1e-9)
+}
+
 // Engine counters not reported in nanoseconds (the xe driver's cycle
 // counters) aren't yet supported and must be skipped rather than
 // misinterpreted, and must not emit anything.

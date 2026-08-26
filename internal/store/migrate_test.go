@@ -10,7 +10,7 @@ import (
 func TestOpenDBCreatesSchema(t *testing.T) {
 	db, err := OpenDB(filepath.Join(t.TempDir(), "gantry.db"))
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	for _, table := range []string{"series", "samples_1m", "samples_10m", "samples_1h", "events", "settings", "schema_migrations"} {
 		var n int
@@ -36,7 +36,7 @@ func TestOpenDBIsIdempotent(t *testing.T) {
 
 	db2, err := OpenDB(path) // second open must not fail re-applying migrations
 	require.NoError(t, err)
-	defer db2.Close()
+	defer func() { _ = db2.Close() }()
 
 	var v int
 	require.NoError(t, db2.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&v))
@@ -46,11 +46,11 @@ func TestOpenDBIsIdempotent(t *testing.T) {
 func TestMigrationVersionsComeFromFilenamePrefix(t *testing.T) {
 	db, err := OpenDB(filepath.Join(t.TempDir(), "g.db"))
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	rows, err := db.Query(`SELECT version FROM schema_migrations ORDER BY version`)
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var versions []int
 	for rows.Next() {
 		var v int
@@ -62,4 +62,25 @@ func TestMigrationVersionsComeFromFilenamePrefix(t *testing.T) {
 	var n int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_samples_1m_ts'`).Scan(&n))
 	require.Equal(t, 1, n)
+}
+
+// TestSortMigrationsOrdersByParsedNumericVersionNotFilenameString pins the
+// migration-ordering hardening: a lexicographic sort would place
+// "10_add_col.sql" before "2_second.sql" and "9_ninth.sql" (comparing the
+// leading "1" byte against "2"/"9"), the classic zero-padding trap.
+// sortMigrations must order by the PARSED numeric version instead.
+func TestSortMigrationsOrdersByParsedNumericVersionNotFilenameString(t *testing.T) {
+	names := []string{"10_add_col.sql", "2_second.sql", "9_ninth.sql", "1_first.sql"}
+	require.NoError(t, sortMigrations(names))
+	require.Equal(t, []string{"1_first.sql", "2_second.sql", "9_ninth.sql", "10_add_col.sql"}, names)
+}
+
+// TestSortMigrationsErrorsOnBadVersionPrefix pins the validation half:
+// a name that doesn't parse as "<number>_<desc>.sql" is an error, not a
+// silently-skipped or zero-valued entry -- matching applyMigrations' own
+// pre-existing validation, just surfaced earlier (before sorting, not
+// during the apply loop).
+func TestSortMigrationsErrorsOnBadVersionPrefix(t *testing.T) {
+	require.Error(t, sortMigrations([]string{"1_ok.sql", "not_numeric.sql"}))
+	require.Error(t, sortMigrations([]string{"nounderscore.sql"}))
 }

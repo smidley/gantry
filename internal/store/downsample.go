@@ -53,12 +53,12 @@ func (s *Store) cascade(ctx context.Context, now time.Time, from, to string, win
 		WHERE ts >= ? AND ts < ?
 		GROUP BY series_id, ts/?`,
 		window, window, last, upTo, window); err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,?)`,
 		watermarkKey, upTo, now.Unix()); err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return err
 	}
 	return tx.Commit()

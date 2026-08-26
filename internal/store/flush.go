@@ -79,7 +79,7 @@ func (s *Store) FlushMinutes(ctx context.Context, now time.Time) (int, error) {
 			for _, a := range aggsWithID {
 				if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO samples_1m (series_id, ts, avg, max)
 					VALUES (?,?,?,?)`, a.id, m, a.avg, a.max); err != nil {
-					tx.Rollback()
+					_ = tx.Rollback()
 					return written, err
 				}
 				written++

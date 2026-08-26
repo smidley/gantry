@@ -2,6 +2,7 @@ package docker
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -132,7 +133,9 @@ func (r *registry) applyInventory(metas []Meta, sink EventSink, evict func(kind,
 	r.mu.Unlock()
 
 	for _, e := range toEmit {
-		sink.AppendEvent(e)
+		if _, err := sink.AppendEvent(e); err != nil {
+			log.Printf("events: %v", err)
+		}
 	}
 	for _, name := range toEvict {
 		evict("container", name)
@@ -188,7 +191,9 @@ func (r *registry) applyEvent(msg events.Message, sink EventSink, evict func(kin
 		return
 	}
 	if evt, ok := translateEvent(msg, name); ok {
-		sink.AppendEvent(evt)
+		if _, err := sink.AppendEvent(evt); err != nil {
+			log.Printf("events: %v", err)
+		}
 	}
 }
 

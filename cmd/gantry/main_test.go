@@ -23,7 +23,7 @@ func freePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port
 }
 
@@ -107,7 +107,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 // the connection's reuse state ambiguous to the transport.
 func drainAndClose(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 // TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed exercises the
@@ -118,7 +118,7 @@ func drainAndClose(resp *http.Response) {
 func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 
 	st.Record(store.SeriesKey{Kind: "host", Metric: "cpu.total"}, 1000, 12.5)
 	st.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, 1000, 4.2)
@@ -240,7 +240,7 @@ func TestHealthcheckExitPath(t *testing.T) {
 func TestRunReturnsOnBindFailure(t *testing.T) {
 	l, err := net.Listen("tcp", ":0")
 	require.NoError(t, err)
-	defer l.Close() // hold the port for the whole test so run()'s bind fails
+	defer func() { _ = l.Close() }() // hold the port for the whole test so run()'s bind fails
 	port := l.Addr().(*net.TCPAddr).Port
 
 	env := map[string]string{

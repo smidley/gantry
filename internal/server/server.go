@@ -78,7 +78,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v) // a write failure here means the client already disconnected
 }
 
 // ListenAndServe serves until ctx is cancelled, then shuts down gracefully.

@@ -15,7 +15,7 @@ func newTestStore(t *testing.T, clock func() time.Time) *Store {
 	t.Helper()
 	s, err := Open(filepath.Join(t.TempDir(), "gantry.db"), clock)
 	require.NoError(t, err)
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

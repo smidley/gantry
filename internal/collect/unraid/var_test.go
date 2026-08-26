@@ -48,7 +48,7 @@ func interpretVarFile(t *testing.T, path string) ArrayState {
 	t.Helper()
 	f, err := os.Open(path)
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	kv, err := ParseINI(f)
 	require.NoError(t, err)
 	return interpretVar(kv)

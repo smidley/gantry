@@ -48,7 +48,7 @@ func (c *Collector) statsViaAPI(ctx context.Context, id string) (cgStats, error)
 	if err != nil {
 		return cgStats{}, fmt.Errorf("docker: stats API for %s: %w", id, err)
 	}
-	defer reader.Body.Close()
+	defer func() { _ = reader.Body.Close() }()
 
 	var resp container.StatsResponse
 	if err := json.NewDecoder(reader.Body).Decode(&resp); err != nil {

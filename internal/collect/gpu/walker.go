@@ -110,7 +110,7 @@ func readFDInfo(path string) (FDInfo, bool) {
 	if err != nil {
 		return FDInfo{}, false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return ParseFDInfo(f)
 }
 

@@ -17,7 +17,7 @@ func TestHealthz(t *testing.T) {
 
 	resp, err := http.Get(ts.URL + "/api/healthz")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 
@@ -41,6 +41,6 @@ func TestRootServesPlaceholder(t *testing.T) {
 
 	resp, err := http.Get(ts.URL + "/")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }

@@ -2,6 +2,7 @@ package unraid
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -103,7 +104,7 @@ func (c *Collector) tickArray(now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("unraid: open var.ini: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	kv, err := ParseINI(f)
 	if err != nil {
@@ -123,7 +124,9 @@ func (c *Collector) tickArray(now time.Time) error {
 
 	if c.havePrevArray {
 		for _, e := range transitionEvents(c.prevArray, next) {
-			c.events.AppendEvent(e)
+			if _, err := c.events.AppendEvent(e); err != nil {
+				log.Printf("events: %v", err)
+			}
 		}
 	}
 	c.prevArray = next

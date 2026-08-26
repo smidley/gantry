@@ -1,0 +1,15 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+
+issues:
+  # Defaults (3 and 50) cap how many instances of an otherwise-identical
+  # finding are ever shown, hiding the rest even from a clean run's exit
+  # code accounting -- unacceptable for a gate meant to catch everything.
+  max-same-issues: 0
+  max-issues-per-linter: 0

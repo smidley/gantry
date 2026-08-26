@@ -12,7 +12,7 @@ func testCfg(t *testing.T, env map[string]string) (*Config, *store.Store) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 	return New(st, func(k string) string { return env[k] }), st
 }
 

@@ -22,7 +22,7 @@ func (c *Collector) tickShares(now time.Time) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	kv, err := ParseINI(f)
 	if err != nil {

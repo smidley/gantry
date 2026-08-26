@@ -84,7 +84,7 @@ func readCPUStat(path string) (usageUsec, throttledUsec, nrThrottled uint64, err
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	dst := map[string]*uint64{
 		"usage_usec":     &usageUsec,
@@ -120,7 +120,7 @@ func readMemoryStatInactiveFile(path string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
@@ -160,7 +160,7 @@ func readIOStat(path string) (map[string]ioCounters, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	out := make(map[string]ioCounters)
 	sc := bufio.NewScanner(f)

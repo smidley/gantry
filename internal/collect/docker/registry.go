@@ -60,6 +60,15 @@ func (r *registry) lookup(id string) (Meta, bool) {
 func (r *registry) lookupByName(name string) (Meta, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.lookupByNameLocked(name)
+}
+
+// lookupByNameLocked is lookupByName's body, for callers that already
+// hold r.mu -- applyEvent's removal branch, which must check whether a
+// destroyed id's name still lives on under a different, newer id before
+// evicting a name that name-keyed eviction would otherwise treat as
+// "this name is gone".
+func (r *registry) lookupByNameLocked(name string) (Meta, bool) {
 	for _, m := range r.byID {
 		if m.Name == name {
 			return m, true
@@ -171,6 +180,16 @@ func diffEvents(oldM, newM Meta) []store.Event {
 // event's own "name" attribute, falling back to whatever the registry
 // already knows about the actor id (events don't always carry attributes,
 // e.g. a bare OOM notification).
+//
+// Recreation guard: the event-stream goroutine and the poll goroutine
+// (applyInventory) are decoupled -- applyEvent never registers metas,
+// only polls do -- so a destroy event for an id can be PROCESSED here
+// after a later poll has already registered a same-named replacement
+// under a different id (compose redeploys, watchtower routinely produce
+// this ordering: destroy(old) delayed in local processing while the next
+// 10s poll already discovered new). Mirrors applyInventory's own guard:
+// evict only fires when no other id currently in the registry holds this
+// name; the dying id is still forgotten either way.
 func (r *registry) applyEvent(msg events.Message, sink EventSink, evict func(kind, entity string)) {
 	name := normalizeName(msg.Actor.Attributes["name"])
 	isRemoval := msg.Action == events.ActionDestroy || msg.Action == events.ActionRemove
@@ -181,13 +200,17 @@ func (r *registry) applyEvent(msg events.Message, sink EventSink, evict func(kin
 			name = m.Name
 		}
 	}
+	skipEvict := false
 	if isRemoval {
 		delete(r.byID, msg.Actor.ID)
+		_, skipEvict = r.lookupByNameLocked(name)
 	}
 	r.mu.Unlock()
 
 	if isRemoval {
-		evict("container", name)
+		if !skipEvict {
+			evict("container", name)
+		}
 		return
 	}
 	if evt, ok := translateEvent(msg, name); ok {

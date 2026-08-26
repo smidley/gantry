@@ -347,6 +347,51 @@ func TestApplyEventDestroyEvictsAndForgetsContainer(t *testing.T) {
 	require.Empty(t, sink.snapshot())
 }
 
+// TestApplyEventRecreationGuardSkipsEvictWhenNameStillLiveAfterPollRace
+// covers the same recreation guard as applyInventory's, but on the event
+// path: the event-stream goroutine and the poll goroutine are decoupled
+// (applyEvent never registers metas -- only applyInventory does), so a
+// destroy event for a superseded id can be PROCESSED after a later poll
+// has already registered a same-named replacement (compose redeploys,
+// watchtower). Without the guard, applyEvent's unconditional
+// evict("container", name) would wipe out the replacement's
+// already-started series, not the destroyed container's -- eviction is
+// name-keyed, and the name now belongs to the new id.
+func TestApplyEventRecreationGuardSkipsEvictWhenNameStillLiveAfterPollRace(t *testing.T) {
+	r := newRegistry()
+	sink := &fakeEventSink{}
+	ev := &fakeEvictor{}
+
+	// old-id ("web") starts, then is destroyed at the daemon -- but
+	// delivery of that destroy event to applyEvent is about to lag behind
+	// the next poll below.
+	r.applyInventory([]Meta{{ID: "old-id", Name: "web", State: "running"}}, sink, ev.evict)
+
+	// The poll runs first: old-id is gone (by id), new-id holds the same
+	// name -- applyInventory's own recreation guard already keeps this
+	// from evicting (pinned separately above); the registry now knows
+	// "web" only via new-id.
+	r.applyInventory([]Meta{{ID: "new-id", Name: "web", State: "running"}}, sink, ev.evict)
+	require.Empty(t, ev.snapshot(), "sanity: the poll itself must not evict yet")
+
+	// The stale destroy(old-id) event finally arrives.
+	r.applyEvent(msg(events.ActionDestroy, "old-id", map[string]string{"name": "/web"}), sink, ev.evict)
+
+	require.Empty(t, ev.snapshot(), "a destroy event for a superseded id must not evict the name a newer id still holds")
+	m, ok := r.lookup("new-id")
+	require.True(t, ok, "the still-live replacement must survive")
+	require.Equal(t, "web", m.Name)
+
+	// Destroying the CURRENT holder of the name, with no replacement
+	// anywhere in the registry, must still evict -- the guard is scoped
+	// to "another id holds this name right now", not a blanket
+	// suppression of the event path's eviction.
+	r.applyEvent(msg(events.ActionDestroy, "new-id", map[string]string{"name": "/web"}), sink, ev.evict)
+	require.Equal(t, []string{"container/web"}, ev.snapshot())
+	_, ok = r.lookup("new-id")
+	require.False(t, ok)
+}
+
 func TestApplyEventNameFallsBackToRegistryWhenAttributeMissing(t *testing.T) {
 	r := newRegistry()
 	sink := &fakeEventSink{}

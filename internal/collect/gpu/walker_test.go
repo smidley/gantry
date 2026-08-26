@@ -1,8 +1,10 @@
 package gpu
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,6 +41,24 @@ func writeFile(t *testing.T, path, content string) {
 
 func fdinfoPath(procRoot, pid, fd string) string {
 	return filepath.Join(procRoot, pid, "fdinfo", fd)
+}
+
+// fdLinkPath mirrors fdinfoPath for the other half of a real /proc/<pid>
+// entry: the fd/<n> symlink whose target scanClients' readlink prefilter
+// inspects before deciding whether fdinfo/<n> is worth opening at all.
+func fdLinkPath(procRoot, pid, fd string) string {
+	return filepath.Join(procRoot, pid, "fd", fd)
+}
+
+// writeFDLink creates the fd/<n> symlink half of a fake /proc/<pid> entry,
+// pointing at target (e.g. "/dev/dri/renderD128" or "socket:[123]"); the
+// target need not exist, matching real /proc symlinks that dangle once
+// the referenced file is gone.
+func writeFDLink(t *testing.T, procRoot, pid, fd, target string) {
+	t.Helper()
+	path := fdLinkPath(procRoot, pid, fd)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.Symlink(target, path))
 }
 
 func cgroupPath(procRoot, pid string) string {
@@ -95,6 +115,65 @@ func TestScanClientsDedupesSameClientIDAcrossTwoFDs(t *testing.T) {
 	require.Contains(t, clients, "10")
 	require.Equal(t, "i915", clients["10"].Driver)
 	require.Equal(t, "0000:00:02.0", clients["10"].Pdev)
+}
+
+// TestScanClientsOnlyOpensDRMFdinfoCandidates pins Task 3's perf fix: a
+// full scan must readlink /proc/<pid>/fd/<n> before opening
+// fdinfo/<n>, and skip any fd whose target doesn't contain "/dev/dri/".
+// fd 1's fdinfo is deliberately a byte-identical, otherwise-valid DRM
+// client (client-id "11") -- the ONLY thing distinguishing it from fd 0
+// is its fd/ symlink target, so this fails if the prefilter isn't
+// actually gating the open (as opposed to, say, some content-based
+// filter that would happen to also reject it).
+func TestScanClientsOnlyOpensDRMFdinfoCandidates(t *testing.T) {
+	procRoot := t.TempDir()
+	writeFile(t, fdinfoPath(procRoot, "100", "0"), i915FDInfo("10", "0000:00:02.0", 1_000_000_000))
+	writeFDLink(t, procRoot, "100", "0", "/dev/dri/renderD128")
+	writeFile(t, fdinfoPath(procRoot, "100", "1"), i915FDInfo("11", "0000:00:02.0", 1_000_000_000))
+	writeFDLink(t, procRoot, "100", "1", "socket:[123]")
+
+	clients := scanClients(procRoot)
+	require.Len(t, clients, 1)
+	require.Contains(t, clients, "10")
+	require.NotContains(t, clients, "11", "the non-DRM fd's fdinfo must never even be opened")
+}
+
+// TestScanClientsFallsBackToOpenEverythingWhenReadlinkFailsForWholePID
+// pins the other half of Task 3's contract: when readlink can't be used
+// at all for a pid (here, simulated by there being no fd/ directory —
+// the same shape a permission-denied ENOENT/EACCES on every entry would
+// produce), the prefilter must not suppress discovery; every fdinfo/<n>
+// gets opened, same as before Task 3.
+func TestScanClientsFallsBackToOpenEverythingWhenReadlinkFailsForWholePID(t *testing.T) {
+	procRoot := t.TempDir()
+	writeFile(t, fdinfoPath(procRoot, "100", "0"), i915FDInfo("10", "0000:00:02.0", 1_000_000_000))
+	// deliberately no fd/ directory at all under procRoot/100.
+
+	clients := scanClients(procRoot)
+	require.Len(t, clients, 1)
+	require.Contains(t, clients, "10")
+}
+
+// TestScanClientsPartialReadlinkFailureStillFiltersTheRest confirms the
+// fallback is scoped to "readlink unusable for this whole pid", not
+// triggered by one fd among several failing (e.g. a fd that raced closed
+// between the fdinfo and fd listings) -- the other fds' real prefilter
+// result must still be honored.
+func TestScanClientsPartialReadlinkFailureStillFiltersTheRest(t *testing.T) {
+	procRoot := t.TempDir()
+	writeFile(t, fdinfoPath(procRoot, "100", "0"), i915FDInfo("10", "0000:00:02.0", 1_000_000_000))
+	writeFDLink(t, procRoot, "100", "0", "/dev/dri/renderD128")
+	writeFile(t, fdinfoPath(procRoot, "100", "1"), i915FDInfo("11", "0000:00:02.0", 1_000_000_000))
+	writeFDLink(t, procRoot, "100", "1", "socket:[123]")
+	// fd 2 has fdinfo but no fd/2 symlink at all -- an individual
+	// readlink failure alongside two that succeeded.
+	writeFile(t, fdinfoPath(procRoot, "100", "2"), i915FDInfo("12", "0000:00:02.0", 1_000_000_000))
+
+	clients := scanClients(procRoot)
+	require.Len(t, clients, 1)
+	require.Contains(t, clients, "10")
+	require.NotContains(t, clients, "11")
+	require.NotContains(t, clients, "12", "an individual readlink failure must not fall back to opening that fd when siblings resolved fine")
 }
 
 // The core mechanics test: one containerized client and one real
@@ -316,6 +395,65 @@ func TestEngineNameIsSlugged(t *testing.T) {
 	pct, ok := sink.value("gpu", "0000:00:02.0", "engine.render.busy_pct")
 	require.True(t, ok, "engine name must be slugged (lowercased) before entering the metric name")
 	require.InDelta(t, 10.0, pct, 1e-9)
+}
+
+// TestEngineCapacityKeysSkippedSilently pins Task 3's fix: xe reports
+// drm-engine-capacity-<name> fields (engine instance counts, not
+// busy-time counters) alongside real drm-engine-<name> fields for the
+// same engine. capacity-* must never reach engineBusyPct or emit any
+// metric — it must not even count as "seen" toward the once-only
+// non-ns warning, which the next test pins directly.
+func TestEngineCapacityKeysSkippedSilently(t *testing.T) {
+	procRoot := t.TempDir()
+	content := "drm-driver:\txe\ndrm-client-id:\t50\ndrm-pdev:\t0000:00:03.0\ndrm-engine-capacity-render:\t1\ndrm-engine-render:\t1000000000 ns\n"
+	writeFile(t, fdinfoPath(procRoot, "500", "0"), content)
+	writeFile(t, cgroupPath(procRoot, "500"), "0::/init.scope\n")
+
+	sink := newFakeSink()
+	c := New(sink, procRoot, func(string) (string, bool) { return "", false })
+
+	t0 := time.Unix(1000, 0)
+	require.NoError(t, c.Tick(context.Background(), t0))
+	content = "drm-driver:\txe\ndrm-client-id:\t50\ndrm-pdev:\t0000:00:03.0\ndrm-engine-capacity-render:\t1\ndrm-engine-render:\t1200000000 ns\n"
+	writeFile(t, fdinfoPath(procRoot, "500", "0"), content)
+	t1 := t0.Add(2 * time.Second)
+	require.NoError(t, c.Tick(context.Background(), t1))
+
+	_, hasCapacity := sink.value("gpu", "0000:00:03.0", "engine.capacity-render.busy_pct")
+	require.False(t, hasCapacity, "capacity-* is not a busy-time counter and must never be recorded")
+	pct, ok := sink.value("gpu", "0000:00:03.0", "engine.render.busy_pct")
+	require.True(t, ok, "the real render counter alongside it must still be recorded")
+	require.InDelta(t, 10.0, pct, 1e-9)
+}
+
+// TestEngineCapacityKeyDoesNotBurnNonNanosecondWarningBudget goes one
+// step further than the previous test: it proves capacity-render is
+// skipped BEFORE engineBusyPct's non-ns check, not merely that it
+// happens not to emit a metric. drm-engine-capacity-render has no unit
+// suffix at all ("1", not "1 ns"), so if it ever reached engineBusyPct
+// it would consume the collector's one-shot warnNonNS log -- leaving a
+// genuinely novel non-ns engine ("weird") silent for the rest of the
+// process's life. Go's map iteration order is randomized, so without
+// the fix this test would fail nondeterministically (whenever
+// capacity-render happened to be visited before weird); the fix makes
+// the outcome independent of iteration order.
+func TestEngineCapacityKeyDoesNotBurnNonNanosecondWarningBudget(t *testing.T) {
+	procRoot := t.TempDir()
+	content := "drm-driver:\txe\ndrm-client-id:\t60\ndrm-pdev:\t0000:00:04.0\ndrm-engine-capacity-render:\t1\ndrm-engine-weird:\t999 cycles\n"
+	writeFile(t, fdinfoPath(procRoot, "600", "0"), content)
+	writeFile(t, cgroupPath(procRoot, "600"), "0::/init.scope\n")
+
+	sink := newFakeSink()
+	c := New(sink, procRoot, func(string) (string, bool) { return "", false })
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	require.Contains(t, logBuf.String(), `engine "weird"`, "the once-log must still fire for the genuinely novel non-ns engine")
+	require.NotContains(t, logBuf.String(), "capacity-render", "capacity-* must never reach the non-ns check at all")
 }
 
 // Engine counters not reported in nanoseconds (the xe driver's cycle

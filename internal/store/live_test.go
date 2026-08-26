@@ -40,6 +40,35 @@ func TestLiveConcurrentRecord(t *testing.T) {
 	}
 }
 
+// TestLiveSnapshotLatestMatchesPerKeyLatest pins Task 3's single-lock
+// snapshot: SnapshotLatest's result must be identical to calling
+// Latest(key) for every key returned by Keys() -- just taken under one
+// read-lock pass instead of N+1.
+func TestLiveSnapshotLatestMatchesPerKeyLatest(t *testing.T) {
+	l := NewLive(8)
+	hostKey := SeriesKey{Kind: "host", Metric: "cpu.total"}
+	diskKey := SeriesKey{Kind: "disk", Entity: "disk1", Metric: "temp.c"}
+	l.Record(hostKey, 100, 1.0)
+	l.Record(hostKey, 102, 2.0) // latest for hostKey
+	l.Record(diskKey, 100, 30.0)
+
+	snap := l.SnapshotLatest()
+	require.Len(t, snap, 2)
+	require.Equal(t, Sample{TS: 102, Val: 2.0}, snap[hostKey])
+	require.Equal(t, Sample{TS: 100, Val: 30.0}, snap[diskKey])
+
+	for _, k := range l.Keys() {
+		want, ok := l.Latest(k)
+		require.True(t, ok)
+		require.Equal(t, want, snap[k])
+	}
+}
+
+func TestLiveSnapshotLatestEmptyWhenNoSeries(t *testing.T) {
+	l := NewLive(8)
+	require.Empty(t, l.SnapshotLatest())
+}
+
 func TestLiveEvict(t *testing.T) {
 	l := NewLive(8)
 	k1 := SeriesKey{Kind: "container", Entity: "app1", Metric: "cpu"}

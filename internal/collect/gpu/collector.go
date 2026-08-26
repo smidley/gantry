@@ -133,6 +133,15 @@ func (c *Collector) tickClients(now time.Time) {
 			if !isEngine {
 				continue
 			}
+			if strings.HasPrefix(engine, "capacity-") {
+				// xe reports drm-engine-capacity-<name> (engine instance
+				// counts) alongside the real drm-engine-<name> busy-time
+				// counter for the same engine. It's never in nanoseconds,
+				// so without this it would reach engineBusyPct and burn
+				// the one-shot non-ns warning on this frequent,
+				// uninteresting shape instead of a genuinely novel one.
+				continue
+			}
 			engine = collect.SlugSegment(engine)
 			busyPct, ok := c.engineBusyPct(id, engine, val, now)
 			if !ok {

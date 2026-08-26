@@ -65,6 +65,23 @@ func (l *Live) Keys() []SeriesKey {
 	return keys
 }
 
+// SnapshotLatest returns the latest sample for every currently-known
+// series, taken under a single read-lock pass -- the counterpart to
+// calling Keys() and then Latest(key) per key (N+1 locks total), which
+// matters once assembling a snapshot happens far more often (SSE
+// fan-out, one per connected client per tick).
+func (l *Live) SnapshotLatest() map[SeriesKey]Sample {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make(map[SeriesKey]Sample, len(l.rings))
+	for k, r := range l.rings {
+		if s, ok := r.Latest(); ok {
+			out[k] = s
+		}
+	}
+	return out
+}
+
 // ForEach runs fn for every series under the read lock.
 // fn must not retain the ring or call back into Live.
 func (l *Live) ForEach(fn func(key SeriesKey, ring *Ring)) {

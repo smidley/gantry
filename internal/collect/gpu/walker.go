@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/smidley/gantry/internal/collect/cgroup"
 )
@@ -39,12 +40,13 @@ func scanClients(procRoot string) map[string]client {
 			continue // not a /proc/<pid> directory
 		}
 
-		fdinfoDir := filepath.Join(procRoot, pidEnt.Name(), "fdinfo")
+		pidDir := filepath.Join(procRoot, pidEnt.Name())
+		fdinfoDir := filepath.Join(pidDir, "fdinfo")
 		fdEntries, err := os.ReadDir(fdinfoDir)
 		if err != nil {
 			continue
 		}
-		for _, fdEnt := range fdEntries {
+		for _, fdEnt := range drmCandidates(pidDir, fdEntries) {
 			path := filepath.Join(fdinfoDir, fdEnt.Name())
 			info, ok := readFDInfo(path)
 			if !ok || info.ClientID == "" {
@@ -59,6 +61,43 @@ func scanClients(procRoot string) map[string]client {
 				Driver: info.Driver,
 				Pdev:   info.Fields["drm-pdev"],
 			}
+		}
+	}
+	return out
+}
+
+// drmCandidates narrows fdEntries (a pid's fdinfo/ listing) down to the
+// ones worth opening at all: a DRM fd's /proc/<pid>/fd/<n> entry is a
+// symlink to something under /dev/dri/, while the overwhelming majority
+// of any process's fds are sockets, pipes, and regular files — reading
+// that symlink's target is far cheaper than opening+parsing fdinfo just
+// to reject it. An fd whose readlink fails is dropped as "not a
+// candidate", the same as a target that doesn't match, EXCEPT: if
+// readlink fails for every single entry (a permission-variance case,
+// e.g. this uid can't traverse another user's fd/ symlinks even though
+// fdinfo/ is readable), that almost certainly means readlink is useless
+// for this whole pid, not that it happens to have zero DRM fds — so the
+// filter is skipped entirely and every entry is returned, matching
+// pre-Task-3 behavior for that pid.
+func drmCandidates(pidDir string, fdEntries []os.DirEntry) []os.DirEntry {
+	targets := make([]string, len(fdEntries))
+	errs := make([]error, len(fdEntries))
+	anyResolved := false
+	for i, fdEnt := range fdEntries {
+		target, err := os.Readlink(filepath.Join(pidDir, "fd", fdEnt.Name()))
+		targets[i], errs[i] = target, err
+		if err == nil {
+			anyResolved = true
+		}
+	}
+	if !anyResolved {
+		return fdEntries
+	}
+
+	var out []os.DirEntry
+	for i, fdEnt := range fdEntries {
+		if errs[i] == nil && strings.Contains(targets[i], "/dev/dri/") {
+			out = append(out, fdEnt)
 		}
 	}
 	return out

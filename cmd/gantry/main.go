@@ -199,12 +199,8 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector) 
 		}
 
 		live := st.Live()
-		for _, key := range live.Keys() {
+		for key, sample := range live.SnapshotLatest() {
 			if strings.HasPrefix(key.Metric, "live:") {
-				continue
-			}
-			sample, ok := live.Latest(key)
-			if !ok {
 				continue
 			}
 			switch key.Kind {

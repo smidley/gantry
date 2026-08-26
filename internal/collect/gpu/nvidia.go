@@ -16,7 +16,10 @@ import (
 )
 
 const (
-	nvidiaTickInterval = 2 * time.Second
+	// nvidiaTickInterval is 15s, not the 2s most collectors use: each tick
+	// execs nvidia-smi up to twice (query-gpu, query-compute-apps), and at
+	// 2s that's roughly 10x the intended CPU budget on Nvidia boxes.
+	nvidiaTickInterval = 15 * time.Second
 	nvidiaEntity       = "nvidia0" // v1: single-GPU assumption, matching spec §4.4's per-container scope
 )
 
@@ -25,7 +28,7 @@ const (
 // the binary and driver libraries at startup) for host GPU
 // utilization/memory and per-process VRAM, attributing processes to
 // containers via /proc/<pid>/cgroup — the same PID→container mapping the
-// DRM fdinfo path (collector.go) uses. Name "nvidia", Interval 2s.
+// DRM fdinfo path (collector.go) uses. Name "nvidia", Interval 15s.
 //
 // v1 scope (spec §4.4): per-container Nvidia data is VRAM + presence
 // only. CSV output has no per-process SM-utilization column, so

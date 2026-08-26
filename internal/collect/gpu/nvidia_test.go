@@ -26,7 +26,7 @@ func stubOnPath(t *testing.T, name string) {
 func TestNvidiaNameAndInterval(t *testing.T) {
 	c := NewNvidia(newFakeSink(), t.TempDir(), func(string) (string, bool) { return "", false })
 	require.Equal(t, "nvidia", c.Name())
-	require.Equal(t, 2*time.Second, c.Interval())
+	require.Equal(t, 15*time.Second, c.Interval())
 }
 
 func TestNvidiaProbeAvailableWhenBinaryOnPath(t *testing.T) {

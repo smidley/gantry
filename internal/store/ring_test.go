@@ -35,3 +35,9 @@ func TestRingEmpty(t *testing.T) {
 	require.False(t, ok)
 	require.Empty(t, r.Since(0))
 }
+
+func TestNewRingClampsNonPositiveCapacity(t *testing.T) {
+	r := NewRing(0)
+	r.Append(Sample{TS: 1, Val: 1}) // must not panic
+	require.Equal(t, 1, r.Len())
+}

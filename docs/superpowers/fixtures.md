@@ -1,0 +1,94 @@
+# Unraid parser fixtures — real-capture reconciliation
+
+Task 16 (Phase 2 plan) reconciled the hand-authored `internal/collect/unraid/testdata/` fixtures against real captures pulled read-only from a live Unraid 7.3.2 box, fixed what reality disagreed with, and added anonymized real fixtures alongside the existing hand-authored ones.
+
+## What was captured
+
+- Box version: Unraid 7.3.2.
+- `var.ini` (155 lines, entirely headerless), `disks.ini` (734 lines, 16 sections: parity, disk1-10, parity2, cache, rocket_pool, scratch, flash), `shares.ini` (380 lines, 19 sections), `ups.ini` (0 bytes).
+- `emhttp-ls.txt` — the real `/var/local/emhttp` directory listing, for context only. It also lists `connectStatus.json`, `devs.ini`, `disk_activity.ini`, `flashbackup.ini`, `monitor.ini`, `network.ini`, `nginx.ini`, `panelcontrol-monitor-payload.json`, `plugins/`, `proxy.ini`, `sec.ini`, `sec_nfs.ini`, `smart/`, `statics.ini`, `unassigned.devices.ini`, `users.ini` — none read by this collector, none touched by this task. Notably, `ups.ini` itself is **not** in this listing at all (see discrepancy 10).
+
+## Anonymization performed
+
+- Disk/pool `id`/`idSb` (real vendor+model+serial strings) → structurally-similar placeholders built from generic `MODEL`/`CODE`/`VENDOR`/`SERIAL` tokens, numbered per disk so they stay distinguishable from each other. Each placeholder matches its real value's own separator pattern and segment-length class — never its actual characters:
+  - disk1, disk6: each real value was one dash-separated pair followed by an underscore-separated final segment (three segments total), with `id` and `idSb` holding the identical real string within a section — each became its own same-shaped placeholder, reused across both fields in that section.
+  - cache: an all-underscore, three-segment real value became an all-underscore, three-segment placeholder.
+  - rocket_pool: a longer all-underscore real value with a dot-separated version-like segment and a size-like segment ahead of a long final serial segment became a placeholder preserving that same segment count and punctuation positions.
+  - flash: the real value ended in a `-0:0` suffix, kept verbatim (a structural partition marker, not identifying); everything before it became a placeholder in the same underscore-separated shape.
+  - parity/disk9: `id`/`idSb` were already `""` in reality (no disk assigned) — nothing to scrub.
+- btrfs pool filesystem `uuid` (cache, rocket_pool) → zeroed canonical nil UUID `00000000-0000-0000-0000-000000000000` (same 8-4-4-4-12 format).
+- var.ini's license/hardware-identity cluster:
+  - `flashGUID` and `regGUID` (identical real value — they're tied together in reality) → `0000-0000-0000-000000000000`
+  - `tpmGUID` → `00-000000000000000000000000`
+  - `flashProduct` → `USB_0.0.0_FD` (same underscore/dot pattern; reuses the placeholder convention from the flash disk's `id` above)
+  - `flashVendor` → `VND` (matches the `VND` used in the flash disk's anonymized `id`)
+  - `regTo` — the real value here was the actual registered owner's full name (PII), replaced with the generic placeholder `Jane Doe`
+  - `csrf_token` — a random 16-hex-char session token, zeroed to `0000000000000000` (a "long alnum run" that would otherwise trip the self-audit below)
+  - Left unchanged as non-identifying: `regTy` (license tier "Plus" — not personally identifying), `regFILE`, `regTm`/`regTm2`/`regBuildTime`/`regGen` (plain timestamps/counters, no more identifying than any other numeric stat we deliberately keep real), `NAME` (`"server"` — already generic), `COMMENT` (`"Media server"` — descriptive, not identifying), `timeZone` (region-level, not on the brief's anonymization checklist).
+- Share names → `share1`/`share2`/`Share2`/`share3`, applied consistently to section headers and `name`/`nameOrig`. One deliberate wrinkle: the real box has two shares whose real names differ only by the case of one letter, both pinned to the same cache pool. To preserve that real, easy-to-miss structural fact (two distinct shares differing only by letter case) without printing either real name anywhere, they became `share2` and `Share2` respectively — see discrepancy 3 and `TestTickSharesRealCaptureFromLiveUnraidBox`. 15 additional shares with identical key shapes to the 4 kept were dropped (brief: "keep 3-4 representative") — their real names are not reproduced here or anywhere else in this document.
+- Pool/disk slot names (`cache`, `rocket_pool`, `scratch`, `flash`, `parity`, `disk1`...`disk10`) were left as-is — structural/functional labels, not personal information, not on the brief's checklist, and already used verbatim in the pre-existing hand-authored fixtures.
+- Device nodes (`sdg`, `sdd`, `nvme1n1`, etc.) left as-is — ephemeral, generic Linux naming.
+
+## What was kept vs. trimmed
+
+- **var.ini**: kept whole (155/155 lines) as `testdata/var_real.ini`, anonymized per above. The three existing hand-authored state fixtures (`var_started.ini`/`var_stopped.ini`/`var_parity_running.ini`) were untouched by this task — no divergence was found in the fields they exist to test. (`var_parity_running.ini` was later corrected by the Phase 2 final-review fix wave to drop the fictional `mdResyncSpeed` key in favor of `mdResyncDb`/`mdResyncDt`, once discrepancy 5 below turned out to be wrong — see that entry.)
+- **disks.ini**: real capture has 16 sections; trimmed to 7 in `testdata/disks_real.ini`:
+  - `parity` (idx 0) — status `DISK_NP_DSBL` (the real evidence behind discrepancy 1)
+  - `disk1` (idx 1), `disk6` (idx 6) — two present data disks, different vendor/model/size class, both xfs
+  - `disk9` (idx 9) — status `DISK_NP`, an empty data slot
+  - `cache` (idx 30), `rocket_pool` (idx 31) — two differently-named btrfs pools (proves the collector doesn't special-case the literal name "cache")
+  - `flash` (idx 33) — boot device, `temp="*"` for a reason other than spin-down
+  - Omitted as redundant with a kept section of the same shape: disk2-5/disk7-8 (more present xfs data disks), disk10 (more `DISK_NP`), parity2 (more `DISK_NP_DSBL`), scratch (more btrfs pool).
+  - The pre-existing hand-authored `testdata/disks.ini` is untouched and deliberately kept — it still covers two scenarios this real capture did not happen to exhibit (see discrepancy 9).
+- **shares.ini**: real capture has 19 sections; trimmed to 4 in `testdata/shares_real.ini` (`share1`/`share2`/`Share2`/`share3` — see "Anonymization performed" above for the mapping rationale; their real source names are not reproduced here). The pre-existing hand-authored `testdata/shares.ini` is untouched.
+- **ups.ini**: real capture is 0 bytes; no fixture added (see discrepancy 10).
+
+## Discrepancies found (parser-relevant)
+
+1. **[FIXED]** `disks.ini`'s `status` for an absent *parity* slot is `"DISK_NP_DSBL"`, not `"DISK_NP"` — `disks.go`.
+   This box's `parity` and `parity2` sections (no parity disk currently assigned) both report `status="DISK_NP_DSBL"`. The empty *data* slots (disk9/disk10) do say exactly `"DISK_NP"`, but the disabled parity slot doesn't, so it fell through the old exact-match check to the "present" path — it would have wrongly emitted `spun_up=1` (from `spundown="0"`) and `errors=0` for a slot with no disk in it at all. Fixed by matching on the `"DISK_NP"` *prefix* rather than the whole string, which also matches what the pre-existing code comment already claimed the intent was ("gate on 'not DISK_NP'") — the implementation just hadn't delivered on it. TDD: `TestTickDisksDiskNPDsblStatusTreatedAsAbsent` (confirmed RED: recorded `spun_up=1`, `errors=0` before the fix) plus the integration-level `TestTickDisksRealCaptureFromLiveUnraidBox`.
+   Caveat, same spirit as discrepancy 9: only `DISK_NP` and `DISK_NP_DSBL` were observed on this box. Other status values that can appear on other Unraid installs — `DISK_DSBL` (present but disabled), `DISK_INVALID`, `DISK_NEW`, `DISK_WRONG` — were not, so the fix's safety for them rests on structural reasoning (none of those four share the `DISK_NP` prefix, so none of them are newly swallowed by the broadened check) rather than a real example of any of them.
+
+2. **[FIXED]** `disks.ini`'s `fsUsed` diverges from `fsSize-fsFree` for btrfs pools — `disks.go`.
+   The parser derived `fs.used_bytes` as `(fsSize-fsFree)*1024` and never read the `fsUsed` key disks.ini also carries. Cross-checked against real numbers: for every xfs array disk (disk1...disk8) and the vfat flash device, `fsSize-fsFree` equals `fsUsed` exactly. For all three real btrfs pools (cache, rocket_pool, scratch) it does not — e.g. cache: `fsSize-fsFree` = 612,581,384 KB vs. the real `fsUsed` = 610,420,272 KB (≈2 GiB overstated); scratch: off by ~4.9M KB, a ~3.3% relative error on a mostly-empty pool. Fixed to read `fsUsed` directly when present, falling back to the subtraction when it's absent — which keeps the pre-existing hand-authored fixture (which never had an `fsUsed` key) passing unchanged. TDD: `TestTickDisksFsUsedBytesPrefersAuthoritativeFsUsedOverDerived` (confirmed RED: derived 627,283,337,216 vs. correct 625,070,358,528) plus the integration test.
+
+3. **[MATCHED reality, documented, not a code fix]** `shares.ini`'s `used`/`free` are never truly per-share — `shares.go`.
+   Every share on this box with no dedicated cache pool (`useCache="no"`, `cachePool=""`) reports the *same* `used`/`free` pair: 151,593,370,640 / 12,457,267,844 KB. Verified by arithmetic: summing all 8 real data disks' `fsUsed` from disks.ini gives 151,593,370,640 exactly, and summing their `fsFree` gives 12,457,267,844 exactly — these are the array's totals, not any one share's footprint. Shares pinned to a specific cache pool (`useCache="only"`, `cachePool` set) instead mirror *that pool's* own `fsUsed`/`fsFree` — but that is still a pool-level total, not a per-share one: our own trimmed fixture has two differently-named shares (`share2`/`Share2`) both pinned to the same pool, and both report the identical pool figure (verified by `TestTickSharesRealCaptureFromLiveUnraidBox`); the raw capture has several more real shares sharing that same pool and the same reported total. The number only happens to equal a share's own usage when that share is the sole occupant of its pool — it is never computed per-share, on any pool or the array. This is not a parsing bug — key name, quoting, and the KB→bytes conversion are all correct, and shares.ini genuinely has no more-granular number to read (Unraid doesn't track true per-share usage). Locked in by `TestTickSharesRealCaptureFromLiveUnraidBox` so this doesn't get mistaken for a bug and "fixed" into something wrong later. Product-level note for later phases: a dashboard must never present `share.<name>.used_bytes` as that share's own size — it is always the backing array- or pool-level total.
+
+4. **[MATCHED — no change]** `ParseINI`'s core dialect assumptions — `ini.go`.
+   Every value-bearing line across all three non-empty real files (var.ini 155/155 lines, disks.ini 734 lines/16 sections, shares.ini 380 lines/19 sections) uses exactly `key="value"` — double-quoted, no exceptions. No unquoted values, no single quotes, no scientific notation, no thousands separators, no comment-line convention anywhere. Section headers are always a form the parser already handles; headerless keys only ever appear in var.ini. Two real value forms the test suite had never exercised, both already handled correctly: an empty quoted value (`DOMAIN=""`, dozens of instances in var.ini — now `TestParseINIHandlesEmptyQuotedValue`), and a numeric-looking field with a decimal point (`floor="17950564.8"` in shares.ini, not a field this package reads, but it validates `parseFloatOK`'s choice of `ParseFloat` over `ParseInt` — now `TestParseFloatOKHandlesDecimalStringsLikeRealFloorField`).
+
+5. **[CORRECTED — original claim was wrong]** var.ini's parsed fields — `var.go`.
+   `mdState`, `mdResyncPos`, `mdResyncSize`, and `version` are all present, all plain decimal strings under the headerless section, exactly as `interpretVar` assumes. Real scale differs from the hand-authored fixtures (`mdResyncSize="25391060992"` vs. the fixtures' `11718885324`) but that's just a different disk size on a different box, not a form issue.
+   `mdResyncSpeed`, however, **does not exist** in this real capture — this entry originally claimed it was present and merely unverified for its nonzero case, which was false: grep the 155-line `testdata/var_real.ini` for `mdResyncSpeed` and it isn't there. The real box's resync-rate fields are `mdResync`, `mdResyncCorr`, `mdResyncPos`, `mdResyncDb`, `mdResyncDt`, `mdResyncAction`, and `mdResyncSize` — no `mdResyncSpeed` among them. `ParitySpeedBps` is now **derived** from `mdResyncDb` (1KB blocks transferred) over `mdResyncDt` (seconds) — emhttp's resync-rate block convention, `(mdResyncDb / mdResyncDt) * 1024` bytes/s, guarded to 0 when `mdResyncDt` is absent or 0 — rather than read from a key that isn't real. The box wasn't mid-parity-check at capture time (`mdResyncPos="0"`, `mdResyncDb="0"`, `mdResyncDt="0"`), so empirical confirmation of the `Db`/`Dt` derivation and its ×1024 factor against a real, active parity check still awaits the first real parity check on the box (Phase 4 pre-release checklist item) — not contradicted by this capture, just not yet independently observed in the nonzero case. Added `testdata/var_real.ini` (full anonymized capture) + `TestInterpretVarRealCaptureToleratesEveryUnreadKey` to prove tolerance of the ~150 unread keys.
+
+6. **[MATCHED — no change]** disks.ini's `name` / shares.ini's `nameOrig` always mirror the section header — `disks.go`, `shares.go`.
+   Confirmed byte-identical to the section header text in every one of the 16 disks.ini sections and 19 shares.ini sections. Both collectors already use the section-header string itself as the entity/share identity and never read these fields — the shortcut is validated, no change.
+
+7. **[MATCHED — no change]** disks.ini structural omissions for slots with no filesystem or no disk — `disks.go`.
+   The real `parity`/`parity2` sections omit `fsSize`/`fsFree`/`fsUsed` entirely (no filesystem to report), whereas the empty data slots (disk9/disk10) carry them explicitly as `"0"`. The hand-authored fixture's parity entry wrongly assumed explicit zero keys are always present. No code change needed: `parseFloatOK` on a missing key (empty string) already fails exactly like it does on a present `"0"` guarded by the `fsSize > 0` check, so both real shapes already produce "no fs metrics." Similarly `rotational` is `""` (not `"0"`) for these slots in reality, vs. the hand-authored fixture's `"0"` — moot, `rotational` isn't read.
+
+8. **[MATCHED — no change]** disks.ini's `temp="*"` covers more than spin-down — `disks.go`.
+   The literal `"*"` sentinel already covers every real case seen: an unassigned slot, and — new evidence — the boot flash device, which reports `temp="*"` while `spundown="0"` (no temperature sensor at all, unrelated to spin state). `parseFloatOK`'s blanket rejection of non-numeric values already handles both identically; no change.
+
+9. **[CAVEAT — not independently verified from this capture]** no disk on this box was actually spun down.
+   Every disk reports `spundown="0"` (`spindownDelay="-1"` throughout — spin-down is effectively disabled fleet-wide on this box). So the `temp="*"` + `spundown="1"` → `spun_up=0`, temp-omitted combination has no real-world evidence in this capture; it remains covered only by the pre-existing hand-authored `testdata/disks.ini`, which is why that file was deliberately kept rather than deleted. Likewise no real disk had `numErrors` above `"0"`, so a nonzero error count's exact form also isn't independently confirmed (not contradicted either) — the existing synthetic increment test is unaffected.
+
+10. **[CAVEAT — not independently verified]** `ups.ini`.
+    The captured `ups.ini` is 0 bytes, but the real box's own directory listing (`emhttp-ls.txt`) does not list `ups.ini` at all — this box has no UPS/apcupsd configured, and the 0-byte file is most likely a capture-process artifact rather than a genuine on-disk empty file. Neither `battery.charge` nor `ups.load`'s real key names or value forms could be validated against real data. `Probe`/`tickUPS` already tolerate a missing or empty file identically by inspection (`os.Open` succeeds on a 0-byte file; `ParseINI` returns an empty map with no error; every subsequent key lookup then fails `parseFloatOK` the same way a missing file's absent keys would) — no fixture or code change made, and not claimed as a real-world-confirmed shape, consistent with the brief's own "may be empty — absence is fine."
+
+11. **[NOTED — deliberate design, not revisited]** var.ini's `shareMoverActive` flag isn't used by the mover collector.
+    var.ini carries an authoritative `shareMoverActive` (`"yes"`/`"no"`) flag. `mover.go` deliberately doesn't read it — Task 12 chose a live `/proc` scan for a `comm == "mover"` process instead of trusting emhttp's self-report. That was a settled design decision from before this task, not something Task 16 was charged with revisiting; noted here only for completeness.
+
+## Tests added
+
+- `ini_test.go`: `TestParseINIHandlesEmptyQuotedValue`, `TestParseFloatOKHandlesDecimalStringsLikeRealFloorField`
+- `var_test.go`: `TestInterpretVarRealCaptureToleratesEveryUnreadKey`
+- `disks_test.go`: `TestTickDisksDiskNPDsblStatusTreatedAsAbsent`, `TestTickDisksFsUsedBytesPrefersAuthoritativeFsUsedOverDerived`, `TestTickDisksRealCaptureFromLiveUnraidBox`
+- `shares_test.go`: `TestTickSharesRealCaptureFromLiveUnraidBox`
+
+All pre-existing tests and fixtures are unchanged and still pass.
+
+## Anonymization audit
+
+Grepped the three new fixture files *and this document itself* for every real serial/model string, both real GUIDs, the real registrant name, the real csrf token, and every real share name from the raw captures: zero matches (an earlier pass scoped only to the `.ini` fixtures missed that this document's own prose was printing several of those real strings as the "before" side of before→after mappings — fixed; nothing in this file states a transformation by showing the real value it replaced, only the placeholder and a description of the real value's shape). Broader sweep for any 10+-character alnum run and any GUID-shaped (8-4-4-4-12 hex) string across the fixtures and this document, plus a manual read of every section header and `name`/`nameOrig` value: only placeholders, zeroed GUIDs, real numeric stats, and non-identifying structural/pool names remain. A section-by-section diff of the trimmed real fixtures against the raw captures (excluding only the intentionally-anonymized `id`/`idSb`/`uuid`/`name`/`nameOrig`/section-header lines) came back byte-identical, confirming no transcription errors alongside the scrub.

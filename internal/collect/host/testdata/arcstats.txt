@@ -1,0 +1,12 @@
+6 1 0x01 100 26400 12345678 90123456
+name                            type data
+hits                            4    5234100
+misses                          4    123400
+demand_data_hits                4    4123000
+demand_data_misses              4    50000
+c                               4    8589934592
+c_min                           4    1073741824
+c_max                           4    17179869184
+size                            4    8589934592
+hdr_size                        4    123456
+data_size                       4    7000000000

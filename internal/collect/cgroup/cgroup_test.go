@@ -37,6 +37,39 @@ func TestContainerID(t *testing.T) {
 			want:    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 			ok:      true,
 		},
+		{
+			name:    "private cgroupns relativized one level up",
+			content: "0::/../0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+			want:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			ok:      true,
+		},
+		{
+			name:    "private cgroupns relativized with no leading dots",
+			content: "0::/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\n",
+			want:    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+			ok:      true,
+		},
+		{
+			name:    "private cgroupns relativized two levels up",
+			content: "0::/../../fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210\n",
+			want:    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+			ok:      true,
+		},
+		{
+			name:    "63 hex chars is not a valid id",
+			content: "0::/../0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n",
+			ok:      false,
+		},
+		{
+			name:    "64 chars mixed case is not a valid id",
+			content: "0::/../0123456789Abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+			ok:      false,
+		},
+		{
+			name:    "64 hex chars as substring of a longer alnum segment",
+			content: "0::/../0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefg\n",
+			ok:      false,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

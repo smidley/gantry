@@ -10,10 +10,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/smidley/gantry/internal/collect"
+	"github.com/smidley/gantry/internal/collect/docker"
+	"github.com/smidley/gantry/internal/collect/gpu"
+	"github.com/smidley/gantry/internal/collect/host"
+	"github.com/smidley/gantry/internal/collect/pressure"
+	"github.com/smidley/gantry/internal/collect/selfstat"
+	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/config"
 	"github.com/smidley/gantry/internal/fake"
 	"github.com/smidley/gantry/internal/server"
@@ -75,7 +83,51 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		}()
 	}
 
+	// Collectors are always registered, fake-data mode or not — each one's
+	// own Probe decides availability, so a dev box with no docker socket,
+	// no /proc, or no Nvidia GPU just reports "unavailable" with a hint
+	// (surfaced via healthz sources) rather than erroring. Wiring adapters
+	// (Lookup->name, MemTotal, DeviceName, Running) live here rather than
+	// in any collector package, keeping the collectors mutually decoupled.
+	sysRoot := envOnly(getenv, "GANTRY_HOST_SYS", "/host/sys")
+	dockerSock := envOnly(getenv, "GANTRY_DOCKER_SOCK", "/var/run/docker.sock")
+	cgroupRoot := sysRoot + "/fs/cgroup"
+
+	host := host.New(st, "/proc", sysRoot)
+
+	dc := docker.New(st, st, st.Live().Evict, dockerSock)
+	dc.CgroupRoot = cgroupRoot
+	dc.MemTotal = host.MemTotal
+	dc.DeviceName = host.DeviceName
+
+	// gpuLookup adapts docker's Meta-returning Lookup to the name-only
+	// signature both GPU collectors (DRM fdinfo and nvidia-smi) need for
+	// pid->container attribution.
+	gpuLookup := func(id string) (string, bool) {
+		m, ok := dc.Lookup(id)
+		return m.Name, ok
+	}
+
+	gp := gpu.New(st, "/proc", gpuLookup)
+	nv := gpu.NewNvidia(st, "/proc", gpuLookup)
+	pr := pressure.New(st, "/proc", cgroupRoot, dc.Running)
+	ur := unraid.New(st, st, envOnly(getenv, "GANTRY_UNRAID_DIR", "/unraid"), "/proc")
+	du := docker.NewDiskUsage(st, dockerSock)
+	ss := selfstat.New(st, "/proc")
+
+	registry := collect.NewRegistry()
+	registry.Add(host)
+	registry.Add(dc)
+	registry.Add(du)
+	registry.Add(gp)
+	registry.Add(nv)
+	registry.Add(pr)
+	registry.Add(ur)
+	registry.Add(ss)
+	registry.Run(runCtx, &wg)
+
 	// Maintenance: flush every minute; downsample + prune every 10 minutes.
+	ret := store.RetentionFromConfig(cfg.Int)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -83,24 +135,17 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		deep := time.NewTicker(10 * time.Minute)
 		defer flush.Stop()
 		defer deep.Stop()
-		ret := store.DefaultRetention()
 		for {
 			select {
 			case <-runCtx.Done():
 				return
 			case <-flush.C:
-				if _, err := st.FlushMinutes(time.Now()); err != nil {
+				if _, err := st.FlushMinutes(runCtx, time.Now()); err != nil {
 					log.Println("flush:", err)
 				}
 			case <-deep.C:
-				if _, err := st.FlushMinutes(time.Now()); err != nil {
-					log.Println("flush:", err)
-				}
-				if err := st.DownsampleOnce(time.Now()); err != nil {
-					log.Println("downsample:", err)
-				}
-				if err := st.PruneOnce(time.Now(), ret); err != nil {
-					log.Println("prune:", err)
+				if err := st.Maintain(runCtx, time.Now(), ret); err != nil {
+					log.Println("maintain:", err)
 				}
 			}
 		}
@@ -108,14 +153,90 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 
 	log.Printf("gantry %s listening on :%d", ver, port)
 	err = server.New(server.Options{
-		Port:    port,
-		Version: ver,
-		Store:   st,
-		Started: time.Now(),
+		Port:     port,
+		Version:  ver,
+		Store:    st,
+		Started:  time.Now(),
+		Sources:  registry.Sources,
+		Snapshot: buildSnapshot(st, dc, ur),
 	}).ListenAndServe(runCtx)
 	cancel()
 	wg.Wait()
+	dc.Drain() // join the docker event-stream goroutine before the final flush
+	// Shutdown flush must complete even though runCtx is already cancelled.
+	if _, ferr := st.FlushMinutes(context.Background(), time.Now()); ferr != nil {
+		log.Println("final flush:", ferr)
+	}
 	return err
+}
+
+// buildSnapshot returns the closure wired to server.Options.Snapshot: it
+// assembles the current SnapshotDTO from st.Live()'s latest sample per
+// series (grouped by SeriesKey Kind, then Entity where the DTO has an
+// entity dimension; live:-prefixed metrics are ring-only per flush.go and
+// never surfaced here), seeded with every currently-running container's
+// inventory metadata from dc.Running() so a container with no metrics yet
+// still appears, plus ur.Version().
+func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector) func() server.SnapshotDTO {
+	return func() server.SnapshotDTO {
+		dto := server.SnapshotDTO{
+			TS:            time.Now().Unix(),
+			Host:          map[string]float64{},
+			Containers:    map[string]server.ContainerDTO{},
+			Disks:         map[string]map[string]float64{},
+			Unraid:        map[string]float64{},
+			UnraidVersion: ur.Version(),
+			GPU:           map[string]map[string]float64{},
+		}
+
+		for _, m := range dc.Running() {
+			dto.Containers[m.Name] = server.ContainerDTO{
+				State:   m.State,
+				Health:  m.Health,
+				Image:   m.Image,
+				Metrics: map[string]float64{},
+			}
+		}
+
+		live := st.Live()
+		for _, key := range live.Keys() {
+			if strings.HasPrefix(key.Metric, "live:") {
+				continue
+			}
+			sample, ok := live.Latest(key)
+			if !ok {
+				continue
+			}
+			switch key.Kind {
+			case "host":
+				dto.Host[key.Metric] = sample.Val
+			case "container":
+				c, ok := dto.Containers[key.Entity]
+				if !ok {
+					c = server.ContainerDTO{Metrics: map[string]float64{}}
+				}
+				c.Metrics[key.Metric] = sample.Val
+				dto.Containers[key.Entity] = c
+			case "disk":
+				d, ok := dto.Disks[key.Entity]
+				if !ok {
+					d = map[string]float64{}
+					dto.Disks[key.Entity] = d
+				}
+				d[key.Metric] = sample.Val
+			case "unraid":
+				dto.Unraid[key.Metric] = sample.Val
+			case "gpu":
+				g, ok := dto.GPU[key.Entity]
+				if !ok {
+					g = map[string]float64{}
+					dto.GPU[key.Entity] = g
+				}
+				g[key.Metric] = sample.Val
+			}
+		}
+		return dto
+	}
 }
 
 func healthcheck(getenv func(string) string) error {

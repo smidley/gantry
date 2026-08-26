@@ -1,0 +1,8 @@
+usage_usec 46000000
+user_usec 34000000
+system_usec 12000000
+nr_periods 500
+nr_throttled 25
+throttled_usec 750000
+nr_bursts 3
+burst_usec 15000

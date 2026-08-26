@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -12,7 +13,7 @@ import (
 // seed1m inserts one samples_1m row per minute over [from, to) for a fresh series.
 func seed1m(t *testing.T, s *Store, key SeriesKey, from, to time.Time, val float64) {
 	t.Helper()
-	id, err := s.seriesID(key)
+	id, err := s.seriesID(context.Background(), key)
 	require.NoError(t, err)
 	for m := from.Unix(); m < to.Unix(); m += 60 {
 		_, err := s.DB().Exec(`INSERT OR REPLACE INTO samples_1m (series_id, ts, avg, max) VALUES (?,?,?,?)`,
@@ -26,7 +27,7 @@ func TestDownsample1mTo10m(t *testing.T) {
 	k := SeriesKey{Kind: "host", Metric: "cpu.total"}
 	seed1m(t, s, k, at("12:00:00"), at("12:20:00"), 10) // 20 minutes of avg=10, max=20
 
-	require.NoError(t, s.DownsampleOnce(at("12:21:00")))
+	require.NoError(t, s.DownsampleOnce(context.Background(), at("12:21:00")))
 
 	rows, err := s.DB().Query(`SELECT ts, avg, max FROM samples_10m ORDER BY ts`)
 	require.NoError(t, err)
@@ -45,7 +46,7 @@ func TestDownsample1mTo10m(t *testing.T) {
 	}, got)
 
 	// Idempotent: watermark advanced, re-run adds nothing.
-	require.NoError(t, s.DownsampleOnce(at("12:21:30")))
+	require.NoError(t, s.DownsampleOnce(context.Background(), at("12:21:30")))
 	var n int
 	require.NoError(t, s.DB().QueryRow(`SELECT count(*) FROM samples_10m`).Scan(&n))
 	require.Equal(t, 2, n)
@@ -54,7 +55,7 @@ func TestDownsample1mTo10m(t *testing.T) {
 func TestDownsampleFullWindowFidelity(t *testing.T) {
 	s := newTestStore(t, nil)
 	k := SeriesKey{Kind: "host", Metric: "cpu.total"}
-	id, err := s.seriesID(k)
+	id, err := s.seriesID(context.Background(), k)
 	require.NoError(t, err)
 
 	base := at("12:00:00")
@@ -64,7 +65,7 @@ func TestDownsampleFullWindowFidelity(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, s.DownsampleOnce(base.Add(11*time.Minute)))
+	require.NoError(t, s.DownsampleOnce(context.Background(), base.Add(11*time.Minute)))
 
 	var n int
 	require.NoError(t, s.DB().QueryRow(`SELECT count(*) FROM samples_10m`).Scan(&n))
@@ -85,7 +86,7 @@ func TestPruneEnforcesAges(t *testing.T) {
 	seed1m(t, s, k, now.Add(-50*time.Hour), now.Add(-49*time.Hour), 5) // older than R1=48h
 	seed1m(t, s, k, now.Add(-1*time.Hour), now, 5)                     // fresh
 
-	require.NoError(t, s.PruneOnce(now, DefaultRetention()))
+	require.NoError(t, s.PruneOnce(context.Background(), now, DefaultRetention()))
 
 	var minTS int64
 	require.NoError(t, s.DB().QueryRow(`SELECT min(ts) FROM samples_1m`).Scan(&minTS))
@@ -128,7 +129,7 @@ func TestPruneEnforcesSizeCap(t *testing.T) {
 	// Drive PruneOnce to convergence (up to 25 calls), measuring occupied bytes after each.
 	converged := false
 	for callNum := 1; callNum <= 25; callNum++ {
-		require.NoError(t, s.PruneOnce(now, ret), "PruneOnce call %d failed", callNum)
+		require.NoError(t, s.PruneOnce(context.Background(), now, ret), "PruneOnce call %d failed", callNum)
 
 		// Measure occupied bytes: (page_count - freelist_count) * page_size
 		var pages, pageSize, freelistCount int64

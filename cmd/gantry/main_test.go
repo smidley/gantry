@@ -70,17 +70,29 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 
 	// Snapshot smoke check: with fake data on, the fake generator writes
 	// host/container series through the same store the real collectors
-	// use, so the snapshot may or may not be empty depending on timing —
-	// only the response shape is asserted here.
+	// use, so any particular METRIC value's presence is still a timing
+	// accident (has a tick landed yet?) — but the fake fleet's inventory
+	// itself (Task 11's Metas()/fakeMetas wiring) is NOT: it's seeded
+	// into every frame the same unconditional way dc.Running() seeds a
+	// real fleet, independent of whether any sample has been recorded
+	// yet. So container PRESENCE and state are asserted deterministically
+	// here; only response shape is asserted for the rest.
 	snapResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/live/snapshot", port))
 	require.NoError(t, err)
 	var snapBody struct {
-		TS int64 `json:"ts"`
+		TS         int64 `json:"ts"`
+		Containers map[string]struct {
+			State string `json:"state"`
+		} `json:"containers"`
 	}
 	require.NoError(t, json.NewDecoder(snapResp.Body).Decode(&snapBody))
 	drainAndClose(snapResp)
 	require.Equal(t, http.StatusOK, snapResp.StatusCode)
 	require.Greater(t, snapBody.TS, int64(0))
+	require.NotEmpty(t, snapBody.Containers, "fake mode's Metas() must survive the DTO-v2 container filter unconditionally")
+	jf, ok := snapBody.Containers["jellyfin"]
+	require.True(t, ok, "fake fleet member must appear in the frame")
+	require.Equal(t, "running", jf.State)
 
 	// /api/series smoke check: Query is now wired straight to
 	// st.QuerySeries (Task 7) -- only the response shape (200, JSON array,
@@ -226,7 +238,7 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur, sources)()
+	snap := buildSnapshot(st, dc, ur, sources, nil)() // nil fakeMetas: not exercising Task 11's fake-mode path here
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
@@ -254,6 +266,73 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 			require.False(t, strings.HasPrefix(metric, "live:"), "live:-prefixed metrics must never reach the snapshot")
 		}
 	}
+}
+
+// TestBuildSnapshotIncludesFakeMetasWhenWired pins the ledger-carried
+// Batch B fix (folded into Task 11): fake mode's synthetic containers
+// never touch dc's registry at all -- the fake generator writes
+// straight to the store, bypassing docker's registry entirely -- so
+// without fakeMetas, Task 4's DTO-v2 filter (only dc.Running() OR a
+// name with BOTH a fresh live sample AND a known Meta) would empty
+// every fake-mode frame even though the store has live fake-container
+// samples. fakeMetas must be treated exactly like dc.Running()'s real
+// entries: unconditionally seeded, not merely consulted as a fallback
+// lookup.
+func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	st.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, 1000, 4.2)
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas)()
+
+	require.Empty(t, dc.Running(), "dc's own registry never saw this container -- the fix must not depend on it")
+	c, ok := snap.Containers["jellyfin"]
+	require.True(t, ok, "a fake Meta must survive the DTO-v2 filter unconditionally, not as a fallback lookup")
+	require.Equal(t, "running", c.State)
+	require.Equal(t, "healthy", c.Health)
+	require.Equal(t, "demo/jellyfin:latest", c.Image)
+	require.Equal(t, 4.2, c.Metrics["cpu.pct"])
+}
+
+// TestBuildContainersListMergesFakeMetas pins the same fix for
+// /api/containers: the fake fleet must be listed the same way a real
+// running fleet would be, not just present in the live snapshot.
+func TestBuildContainersListMergesFakeMetas(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "frigate", State: "running", Health: "healthy", Image: "demo/frigate:latest"}}
+	}
+
+	list := buildContainersList(dc, fakeMetas)()
+
+	require.Len(t, list, 1)
+	require.Equal(t, "frigate", list[0].Name)
+	require.Equal(t, "running", list[0].State)
+	require.Equal(t, "demo/frigate:latest", list[0].Image)
+}
+
+// TestBuildContainersListNilFakeMetasUnaffected pins real-mode
+// behavior (GANTRY_FAKE_DATA unset): a nil fakeMetas must not change
+// buildContainersList's existing dc.Running()-only contract.
+func TestBuildContainersListNilFakeMetasUnaffected(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+
+	require.Empty(t, buildContainersList(dc, nil)())
 }
 
 // fakeMeta builds a minimal known-container answer for a lookupByName

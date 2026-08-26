@@ -1,16 +1,29 @@
-// Package fake synthesizes a plausible Unraid box (host + container fleet)
-// through the production MetricSink path, for UI development and demos.
+// Package fake synthesizes a plausible Unraid box (host + container fleet,
+// disks, array/parity, GPU, and Gantry's own footprint) through the
+// production MetricSink/EventSink paths, for UI development and demos.
 // Enabled by GANTRY_FAKE_DATA=1. Never active by default.
 package fake
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"time"
 
+	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/store"
 )
+
+// EventSink is the narrow slice of store.Store the fake generator needs
+// to append its synthesized lifecycle/health events (parity.start/
+// finish, disk.errors, container.start/oom) -- the same narrow, package-
+// local interface convention internal/collect/docker and internal/
+// collect/unraid each already use for the same dependency.
+type EventSink interface {
+	AppendEvent(store.Event) (int64, error)
+}
 
 type archetype struct {
 	name     string
@@ -44,19 +57,135 @@ var fleet = []archetype{
 	{"unifi-controller", 2, 1, 0.005, 900e6, 2e5},
 }
 
-type Generator struct {
-	sink store.MetricSink
-	rng  *rand.Rand
+// diskSpec describes one of the fake array's fixed 6 disks: parity
+// (false hasFS, matching real disks.ini's fsSize=0 for a parity slot --
+// it has no filesystem view) plus 4 data disks and one cache disk.
+type diskSpec struct {
+	name      string
+	hasFS     bool
+	sizeBytes float64
+	baseUsed  float64 // fraction 0..1, before its slow drift
+	tempBase  float64 // °C baseline; meaningless when spunDown
+	spunDown  bool
 }
 
-func New(sink store.MetricSink, seed int64) *Generator {
-	return &Generator{sink: sink, rng: rand.New(rand.NewSource(seed))}
+// disks is Task 11's fixed 6-disk fake array. disk3 is permanently
+// spun down: real spun-down disks never report a temp (disks.ini's
+// temp key reads the literal "*"), but DO still report cached
+// filesystem usage -- fsSize/fsFree come from a mount-time stat, not a
+// live SMART query, so they're independent of spin state.
+var disks = []diskSpec{
+	{"parity", false, 12e12, 0, 38, false},
+	{"disk1", true, 8e12, 0.62, 34, false},
+	{"disk2", true, 8e12, 0.71, 35, false},
+	{"disk3", true, 8e12, 0.55, 36, true},
+	{"disk4", true, 4e12, 0.40, 37, false},
+	{"cache", true, 1e12, 0.35, 41, false},
+}
+
+const (
+	// errorDiskEntity is the one disk (of the six above) that gets the
+	// brief's "one disk with a rare disk.errors event" -- an arbitrary
+	// but fixed choice, named once here rather than scattered as a
+	// literal.
+	errorDiskEntity = "disk2"
+	// diskErrorsAt is when errorDiskEntity's error count rises from 0 --
+	// "rare" meaning once, well into a session, not at boot.
+	diskErrorsAt = 5 * time.Minute
+
+	// parityStartAt/parityRatePctPS/paritySpeedBps model the fake
+	// array's one-shot parity check (see parityState): idle for the
+	// first parityStartAt, then progress climbs at parityRatePctPS per
+	// second until it reaches 100%, at ~paritySpeedBps (decimal MB/s,
+	// matching the plan's docker-convention byte-rate formatting).
+	parityStartAt   = 2 * time.Minute
+	parityRatePctPS = 0.4
+	paritySpeedBps  = 130_000_000.0
+
+	// moverTogglePeriod is how often unraid entity "array"'s
+	// mover.running flips -- a pure function of elapsed time, no stored
+	// state needed.
+	moverTogglePeriod = 7 * time.Minute
+
+	// restartEvery/oomEvery/restartContainer/oomContainer drive the
+	// "periodic container events" contract: a restart on one container
+	// every ~3min, an OOM on a DIFFERENT container every ~10min --
+	// sonarr (auto-update restarts are common for the *arr stack) and
+	// minecraft (a classic Java-heap OOM candidate) are arbitrary but
+	// plausible, fixed choices.
+	restartEvery     = 3 * time.Minute
+	oomEvery         = 10 * time.Minute
+	restartContainer = "sonarr"
+	oomContainer     = "minecraft"
+
+	// gpuEntity is the fake GPU device's kind="gpu" entity name.
+	gpuEntity = "gpu0"
+	// jellyfinBurstChance/MinTicks/MaxTicks give jellyfin's GPU usage a
+	// multi-tick burst shape (mirroring Tick's existing per-tick-
+	// probability CPU spike idiom) rather than isolated single-tick
+	// spikes, so a chart actually shows a visible burst.
+	jellyfinBurstChance   = 0.02
+	jellyfinBurstMinTicks = 10
+	jellyfinBurstMaxTicks = 40
+)
+
+type Generator struct {
+	sink   store.MetricSink
+	events EventSink
+	rng    *rand.Rand
+
+	// boot is the `now` of this Generator's first Tick call -- every
+	// "N minutes after boot" schedule below (parity check, periodic
+	// container events, the rare disk error) is relative to it, not
+	// wall-clock time, so a test driving Tick with arbitrary injected
+	// `now` values sees the same schedule a real 2s-interval Run would.
+	haveBoot bool
+	boot     time.Time
+
+	// Edge-trigger state for events that must fire exactly once per
+	// threshold crossing, not once per tick while a condition holds.
+	lastRestartBoundary int64
+	lastOOMBoundary     int64
+	parityStarted       bool
+	parityFinished      bool
+	diskErrorsFired     bool
+
+	// jellyfinBurstTicks counts down a GPU-usage burst in progress; 0
+	// means idle and eligible to roll a new burst.
+	jellyfinBurstTicks int
+}
+
+func New(sink store.MetricSink, events EventSink, seed int64) *Generator {
+	return &Generator{sink: sink, events: events, rng: rand.New(rand.NewSource(seed))}
 }
 
 func clamp(v, lo, hi float64) float64 { return math.Max(lo, math.Min(hi, v)) }
 
+// appendEvent stamps ts explicitly rather than leaving Event.TS zero
+// for AppendEvent's own clock to fill in, so a synthesized event's
+// timestamp always matches the simulated `now` that triggered it, not
+// wall-clock time -- essential for the deterministic, clock-injected
+// tests in fake_test.go. A nil events sink (defensive; main always
+// wires the real *store.Store) is a silent no-op, the same nil-
+// tolerance every other optional dependency in this codebase has.
+func (g *Generator) appendEvent(ts int64, e store.Event) {
+	if g.events == nil {
+		return
+	}
+	e.TS = ts
+	if _, err := g.events.AppendEvent(e); err != nil {
+		log.Printf("fake: events: %v", err)
+	}
+}
+
 // Tick emits one sample per series for the instant `now`.
 func (g *Generator) Tick(now time.Time) {
+	if !g.haveBoot {
+		g.haveBoot = true
+		g.boot = now
+	}
+	elapsed := now.Sub(g.boot)
+
 	ts := now.Unix()
 	phase := float64(ts) / 300.0 // slow 5-minute swells
 
@@ -86,6 +215,182 @@ func (g *Generator) Tick(now time.Time) {
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "net.tx_bps"}, ts, 5e6*(0.5+g.rng.Float64()))
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio.read_bps"}, ts, 30e6*g.rng.Float64())
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio.write_bps"}, ts, 15e6*g.rng.Float64())
+
+	g.emitDisks(ts, elapsed)
+	g.emitArray(ts, elapsed)
+	g.emitGPU(ts)
+	g.emitSelf(ts)
+	g.emitContainerEvents(ts, elapsed)
+}
+
+// emitDisks records every fake disk's spun_up/temp.c/fs.*/errors series
+// for one tick -- see the disks var and errorDiskEntity/diskErrorsAt
+// consts for the per-disk shape and the one rare error's schedule.
+func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
+	phase := elapsed.Seconds() / 300.0
+	for i, d := range disks {
+		spunUp := 1.0
+		if d.spunDown {
+			spunUp = 0
+		}
+		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "spun_up"}, ts, spunUp)
+
+		if !d.spunDown {
+			temp := clamp(d.tempBase+2.5*math.Sin(phase+float64(i))+(g.rng.Float64()-0.5)*1.5, 32, 45)
+			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "temp.c"}, ts, temp)
+		}
+
+		if d.hasFS {
+			// A slow (~0.05%/hour) upward creep plus small tick-to-tick
+			// noise -- "slowly-drifting fs usage", not a random walk.
+			usedFrac := clamp(d.baseUsed+elapsed.Hours()*0.0005+g.rng.Float64()*0.002, 0, 0.98)
+			used := d.sizeBytes * usedFrac
+			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.used_bytes"}, ts, used)
+			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.free_bytes"}, ts, d.sizeBytes-used)
+		}
+
+		errCount := 0.0
+		if d.name == errorDiskEntity && elapsed >= diskErrorsAt {
+			errCount = 1
+		}
+		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "errors"}, ts, errCount)
+	}
+
+	if !g.diskErrorsFired && elapsed >= diskErrorsAt {
+		g.diskErrorsFired = true
+		g.appendEvent(ts, store.Event{Kind: "disk.errors", Entity: errorDiskEntity, Severity: "alert", Detail: "errors 0 → 1"})
+	}
+}
+
+// parityState derives the fake array's one-shot parity check purely
+// from elapsed time since boot: idle for the first parityStartAt, then
+// running with progress climbing at parityRatePctPS per second until it
+// reaches 100%, then done (not running) forever after -- mirroring real
+// var.go's ParityRunning/ParityProgress shape (mdResyncPos>0,
+// pos/size*100) without needing an actual mdResync file to read.
+func parityState(elapsed time.Duration) (running bool, progressPct float64) {
+	if elapsed < parityStartAt {
+		return false, 0
+	}
+	progressPct = (elapsed - parityStartAt).Seconds() * parityRatePctPS
+	if progressPct >= 100 {
+		return false, 100
+	}
+	return true, progressPct
+}
+
+// emitArray records unraid entity "array"'s mover + parity series and
+// fires parity.start/finish on parityState's running-edge transitions
+// -- the same edge-triggered shape real var.go's transitionEvents uses,
+// just driven by a synthetic schedule instead of var.ini.
+func (g *Generator) emitArray(ts int64, elapsed time.Duration) {
+	moverOn := int64(elapsed/moverTogglePeriod)%2 == 1
+	moverVal := 0.0
+	if moverOn {
+		moverVal = 1
+	}
+	g.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "mover.running"}, ts, moverVal)
+
+	running, progress := parityState(elapsed)
+	if running {
+		speed := paritySpeedBps * (0.95 + 0.1*g.rng.Float64())
+		g.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, ts, progress)
+		g.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}, ts, speed)
+	}
+
+	switch {
+	case running && !g.parityStarted:
+		g.parityStarted = true
+		g.appendEvent(ts, store.Event{Kind: "parity.start", Entity: "array", Severity: "info"})
+	case !running && g.parityStarted && !g.parityFinished:
+		g.parityFinished = true
+		g.appendEvent(ts, store.Event{
+			Kind: "parity.finish", Entity: "array", Severity: "info",
+			Detail: fmt.Sprintf("reached %.1f%%", 100.0),
+		})
+	}
+}
+
+// emitGPU records gpu entity "gpu0"'s per-engine busy_pct plus the two
+// GPU-attributed containers' own gpu.video.busy_pct: frigate steady
+// around 20% (continuous NVR object detection), jellyfin bursty
+// (occasional hardware-transcode spikes) via a multi-tick burst state
+// machine. gpu0's own engine.video.busy_pct is modeled as roughly the
+// sum of its two attributed consumers -- the device-level number a real
+// collector would report is the aggregate of every client's share on
+// that engine, clamped the same way the real collector clamps at 100.
+func (g *Generator) emitGPU(ts int64) {
+	frigateBusy := clamp(20+(g.rng.Float64()-0.5)*4, 0, 100)
+	g.sink.Record(store.SeriesKey{Kind: "container", Entity: "frigate", Metric: "gpu.video.busy_pct"}, ts, frigateBusy)
+
+	if g.jellyfinBurstTicks > 0 {
+		g.jellyfinBurstTicks--
+	} else if g.rng.Float64() < jellyfinBurstChance {
+		g.jellyfinBurstTicks = jellyfinBurstMinTicks + g.rng.Intn(jellyfinBurstMaxTicks-jellyfinBurstMinTicks)
+	}
+	jellyfinBusy := clamp(g.rng.Float64()*4, 0, 100)
+	if g.jellyfinBurstTicks > 0 {
+		jellyfinBusy = clamp(45+g.rng.Float64()*45, 0, 100)
+	}
+	g.sink.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "gpu.video.busy_pct"}, ts, jellyfinBusy)
+
+	g.sink.Record(store.SeriesKey{Kind: "gpu", Entity: gpuEntity, Metric: "engine.video.busy_pct"}, ts, clamp(frigateBusy+jellyfinBusy, 0, 100))
+	g.sink.Record(store.SeriesKey{Kind: "gpu", Entity: gpuEntity, Metric: "engine.render.busy_pct"}, ts, clamp(g.rng.Float64()*3, 0, 100))
+	g.sink.Record(store.SeriesKey{Kind: "gpu", Entity: gpuEntity, Metric: "engine.video-enhance.busy_pct"}, ts, clamp(g.rng.Float64()*3, 0, 100))
+	g.sink.Record(store.SeriesKey{Kind: "gpu", Entity: gpuEntity, Metric: "engine.copy.busy_pct"}, ts, clamp(g.rng.Float64()*2, 0, 100))
+}
+
+// emitSelf records Gantry's own footprint (kind "host", no entity,
+// mirroring internal/collect/selfstat's exact metric names) around the
+// real, observed-in-production figures (~0.6% CPU, ~30MB RSS) so the
+// Settings page's footprint receipt looks like the real thing even in
+// fake mode.
+func (g *Generator) emitSelf(ts int64) {
+	cpu := clamp(0.6+(g.rng.Float64()-0.5)*0.3, 0, 100)
+	rss := 30e6 + g.rng.Float64()*4e6
+	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "gantry.cpu_pct"}, ts, cpu)
+	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "gantry.rss_bytes"}, ts, rss)
+}
+
+// emitContainerEvents fires the "periodic container events" contract:
+// a restart on restartContainer every ~restartEvery, an OOM on the
+// DIFFERENT oomContainer every ~oomEvery -- edge-triggered on each
+// elapsed-time boundary crossed (once per boundary, however many ticks
+// land inside it), not once per tick. A single Tick call that somehow
+// leaps across more than one boundary at once (never happens at Run's
+// real 2s cadence, or in this file's own tests) fires only the latest
+// one, not a backfill of every skipped boundary.
+func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
+	if b := int64(elapsed / restartEvery); b > g.lastRestartBoundary {
+		g.lastRestartBoundary = b
+		g.appendEvent(ts, store.Event{
+			Kind: "container.start", Entity: restartContainer, Severity: "info",
+			Detail: fmt.Sprintf("restart count %d", b),
+		})
+	}
+	if b := int64(elapsed / oomEvery); b > g.lastOOMBoundary {
+		g.lastOOMBoundary = b
+		g.appendEvent(ts, store.Event{Kind: "container.oom", Entity: oomContainer, Severity: "alert"})
+	}
+}
+
+// Metas returns one synthetic docker.Meta per fleet archetype, always
+// reporting state "running"/health "healthy" (the fake fleet's own
+// identity never stops or restarts -- emitContainerEvents' periodic
+// events simulate that instead, without actually changing state here).
+// main wiring passes this to buildSnapshot/buildContainersList
+// (GANTRY_FAKE_DATA=1 only) so the fake fleet is treated exactly like
+// dc.Running()'s real entries: without it, Task 4's DTO-v2 container
+// filter (only dc.Running() OR a name with both a fresh live sample AND
+// a known Meta) would empty every fake-mode frame, since this
+// generator writes samples straight to the store, bypassing docker's
+// registry entirely.
+func (g *Generator) Metas() []docker.Meta {
+	out := make([]docker.Meta, len(fleet))
+	for i, a := range fleet {
+		out[i] = docker.Meta{Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest"}
+	}
+	return out
 }
 
 // Run ticks until ctx is done. clock defaults to time.Now when nil.

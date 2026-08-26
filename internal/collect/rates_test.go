@@ -67,3 +67,16 @@ func TestRateTrackerZeroElapsedIsFalse(t *testing.T) {
 	require.False(t, ok)
 	require.Equal(t, 0.0, rate)
 }
+
+func TestRateUsesFractionalSecondElapsed(t *testing.T) {
+	rt := NewRateTracker()
+	t0 := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	_, ok := rt.Rate("k", t0, 100)
+	require.False(t, ok)
+
+	// 1.5s later, counter +15 → exactly 10.0/s. Integer-second arithmetic
+	// would yield 15.0 (truncated elapsed 1s) or 7.5 (rounded 2s) — both wrong.
+	rate, ok := rt.Rate("k", t0.Add(1500*time.Millisecond), 115)
+	require.True(t, ok)
+	require.InDelta(t, 10.0, rate, 0.0001)
+}

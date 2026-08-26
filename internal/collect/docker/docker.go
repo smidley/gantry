@@ -50,6 +50,7 @@ type Collector struct {
 
 	lastInventory time.Time
 	eventsOnce    sync.Once
+	eventsWG      sync.WaitGroup // tracks the runEvents goroutine so Drain can join it at shutdown
 
 	loggedFallback sync.Map // container id -> struct{}: log the API-stats fallback once per container
 }
@@ -86,7 +87,38 @@ func (c *Collector) Probe(ctx context.Context) collect.Status {
 	if _, err := c.cli.Ping(ctx); err != nil {
 		return collect.Status{Available: false, Detail: "mount the docker socket read-only at " + c.sockPath}
 	}
+	c.startEvents(ctx)
 	return collect.Status{Available: true}
+}
+
+// startEvents launches the event-stream goroutine at most once (guarded
+// by eventsOnce), anchoring it to ctx for its whole lifetime. It's called
+// from Probe rather than Tick, and only once Ping has confirmed the
+// daemon is actually reachable: the runner's safeTick bounds every Tick
+// call to a short per-call deadline (a few multiples of Interval), which
+// would be wrong to also use as this goroutine's lifetime — it would get
+// cancelled moments after the first Tick returns. Probe's ctx is the
+// collector runner's real run-lifetime one (safeTick only wraps the Tick
+// call, not Probe), so this is the correct anchor.
+func (c *Collector) startEvents(ctx context.Context) {
+	c.eventsOnce.Do(func() {
+		c.eventsWG.Add(1)
+		go func() {
+			defer c.eventsWG.Done()
+			c.runEvents(ctx)
+		}()
+	})
+}
+
+// Drain blocks until the event-stream goroutine (started by the first
+// successful Probe, if any) has exited. Callers should invoke it after
+// cancelling the collector's run ctx and joining the registry's own
+// WaitGroup, so the docker event stream is guaranteed to have stopped
+// touching the registry/sink before shutdown finishes. If the event
+// stream never started (docker was never reachable), eventsWG's counter
+// is still 0 and this returns immediately.
+func (c *Collector) Drain() {
+	c.eventsWG.Wait()
 }
 
 // Lookup returns the current Meta for a container id (for GPU attribution
@@ -97,13 +129,13 @@ func (c *Collector) Lookup(containerID string) (Meta, bool) { return c.reg.looku
 // container's Meta.
 func (c *Collector) Running() []Meta { return c.reg.running() }
 
-// Tick starts the event stream on its first call (lazily, so it runs for
-// the lifetime of ctx — the collector runner's ctx, not a per-Tick one),
-// refreshes inventory every 10s, then records per-container stats
-// (cgroupv2.go, falling back to apistats.go) and network (net.go).
+// Tick refreshes inventory every 10s, then records per-container stats
+// (cgroupv2.go, falling back to apistats.go) and network (net.go). The
+// event stream itself is started lazily from Probe, not here — see
+// startEvents — since Tick's own ctx parameter is a short-lived, per-call
+// one (safeTick) unsuitable for anchoring a goroutine meant to outlive
+// any single call.
 func (c *Collector) Tick(ctx context.Context, now time.Time) error {
-	c.eventsOnce.Do(func() { go c.runEvents(ctx) })
-
 	if c.lastInventory.IsZero() || now.Sub(c.lastInventory) >= inventoryInterval {
 		if err := c.refreshInventory(ctx); err != nil {
 			return err
@@ -163,18 +195,22 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 	return m
 }
 
-// runEvents streams docker events for the collector's run lifetime,
-// restarting the stream with exponential backoff (1s doubling, cap 60s)
-// on any stream error (including the SDK's own EOF-on-clean-close, which
-// arrives on the same channel) and exiting when ctx is done. Backoff
-// resets to its base once a stream delivers at least one event, so a
-// daemon that's been stable doesn't inherit a stale, longer wait from an
-// earlier flaky period.
+// runEvents streams docker events for the collector's run lifetime (see
+// startEvents for how ctx is anchored), restarting the stream with
+// exponential backoff (1s doubling, cap 60s) on any stream error
+// (including the SDK's own EOF-on-clean-close, which arrives on the same
+// channel) and exiting when ctx is done. Backoff resets to its base once
+// a stream delivers at least one event, so a daemon that's been stable
+// doesn't inherit a stale, longer wait from an earlier flaky period.
+// Each pass through this loop is recovered (streamOnce) so a panic
+// anywhere in the stream/translate path can't kill this long-lived
+// background goroutine and take the whole process down with it (spec
+// §9) — it's counted the same as a stream that errored before
+// delivering anything, and retried on the same backoff schedule.
 func (c *Collector) runEvents(ctx context.Context) {
 	backoff := eventBackoffBase
 	for ctx.Err() == nil {
-		msgs, errs := c.cli.Events(ctx, events.ListOptions{})
-		if c.consumeEvents(ctx, msgs, errs) {
+		if c.streamOnce(ctx) {
 			backoff = eventBackoffBase
 		}
 		if ctx.Err() != nil {
@@ -192,9 +228,30 @@ func (c *Collector) runEvents(ctx context.Context) {
 	}
 }
 
+// streamOnce opens one docker event stream and consumes it to exhaustion
+// (consumeEvents), recovering any panic anywhere in that path — the SDK
+// call itself, or a bug in consumeEvents' own loop. consumeEvents already
+// recovers a panic in any one event's handling (applyEventRecovered), so
+// this is the last-resort net, not the primary one. A recovered panic
+// reports no progress, same as a stream that errored before delivering
+// anything.
+func (c *Collector) streamOnce(ctx context.Context) (progressed bool) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("docker: event stream: recovered from panic: %v", p)
+			progressed = false
+		}
+	}()
+	msgs, errs := c.cli.Events(ctx, events.ListOptions{})
+	return c.consumeEvents(ctx, msgs, errs)
+}
+
 // consumeEvents reads one stream to exhaustion (ctx done, channel closed,
 // or an error/EOF on errs) and reports whether it translated at least one
-// event before ending.
+// event before ending. Each event's handling is individually recovered
+// (applyEventRecovered) so one malformed event or downstream sink bug
+// can't tear down the whole connection — the stream keeps consuming
+// whatever arrives after it, rather than forcing a full reconnect.
 func (c *Collector) consumeEvents(ctx context.Context, msgs <-chan events.Message, errs <-chan error) (progressed bool) {
 	for {
 		select {
@@ -204,7 +261,7 @@ func (c *Collector) consumeEvents(ctx context.Context, msgs <-chan events.Messag
 			if !ok {
 				return progressed
 			}
-			c.reg.applyEvent(msg, c.events, c.evict)
+			c.applyEventRecovered(msg)
 			progressed = true
 		case err, ok := <-errs:
 			if ok && err != nil {
@@ -213,4 +270,17 @@ func (c *Collector) consumeEvents(ctx context.Context, msgs <-chan events.Messag
 			return progressed
 		}
 	}
+}
+
+// applyEventRecovered applies one docker event to the registry,
+// recovering any panic from that path (a malformed event, or a
+// downstream sink bug) so it can't kill the event-stream goroutine — an
+// unrecovered panic there would crash the whole process (spec §9).
+func (c *Collector) applyEventRecovered(msg events.Message) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("docker: event stream: recovered from panic handling event: %v", p)
+		}
+	}()
+	c.reg.applyEvent(msg, c.events, c.evict)
 }

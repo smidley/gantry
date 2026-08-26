@@ -162,6 +162,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	}).ListenAndServe(runCtx)
 	cancel()
 	wg.Wait()
+	dc.Drain() // join the docker event-stream goroutine before the final flush
 	// Shutdown flush must complete even though runCtx is already cancelled.
 	if _, ferr := st.FlushMinutes(context.Background(), time.Now()); ferr != nil {
 		log.Println("final flush:", ferr)

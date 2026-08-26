@@ -277,6 +277,46 @@ func TestApplyEventNameFallsBackToRegistryWhenAttributeMissing(t *testing.T) {
 	require.Equal(t, "web", got[0].Entity)
 }
 
+// panicOnDetailSink panics on AppendEvent for one specific Detail value,
+// simulating a downstream sink bug (or any other panic-prone code a
+// malformed event might reach) that the docker event stream must survive
+// without taking the whole process down with it.
+type panicOnDetailSink struct {
+	fakeEventSink
+	panicOn string
+}
+
+func (p *panicOnDetailSink) AppendEvent(e store.Event) (int64, error) {
+	if e.Detail == p.panicOn {
+		panic("simulated sink panic on " + p.panicOn)
+	}
+	return p.fakeEventSink.AppendEvent(e)
+}
+
+// TestConsumeEventsRecoversPanicAndKeepsConsumingSubsequentEvents pins I4:
+// a panic while handling one event (a malformed event, or a downstream
+// sink bug) must not crash the process, and the stream must keep
+// consuming whatever arrives after it on the same connection rather than
+// the whole connection being torn down and forced through a reconnect.
+func TestConsumeEventsRecoversPanicAndKeepsConsumingSubsequentEvents(t *testing.T) {
+	sink := &panicOnDetailSink{panicOn: "exit code boom"}
+	c := &Collector{reg: newRegistry(), events: sink, evict: func(string, string) {}}
+
+	msgs := make(chan events.Message, 2)
+	errs := make(chan error, 1)
+	msgs <- msg(events.ActionDie, "abc", map[string]string{"name": "/flaky", "exitCode": "boom"})
+	msgs <- msg(events.ActionStart, "def", map[string]string{"name": "/web"})
+	close(msgs)
+
+	progressed := c.consumeEvents(context.Background(), msgs, errs)
+
+	require.True(t, progressed)
+	got := sink.snapshot()
+	require.Len(t, got, 1, "the panicking event's own append must not land")
+	require.Equal(t, store.Event{Kind: "container.start", Entity: "web", Severity: "info"}, got[0],
+		"the event after the panic must still be consumed and appended")
+}
+
 // Collector-level smoke tests (Name/Interval/Probe) — mirrors the host
 // package's TestHostNameAndInterval convention.
 
@@ -293,4 +333,24 @@ func TestDockerCollectorProbeUnavailableWithoutDaemon(t *testing.T) {
 	st := c.Probe(ctx)
 	require.False(t, st.Available)
 	require.NotEmpty(t, st.Detail)
+}
+
+// TestDrainReturnsImmediatelyWhenEventsNeverStarted pins I4's Drain()
+// against the case where the daemon was never reachable: Probe never got
+// past Ping, so startEvents never fired and eventsWG's counter is still
+// 0 — Drain must not block waiting for a goroutine that was never
+// started.
+func TestDrainReturnsImmediatelyWhenEventsNeverStarted(t *testing.T) {
+	c := New(nil, nil, func(string, string) {}, "/no/such/socket.sock")
+
+	done := make(chan struct{})
+	go func() {
+		c.Drain()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Drain() blocked even though the event stream never started")
+	}
 }

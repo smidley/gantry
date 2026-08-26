@@ -224,6 +224,39 @@ func TestTickTwiceComputesPerContainerAndGPUTotalsWithHostBucketing(t *testing.T
 	}
 }
 
+// TestEngineBusyPctClampedAtEmission pins the [0,100] clamp: a counter
+// delta larger than one tick interval's worth of ns -- a driver overshoot
+// (~100.001% seen live, per the carry-in doc) synthesized here as a much
+// larger 150% delta so the un-clamped value would be unmistakable -- must
+// never reach the sink above 100, for both the per-container series and
+// the per-GPU total (the sum of every client sharing that GPU).
+func TestEngineBusyPctClampedAtEmission(t *testing.T) {
+	procRoot := t.TempDir()
+	writeFile(t, fdinfoPath(procRoot, "100", "0"), i915FDInfo("10", "0000:00:02.0", 0))
+	writeFile(t, cgroupPath(procRoot, "100"), "0::/docker/"+jellyfinID+"\n")
+
+	sink := newFakeSink()
+	c := New(sink, procRoot, dockerLookup(jellyfinID, "jellyfin"))
+
+	t0 := time.Unix(1000, 0)
+	require.NoError(t, c.Tick(context.Background(), t0))
+
+	// Over the next 2s, the counter advances by 3s worth of ns: a
+	// physically-impossible-but-observed-live overshoot that would
+	// naively compute to 150% ((3e9 ns / 2s) / 1e7).
+	writeFile(t, fdinfoPath(procRoot, "100", "0"), i915FDInfo("10", "0000:00:02.0", 3_000_000_000))
+	t1 := t0.Add(2 * time.Second)
+	require.NoError(t, c.Tick(context.Background(), t1))
+
+	jellyfinPct, ok := sink.value("container", "jellyfin", "gpu.video.busy_pct")
+	require.True(t, ok)
+	require.Equal(t, 100.0, jellyfinPct, "per-container busy_pct must clamp at 100, not report the naive 150%")
+
+	gpuPct, ok := sink.value("gpu", "0000:00:02.0", "engine.video.busy_pct")
+	require.True(t, ok)
+	require.Equal(t, 100.0, gpuPct, "per-gpu total busy_pct must clamp at 100 too")
+}
+
 // A client whose fdinfo file disappears (process exited, fd closed) must
 // be dropped immediately on the tick that discovers this, not left
 // dangling until the next 30s full scan, and must not error the tick.

@@ -129,6 +129,12 @@ func (c *Collector) Drain() {
 // in Task 9).
 func (c *Collector) Lookup(containerID string) (Meta, bool) { return c.reg.lookup(containerID) }
 
+// LookupByName returns the current Meta for a container name, regardless
+// of state. Used by main's snapshot filter (Task 4) to tell a briefly-
+// stale-but-real container's lingering live sample apart from one whose
+// container has been fully removed.
+func (c *Collector) LookupByName(name string) (Meta, bool) { return c.reg.lookupByName(name) }
+
 // evictContainer is the registry's removal callback (wired in place of a
 // bare evict at both call sites below): it clears every trace of a
 // removed container, not just its store rings. name+"." is the shared

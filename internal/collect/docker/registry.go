@@ -49,6 +49,24 @@ func (r *registry) lookup(id string) (Meta, bool) {
 	return m, ok
 }
 
+// lookupByName scans the registry for a Meta with the given name,
+// regardless of state -- a merely-exited (not removed) container is
+// still "known" here, and stops being known the moment applyInventory or
+// applyEvent removes it. Task 4's snapshot filter uses this to tell a
+// briefly-stale-but-real container apart from one that's been fully
+// removed. Linear scan: registry sizes are a handful of containers, and
+// this runs once per snapshot build, not once per tick.
+func (r *registry) lookupByName(name string) (Meta, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, m := range r.byID {
+		if m.Name == name {
+			return m, true
+		}
+	}
+	return Meta{}, false
+}
+
 // running returns a name-sorted snapshot of every Meta currently in state
 // "running".
 func (r *registry) running() []Meta {
@@ -76,10 +94,19 @@ func normalizeName(name string) string {
 // same change is an accepted simplification, not a bug — see the phase
 // plan's dispatch notes), and evicting names that disappeared entirely
 // (containers removed since the last refresh).
+//
+// Recreation guard: a vanished id only evicts its name when no id in the
+// NEW snapshot holds that same name. Eviction is name-keyed (Live.Evict,
+// RateTracker.EvictPrefix), so a container destroyed and recreated under
+// the same name within one 10s poll interval must not have its
+// just-started replacement's series wiped out by the old id's own
+// disappearance.
 func (r *registry) applyInventory(metas []Meta, sink EventSink, evict func(kind, entity string)) {
 	next := make(map[string]Meta, len(metas))
+	nextNames := make(map[string]struct{}, len(metas))
 	for _, m := range metas {
 		next[m.ID] = m
+		nextNames[m.Name] = struct{}{}
 	}
 
 	var toEmit []store.Event
@@ -94,9 +121,13 @@ func (r *registry) applyInventory(metas []Meta, sink EventSink, evict func(kind,
 		}
 	}
 	for id, oldM := range old {
-		if _, still := next[id]; !still {
-			toEvict = append(toEvict, oldM.Name)
+		if _, still := next[id]; still {
+			continue
 		}
+		if _, nameLives := nextNames[oldM.Name]; nameLives {
+			continue // recreated under the same name elsewhere in this diff
+		}
+		toEvict = append(toEvict, oldM.Name)
 	}
 	r.mu.Unlock()
 

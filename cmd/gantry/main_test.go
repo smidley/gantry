@@ -126,25 +126,103 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	st.Record(store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "temp.c"}, 1000, 31)
 	st.Record(store.SeriesKey{Kind: "gpu", Entity: "gpu0", Metric: "engine.render.busy_pct"}, 1000, 5.5)
 	st.Record(store.SeriesKey{Kind: "unraid", Entity: "docker", Metric: "docker.images_bytes"}, 1000, 999)
+	st.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, 1000, 0)
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur)()
+	snap := buildSnapshot(st, dc, ur, sources)()
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
-	require.Equal(t, 4.2, snap.Containers["jellyfin"].Metrics["cpu.pct"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
 	require.Equal(t, 5.5, snap.GPU["gpu0"]["engine.render.busy_pct"])
-	require.Equal(t, 999.0, snap.Unraid["docker.images_bytes"])
 	require.Equal(t, "", snap.UnraidVersion, "unraid.Version() before any Tick is empty")
 	require.Empty(t, dc.Running(), "docker.Running() before any Tick is empty")
+	require.Equal(t, map[string]string{"host": "ok"}, snap.Sources, "v2: Sources rides in the frame")
+
+	// v2: Unraid is entity-dimensioned -- docker.img usage and array/parity
+	// data must land in separate buckets, not collide into one flat map.
+	require.Equal(t, 999.0, snap.Unraid["docker"]["docker.images_bytes"])
+	require.Equal(t, 0.0, snap.Unraid["array"]["parity.progress_pct"])
+	require.Len(t, snap.Unraid, 2)
+
+	// jellyfin is neither running (dc never ticked) nor known by name
+	// (dc's registry has never seen it) -- its ancient (year-1970) sample
+	// must not resurrect it into the frame. This is the buildSnapshot-level
+	// half of the stopped-container filter pin; containerFrameEntities'
+	// own tests (below) exercise the freshness/lookup rule directly.
+	_, stillPresent := snap.Containers["jellyfin"]
+	require.False(t, stillPresent, "a container dc doesn't know about must not appear in the frame")
 
 	for _, c := range snap.Containers {
 		for metric := range c.Metrics {
 			require.False(t, strings.HasPrefix(metric, "live:"), "live:-prefixed metrics must never reach the snapshot")
 		}
 	}
+}
+
+// fakeMeta builds a minimal known-container answer for a lookupByName
+// stand-in, without needing a real docker.Collector/daemon.
+func fakeMeta(name string) docker.Meta { return docker.Meta{Name: name} }
+
+// TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup pins the OR's
+// first clause: a name in `running` is included unconditionally — the
+// lookup function must not even be consulted for it (a call for this name
+// fails the test immediately, proving the OR short-circuits).
+func TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup(t *testing.T) {
+	running := map[string]struct{}{"jellyfin": {}}
+	lookup := func(name string) (docker.Meta, bool) {
+		t.Fatalf("lookupByName must not be consulted for a running container, got %q", name)
+		return docker.Meta{}, false
+	}
+
+	got := containerFrameEntities(running, map[string]int64{}, 60, lookup)
+	require.Contains(t, got, "jellyfin")
+}
+
+// TestContainerFrameEntitiesIncludesFreshKnownNonRunning pins the OR's
+// second clause: a non-running name with a live sample younger than
+// maxAge AND a known lookup result is included.
+func TestContainerFrameEntitiesIncludesFreshKnownNonRunning(t *testing.T) {
+	lookup := func(name string) (docker.Meta, bool) { return fakeMeta(name), name == "radarr" }
+
+	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 59}, 60, lookup)
+	require.Contains(t, got, "radarr")
+}
+
+// TestContainerFrameEntitiesExcludesStaleEvenWhenKnown pins the
+// "stopped-and-gone" cutoff itself: once a non-running container's
+// freshest sample is 60s old or older, it drops out of the frame even
+// though lookupByName still recognizes the name (registry cleanup and
+// the frame's own 60s cutoff are two different clocks).
+func TestContainerFrameEntitiesExcludesStaleEvenWhenKnown(t *testing.T) {
+	lookup := func(name string) (docker.Meta, bool) { return fakeMeta(name), true }
+
+	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 60}, 60, lookup)
+	require.NotContains(t, got, "radarr", "age >= maxAge must exclude, not just age > maxAge")
+}
+
+// TestContainerFrameEntitiesExcludesFreshButUnknown pins the other half:
+// a stopped-AND-REMOVED container's lingering fresh sample must not
+// resurrect it once dc no longer knows the name at all.
+func TestContainerFrameEntitiesExcludesFreshButUnknown(t *testing.T) {
+	lookup := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
+
+	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 0}, 60, lookup)
+	require.NotContains(t, got, "radarr", "a name the registry no longer knows must drop immediately")
+}
+
+// TestContainerFrameEntitiesRunningWinsOverStaleSample confirms a name
+// present in both `running` and `sampleAge` (the common case: a running
+// container that also has metric samples) is included via the running
+// clause and isn't accidentally excluded by a stale sampleAge entry.
+func TestContainerFrameEntitiesRunningWinsOverStaleSample(t *testing.T) {
+	running := map[string]struct{}{"jellyfin": {}}
+	lookup := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
+
+	got := containerFrameEntities(running, map[string]int64{"jellyfin": 99999}, 60, lookup)
+	require.Contains(t, got, "jellyfin")
 }
 
 func TestHealthcheckExitPath(t *testing.T) {

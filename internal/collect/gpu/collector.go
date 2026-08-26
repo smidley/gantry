@@ -157,14 +157,31 @@ func (c *Collector) tickClients(now time.Time) {
 	ts := now.Unix()
 	for owner, engines := range containerTotals {
 		for engine, pct := range engines {
-			c.sink.Record(store.SeriesKey{Kind: "container", Entity: owner, Metric: "gpu." + engine + ".busy_pct"}, ts, pct)
+			c.sink.Record(store.SeriesKey{Kind: "container", Entity: owner, Metric: "gpu." + engine + ".busy_pct"}, ts, clampPct(pct))
 		}
 	}
 	for pdev, engines := range gpuTotals {
 		for engine, pct := range engines {
-			c.sink.Record(store.SeriesKey{Kind: "gpu", Entity: pdev, Metric: "engine." + engine + ".busy_pct"}, ts, pct)
+			c.sink.Record(store.SeriesKey{Kind: "gpu", Entity: pdev, Metric: "engine." + engine + ".busy_pct"}, ts, clampPct(pct))
 		}
 	}
+}
+
+// clampPct bounds a busy_pct value to [0,100] at emission: engineBusyPct's
+// rate-derived value (and container/GPU sums of it across multiple
+// engines or clients) can overshoot 100 on real hardware -- a ~100.001%
+// float overshoot has been observed live, and the summed-across-clients
+// GPU total can exceed 100 legitimately in raw form when several
+// containers share one engine -- so both callers clamp at the point of
+// emission rather than trusting the raw computation.
+func clampPct(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
 }
 
 // engineBusyPct converts one drm-engine-<name> field's raw value

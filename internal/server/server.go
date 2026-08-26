@@ -29,9 +29,13 @@ type Options struct {
 	// Snapshot assembles the current live-metrics snapshot (main wiring
 	// builds this from store.Live() + the docker/unraid collectors — the
 	// server itself stays store-shape-agnostic). Nil in tests that don't
-	// wire one — the snapshot/containers routes then report empty JSON
-	// objects rather than panicking.
+	// wire one — the snapshot route then reports an empty JSON object
+	// rather than panicking.
 	Snapshot func() SnapshotDTO
+	// Containers lists the current fleet (main wiring calls dc.Running()
+	// directly) for /api/containers. Nil in tests that don't wire one —
+	// the route then reports an empty JSON array rather than panicking.
+	Containers func() []ContainerInfo
 }
 
 type Server struct {

@@ -195,6 +195,87 @@ func TestApplyInventoryDoesNotEvictOnFirstRefresh(t *testing.T) {
 	require.Empty(t, ev.snapshot())
 }
 
+// TestApplyInventoryRecreationGuardSkipsEvictWhenNameStillLive pins the
+// recreation guard: a container destroyed and replaced (new id, same
+// name) in the same inventory diff must not evict that name -- eviction
+// is name-keyed (Live.Evict, RateTracker.EvictPrefix), so evicting "web"
+// here would wipe the brand-new container's just-started series, not
+// the old one's.
+func TestApplyInventoryRecreationGuardSkipsEvictWhenNameStillLive(t *testing.T) {
+	r := newRegistry()
+	sink := &fakeEventSink{}
+	ev := &fakeEvictor{}
+
+	r.applyInventory([]Meta{{ID: "old-id", Name: "web", State: "running"}}, sink, ev.evict)
+	r.applyInventory([]Meta{{ID: "new-id", Name: "web", State: "running"}}, sink, ev.evict)
+
+	require.Empty(t, ev.snapshot(), "recreating a container under the same name must not evict its own fresh series")
+	m, ok := r.lookup("new-id")
+	require.True(t, ok)
+	require.Equal(t, "web", m.Name)
+	_, ok = r.lookup("old-id")
+	require.False(t, ok, "the old id itself is still gone from the registry")
+}
+
+// TestApplyInventoryStillEvictsWhenReplacementHasDifferentName confirms
+// the recreation guard is scoped to "this exact name still lives" and
+// doesn't over-suppress eviction: a vanished container whose name nobody
+// else holds must still evict, even while an unrelated container starts
+// in the same diff.
+func TestApplyInventoryStillEvictsWhenReplacementHasDifferentName(t *testing.T) {
+	r := newRegistry()
+	sink := &fakeEventSink{}
+	ev := &fakeEvictor{}
+
+	r.applyInventory([]Meta{{ID: "old-id", Name: "web", State: "running"}}, sink, ev.evict)
+	r.applyInventory([]Meta{{ID: "other-id", Name: "other", State: "running"}}, sink, ev.evict)
+
+	require.Equal(t, []string{"container/web"}, ev.snapshot(), "a genuinely vanished name (no replacement) must still evict")
+}
+
+// TestRegistryLookupByNameFindsRunningAndNonRunningContainers pins
+// lookupByName (Task 4's snapshot-filter dependency): it must find a
+// container by name regardless of state -- a merely-exited-but-not-removed
+// container is still "known" -- and miss on a name never seen.
+func TestRegistryLookupByNameFindsRunningAndNonRunningContainers(t *testing.T) {
+	r := newRegistry()
+	sink := &fakeEventSink{}
+	ev := &fakeEvictor{}
+
+	r.applyInventory([]Meta{
+		{ID: "id-a", Name: "web", State: "running"},
+		{ID: "id-b", Name: "worker", State: "exited"},
+	}, sink, ev.evict)
+
+	m, ok := r.lookupByName("web")
+	require.True(t, ok)
+	require.Equal(t, "id-a", m.ID)
+
+	m, ok = r.lookupByName("worker")
+	require.True(t, ok, "a merely-exited (not removed) container is still known")
+	require.Equal(t, "id-b", m.ID)
+
+	_, ok = r.lookupByName("ghost")
+	require.False(t, ok, "a name never seen is not known")
+}
+
+// TestRegistryLookupByNameForgetsRemovedContainer confirms the other
+// half of the snapshot filter's contract: once a container is genuinely
+// removed (vanished from an inventory diff), lookupByName must forget it
+// too -- this is what lets a stopped-and-removed container drop out of
+// the live snapshot frame immediately.
+func TestRegistryLookupByNameForgetsRemovedContainer(t *testing.T) {
+	r := newRegistry()
+	sink := &fakeEventSink{}
+	ev := &fakeEvictor{}
+
+	r.applyInventory([]Meta{{ID: "id-a", Name: "web", State: "running"}}, sink, ev.evict)
+	r.applyInventory([]Meta{}, sink, ev.evict) // removed
+
+	_, ok := r.lookupByName("web")
+	require.False(t, ok, "a genuinely removed container must no longer be known")
+}
+
 func msg(action events.Action, id string, attrs map[string]string) events.Message {
 	return events.Message{Type: events.ContainerEventType, Action: action, Actor: events.Actor{ID: id, Attributes: attrs}}
 }
@@ -441,6 +522,22 @@ func TestDockerCollectorProbeUnavailableWithoutDaemon(t *testing.T) {
 	st := c.Probe(ctx)
 	require.False(t, st.Available)
 	require.NotEmpty(t, st.Detail)
+}
+
+// TestCollectorLookupByNameDelegatesToRegistry pins Collector.LookupByName
+// (Task 4's snapshot-filter dependency) as a thin passthrough to the
+// registry, the same relationship Lookup already has by id.
+func TestCollectorLookupByNameDelegatesToRegistry(t *testing.T) {
+	c := New(nil, nil, func(string, string) {}, "/var/run/docker.sock")
+	sink := &fakeEventSink{}
+	c.reg.applyInventory([]Meta{{ID: "abc", Name: "web", State: "running"}}, sink, func(string, string) {})
+
+	m, ok := c.LookupByName("web")
+	require.True(t, ok)
+	require.Equal(t, "abc", m.ID)
+
+	_, ok = c.LookupByName("ghost")
+	require.False(t, ok)
 }
 
 // TestDrainReturnsImmediatelyWhenEventsNeverStarted pins I4's Drain()

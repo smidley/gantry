@@ -54,6 +54,18 @@ type Options struct {
 	// store.QueryEvents, a straight passthrough) for /api/events. Nil in
 	// tests that don't wire one — see Query.
 	Events func(f store.EventFilter) ([]store.Event, error)
+
+	// Live fans out SSE frames to connected /api/live clients (main wiring
+	// constructs one *Broadcaster and feeds it from a periodic
+	// snapshot-publish goroutine). Nil in tests that don't wire one — the
+	// route then reports 503: unlike the other optional closures above,
+	// there is no meaningful "empty" stream to fall back to.
+	Live *Broadcaster
+	// Current returns the latest snapshot, pre-marshaled to JSON, for the
+	// immediate frame /api/live writes on connect (main wiring points this
+	// at buildSnapshot + json.Marshal). Nil in tests that don't wire one —
+	// the route then skips straight to streaming, no connect frame.
+	Current func() []byte
 }
 
 type Server struct {
@@ -73,6 +85,7 @@ func New(o Options) *Server {
 	s.mux.HandleFunc("GET /api/series", s.handleSeries)
 	s.mux.HandleFunc("GET /api/top", s.handleTop)
 	s.mux.HandleFunc("GET /api/events", s.handleEvents)
+	s.mux.HandleFunc("GET /api/live", s.handleLive)
 
 	dist, err := fs.Sub(webFS, "webdist")
 	if err != nil {

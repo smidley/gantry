@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -95,6 +96,31 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	require.Equal(t, http.StatusOK, seriesResp.StatusCode)
 	require.Len(t, seriesBody, 1)
 	require.Equal(t, "cpu.total", seriesBody[0].Metric)
+
+	// /api/live smoke check: Live/Current are now wired (Task 8) --
+	// read just the connect frame's SSE event (up to the blank line that
+	// ends it) then close, rather than waiting on the 2s publish loop. A
+	// dedicated, timeout-bound client keeps a handler bug (e.g. never
+	// writing the connect frame) a prompt test failure, not a hang.
+	sseClient := &http.Client{Timeout: 5 * time.Second}
+	liveResp, err := sseClient.Get(fmt.Sprintf("http://127.0.0.1:%d/api/live", port))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, liveResp.StatusCode)
+	require.Equal(t, "text/event-stream", liveResp.Header.Get("Content-Type"))
+	reader := bufio.NewReader(liveResp.Body)
+	sawData := false
+	for {
+		line, rerr := reader.ReadString('\n')
+		require.NoError(t, rerr)
+		if strings.HasPrefix(line, "data: ") {
+			sawData = true
+		}
+		if strings.TrimRight(line, "\n") == "" {
+			break // blank line: end of the connect frame's SSE event
+		}
+	}
+	require.True(t, sawData, "connect frame must carry a data: line")
+	_ = liveResp.Body.Close() // unread rest of body: transport closes the connection, freeing the Broadcaster slot
 
 	// Every request above went through http.DefaultTransport, which keeps
 	// the underlying connection open (keep-alive) for reuse even after its

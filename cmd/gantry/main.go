@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -155,6 +156,37 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		}
 	}()
 
+	// snapshotFn is the one buildSnapshot instance shared by /api/live/
+	// snapshot (Options.Snapshot), /api/live's connect frame (Options.
+	// Current), and the publish loop below -- all three read the exact
+	// same assembly, just on different triggers (poll, connect, tick).
+	snapshotFn := buildSnapshot(st, dc, ur, registry.Sources)
+	live := server.NewBroadcaster()
+
+	// SSE publish loop: every 2s, marshal the current snapshot and fan it
+	// out to every connected /api/live client. A marshal error is logged
+	// and skipped rather than fatal -- SnapshotDTO is all plain JSON-safe
+	// types, so this is defensive, not expected to ever fire.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		publish := time.NewTicker(2 * time.Second)
+		defer publish.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-publish.C:
+				b, err := json.Marshal(snapshotFn())
+				if err != nil {
+					log.Println("live publish marshal:", err)
+					continue
+				}
+				live.Publish(b)
+			}
+		}
+	}()
+
 	log.Printf("gantry %s listening on :%d", ver, port)
 	err = server.New(server.Options{
 		Port:       port,
@@ -162,11 +194,13 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Store:      st,
 		Started:    time.Now(),
 		Sources:    registry.Sources,
-		Snapshot:   buildSnapshot(st, dc, ur, registry.Sources),
+		Snapshot:   snapshotFn,
 		Containers: buildContainersList(dc),
 		Query:      st.QuerySeries,
 		Top:        buildTop(st),
 		Events:     st.QueryEvents,
+		Live:       live,
+		Current:    func() []byte { b, _ := json.Marshal(snapshotFn()); return b },
 	}).ListenAndServe(runCtx)
 	cancel()
 	wg.Wait()

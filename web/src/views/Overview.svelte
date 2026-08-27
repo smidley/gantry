@@ -13,10 +13,11 @@
   import { prefersReducedMotion } from 'svelte/motion';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
+  import { seriesPointsToRing } from '../lib/livering';
   import { fmtPct, fmtRate } from '../lib/format';
-  import { sumMetricsByPattern } from '../lib/metrics';
+  import { sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
   import { topFromFrame } from '../lib/topFromFrame';
-  import { fetchEvents } from '../lib/api';
+  import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
 
   import StatTile from '../components/StatTile.svelte';
   import HealthDot from '../components/HealthDot.svelte';
@@ -28,11 +29,50 @@
 
   const EVENTS_POLL_MS = 30_000;
   const TWEEN_MS = 400;
+  const LIVE_WINDOW_SEC = 900;
 
   let cpuRing = liveRing((f) => f.host?.['cpu.total']);
   let memRing = liveRing((f) => f.host?.['mem.used_pct']);
   let netRxRing = liveRing((f) => f.host?.['net.rx_bps']);
   let ioReadRing = liveRing((f) => sumMetricsByPattern(f.host, 'diskio', '.read_bps'));
+
+  // Seed all four sparklines from server history on mount, once. cpu/mem/
+  // net are each a single fixed host metric, fetched straight by name --
+  // net.rx_bps matches netRxRing's OWN live extractor above exactly
+  // (real mode's per-interface "net.<iface>.rx_bps" isn't summed here
+  // either; seeding stays faithful to whatever a sparkline actually
+  // plots today, not a fix for that separately). ioReadRing sums a
+  // PATTERN of per-device keys instead (sumMetricsByPattern, live-side)
+  // with no fixed name to fetch by itself, so its history needs the
+  // CURRENT exact key names first -- fetchSnapshot() answers that
+  // synchronously, without waiting on (or racing) live.frame's own first
+  // SSE frame, the same discovery sumMetricsByPattern itself does at
+  // read time off whatever frame it's handed.
+  onMount(() => {
+    const controller = new AbortController();
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - LIVE_WINDOW_SEC;
+    fetchSnapshot()
+      .then((snapshot) => {
+        const readKeys = Object.keys(snapshot.host ?? {}).filter((k) => k.startsWith('diskio') && k.endsWith('.read_bps'));
+        const metrics = ['cpu.total', 'mem.used_pct', 'net.rx_bps', ...readKeys];
+        return fetchSeries({ kind: 'host', entity: '', metrics, from, to, signal: controller.signal }).then((results) => {
+          const byMetric = {};
+          for (const r of results) byMetric[r.metric] = r.points;
+          cpuRing.seed(seriesPointsToRing(byMetric['cpu.total'] ?? []));
+          memRing.seed(seriesPointsToRing(byMetric['mem.used_pct'] ?? []));
+          netRxRing.seed(seriesPointsToRing(byMetric['net.rx_bps'] ?? []));
+          ioReadRing.seed(sumSeriesPoints(readKeys.map((k) => byMetric[k] ?? [])));
+        });
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // unmounted before the seed resolved
+        // A failed discovery/seed fetch leaves every sparkline exactly
+        // as unseeded as it is today -- no error banner, no new skeleton
+        // state, just today's cold start.
+      });
+    return () => controller.abort();
+  });
 
   let host = $derived(live.frame?.host ?? {});
   let ioRead = $derived(sumMetricsByPattern(host, 'diskio', '.read_bps'));

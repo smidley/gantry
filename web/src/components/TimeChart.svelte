@@ -359,19 +359,27 @@
       // simple.
       const nowMs = Date.now();
       const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
-      // The shared driver's own ticks are what normally step this
-      // chart's x-window (see the animation-tick effect below) -- but
-      // under reduced motion the driver never ticks at all, so nothing
-      // else would ever move the window. Stepping it here too, from the
-      // data-arrival path itself, means the window still advances once
-      // per real SSE frame instead of freezing wherever it happened to
-      // be the moment reduced motion took hold (whether that was already
-      // true when this chart mounted, or flipped on mid-session) --
-      // a discrete step per arrival, exactly the pre-feature behavior.
-      if (prefersReducedMotion.current) {
-        const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
-        chart.setScale('x', { min, max });
-      }
+      // The shared driver's own ticks also step this chart's x-window
+      // (see the animation-tick effect below), far more often than this
+      // effect re-runs -- but that subscription is gated behind
+      // IntersectionObserver (subscribeWhileVisible), and under reduced
+      // motion the driver never ticks at all regardless of visibility.
+      // Either way, nothing else would ever set a first x-range for a
+      // chart that hasn't been on-screen yet when real data arrives (a
+      // live-seed history fetch landing while its chart is still below
+      // the fold, reproduced live on the Containers view's lower rows,
+      // whose per-row Sparkline shares this same gap -- see its own
+      // doc): setData is always called with resetScales=false in live
+      // mode, so without this, that data would sit there with no
+      // x-range that ever includes it. Stepping the window here too,
+      // unconditionally, from the data-arrival path itself, fixes both
+      // that and reduced motion's own already-documented freeze -- a
+      // discrete step per arrival under reduced motion, exactly the
+      // pre-feature behavior; a harmless redundant assignment (same
+      // formula, same values) once the driver's own more frequent tick
+      // is already running for a chart that IS visible.
+      const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
+      chart.setScale('x', { min, max });
       alignedData = buildAlignedData(series);
       headState = advanceAll(alignedData.slice(1), nowMs, durationMs);
       chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);

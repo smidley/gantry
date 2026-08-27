@@ -111,15 +111,21 @@
       // simpler than skipping it conditionally.
       const nowMs = Date.now();
       const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
-      // See TimeChart's matching comment: under reduced motion the shared
-      // driver never ticks, so nothing else would ever step this window --
-      // step it here too, once per real data arrival, so it doesn't freeze
-      // wherever it happened to be (whether reduced motion was already on
-      // at mount, or flipped on mid-session).
-      if (prefersReducedMotion.current) {
-        const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
-        chart.setScale('x', { min, max });
-      }
+      // Always step the window here, not only under reduced motion: the
+      // shared driver's own (far more frequent) tick is the ONLY other
+      // place this gets set, and it's gated behind IntersectionObserver
+      // (subscribeWhileVisible) -- a chart that hasn't been on-screen
+      // yet when real data arrives (a live-seed history fetch landing
+      // on one of the Containers view's below-the-fold rows, reproduced
+      // live building this) would otherwise hold that data with no
+      // x-range that ever includes it: setData is always called with
+      // resetScales=false in live mode, so nothing else would ever
+      // range the axis onto it. Redundant with the tick's own
+      // more-frequent update once a chart IS visible -- same formula,
+      // just also invoked here -- so this changes nothing for that case
+      // beyond one extra identical assignment.
+      const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
+      chart.setScale('x', { min, max });
       alignedData = toData(points);
       headState = points.length === 0 ? null : advanceHeadState(headState, points[points.length - 1][1], nowMs, durationMs);
       chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);

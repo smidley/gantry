@@ -145,6 +145,18 @@ export function fetchContainers(): Promise<ContainerInfo[]> {
   return getJSON<ContainerInfo[]>('/api/containers');
 }
 
+// fetchSnapshot backs Overview's live-seed discovery step: host metrics
+// carry no fixed per-device vocabulary (a real box's net/diskio keys are
+// named after whatever interfaces/devices it actually has -- see
+// metrics.ts's own sumMetricsByPattern doc), so seeding a sum-of-pattern
+// sparkline needs to know the CURRENT exact key names before it can ask
+// /api/series for them by name. This is a plain GET, answered
+// synchronously from server state -- unlike waiting on live.frame off
+// the SSE store, it never races that connection's own first frame.
+export function fetchSnapshot(): Promise<SnapshotDTO> {
+  return getJSON<SnapshotDTO>('/api/live/snapshot');
+}
+
 export function fetchSettings(): Promise<SettingsResponse> {
   return getJSON<SettingsResponse>('/api/settings');
 }

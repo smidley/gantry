@@ -8,6 +8,7 @@ import {
   seqStep,
   sharesFromMetrics,
   sumMetricsByPattern,
+  sumSeriesPoints,
 } from './metrics';
 
 describe('sumMetricsByPattern', () => {
@@ -35,6 +36,66 @@ describe('sumMetricsByPattern', () => {
     expect(sumMetricsByPattern(undefined, 'diskio', '.read_bps')).toBe(0);
     expect(sumMetricsByPattern(null, 'diskio', '.read_bps')).toBe(0);
     expect(sumMetricsByPattern({}, 'diskio', '.read_bps')).toBe(0);
+  });
+});
+
+describe('sumSeriesPoints', () => {
+  it('sums the single-array degenerate case (fake-mode shape) unchanged', () => {
+    expect(
+      sumSeriesPoints([
+        [
+          [100, 10, 10],
+          [110, 20, 20],
+        ],
+      ]),
+    ).toEqual([
+      [100, 10],
+      [110, 20],
+    ]);
+  });
+
+  it('sums multiple metrics by aligned ts (real-mode per-device shape)', () => {
+    const sda = [
+      [100, 10, 10],
+      [110, 20, 20],
+    ];
+    const nvme = [
+      [100, 5, 5],
+      [110, 15, 15],
+    ];
+    expect(sumSeriesPoints([sda, nvme])).toEqual([
+      [100, 15],
+      [110, 35],
+    ]);
+  });
+
+  it('a ts present in only some inputs still contributes just those', () => {
+    const sda = [[100, 10, 10]];
+    const nvme = [
+      [100, 5, 5],
+      [110, 15, 15], // sda has no sample at this ts -- not a poisoned/dropped point
+    ];
+    expect(sumSeriesPoints([sda, nvme])).toEqual([
+      [100, 15],
+      [110, 15],
+    ]);
+  });
+
+  it('skips non-finite entries and sorts ascending by ts', () => {
+    const a = [
+      [110, 2, 2],
+      [100, NaN, NaN],
+    ];
+    const b = [[100, 1, 1]];
+    expect(sumSeriesPoints([a, b])).toEqual([
+      [100, 1],
+      [110, 2],
+    ]);
+  });
+
+  it('returns an empty ring for no inputs or all-empty inputs', () => {
+    expect(sumSeriesPoints([])).toEqual([]);
+    expect(sumSeriesPoints([[], []])).toEqual([]);
   });
 });
 

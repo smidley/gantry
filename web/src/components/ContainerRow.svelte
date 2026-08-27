@@ -24,9 +24,32 @@
 
   const TWEEN_MS = 400;
 
-  let { name } = $props();
+  // registerSeedTarget (additive, optional -- live-seed history):
+  // Containers.svelte fetches every visible row's cpu.pct history itself
+  // (one AbortController, concurrency-capped, for the whole view -- see
+  // its own doc) and delivers each row's own result through a callback
+  // this row registers on mount, rather than through a prop -- see
+  // registerSeedTarget's own doc in Containers.svelte for why a plain
+  // reactive prop is the wrong shape for this specifically, at 23-rows
+  // scale. Optional/absent in the collapsed Stopped section, which never
+  // registers a target (this row's sparkline just builds up live-only
+  // there, same as before this feature).
+  let { name, registerSeedTarget = undefined } = $props();
 
   let cpuRing = liveRing((f) => f.containers[name]?.metrics['cpu.pct']);
+
+  // Registers once: registerSeedTarget is a stable function reference
+  // (Containers.svelte never reassigns it), so this effect's only
+  // dependency never changes after the first run -- one registration
+  // per row for its whole mounted lifetime, torn down via the returned
+  // cleanup on unmount (a name that starts back up under the same
+  // component instance -- doesn't happen here; Containers.svelte's own
+  // keyed {#each} recreates the row -- but cleanup is still correct
+  // regardless).
+  $effect(() => {
+    if (!registerSeedTarget) return;
+    return registerSeedTarget(name, (points) => cpuRing.seed(points));
+  });
 
   let c = $derived(live.frame?.containers?.[name]);
   let m = $derived(c?.metrics ?? {});

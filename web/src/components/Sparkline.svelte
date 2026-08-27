@@ -7,8 +7,16 @@
   import { onDestroy, onMount } from 'svelte';
   import { theme, resolveToken, withAlpha } from '../lib/theme.svelte';
   import { needsRebuild } from '../lib/chartRebuild';
+  import { headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
+  import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
+  import { prefersReducedMotion } from 'svelte/motion';
 
-  let { points = [], color = 'var(--series-1)' } = $props();
+  // live defaults true: every real Sparkline in this app charts a
+  // liveRing (StatTile, ContainerRow's per-row CPU column) -- there is
+  // no historical/fetched Sparkline usage today, unlike TimeChart, which
+  // is why that component requires an explicit opt-in instead. See its
+  // own doc for the full mechanism 1+2 rationale this mirrors.
+  let { points = [], color = 'var(--series-1)', live = true } = $props();
 
   let el;
   let chart = null;
@@ -21,13 +29,46 @@
   // the same shared helper applies unchanged.
   let prevShape = null;
 
+  // alignedData/headState: Sparkline's single-series analogue of
+  // TimeChart's own pair (see that file's doc for the full rationale).
+  // alignedData stays the pristine last-real-points snapshot; headState
+  // is one {prevValue, targetValue, arrivalMs} record (or null before
+  // the first real point) rather than an array, since Sparkline only
+  // ever charts one series.
+  let alignedData = null;
+  let headState = null;
+
   function toData(pts) {
     return [pts.map((p) => p[0]), pts.map((p) => p[1])];
+  }
+
+  function advanceHeadState(pts, nowMs) {
+    if (pts.length === 0) return null;
+    const raw = pts[pts.length - 1][1];
+    if (!headState) return { prevValue: raw, targetValue: raw, arrivalMs: nowMs };
+    if (headState.targetValue === raw) return headState;
+    return { prevValue: headState.targetValue, targetValue: raw, arrivalMs: nowMs };
+  }
+
+  // applyHeadState returns a COPY of [xs, ys] with only the tail y
+  // patched to its current eased value -- same "copy the tail, never
+  // mutate the source" contract as TimeChart's own version. Same
+  // reduced-motion durationMs override too -- see its doc.
+  function applyHeadState(data, state, nowMs, durationMs = HEAD_EASE_MS) {
+    if (!state) return data;
+    const [xs, ys] = data;
+    const patched = ys.slice();
+    patched[patched.length - 1] = headValue(state.prevValue, state.targetValue, state.arrivalMs, nowMs, durationMs);
+    return [xs, patched];
   }
 
   function build() {
     if (!el) return;
     chart?.destroy();
+    // A rebuild (color/theme change) means the chart itself is brand
+    // new -- headState resetting to null makes the next tick treat the
+    // first post-rebuild value as a fresh, unanimated starting point.
+    headState = null;
     const resolved = resolveToken(color);
     chart = new uPlot(
       {
@@ -66,12 +107,45 @@
     theme.resolved;
 
     const shape = { series: [{ label: '', colorVar: color }], theme: theme.resolved, hasFormatValue: false };
-    if (!chart || needsRebuild(prevShape, shape)) {
+    const rebuilding = !chart || needsRebuild(prevShape, shape);
+    if (rebuilding) {
       build();
-    } else {
+    }
+    if (live) {
+      // See TimeChart's matching branch: always re-derive headState off
+      // the fresh points and re-apply it, even right after a rebuild --
+      // a rebuild resets headState to prevValue === targetValue, so the
+      // extra setData is a visual no-op there, and one code path stays
+      // simpler than skipping it conditionally.
+      const nowMs = Date.now();
+      const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
+      alignedData = toData(points);
+      headState = advanceHeadState(points, nowMs);
+      chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
+    } else if (!rebuilding) {
       chart.setData(toData(points));
     }
     prevShape = shape;
+  });
+
+  // See TimeChart's matching effect for the full rationale: its own
+  // effect so a `live` flip un/resubscribes immediately rather than
+  // just changing what an existing subscription's tick does.
+  $effect(() => {
+    if (!live) return;
+    const unsubscribe = subscribeWhileVisible(
+      () => el,
+      (nowMs) => {
+        if (!chart || !alignedData) return;
+        const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
+        chart.setScale('x', { min, max });
+        if (headState) {
+          const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
+          chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
+        }
+      },
+    );
+    return unsubscribe;
   });
 
   onMount(() => {

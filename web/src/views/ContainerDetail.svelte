@@ -244,7 +244,7 @@
     <div class="card container-detail__chart-card">
       <span class="microlabel">CPU</span>
       {#if hasPoints('cpu.pct')}
-        <TimeChart series={cpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} />
+        <TimeChart series={cpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
       {:else}
         <p class="microlabel container-detail__empty">No CPU data for this range.</p>
       {/if}
@@ -252,7 +252,7 @@
     <div class="card container-detail__chart-card">
       <span class="microlabel">Memory</span>
       {#if hasPoints('mem.bytes')}
-        <TimeChart series={memSeries} formatValue={fmtBytes} {markers} syncKey={SYNC_KEY} />
+        <TimeChart series={memSeries} formatValue={fmtBytes} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
       {:else}
         <p class="microlabel container-detail__empty">No memory data for this range.</p>
       {/if}
@@ -260,7 +260,7 @@
     <div class="card container-detail__chart-card">
       <span class="microlabel">Network</span>
       {#if hasPoints('net.rx_bps') || hasPoints('net.tx_bps')}
-        <TimeChart series={netSeries} formatValue={fmtRate} {markers} syncKey={SYNC_KEY} />
+        <TimeChart series={netSeries} formatValue={fmtRate} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
       {:else}
         <p class="microlabel container-detail__empty">No network data for this range.</p>
       {/if}
@@ -268,7 +268,7 @@
     <div class="card container-detail__chart-card">
       <span class="microlabel">Disk IO</span>
       {#if hasPoints('io.read_bps') || hasPoints('io.write_bps')}
-        <TimeChart series={ioSeries} formatValue={fmtRate} {markers} syncKey={SYNC_KEY} />
+        <TimeChart series={ioSeries} formatValue={fmtRate} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
       {:else}
         <p class="microlabel container-detail__empty">No disk IO data for this range.</p>
       {/if}
@@ -276,13 +276,13 @@
     {#if gpuSeries.length > 0}
       <div class="card container-detail__chart-card">
         <span class="microlabel">GPU</span>
-        <TimeChart series={gpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} />
+        <TimeChart series={gpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
       </div>
     {/if}
     {#if psiSeries.length > 0}
       <div class="card container-detail__chart-card">
         <span class="microlabel">Pressure (PSI)</span>
-        <TimeChart series={psiSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} />
+        <TimeChart series={psiSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
       </div>
     {/if}
   </div>

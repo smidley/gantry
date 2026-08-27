@@ -131,7 +131,7 @@
   {:else if fetchInFlight}
     <p class="microlabel gpu-entity-card__loading">Loading…</p>
   {:else if series.length > 0}
-    <TimeChart {series} formatValue={fmtPct} {syncKey} />
+    <TimeChart {series} formatValue={fmtPct} {syncKey} live={activeRange === 'live'} />
   {:else}
     <p class="microlabel gpu-entity-card__empty">No engine activity for this range.</p>
   {/if}

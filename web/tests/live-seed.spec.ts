@@ -65,3 +65,52 @@ test('container detail seeds its live CPU chart from server history on arrival',
   ).toHaveCount(0, { timeout: 1_000 });
   await expect(page.locator('.container-detail__charts canvas').first()).toBeVisible({ timeout: 1_000 });
 });
+
+// The test above proves the seed lands and the chart takes over, but it
+// awaits the seed response BEFORE asserting -- by then, the real
+// (usually well under 50ms) fetch has already resolved either way, so it
+// can't actually catch a regression of the pending gate itself
+// (liveSeedPending in ContainerDetail.svelte, mirroring GPUEntityCard's
+// own field of the same name). This test instead delays the seed
+// response ARTIFICIALLY, widening that window enough to assert against
+// deterministically -- and, unlike the test above, deliberately does NOT
+// wait out real server uptime first, so the ring genuinely has zero
+// points when the seed request fires: while it's still in flight, the
+// CPU card must show neither its chart (no data yet) nor the misleading
+// "No CPU data for this range." placeholder. Regressing the gate (e.g.
+// reverting to a bare hasPoints()/else) would surface that text here,
+// where the first test above cannot.
+test('container detail never flashes "no data" while its live seed is still in flight', async ({ page }) => {
+  test.setTimeout(15_000);
+
+  await page.goto('#/');
+  await expect(page.locator('.overview__tiles .stat-tile').first()).toBeVisible();
+
+  const seedRequest = page.waitForRequest(
+    (req) => new URL(req.url()).pathname === '/api/series' && new URL(req.url()).searchParams.get('kind') === 'container',
+  );
+  await page.route(
+    (url) => url.pathname === '/api/series' && url.searchParams.get('kind') === 'container',
+    async (route) => {
+      await new Promise((r) => setTimeout(r, 500));
+      await route.continue();
+    },
+  );
+
+  const cpuEmptyState = page
+    .locator('.container-detail__chart-card', { hasText: 'CPU' })
+    .locator('.container-detail__empty');
+
+  await page.goto('#/containers/jellyfin');
+  await seedRequest; // the seed request has fired; its (artificially delayed) response hasn't landed yet
+
+  // Deliberately .count() (a plain, one-shot query) rather than
+  // expect(locator).toHaveCount(0): that matcher auto-retries for up to
+  // its own timeout, so it would still pass here even if the text
+  // flashed and cleared again well inside that window -- exactly the
+  // failure mode this test exists to catch. .count() reports what's in
+  // the DOM at THIS instant, with nothing left to retry away.
+  expect(await cpuEmptyState.count()).toBe(0);
+  await page.waitForTimeout(400); // still short of the route handler's own 500ms delay
+  expect(await cpuEmptyState.count()).toBe(0);
+});

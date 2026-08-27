@@ -125,12 +125,24 @@
   // it's looked at again).
   let events = $state([]);
 
+  // eventsSeedPending gates the "No events yet." message below the same
+  // way ContainerDetail/GPUEntityCard's own liveSeedPending gates their
+  // chart cards: while true, a truly-empty `events` stays silent instead
+  // of flashing that message the instant this view mounts (or remounts,
+  // navigating away and back), before the very first loadEvents() below
+  // has had a chance to resolve. Only ever flips false once, on that
+  // first resolution (success or failure) -- a later poll/focus refresh
+  // finding zero events is a real "No events yet.", not a pending state.
+  let eventsSeedPending = $state(true);
+
   async function loadEvents() {
     try {
       events = await fetchEvents({ limit: 8 });
     } catch {
       // A transient fetch failure leaves the last-good feed showing
       // rather than blanking it -- the next poll or focus tries again.
+    } finally {
+      eventsSeedPending = false;
     }
   }
 
@@ -216,7 +228,9 @@
 
     <div class="card overview__events">
       <span class="microlabel">Recent events</span>
-      {#if events.length === 0}
+      {#if eventsSeedPending}
+        <!-- first loadEvents() call hasn't settled yet -- see eventsSeedPending's own doc -->
+      {:else if events.length === 0}
         <p class="microlabel overview__events-empty">No events yet.</p>
       {:else}
         <div class="overview__events-list">

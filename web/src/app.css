@@ -24,6 +24,15 @@
 
 html {
   font-family: var(--font-sans);
+  /* Route swaps land on views whose content height varies a LOT (e.g.
+     Events/GPU with no expanded sections land right at the viewport's own
+     height, while Overview/Containers/Settings all overflow it) --
+     reproduced live: on a classic (space-reserving, non-overlay)
+     scrollbar system, crossing that boundary on navigation toggles the
+     scrollbar and shifts the entire page horizontally by its width.
+     `stable` reserves that gutter on every page, scrollbar needed or
+     not, so swapping routes never adds or removes it. */
+  scrollbar-gutter: stable;
 }
 
 body {

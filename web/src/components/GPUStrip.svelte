@@ -5,21 +5,32 @@
   video-enhance=series-3, copy=series-4), matching Task 19's GPU view --
   engines are a small, fixed vocabulary here (not a leaderboard whose
   membership churns), so a stable per-engine color is the right call,
-  unlike TopBarList's single-hue leaderboard bars.
+  unlike TopBarList's single-hue leaderboard bars. GPU_ENTITY_ENGINE_ORDER
+  (rather than plain GPU_ENGINE_ORDER) also recognizes the Nvidia v1
+  path's solo "gpu" pseudo-engine (see metrics.ts's own doc) -- an
+  Nvidia-only host's gpu entity has no render/video/video-enhance/copy
+  keys at all, only "engine.gpu.busy_pct", which without this fallback
+  this strip would silently never render a bar for.
 -->
 <script>
   import { fmtPct } from '../lib/format';
-  import { enginesPresent, GPU_ENGINE_ORDER } from '../lib/metrics';
+  import { enginesPresent, GPU_ENTITY_ENGINE_ORDER } from '../lib/metrics';
 
   let { gpu = {} } = $props();
 
-  const SERIES_VAR = { render: '--series-1', video: '--series-2', 'video-enhance': '--series-3', copy: '--series-4' };
+  const SERIES_VAR = {
+    render: '--series-1',
+    video: '--series-2',
+    'video-enhance': '--series-3',
+    copy: '--series-4',
+    gpu: '--series-1', // Nvidia's solo pseudo-engine -- never co-present with the other four, so slot reuse is harmless
+  };
 
   let entities = $derived(
     Object.entries(gpu)
       .map(([entity, metrics]) => ({
         entity,
-        engines: enginesPresent(metrics, (e) => `engine.${e}.busy_pct`).map((engine) => ({
+        engines: enginesPresent(metrics, (e) => `engine.${e}.busy_pct`, GPU_ENTITY_ENGINE_ORDER).map((engine) => ({
           engine,
           pct: metrics[`engine.${engine}.busy_pct`],
         })),

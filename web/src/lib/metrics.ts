@@ -14,6 +14,19 @@
 export const GPU_ENGINE_ORDER = ['render', 'video', 'video-enhance', 'copy'] as const;
 export type GPUEngine = (typeof GPU_ENGINE_ORDER)[number];
 
+// GPU_ENTITY_ENGINE_ORDER extends GPU_ENGINE_ORDER with the Nvidia v1
+// path's one pseudo-engine name, "gpu" -- nvidia.go's NvidiaCollector
+// records a single entity-level series, "engine.gpu.busy_pct", since
+// nvidia-smi's CSV output has no per-engine breakdown the way the DRM
+// fdinfo path's drm-engine-* counters do (the whole GPU's utilization is
+// modeled as one series named after the entity kind itself). Scoped to
+// GPU-ENTITY code (GPUStrip, the GPU view) only: container-side
+// attribution ("gpu.<engine>.busy_pct") never uses "gpu" as an engine
+// name -- Nvidia's v1 per-container data is VRAM only (gpu.nvidia.mem_mib)
+// -- so GPU_ENGINE_ORDER itself, and every container-attribution call
+// site that uses it, stays unchanged.
+export const GPU_ENTITY_ENGINE_ORDER = [...GPU_ENGINE_ORDER, 'gpu'] as const;
+
 // sumMetricsByPattern sums every value in `metrics` whose key starts with
 // `prefix` and ends with `suffix`. This covers both a flat key (prefix
 // and suffix directly adjacent, e.g. "diskio.read_bps") and a key with a
@@ -66,15 +79,22 @@ export function sharesFromMetrics(metrics: Record<string, number> | undefined | 
   return out;
 }
 
-// enginesPresent reads which of GPU_ENGINE_ORDER's engines have a
+// enginesPresent reads which of `order`'s engines have a
 // "engine.<name>.busy_pct" (device entity) or "gpu.<name>.busy_pct"
-// (container entity) key present in metrics, returning them in
-// GPU_ENGINE_ORDER's fixed order (not object insertion order, which
-// JSON's map-shaped gpu/metrics fields don't guarantee reflects anything
-// meaningful anyway).
-export function enginesPresent(metrics: Record<string, number> | undefined | null, keyFor: (engine: string) => string): GPUEngine[] {
+// (container entity) key present in metrics, returning them in `order`'s
+// fixed sequence (not object insertion order, which JSON's map-shaped
+// gpu/metrics fields don't guarantee reflects anything meaningful
+// anyway). `order` defaults to GPU_ENGINE_ORDER for every existing
+// container-attribution call site; a GPU-entity caller (GPUStrip, the
+// GPU view) passes GPU_ENTITY_ENGINE_ORDER instead, to also recognize
+// the Nvidia path's solo "gpu" pseudo-engine.
+export function enginesPresent(
+  metrics: Record<string, number> | undefined | null,
+  keyFor: (engine: string) => string,
+  order: readonly string[] = GPU_ENGINE_ORDER,
+): string[] {
   if (!metrics) return [];
-  return GPU_ENGINE_ORDER.filter((engine) => metrics[keyFor(engine)] !== undefined);
+  return order.filter((engine) => metrics[keyFor(engine)] !== undefined);
 }
 
 // seqStep buckets a 0-100 percentage onto tokens.css's 7-stop sequential

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { enginesPresent, etaFromProgress, GPU_ENGINE_ORDER, seqStep, sharesFromMetrics, sumMetricsByPattern } from './metrics';
+import {
+  enginesPresent,
+  etaFromProgress,
+  GPU_ENGINE_ORDER,
+  GPU_ENTITY_ENGINE_ORDER,
+  seqStep,
+  sharesFromMetrics,
+  sumMetricsByPattern,
+} from './metrics';
 
 describe('sumMetricsByPattern', () => {
   it('sums a flat key with no dynamic middle segment (fake-mode shape)', () => {
@@ -86,6 +94,20 @@ describe('enginesPresent', () => {
 
   it('covers every declared engine slot', () => {
     expect(GPU_ENGINE_ORDER).toEqual(['render', 'video', 'video-enhance', 'copy']);
+  });
+
+  it('recognizes the Nvidia solo "gpu" pseudo-engine when given GPU_ENTITY_ENGINE_ORDER', () => {
+    const metrics = { 'engine.gpu.busy_pct': 42 };
+    expect(enginesPresent(metrics, (e) => `engine.${e}.busy_pct`, GPU_ENTITY_ENGINE_ORDER)).toEqual(['gpu']);
+  });
+
+  it('does not recognize "gpu" as an engine under the default order (container attribution never uses it)', () => {
+    const metrics = { 'gpu.gpu.busy_pct': 42 };
+    expect(enginesPresent(metrics, (e) => `gpu.${e}.busy_pct`)).toEqual([]);
+  });
+
+  it('GPU_ENTITY_ENGINE_ORDER is GPU_ENGINE_ORDER plus the Nvidia fallback, in order', () => {
+    expect(GPU_ENTITY_ENGINE_ORDER).toEqual(['render', 'video', 'video-enhance', 'copy', 'gpu']);
   });
 });
 

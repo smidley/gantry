@@ -5,9 +5,10 @@
   frame's unraid.array / disks maps; nothing here is fetched.
 -->
 <script>
-  import { fmtBytes, fmtDuration, fmtPct, fmtRate } from '../lib/format';
-  import { etaFromProgress, parityIsRunning, seqStep } from '../lib/metrics';
+  import { fmtDuration, fmtPct, fmtRate } from '../lib/format';
+  import { etaFromProgress, parityIsRunning } from '../lib/metrics';
   import HealthDot from './HealthDot.svelte';
+  import ArrayCardPoolRow from './ArrayCardPoolRow.svelte';
 
   let { array = {}, disks = {}, ts = 0 } = $props();
 
@@ -112,14 +113,7 @@
   {#if pools.length > 0}
     <div class="array-card__pools">
       {#each pools as pool (pool.slot)}
-        <div class="array-card__pool-row">
-          <span class="array-card__pool-name">{pool.slot}</span>
-          <div class="array-card__pool-track">
-            <div class="array-card__pool-fill" style="width: {pool.pct}%; background: {seqStep(pool.pct)}"></div>
-          </div>
-          <span class="tabular-nums array-card__pool-pct">{fmtPct(pool.pct)}</span>
-          <span class="tabular-nums array-card__pool-bytes">{fmtBytes(pool.used)} / {fmtBytes(pool.total)}</span>
-        </div>
+        <ArrayCardPoolRow {pool} />
       {/each}
     </div>
   {:else}
@@ -202,39 +196,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-  }
-  .array-card__pool-row {
-    display: grid;
-    grid-template-columns: 4.5rem 1fr auto auto;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .array-card__pool-name {
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
-    color: var(--ink-2);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .array-card__pool-track {
-    height: 8px;
-    border-radius: 4px;
-    background: color-mix(in oklab, var(--ink) 8%, transparent);
-    overflow: hidden;
-  }
-  .array-card__pool-fill {
-    height: 100%;
-  }
-  .array-card__pool-pct {
-    font-size: 0.75rem;
-    min-width: 3em;
-    text-align: right;
-  }
-  .array-card__pool-bytes {
-    font-size: 0.72rem;
-    color: var(--ink-2);
-    white-space: nowrap;
   }
   .array-card__empty {
     margin: 0;

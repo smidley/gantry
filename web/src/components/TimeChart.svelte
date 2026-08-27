@@ -19,6 +19,9 @@
   import { theme, resolveToken } from '../lib/theme.svelte';
   import { fmtRelTime } from '../lib/format';
   import { needsRebuild } from '../lib/chartRebuild';
+  import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
+  import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
+  import { prefersReducedMotion } from 'svelte/motion';
 
   // formatValue (additive, optional -- Task 14-17's own fold-in note:
   // "views pre-format tooltip values (or formatter callback) -- TimeChart
@@ -28,7 +31,15 @@
   // rather than "900.0 MB". Undefined preserves the exact original
   // behavior (raw number + a plain unit suffix) for any caller that
   // hasn't been updated to pass one.
-  let { series = [], unit = '', height = 220, markers = [], syncKey = undefined, formatValue = undefined } = $props();
+  //
+  // live (additive, optional, default false -- smooth-streaming) opts a
+  // caller into mechanisms 1+2: a continuously-sliding 15-minute x-window
+  // and newest-sample head easing, both driven by the shared animation
+  // driver (lib/streamdriver.svelte.ts) instead of the plain setData-per-
+  // SSE-tick this chart has always done. A caller passes true only for
+  // its OWN live range (e.g. `live={activeRange === 'live'}`) -- a
+  // fetched/historical range must stay exactly as static as it is today.
+  let { series = [], unit = '', height = 220, markers = [], syncKey = undefined, formatValue = undefined, live = false } = $props();
 
   const SEVERITY_VAR = {
     info: '--status-good',
@@ -96,6 +107,71 @@
       }
     });
     return [xs, ...ys];
+  }
+
+  // alignedData is the last REAL buildAlignedData(series) result -- the
+  // pristine target values every series is currently easing TOWARD in
+  // live mode. Only ever replaced wholesale, by the data-effect below,
+  // on a genuine data change; the animation-tick handler (also below)
+  // only ever READS it, so headState's own next-tick comparisons can
+  // never drift from what an actual SSE frame reported.
+  let alignedData = null;
+
+  // headState[i] is series i's own in-flight head ease -- null until
+  // that series has reported at least one real (non-gap) value. Reset
+  // in build() below: a structural rebuild can reorder or replace
+  // series entirely, and stale state keyed by the OLD index would ease
+  // the WRONG series toward the wrong target.
+  let headState = [];
+
+  // tailValue reads a series' own last non-null y in aligned data --
+  // walking backward rather than assuming index length-1 is non-null,
+  // since the newest timestamp in the shared x-axis can belong to a
+  // DIFFERENT series (a real gap for this one, per buildAlignedData's
+  // own doc), which must stay a gap here too rather than easing toward
+  // a stale earlier value.
+  function tailValue(ys) {
+    for (let i = ys.length - 1; i >= 0; i--) {
+      if (ys[i] !== null) return ys[i];
+    }
+    return null;
+  }
+
+  // Per-series advanceHeadState folding lives in lib/streamdriver.ts now
+  // (pure, unit-tested there) -- this is just the aligned-data-shape glue:
+  // extract series i's own raw tail value (or null for a real gap, which
+  // must stay a gap here rather than easing toward a stale earlier one)
+  // and fold it via the shared function, one series at a time.
+  function advanceAll(alignedYs, nowMs, durationMs) {
+    return alignedYs.map((ys, i) => {
+      const raw = tailValue(ys);
+      return raw === null ? null : advanceHeadState(headState[i], raw, nowMs, durationMs);
+    });
+  }
+
+  // applyHeadState patches only the LAST index of each series to its
+  // current eased value, MUTATING `aligned` in place rather than
+  // returning a copy -- safe because `alignedData` is only ever the
+  // pristine target array immediately after the data effect rebuilds it
+  // wholesale via buildAlignedData(); every read of a series' true raw
+  // tail (tailValue, above) happens before this runs again for that
+  // series, so patching the disposable last slot here can never leak a
+  // stale eased value back out as if it were real data. Skips the
+  // per-tick array-clone this would otherwise cost at up to 30fps across
+  // every series of every live chart on screen. durationMs defaults to
+  // the real ease (HEAD_EASE_MS); callers under reduced motion pass 0 so
+  // headValue snaps straight to targetValue -- the driver's own ticks
+  // never run in that state (see streamdriver.svelte.ts), so without this
+  // the tail would otherwise freeze one arrival stale forever instead of
+  // tracking each new value immediately.
+  function applyHeadState(aligned, state, nowMs, durationMs = HEAD_EASE_MS) {
+    for (let i = 0; i < state.length; i++) {
+      const s = state[i];
+      if (!s) continue;
+      const oneSeries = aligned[i + 1];
+      oneSeries[oneSeries.length - 1] = headValue(s.prevValue, s.targetValue, s.arrivalMs, nowMs, durationMs);
+    }
+    return aligned;
   }
 
   function markerColor(severity) {
@@ -174,6 +250,10 @@
     if (!plotEl || !container) return;
     chart?.destroy();
     chart = null;
+    // A structural rebuild can reorder/replace series entirely -- reset
+    // headState so index i can't end up easing a NEW series toward a
+    // STALE target left over from whatever used to be at that index.
+    headState = [];
 
     const width = container.clientWidth || 320;
     const ink = resolveToken('var(--ink)');
@@ -264,12 +344,66 @@
     theme.resolved;
 
     const shape = currentShape();
-    if (!chart || needsRebuild(prevShape, shape)) {
+    const rebuilding = !chart || needsRebuild(prevShape, shape);
+    if (rebuilding) {
       build();
-    } else {
+    }
+    if (live) {
+      // Live mode always recomputes headState off the fresh aligned
+      // data and re-applies it, even right after a rebuild (which
+      // already rendered the raw target once via build()'s own
+      // buildAlignedData call): a rebuild resets headState above to
+      // prevValue === targetValue for every series, so this second
+      // setData is a visual no-op in that case -- keeping ONE code path
+      // rather than skipping it post-rebuild is what keeps this branch
+      // simple.
+      const nowMs = Date.now();
+      const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
+      // The shared driver's own ticks are what normally step this
+      // chart's x-window (see the animation-tick effect below) -- but
+      // under reduced motion the driver never ticks at all, so nothing
+      // else would ever move the window. Stepping it here too, from the
+      // data-arrival path itself, means the window still advances once
+      // per real SSE frame instead of freezing wherever it happened to
+      // be the moment reduced motion took hold (whether that was already
+      // true when this chart mounted, or flipped on mid-session) --
+      // a discrete step per arrival, exactly the pre-feature behavior.
+      if (prefersReducedMotion.current) {
+        const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
+        chart.setScale('x', { min, max });
+      }
+      alignedData = buildAlignedData(series);
+      headState = advanceAll(alignedData.slice(1), nowMs, durationMs);
+      chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
+    } else if (!rebuilding) {
       chart.setData(buildAlignedData(series));
     }
     prevShape = shape;
+  });
+
+  // The live-mode animation subscription is its own effect (rather than
+  // folded into the data effect above) so it can react to `live` itself
+  // flipping -- a range-picker switch away from Live must unsubscribe
+  // immediately, handing the shared driver back if this was its last
+  // active subscriber, not merely stop mattering. container is already
+  // bound by the time any $effect in this component first runs (see
+  // streamdriver.svelte.ts's own doc), so subscribeWhileVisible always
+  // has a real element to observe.
+  $effect(() => {
+    if (!live) return;
+    const unsubscribe = subscribeWhileVisible(
+      () => container,
+      (nowMs) => {
+        if (!chart || !alignedData) return;
+        const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
+        chart.setScale('x', { min, max });
+        if (headState.length > 0) {
+          const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
+          chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
+        }
+      },
+    );
+    return unsubscribe;
   });
 
   onMount(() => {

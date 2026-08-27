@@ -36,6 +36,32 @@
     critical: '--status-critical',
   };
 
+  // MIN_X_SPAN_SEC floors the x-axis's own domain width. Reproduced live
+  // while building the GPU/Events views: a chart fed by liveRing (any
+  // live-mode TimeChart -- Container Detail, GPU) starts with just one
+  // or two points in the first couple of seconds after mounting, and
+  // uPlot's own auto tick-picker mishandles that near-zero-width domain
+  // -- it renders YEAR-granularity gridlines (seen: "2027", "2028",
+  // "2029") with no visible data at all, rather than the correct
+  // few-second range, for as long as the real span stays under this
+  // floor. Once enough points arrive the natural span always exceeds
+  // 10s within a couple more ticks (2s cadence), so this only smooths
+  // over that brief startup window -- it never affects a real range
+  // (every history-fetched range is hours-to-months wide).
+  const MIN_X_SPAN_SEC = 10;
+
+  // xRange is uPlot's Range.Function for the x scale: pads a too-narrow
+  // [initMin, initMax] out symmetrically to MIN_X_SPAN_SEC, and passes
+  // a genuinely empty domain (no points at all yet) through unchanged
+  // rather than inventing a fake one.
+  function xRange(_u, initMin, initMax) {
+    if (initMin == null || initMax == null) return [initMin, initMax];
+    const span = initMax - initMin;
+    if (span >= MIN_X_SPAN_SEC) return [initMin, initMax];
+    const pad = (MIN_X_SPAN_SEC - span) / 2;
+    return [initMin - pad, initMax + pad];
+  }
+
   let container;
   let plotEl;
   let chart = null;
@@ -152,7 +178,7 @@
         width,
         height,
         padding: [8, 8, 8, 8],
-        scales: { x: { time: true } },
+        scales: { x: { time: true, range: xRange } },
         axes: [
           { stroke: ink, grid: { stroke: gridColor, width: 1 } },
           {

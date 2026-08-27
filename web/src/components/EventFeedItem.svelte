@@ -5,10 +5,16 @@
   Detail) are the JSON/prop keys as-is.
 
   showAbsoluteTime (additive, optional -- Task 20) renders the event's
-  browser-local absolute timestamp alongside the relative one, for the
-  Events view's own "relative + absolute time" contract. Overview's
-  compact feed leaves it false (its default), keeping that view's exact
-  original single-timestamp rendering.
+  browser-local absolute timestamp for the Events view's own "relative +
+  absolute time" contract, on its OWN line below the kind/entity/
+  relative-time head row -- NOT crammed inline after it: a full
+  toLocaleString() date+time ("8/26/2026, 7:04:20 PM") is wide enough
+  that appending it inside the head row's own nowrap time span
+  overflowed the card (and, since nothing there clips overflow, the
+  whole page) on narrow viewports once real event data was on screen --
+  reproduced live while building the Events view. Overview's compact
+  feed leaves it false (its default), keeping that view's exact original
+  single-line rendering untouched.
 -->
 <script>
   import HealthDot from './HealthDot.svelte';
@@ -33,13 +39,11 @@
     <div class="event-feed-item__head">
       <span class="event-feed-item__kind">{event.Kind}</span>
       {#if event.Entity}<span class="event-feed-item__entity">{event.Entity}</span>{/if}
-      <span class="microlabel event-feed-item__time">
-        {fmtRelTime(event.TS)}
-        {#if showAbsoluteTime}
-          <span class="event-feed-item__time-abs">&middot; {new Date(event.TS * 1000).toLocaleString()}</span>
-        {/if}
-      </span>
+      <span class="microlabel event-feed-item__time">{fmtRelTime(event.TS)}</span>
     </div>
+    {#if showAbsoluteTime}
+      <div class="microlabel event-feed-item__time-abs">{new Date(event.TS * 1000).toLocaleString()}</div>
+    {/if}
     {#if event.Detail}
       <div class="event-feed-item__detail">{event.Detail}</div>
     {/if}
@@ -60,6 +64,7 @@
   .event-feed-item__head {
     display: flex;
     align-items: baseline;
+    flex-wrap: wrap;
     gap: 0.5rem;
   }
   .event-feed-item__kind {
@@ -78,6 +83,7 @@
   .event-feed-item__time-abs {
     text-transform: none;
     letter-spacing: normal;
+    margin-top: 0.15rem;
   }
   .event-feed-item__detail {
     color: var(--ink-2);

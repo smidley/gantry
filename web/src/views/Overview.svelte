@@ -180,6 +180,20 @@
     gap: 0.75rem;
     align-items: start;
   }
+  /* A grid item's default min-width is auto (effectively its content's
+     min-content size), not 0 -- ArrayCard's pool rows and the Fleet
+     card's counts row both have content wide enough that, right around
+     the md breakpoint (768px, where the 2-column layout is already
+     active but the content column itself is still fairly narrow), that
+     min-content size exceeded the actual grid track width and pushed
+     the WHOLE PAGE wider (reproduced live at exactly 768px -- the Fleet
+     card's third count visibly ran off the viewport edge). :global(*)
+     reaches ArrayCard's own root element too, a different component
+     with its own Svelte scope hash that a plain child selector here
+     wouldn't otherwise match. */
+  .overview__grid > :global(*) {
+    min-width: 0;
+  }
   @media (max-width: 47.9375rem) {
     .overview__grid {
       grid-template-columns: 1fr;
@@ -194,6 +208,7 @@
     gap: 0.6rem;
   }
   .overview__fleet-counts {
+    flex-wrap: wrap;
     display: flex;
     gap: 1.25rem;
   }

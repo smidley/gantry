@@ -45,6 +45,15 @@
   --seq-500: #4d6f9b;
   --seq-600: #2d5383;
   --seq-700: #0d366b;
+
+  /* Focus-visible ring: a named token (not a bare reference to
+     --series-1 sprinkled at every call site) so app.css's one global
+     :focus-visible rule -- and anything else that ever needs "the focus
+     ring color" -- says so explicitly. Defined once here, not repeated
+     in the dark-mode blocks below: a var() reference re-resolves
+     against whatever --series-1 currently is in the active cascade, so
+     this alias stays theme-correct without redeclaration. */
+  --focus-ring: var(--series-1);
 }
 
 @media (prefers-color-scheme: dark) {

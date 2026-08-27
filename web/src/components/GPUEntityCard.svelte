@@ -97,8 +97,13 @@
   function pointsFor(engine) {
     return activeRange === 'live' ? liveRings[engine].points : (fetchedSeries[METRIC_FOR(engine)] ?? []);
   }
+  // >1, not merely >0: see ContainerDetail.svelte's matching hasPoints
+  // for why -- a single point can't show a trend, and (reproduced live
+  // building this view) uPlot's own x-axis tick-picker mishandles a
+  // genuinely single-point time domain regardless of TimeChart's own
+  // xRange padding, which only smooths over 2+ close-together points.
   function hasPoints(engine) {
-    return pointsFor(engine).length > 0;
+    return pointsFor(engine).length > 1;
   }
 
   // series: one per engine that actually has data -- this is what makes

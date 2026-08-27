@@ -131,8 +131,18 @@
   function pointsFor(metric) {
     return activeRange === 'live' ? liveRings[metric].points : (fetchedSeries[metric] ?? []);
   }
+  // hasPoints requires >1 point, not merely >0: a single point can't
+  // show a trend anyway (there's no line to draw, just one dot), and --
+  // reproduced live while building the GPU view -- uPlot's own x-axis
+  // tick-picker mishandles a genuinely single-point (zero-width) time
+  // domain, rendering nonsensical year-granularity gridlines with no
+  // visible data rather than the correct few-second range. TimeChart's
+  // own xRange padding (see its doc) handles every OTHER too-narrow
+  // case (2+ close-together points); this is the one gap that needs
+  // fixing at the call site instead, since there is no meaningful
+  // "point 2" to pad around yet.
   function hasPoints(metric) {
-    return pointsFor(metric).length > 0;
+    return pointsFor(metric).length > 1;
   }
   function hasNonzero(metric) {
     return pointsFor(metric).some(([, v]) => v > 0);

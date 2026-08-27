@@ -34,10 +34,13 @@ body {
 }
 
 /* Quality floor: a visible focus ring everywhere, never suppressed --
-   2px, offset 2px, in a series color rather than a status color (focus
-   is not a health signal). */
+   2px, offset 2px, via the --focus-ring token (tokens.css; aliases
+   --series-1 -- a series color rather than a status color, since focus
+   is not a health signal). One rule, no per-component overrides
+   anywhere in this codebase, so "consistently applied" holds by
+   construction rather than by convention. */
 :focus-visible {
-  outline: 2px solid var(--series-1);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 

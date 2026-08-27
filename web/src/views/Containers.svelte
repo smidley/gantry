@@ -13,8 +13,13 @@
   import HealthDot from '../components/HealthDot.svelte';
   import ContainerRow from '../components/ContainerRow.svelte';
 
+  // ariaName covers the one column (health) whose visible label is
+  // deliberately empty (just a dot column) -- a sort button with no
+  // visible text and no aria-label has NO accessible name at all until
+  // it becomes the active column (sortIndicator only renders once
+  // active), which a screen reader user would hit on every page load.
   const COLUMNS = [
-    { key: 'health', label: '', sortable: true },
+    { key: 'health', label: '', ariaName: 'Health', sortable: true },
     { key: 'name', label: 'Name', sortable: true },
     { key: 'cpu', label: 'CPU', sortable: true },
     { key: 'mem', label: 'Mem', sortable: true },
@@ -74,6 +79,17 @@
     return sortDir === 'asc' ? ' ▲' : ' ▼';
   }
 
+  // sortAriaLabel gives every sort button a real accessible name
+  // regardless of visible label text (the health column has none) and
+  // announces the CURRENT sort state the same way the visible ▲/▼
+  // indicator does for sighted users -- a screen reader user gets that
+  // information too, not just "button".
+  function sortAriaLabel(col) {
+    const name = col.ariaName ?? col.label;
+    if (sortColumn !== col.key) return `Sort by ${name}`;
+    return `Sort by ${name}, currently sorted ${sortDir === 'asc' ? 'ascending' : 'descending'}`;
+  }
+
   // filteredNames re-derives every frame (it reads live.frame for each
   // name's current image/state) but never reorders anything -- it only
   // narrows sortedNames' already-stable order down to what the filter
@@ -113,8 +129,13 @@
           <tr>
             {#each COLUMNS as col (col.key)}
               <th>
-                <button type="button" class="containers-table__sort-btn" onclick={() => setSort(col.key)}>
-                  <span class="microlabel">{col.label}{sortIndicator(col.key)}</span>
+                <button
+                  type="button"
+                  class="containers-table__sort-btn"
+                  onclick={() => setSort(col.key)}
+                  aria-label={sortAriaLabel(col)}
+                >
+                  <span class="microlabel" aria-hidden="true">{col.label}{sortIndicator(col.key)}</span>
                 </button>
               </th>
             {/each}

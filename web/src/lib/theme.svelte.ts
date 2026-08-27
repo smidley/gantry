@@ -3,6 +3,7 @@
 // TimeChart/Sparkline re-read the resolved CSS custom properties via
 // `theme.resolved` whenever it changes (see their own $effect) since
 // uPlot draws literal colors onto a canvas, not live var() references.
+import { extractTokenName } from './theme';
 
 export type ThemePreference = 'system' | 'light' | 'dark';
 export type ResolvedTheme = 'light' | 'dark';
@@ -63,19 +64,22 @@ class ThemeStore {
 
 export const theme = new ThemeStore();
 
-// resolveToken resolves a "var(--xxx)" reference to its current
-// computed value. Canvas-based rendering (uPlot, in Sparkline/
+// resolveToken resolves a CSS custom property reference -- either a
+// bare name ("--series-1") or a full var() reference ("var(--series-1)"),
+// see extractTokenName's own doc for why both forms must work -- to its
+// current computed value. Canvas-based rendering (uPlot, in Sparkline/
 // TimeChart) can't consume a live var() reference the way DOM/CSS
 // can -- ctx.fillStyle/strokeStyle are parsed outside any cascade
-// context, so a var() reference in that string is simply invalid.
-// Callers re-resolve this whenever `theme.resolved` changes. A value
-// that isn't a bare "var(--x)" reference (e.g. one an entity-color
-// hash has already resolved to a literal) passes through unchanged.
+// context, so a var() reference OR a bare custom-property name in that
+// string is simply invalid there. Callers re-resolve this whenever
+// `theme.resolved` changes. A value that's neither form (e.g. one an
+// entity-color hash has already resolved to a literal) passes through
+// unchanged.
 export function resolveToken(value: string): string {
   if (typeof document === 'undefined') return value;
-  const match = /^var\((--[\w-]+)\)$/.exec(value.trim());
-  if (!match) return value;
-  return getComputedStyle(document.documentElement).getPropertyValue(match[1]).trim() || value;
+  const tokenName = extractTokenName(value);
+  if (!tokenName) return value;
+  return getComputedStyle(document.documentElement).getPropertyValue(tokenName).trim() || value;
 }
 
 // withAlpha appends an alpha channel to a 6-digit "#rrggbb" hex color,

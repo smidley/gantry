@@ -34,14 +34,23 @@ func (r *Ring) Latest() (Sample, bool) {
 	return r.buf[(r.head+r.n-1)%len(r.buf)], true
 }
 
-// Since returns samples with TS >= ts, oldest first.
-func (r *Ring) Since(ts int64) []Sample {
-	out := make([]Sample, 0, r.n)
+// AppendSince appends every sample with TS >= ts, oldest first, onto dst
+// and returns the resulting slice, the same way append() does. A caller
+// that walks many rings for the same ts (FlushMinutes, catching up
+// several windows across every series) can pass the same backing slice,
+// resliced to length 0, back in on every call, reusing one growing
+// buffer instead of paying for a fresh ring-capacity allocation per ring.
+func (r *Ring) AppendSince(ts int64, dst []Sample) []Sample {
 	for i := 0; i < r.n; i++ {
 		s := r.buf[(r.head+i)%len(r.buf)]
 		if s.TS >= ts {
-			out = append(out, s)
+			dst = append(dst, s)
 		}
 	}
-	return out
+	return dst
+}
+
+// Since returns samples with TS >= ts, oldest first.
+func (r *Ring) Since(ts int64) []Sample {
+	return r.AppendSince(ts, nil)
 }

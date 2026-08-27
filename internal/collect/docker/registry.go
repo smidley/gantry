@@ -2,6 +2,7 @@ package docker
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -49,6 +50,33 @@ func (r *registry) lookup(id string) (Meta, bool) {
 	return m, ok
 }
 
+// lookupByName scans the registry for a Meta with the given name,
+// regardless of state -- a merely-exited (not removed) container is
+// still "known" here, and stops being known the moment applyInventory or
+// applyEvent removes it. Task 4's snapshot filter uses this to tell a
+// briefly-stale-but-real container apart from one that's been fully
+// removed. Linear scan: registry sizes are a handful of containers, and
+// this runs once per snapshot build, not once per tick.
+func (r *registry) lookupByName(name string) (Meta, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lookupByNameLocked(name)
+}
+
+// lookupByNameLocked is lookupByName's body, for callers that already
+// hold r.mu -- applyEvent's removal branch, which must check whether a
+// destroyed id's name still lives on under a different, newer id before
+// evicting a name that name-keyed eviction would otherwise treat as
+// "this name is gone".
+func (r *registry) lookupByNameLocked(name string) (Meta, bool) {
+	for _, m := range r.byID {
+		if m.Name == name {
+			return m, true
+		}
+	}
+	return Meta{}, false
+}
+
 // running returns a name-sorted snapshot of every Meta currently in state
 // "running".
 func (r *registry) running() []Meta {
@@ -76,10 +104,19 @@ func normalizeName(name string) string {
 // same change is an accepted simplification, not a bug — see the phase
 // plan's dispatch notes), and evicting names that disappeared entirely
 // (containers removed since the last refresh).
+//
+// Recreation guard: a vanished id only evicts its name when no id in the
+// NEW snapshot holds that same name. Eviction is name-keyed (Live.Evict,
+// RateTracker.EvictPrefix), so a container destroyed and recreated under
+// the same name within one 10s poll interval must not have its
+// just-started replacement's series wiped out by the old id's own
+// disappearance.
 func (r *registry) applyInventory(metas []Meta, sink EventSink, evict func(kind, entity string)) {
 	next := make(map[string]Meta, len(metas))
+	nextNames := make(map[string]struct{}, len(metas))
 	for _, m := range metas {
 		next[m.ID] = m
+		nextNames[m.Name] = struct{}{}
 	}
 
 	var toEmit []store.Event
@@ -94,14 +131,20 @@ func (r *registry) applyInventory(metas []Meta, sink EventSink, evict func(kind,
 		}
 	}
 	for id, oldM := range old {
-		if _, still := next[id]; !still {
-			toEvict = append(toEvict, oldM.Name)
+		if _, still := next[id]; still {
+			continue
 		}
+		if _, nameLives := nextNames[oldM.Name]; nameLives {
+			continue // recreated under the same name elsewhere in this diff
+		}
+		toEvict = append(toEvict, oldM.Name)
 	}
 	r.mu.Unlock()
 
 	for _, e := range toEmit {
-		sink.AppendEvent(e)
+		if _, err := sink.AppendEvent(e); err != nil {
+			log.Printf("events: %v", err)
+		}
 	}
 	for _, name := range toEvict {
 		evict("container", name)
@@ -137,6 +180,16 @@ func diffEvents(oldM, newM Meta) []store.Event {
 // event's own "name" attribute, falling back to whatever the registry
 // already knows about the actor id (events don't always carry attributes,
 // e.g. a bare OOM notification).
+//
+// Recreation guard: the event-stream goroutine and the poll goroutine
+// (applyInventory) are decoupled -- applyEvent never registers metas,
+// only polls do -- so a destroy event for an id can be PROCESSED here
+// after a later poll has already registered a same-named replacement
+// under a different id (compose redeploys, watchtower routinely produce
+// this ordering: destroy(old) delayed in local processing while the next
+// 10s poll already discovered new). Mirrors applyInventory's own guard:
+// evict only fires when no other id currently in the registry holds this
+// name; the dying id is still forgotten either way.
 func (r *registry) applyEvent(msg events.Message, sink EventSink, evict func(kind, entity string)) {
 	name := normalizeName(msg.Actor.Attributes["name"])
 	isRemoval := msg.Action == events.ActionDestroy || msg.Action == events.ActionRemove
@@ -147,17 +200,23 @@ func (r *registry) applyEvent(msg events.Message, sink EventSink, evict func(kin
 			name = m.Name
 		}
 	}
+	skipEvict := false
 	if isRemoval {
 		delete(r.byID, msg.Actor.ID)
+		_, skipEvict = r.lookupByNameLocked(name)
 	}
 	r.mu.Unlock()
 
 	if isRemoval {
-		evict("container", name)
+		if !skipEvict {
+			evict("container", name)
+		}
 		return
 	}
 	if evt, ok := translateEvent(msg, name); ok {
-		sink.AppendEvent(evt)
+		if _, err := sink.AppendEvent(evt); err != nil {
+			log.Printf("events: %v", err)
+		}
 	}
 }
 

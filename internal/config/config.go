@@ -39,6 +39,15 @@ func (c *Config) Int(key string, def int) int {
 	return def
 }
 
+// EnvOverridden reports whether key's env var (see envName) is currently
+// set. Env always wins over a stored setting (String/Int/Bool above), so
+// a caller building a "this field is locked" UI hint (Task 10's
+// /api/settings) can ask directly rather than re-deriving envName
+// itself.
+func (c *Config) EnvOverridden(key string) bool {
+	return c.getenv(envName(key)) != ""
+}
+
 func (c *Config) Bool(key string, def bool) bool {
 	v := strings.ToLower(c.String(key, ""))
 	switch v {

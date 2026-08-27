@@ -21,7 +21,7 @@ func readContainerNetDev(procRoot string, pid int) (rxBytes, txBytes uint64, err
 	if err != nil {
 		return 0, 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	all, err := host.ParseNetDev(f)
 	if err != nil {

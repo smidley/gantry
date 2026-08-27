@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/store"
 )
 
@@ -21,7 +22,7 @@ func (c *Collector) tickShares(now time.Time) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	kv, err := ParseINI(f)
 	if err != nil {
@@ -43,6 +44,6 @@ func (c *Collector) tickShares(now time.Time) {
 		if !ok {
 			continue
 		}
-		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "share." + name + ".used_bytes"}, ts, usedKB*1024)
+		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "share." + collect.SlugSegment(name) + ".used_bytes"}, ts, usedKB*1024)
 	}
 }

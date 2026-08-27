@@ -2,6 +2,7 @@ package unraid
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -103,7 +104,7 @@ func (c *Collector) tickArray(now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("unraid: open var.ini: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	kv, err := ParseINI(f)
 	if err != nil {
@@ -116,14 +117,43 @@ func (c *Collector) tickArray(now time.Time) error {
 	c.mu.Unlock()
 
 	ts := now.Unix()
+	// array.started is 1/0 rather than mdState's raw string -- Sample.Val
+	// is float64-only (see store.MetricSink), and the UI's Overview array
+	// card needs a live-frame-visible "is the array up" signal that
+	// doesn't depend on ever having observed a STATE TRANSITION (unlike
+	// the array.state event below, which only fires on change and so
+	// never fires at all for a box that's stayed STARTED the whole time
+	// this collector has been running).
+	started := 0.0
+	if next.State == "STARTED" {
+		started = 1.0
+	}
+	c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "array.started"}, ts, started)
 	if next.ParityRunning {
 		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, ts, next.ParityProgress)
 		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}, ts, next.ParitySpeedBps)
+	} else if c.havePrevArray && c.prevArray.ParityRunning {
+		// The ParityRunning true->false transition: record ONE final zero
+		// sample for each parity metric so "not running" has an explicit,
+		// permanent wire value. Without this, the store's live ring simply
+		// keeps whatever was last recorded while the run was active (e.g.
+		// 99.9%, 135 MB/s) forever -- Ring.Latest has no expiry -- so the
+		// live frame reads as "still running" indefinitely after a finish.
+		// "Zero when not running" is now the wire semantic the UI's
+		// parityRunning derivation depends on (see parityIsRunning in
+		// web/src/lib/metrics.ts). Guarded on the prev-tick's own
+		// ParityRunning (checked before c.prevArray is overwritten below)
+		// so this fires exactly once, on the same tick as the
+		// parity.finish event, never on every idle tick after.
+		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, ts, 0)
+		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}, ts, 0)
 	}
 
 	if c.havePrevArray {
 		for _, e := range transitionEvents(c.prevArray, next) {
-			c.events.AppendEvent(e)
+			if _, err := c.events.AppendEvent(e); err != nil {
+				log.Printf("events: %v", err)
+			}
 		}
 	}
 	c.prevArray = next

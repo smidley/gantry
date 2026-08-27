@@ -1,6 +1,9 @@
 package store
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 type Event struct {
 	ID       int64
@@ -33,7 +36,15 @@ func (s *Store) AppendEvent(e Event) (int64, error) {
 	return res.LastInsertId()
 }
 
-func (s *Store) QueryEvents(f EventFilter) ([]Event, error) {
+// QueryEvents answers /api/events off the read pool (s.readDB,
+// MaxOpenConns(4)), same as QuerySeries/TopEntities in query.go -- never
+// s.db, the single-writer handle Maintain's multi-second flush/downsample
+// lock can hold for a while. ctx is passed straight through to
+// QueryContext so a cancelled request (the entity filter fires on every
+// keystroke; see Events.svelte's own debounce for the frontend half of
+// this fix) actually stops the query rather than queuing behind that lock
+// and running to completion anyway.
+func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error) {
 	q := `SELECT id, ts, kind, entity, severity, detail FROM events WHERE 1=1`
 	var args []any
 	if len(f.Kinds) > 0 {
@@ -61,11 +72,11 @@ func (s *Store) QueryEvents(f EventFilter) ([]Event, error) {
 	q += ` ORDER BY ts DESC, id DESC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.readDB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Event
 	for rows.Next() {
 		var e Event

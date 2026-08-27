@@ -58,7 +58,7 @@ func WriteNotify(dir string, n Notification, now time.Time) (string, error) {
 		return "", err
 	}
 	if err := os.Rename(tmp, final); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return "", err
 	}
 	return final, nil

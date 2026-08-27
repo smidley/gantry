@@ -2,6 +2,7 @@ package unraid
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,7 +28,7 @@ func (c *Collector) tickDisks(now time.Time) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	kv, err := ParseINI(f)
 	if err != nil {
@@ -101,8 +102,11 @@ func (c *Collector) checkErrorIncrease(slot string, numErrors float64) {
 	if !seen || numErrors <= prev {
 		return
 	}
-	c.events.AppendEvent(store.Event{
+	_, err := c.events.AppendEvent(store.Event{
 		Kind: "disk.errors", Entity: slot, Severity: "alert",
 		Detail: fmt.Sprintf("errors %g → %g", prev, numErrors),
 	})
+	if err != nil {
+		log.Printf("events: %v", err)
+	}
 }

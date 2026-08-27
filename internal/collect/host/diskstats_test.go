@@ -11,7 +11,7 @@ func openDiskstatsFixture(t *testing.T) *os.File {
 	t.Helper()
 	f, err := os.Open("testdata/diskstats.txt")
 	require.NoError(t, err)
-	t.Cleanup(func() { f.Close() })
+	t.Cleanup(func() { _ = f.Close() })
 	return f
 }
 

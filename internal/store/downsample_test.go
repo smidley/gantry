@@ -31,7 +31,7 @@ func TestDownsample1mTo10m(t *testing.T) {
 
 	rows, err := s.DB().Query(`SELECT ts, avg, max FROM samples_10m ORDER BY ts`)
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var got []string
 	for rows.Next() {
 		var ts int64

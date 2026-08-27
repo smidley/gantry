@@ -1,0 +1,91 @@
+/* Design tokens: plain CSS custom properties, switched by [data-theme]
+   (set on <html> by theme.svelte.ts) rather than Tailwind's dark:
+   variant -- the app needs an explicit system|light|dark cycle, not
+   just a prefers-color-scheme mirror.
+
+   Light values live on bare :root (the default, no attribute needed).
+   Dark values are then applied twice: once under prefers-color-scheme
+   guarded by :not([data-theme="light"]) (system dark, no explicit
+   choice), and again under [data-theme="dark"] (explicit dark choice,
+   regardless of OS setting) -- so the manual toggle always wins over
+   the OS in both directions. */
+:root {
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+
+  /* Categorical series slots -- fixed order, never cycled or
+     reassigned by rank. A caller with >8 series buckets the rest into
+     "Other" rather than wrapping back to --series-1. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+
+  /* Status colors are reserved for health/severity meaning ONLY --
+     always paired with an icon or text label, never used for series
+     identity. */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  /* Sequential ramp for magnitude fills (e.g. disk-usage heat) --
+     evenly interpolated between the given endpoints, same in both
+     themes (not redefined below). */
+  --seq-100: #cde2fb;
+  --seq-200: #adc5e3;
+  --seq-300: #8da9cb;
+  --seq-400: #6d8cb3;
+  --seq-500: #4d6f9b;
+  --seq-600: #2d5383;
+  --seq-700: #0d366b;
+
+  /* Focus-visible ring: a named token (not a bare reference to
+     --series-1 sprinkled at every call site) so app.css's one global
+     :focus-visible rule -- and anything else that ever needs "the focus
+     ring color" -- says so explicitly. Defined once here, not repeated
+     in the dark-mode blocks below: a var() reference re-resolves
+     against whatever --series-1 currently is in the active cascade, so
+     this alias stays theme-correct without redeclaration. */
+  --focus-ring: var(--series-1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+  }
+}
+
+:root[data-theme='dark'] {
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+}

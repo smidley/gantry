@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/store"
 )
 
@@ -83,7 +84,7 @@ func readCPUStat(path string) (usageUsec, throttledUsec, nrThrottled uint64, err
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	dst := map[string]*uint64{
 		"usage_usec":     &usageUsec,
@@ -119,7 +120,7 @@ func readMemoryStatInactiveFile(path string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
@@ -159,7 +160,7 @@ func readIOStat(path string) (map[string]ioCounters, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	out := make(map[string]ioCounters)
 	sc := bufio.NewScanner(f)
@@ -197,8 +198,10 @@ func readIOStat(path string) (map[string]ioCounters, error) {
 // path for each container the registry reports as running, falling back
 // to a one-shot docker stats API call (apistats.go) when the cgroup dir
 // can't be read (v1 host, masked path). Selection is automatic and
-// per-container; the fallback is logged once per container id so a
-// whole-fleet v1 box doesn't spam the log every 2s.
+// per-container; the fallback is logged once per container (keyed by
+// name — the stable identity across recreations, spec §5, and what
+// evictContainer prunes on removal) so a whole-fleet v1 box doesn't spam
+// the log every 2s.
 func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 	for _, m := range c.reg.running() {
 		dir := filepath.Join(c.CgroupRoot, "docker", m.ID)
@@ -208,7 +211,7 @@ func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 			if err != nil {
 				continue
 			}
-			if _, alreadyLogged := c.loggedFallback.LoadOrStore(m.ID, struct{}{}); !alreadyLogged {
+			if _, alreadyLogged := c.loggedFallback.LoadOrStore(m.Name, struct{}{}); !alreadyLogged {
 				log.Printf("docker: %s: cgroup v2 stats unavailable, using stats API fallback", m.Name)
 			}
 		}
@@ -273,19 +276,20 @@ func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time)
 	var haveRead, haveWrite bool
 	for majMin, dev := range cg.IO {
 		devName, named := c.DeviceName(majMin)
+		slugName := collect.SlugSegment(devName)
 
 		if bps, ok := c.rates.Rate(name+".io."+majMin+".read", now, float64(dev.RBytes)); ok {
 			totalReadBps += bps
 			haveRead = true
 			if named {
-				c.sink.Record(key("live:io."+devName+".read_bps"), ts, bps)
+				c.sink.Record(key("live:io."+slugName+".read_bps"), ts, bps)
 			}
 		}
 		if bps, ok := c.rates.Rate(name+".io."+majMin+".write", now, float64(dev.WBytes)); ok {
 			totalWriteBps += bps
 			haveWrite = true
 			if named {
-				c.sink.Record(key("live:io."+devName+".write_bps"), ts, bps)
+				c.sink.Record(key("live:io."+slugName+".write_bps"), ts, bps)
 			}
 		}
 	}

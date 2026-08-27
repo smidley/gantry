@@ -10,7 +10,7 @@ import (
 func TestParseNetDev(t *testing.T) {
 	f, err := os.Open("testdata/net_dev.txt")
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	all, err := ParseNetDev(f)
 	require.NoError(t, err)

@@ -13,7 +13,10 @@ import (
 // handBuiltSnapshot returns a fixed two-container snapshot closure, the
 // same hand-assembled shape main wiring would build from store.Live() +
 // the docker/unraid collectors — but with no store involved, so this
-// package's tests stay decoupled from store's actual schema.
+// package's tests stay decoupled from store's actual schema. Unraid
+// carries both "array" and "docker" entities to exercise the v2 entity
+// dimension; Sources is populated to exercise the frame-carries-sources
+// change.
 func handBuiltSnapshot() func() SnapshotDTO {
 	return func() SnapshotDTO {
 		return SnapshotDTO{
@@ -44,11 +47,32 @@ func handBuiltSnapshot() func() SnapshotDTO {
 			Disks: map[string]map[string]float64{
 				"sda": {"used_pct": 42.0},
 			},
-			Unraid:        map[string]float64{"parity.progress_pct": 0},
 			UnraidVersion: "6.12.10",
+			Unraid: map[string]map[string]float64{
+				"array":  {"parity.progress_pct": 0},
+				"docker": {"docker.images_bytes": 12e9},
+			},
 			GPU: map[string]map[string]float64{
 				"gpu0": {"engine.render.busy_pct": 5.5},
 			},
+			Sources: map[string]string{
+				"host":   "ok",
+				"docker": "ok",
+			},
+		}
+	}
+}
+
+// handBuiltContainers returns the /api/containers list-only shape
+// (name/state/health/image, no metrics) mirroring what main wiring builds
+// straight from dc.Running() — deliberately a DIFFERENT container set
+// than handBuiltSnapshot's, so tests can't pass by accidentally reading
+// the wrong closure.
+func handBuiltContainers() func() []ContainerInfo {
+	return func() []ContainerInfo {
+		return []ContainerInfo{
+			{Name: "jellyfin", State: "running", Health: "healthy", Image: "jellyfin/jellyfin:latest"},
+			{Name: "sonarr", State: "running", Health: "", Image: "linuxserver/sonarr:latest"},
 		}
 	}
 }
@@ -60,7 +84,7 @@ func TestSnapshotEndpointReturnsAssembledDTO(t *testing.T) {
 
 	resp, err := http.Get(ts.URL + "/api/live/snapshot")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 
@@ -79,6 +103,16 @@ func TestSnapshotEndpointReturnsAssembledDTO(t *testing.T) {
 	require.Equal(t, 42.0, got.Disks["sda"]["used_pct"])
 	require.Equal(t, "6.12.10", got.UnraidVersion)
 	require.Equal(t, 5.5, got.GPU["gpu0"]["engine.render.busy_pct"])
+
+	// v2: Unraid is entity-dimensioned -- "array" and "docker" provenance
+	// must land in separate buckets, not collide into one flat map.
+	require.Equal(t, 0.0, got.Unraid["array"]["parity.progress_pct"])
+	require.Equal(t, 12e9, got.Unraid["docker"]["docker.images_bytes"])
+	require.Len(t, got.Unraid, 2, "array and docker must stay in separate entity buckets")
+
+	// v2: Sources now rides in the frame itself, not just healthz.
+	require.Equal(t, "ok", got.Sources["host"])
+	require.Equal(t, "ok", got.Sources["docker"])
 }
 
 func TestSnapshotEndpointEmptyObjectWhenNotWired(t *testing.T) {
@@ -88,7 +122,7 @@ func TestSnapshotEndpointEmptyObjectWhenNotWired(t *testing.T) {
 
 	resp, err := http.Get(ts.URL + "/api/live/snapshot")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 
@@ -97,36 +131,67 @@ func TestSnapshotEndpointEmptyObjectWhenNotWired(t *testing.T) {
 	require.Empty(t, got)
 }
 
-func TestContainersEndpointDerivesFromSnapshot(t *testing.T) {
-	s := New(Options{Version: "test-1", Started: time.Now(), Snapshot: handBuiltSnapshot()})
+// TestContainersEndpointReturnsWiredList pins the v2 contract: /api/
+// containers serves Options.Containers directly (main wiring's dc.
+// Running() straight through), as a JSON array of {name,state,health,
+// image} -- not a detour through the snapshot DTO.
+func TestContainersEndpointReturnsWiredList(t *testing.T) {
+	s := New(Options{Version: "test-1", Started: time.Now(), Containers: handBuiltContainers()})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/containers")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 
-	var got map[string]ContainerDTO
+	var got []ContainerInfo
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
-	require.Len(t, got, 2)
-	require.Equal(t, "running", got["jellyfin"].State)
-	require.Equal(t, "exited", got["radarr"].State)
-	require.Equal(t, 0.0, got["radarr"].Metrics["cpu.pct"])
+	require.Equal(t, []ContainerInfo{
+		{Name: "jellyfin", State: "running", Health: "healthy", Image: "jellyfin/jellyfin:latest"},
+		{Name: "sonarr", State: "running", Health: "", Image: "linuxserver/sonarr:latest"},
+	}, got)
 }
 
-func TestContainersEndpointEmptyObjectWhenNotWired(t *testing.T) {
+// TestContainersEndpointIgnoresSnapshotWhenBothWired confirms the "no DTO
+// detour" half of the contract directly: with both Options.Snapshot and
+// Options.Containers wired to deliberately DIFFERENT container sets,
+// /api/containers must reflect Containers, never Snapshot().Containers.
+func TestContainersEndpointIgnoresSnapshotWhenBothWired(t *testing.T) {
+	s := New(Options{
+		Version: "test-1", Started: time.Now(),
+		Snapshot:   handBuiltSnapshot(),
+		Containers: handBuiltContainers(),
+	})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/containers")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	var got []ContainerInfo
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	names := make([]string, len(got))
+	for i, c := range got {
+		names[i] = c.Name
+	}
+	require.ElementsMatch(t, []string{"jellyfin", "sonarr"}, names,
+		"must come from Options.Containers (sonarr), not Options.Snapshot().Containers (radarr)")
+}
+
+func TestContainersEndpointEmptyArrayWhenNotWired(t *testing.T) {
 	s := New(Options{Version: "test-1", Started: time.Now()})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/containers")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var got map[string]ContainerDTO
+	var got []ContainerInfo
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 	require.Empty(t, got)
 }
@@ -144,7 +209,7 @@ func TestHealthzSourcesPassthrough(t *testing.T) {
 
 	resp, err := http.Get(ts.URL + "/api/healthz")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var body struct {
@@ -161,7 +226,7 @@ func TestHealthzSourcesEmptyMapWhenNotWired(t *testing.T) {
 
 	resp, err := http.Get(ts.URL + "/api/healthz")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var body struct {
 		Sources map[string]string `json:"sources"`

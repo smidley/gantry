@@ -48,7 +48,7 @@ func interpretVarFile(t *testing.T, path string) ArrayState {
 	t.Helper()
 	f, err := os.Open(path)
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	kv, err := ParseINI(f)
 	require.NoError(t, err)
 	return interpretVar(kv)
@@ -243,6 +243,27 @@ func TestTickEmitsParityMetricsOnlyWhileRunning(t *testing.T) {
 	require.InDelta(t, 128000000, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}], 1e-9)
 }
 
+// TestTickAlwaysEmitsArrayStartedMetric pins array.started as an
+// unconditional-every-tick metric (unlike parity.progress_pct/speed_bps,
+// gated on ParityRunning) -- the UI's Overview array-card state badge
+// needs a live-frame value even on a box that has never once transitioned
+// state (transitionEvents' array.state event only fires ON A CHANGE, so
+// a box that boots already STARTED and stays that way would otherwise
+// never surface its state at all).
+func TestTickAlwaysEmitsArrayStartedMetric(t *testing.T) {
+	dir := t.TempDir()
+	sink := newFakeSink()
+	c := New(sink, &fakeEvents{}, dir, t.TempDir())
+
+	copyFixture(t, "testdata/var_started.ini", filepath.Join(dir, "var.ini"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+	require.Equal(t, 1.0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "array.started"}])
+
+	copyFixture(t, "testdata/var_stopped.ini", filepath.Join(dir, "var.ini"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1010, 0)))
+	require.Equal(t, 0.0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "array.started"}])
+}
+
 func TestTickTwiceEmitsArrayStateEventInIsolation(t *testing.T) {
 	dir := t.TempDir()
 	events := &fakeEvents{}
@@ -263,7 +284,8 @@ func TestTickTwiceEmitsArrayStateEventInIsolation(t *testing.T) {
 func TestTickThriceEmitsParityStartThenFinishWithoutStateNoise(t *testing.T) {
 	dir := t.TempDir()
 	events := &fakeEvents{}
-	c := New(newFakeSink(), events, dir, t.TempDir())
+	sink := newFakeSink()
+	c := New(sink, events, dir, t.TempDir())
 
 	copyFixture(t, "testdata/var_started.ini", filepath.Join(dir, "var.ini"))
 	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
@@ -281,6 +303,19 @@ func TestTickThriceEmitsParityStartThenFinishWithoutStateNoise(t *testing.T) {
 		{Kind: "parity.start", Entity: "array", Severity: "info"},
 		{Kind: "parity.finish", Entity: "array", Severity: "info", Detail: "reached 50.0%"},
 	}, events.events, "STARTED throughout means only the parity edge should fire, isolated from any state event")
+
+	// On the same finish tick, the collector must overwrite both parity
+	// metrics with an explicit final zero -- otherwise the last real
+	// sample recorded above (50%, 128MB/s) is what Ring.Latest keeps
+	// forever, since nothing else ever writes those keys again until a
+	// NEXT check starts. This is the fix for the live frame reading as
+	// "still running" indefinitely after a real finish (Storage/
+	// ArrayCard's parityRunning derivation depends on this "zero means
+	// not running" wire semantic).
+	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}], 1e-9,
+		"finish must overwrite parity.progress_pct with an explicit 0, not leave the last running sample in place")
+	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}], 1e-9,
+		"finish must overwrite parity.speed_bps with an explicit 0, not leave the last running sample in place")
 }
 
 func TestTickMissingVarIniReturnsError(t *testing.T) {

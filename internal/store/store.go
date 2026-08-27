@@ -35,7 +35,7 @@ func Open(path string, clock func() time.Time) (*Store, error) {
 	}
 	readDB, err := openReadPool(path)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return &Store{

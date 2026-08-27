@@ -12,7 +12,7 @@ func openFixture(t *testing.T, name string) *os.File {
 	t.Helper()
 	f, err := os.Open("testdata/" + name)
 	require.NoError(t, err)
-	t.Cleanup(func() { f.Close() })
+	t.Cleanup(func() { _ = f.Close() })
 	return f
 }
 

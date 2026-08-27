@@ -30,7 +30,7 @@ func TestMaintainFlushesBeforeDownsampling(t *testing.T) {
 }
 
 func TestRetentionFromConfig(t *testing.T) {
-	vals := map[string]int{"retention.r1_hours": 24, "retention.size_cap_mb": 128}
+	vals := map[string]int{"retention.r1_hours": 24, "retention.r3_days": 60, "retention.size_cap_mb": 128}
 	get := func(key string, def int) int {
 		if v, ok := vals[key]; ok {
 			return v
@@ -40,5 +40,11 @@ func TestRetentionFromConfig(t *testing.T) {
 	ret := RetentionFromConfig(get)
 	require.Equal(t, 24*time.Hour, ret.R1)
 	require.Equal(t, DefaultRetention().R2, ret.R2) // untouched keys keep defaults
+	require.Equal(t, 60*24*time.Hour, ret.R3, "r3_days override")
 	require.Equal(t, int64(128<<20), ret.SizeCapBytes)
+
+	// R3 default: with retention.r3_days untouched, RetentionFromConfig
+	// must fall back to DefaultRetention's R3, the same way R2 does above.
+	defaultOnly := func(_ string, def int) int { return def }
+	require.Equal(t, DefaultRetention().R3, RetentionFromConfig(defaultOnly).R3)
 }

@@ -24,6 +24,7 @@ func (s *Store) FlushMinutes(ctx context.Context, now time.Time) (int, error) {
 		start = nowMin - flushCatchUpMax*60
 	}
 
+	var buf []Sample // reused across every series and window this call touches
 	for m := start; m < nowMin; m += 60 {
 		type agg struct {
 			key      SeriesKey
@@ -35,8 +36,9 @@ func (s *Store) FlushMinutes(ctx context.Context, now time.Time) (int, error) {
 			if strings.HasPrefix(key.Metric, "live:") {
 				return // per-device docker IO etc.: live ring only, never persisted
 			}
+			buf = ring.AppendSince(m, buf[:0])
 			a := agg{key: key}
-			for _, smp := range ring.Since(m) {
+			for _, smp := range buf {
 				if smp.TS >= m+60 {
 					continue
 				}
@@ -77,7 +79,7 @@ func (s *Store) FlushMinutes(ctx context.Context, now time.Time) (int, error) {
 			for _, a := range aggsWithID {
 				if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO samples_1m (series_id, ts, avg, max)
 					VALUES (?,?,?,?)`, a.id, m, a.avg, a.max); err != nil {
-					tx.Rollback()
+					_ = tx.Rollback()
 					return written, err
 				}
 				written++

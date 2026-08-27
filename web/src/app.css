@@ -1,0 +1,107 @@
+@import "tailwindcss";
+@import "./lib/tokens.css";
+
+/* Tailwind v4 CSS-first config: fonts + the desktop-sidebar breakpoint
+   (768px, "Sidebar (desktop >=768px) / bottom TabBar (mobile)") live in
+   Tailwind's own theme namespace so utilities like font-sans/font-mono/
+   font-display and the md: variant are available everywhere. Color
+   tokens are NOT here -- they're plain CSS custom properties in
+   lib/tokens.css, switched by [data-theme] rather than Tailwind's
+   dark: variant, since the design needs an explicit system|light|dark
+   toggle, not just a prefers-color-scheme mirror. */
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --breakpoint-md: 48rem;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: var(--font-sans);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--page);
+  color: var(--ink);
+}
+
+/* Quality floor: a visible focus ring everywhere, never suppressed --
+   2px, offset 2px, via the --focus-ring token (tokens.css; aliases
+   --series-1 -- a series color rather than a status color, since focus
+   is not a health signal). One rule, no per-component overrides
+   anywhere in this codebase, so "consistently applied" holds by
+   construction rather than by convention. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Quality floor: prefers-reduced-motion kills every animation/
+   transition globally, including LivePulse's per-frame pulse -- it
+   still changes color/text on state change, since those aren't
+   animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Page title convention: every route's own <h1>, Space Grotesk per the
+   design direction ("Space Grotesk display for page titles + hero
+   numbers") -- Layout's header carries the constant "Gantry" wordmark,
+   not a per-route title, so each view renders its own. */
+.page-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.4rem;
+  color: var(--ink);
+  margin: 0 0 1rem 0;
+}
+
+/* Equipment-tag micro-label convention: metric names, table headers,
+   chart eyebrows. */
+.microlabel {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
+}
+
+/* Card surface -- shadow in light mode only; dark mode relies on the
+   border alone (a shadow reads as noise on a near-black surface). */
+.card {
+  background: var(--surface);
+  border: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--ink) 12%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .card {
+    box-shadow: none;
+  }
+}
+
+:root[data-theme='dark'] .card {
+  box-shadow: none;
+}
+
+/* Tabular numerals everywhere data ticks -- a value must not jitter
+   horizontally as its digits change. */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}

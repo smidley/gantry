@@ -86,7 +86,7 @@ func (c *Collector) tickCPU(now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("host: open stat: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	total, perCore, err := parseProcStat(f)
 	if err != nil {
 		return fmt.Errorf("host: parse stat: %w", err)
@@ -116,7 +116,7 @@ func (c *Collector) tickMem(now time.Time) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	memTotal, memAvailable, swapTotal, swapFree, err := parseMeminfo(f)
 	if err != nil {
 		return
@@ -146,14 +146,14 @@ func (c *Collector) tickLoadUptime(now time.Time) {
 	ts := now.Unix()
 	if f, err := os.Open(filepath.Join(c.procRoot, "loadavg")); err == nil {
 		load1, perr := parseLoadavg(f)
-		f.Close()
+		_ = f.Close()
 		if perr == nil {
 			c.sink.Record(store.SeriesKey{Kind: "host", Metric: "load.1m"}, ts, load1)
 		}
 	}
 	if f, err := os.Open(filepath.Join(c.procRoot, "uptime")); err == nil {
 		uptime, perr := parseUptime(f)
-		f.Close()
+		_ = f.Close()
 		if perr == nil {
 			c.sink.Record(store.SeriesKey{Kind: "host", Metric: "uptime_s"}, ts, uptime)
 		}
@@ -165,7 +165,7 @@ func (c *Collector) tickArc(now time.Time) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if arcBytes, ok := parseArcstats(f); ok {
 		c.sink.Record(store.SeriesKey{Kind: "host", Metric: "mem.arc_bytes"}, now.Unix(), float64(arcBytes))
 	}
@@ -179,7 +179,7 @@ func (c *Collector) tickNet(now time.Time) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	all, err := ParseNetDev(f)
 	if err != nil {
 		return

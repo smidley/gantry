@@ -2,11 +2,13 @@ package docker
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/events"
+	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
 )
@@ -193,6 +195,87 @@ func TestApplyInventoryDoesNotEvictOnFirstRefresh(t *testing.T) {
 	require.Empty(t, ev.snapshot())
 }
 
+// TestApplyInventoryRecreationGuardSkipsEvictWhenNameStillLive pins the
+// recreation guard: a container destroyed and replaced (new id, same
+// name) in the same inventory diff must not evict that name -- eviction
+// is name-keyed (Live.Evict, RateTracker.EvictPrefix), so evicting "web"
+// here would wipe the brand-new container's just-started series, not
+// the old one's.
+func TestApplyInventoryRecreationGuardSkipsEvictWhenNameStillLive(t *testing.T) {
+	r := newRegistry()
+	sink := &fakeEventSink{}
+	ev := &fakeEvictor{}
+
+	r.applyInventory([]Meta{{ID: "old-id", Name: "web", State: "running"}}, sink, ev.evict)
+	r.applyInventory([]Meta{{ID: "new-id", Name: "web", State: "running"}}, sink, ev.evict)
+
+	require.Empty(t, ev.snapshot(), "recreating a container under the same name must not evict its own fresh series")
+	m, ok := r.lookup("new-id")
+	require.True(t, ok)
+	require.Equal(t, "web", m.Name)
+	_, ok = r.lookup("old-id")
+	require.False(t, ok, "the old id itself is still gone from the registry")
+}
+
+// TestApplyInventoryStillEvictsWhenReplacementHasDifferentName confirms
+// the recreation guard is scoped to "this exact name still lives" and
+// doesn't over-suppress eviction: a vanished container whose name nobody
+// else holds must still evict, even while an unrelated container starts
+// in the same diff.
+func TestApplyInventoryStillEvictsWhenReplacementHasDifferentName(t *testing.T) {
+	r := newRegistry()
+	sink := &fakeEventSink{}
+	ev := &fakeEvictor{}
+
+	r.applyInventory([]Meta{{ID: "old-id", Name: "web", State: "running"}}, sink, ev.evict)
+	r.applyInventory([]Meta{{ID: "other-id", Name: "other", State: "running"}}, sink, ev.evict)
+
+	require.Equal(t, []string{"container/web"}, ev.snapshot(), "a genuinely vanished name (no replacement) must still evict")
+}
+
+// TestRegistryLookupByNameFindsRunningAndNonRunningContainers pins
+// lookupByName (Task 4's snapshot-filter dependency): it must find a
+// container by name regardless of state -- a merely-exited-but-not-removed
+// container is still "known" -- and miss on a name never seen.
+func TestRegistryLookupByNameFindsRunningAndNonRunningContainers(t *testing.T) {
+	r := newRegistry()
+	sink := &fakeEventSink{}
+	ev := &fakeEvictor{}
+
+	r.applyInventory([]Meta{
+		{ID: "id-a", Name: "web", State: "running"},
+		{ID: "id-b", Name: "worker", State: "exited"},
+	}, sink, ev.evict)
+
+	m, ok := r.lookupByName("web")
+	require.True(t, ok)
+	require.Equal(t, "id-a", m.ID)
+
+	m, ok = r.lookupByName("worker")
+	require.True(t, ok, "a merely-exited (not removed) container is still known")
+	require.Equal(t, "id-b", m.ID)
+
+	_, ok = r.lookupByName("ghost")
+	require.False(t, ok, "a name never seen is not known")
+}
+
+// TestRegistryLookupByNameForgetsRemovedContainer confirms the other
+// half of the snapshot filter's contract: once a container is genuinely
+// removed (vanished from an inventory diff), lookupByName must forget it
+// too -- this is what lets a stopped-and-removed container drop out of
+// the live snapshot frame immediately.
+func TestRegistryLookupByNameForgetsRemovedContainer(t *testing.T) {
+	r := newRegistry()
+	sink := &fakeEventSink{}
+	ev := &fakeEvictor{}
+
+	r.applyInventory([]Meta{{ID: "id-a", Name: "web", State: "running"}}, sink, ev.evict)
+	r.applyInventory([]Meta{}, sink, ev.evict) // removed
+
+	_, ok := r.lookupByName("web")
+	require.False(t, ok, "a genuinely removed container must no longer be known")
+}
+
 func msg(action events.Action, id string, attrs map[string]string) events.Message {
 	return events.Message{Type: events.ContainerEventType, Action: action, Actor: events.Actor{ID: id, Attributes: attrs}}
 }
@@ -264,6 +347,51 @@ func TestApplyEventDestroyEvictsAndForgetsContainer(t *testing.T) {
 	require.Empty(t, sink.snapshot())
 }
 
+// TestApplyEventRecreationGuardSkipsEvictWhenNameStillLiveAfterPollRace
+// covers the same recreation guard as applyInventory's, but on the event
+// path: the event-stream goroutine and the poll goroutine are decoupled
+// (applyEvent never registers metas -- only applyInventory does), so a
+// destroy event for a superseded id can be PROCESSED after a later poll
+// has already registered a same-named replacement (compose redeploys,
+// watchtower). Without the guard, applyEvent's unconditional
+// evict("container", name) would wipe out the replacement's
+// already-started series, not the destroyed container's -- eviction is
+// name-keyed, and the name now belongs to the new id.
+func TestApplyEventRecreationGuardSkipsEvictWhenNameStillLiveAfterPollRace(t *testing.T) {
+	r := newRegistry()
+	sink := &fakeEventSink{}
+	ev := &fakeEvictor{}
+
+	// old-id ("web") starts, then is destroyed at the daemon -- but
+	// delivery of that destroy event to applyEvent is about to lag behind
+	// the next poll below.
+	r.applyInventory([]Meta{{ID: "old-id", Name: "web", State: "running"}}, sink, ev.evict)
+
+	// The poll runs first: old-id is gone (by id), new-id holds the same
+	// name -- applyInventory's own recreation guard already keeps this
+	// from evicting (pinned separately above); the registry now knows
+	// "web" only via new-id.
+	r.applyInventory([]Meta{{ID: "new-id", Name: "web", State: "running"}}, sink, ev.evict)
+	require.Empty(t, ev.snapshot(), "sanity: the poll itself must not evict yet")
+
+	// The stale destroy(old-id) event finally arrives.
+	r.applyEvent(msg(events.ActionDestroy, "old-id", map[string]string{"name": "/web"}), sink, ev.evict)
+
+	require.Empty(t, ev.snapshot(), "a destroy event for a superseded id must not evict the name a newer id still holds")
+	m, ok := r.lookup("new-id")
+	require.True(t, ok, "the still-live replacement must survive")
+	require.Equal(t, "web", m.Name)
+
+	// Destroying the CURRENT holder of the name, with no replacement
+	// anywhere in the registry, must still evict -- the guard is scoped
+	// to "another id holds this name right now", not a blanket
+	// suppression of the event path's eviction.
+	r.applyEvent(msg(events.ActionDestroy, "new-id", map[string]string{"name": "/web"}), sink, ev.evict)
+	require.Equal(t, []string{"container/web"}, ev.snapshot())
+	_, ok = r.lookup("new-id")
+	require.False(t, ok)
+}
+
 func TestApplyEventNameFallsBackToRegistryWhenAttributeMissing(t *testing.T) {
 	r := newRegistry()
 	sink := &fakeEventSink{}
@@ -317,6 +445,112 @@ func TestConsumeEventsRecoversPanicAndKeepsConsumingSubsequentEvents(t *testing.
 		"the event after the panic must still be consumed and appended")
 }
 
+// newEvictingCollector builds a Collector with a real RateTracker and a
+// store-evict spy, wired exactly like New() wires evictContainer — for
+// tests exercising Task 2's container-removal cleanup without a docker
+// daemon.
+func newEvictingCollector(sink EventSink) (*Collector, *fakeEvictor) {
+	ev := &fakeEvictor{}
+	c := &Collector{
+		reg:    newRegistry(),
+		events: sink,
+		evict:  ev.evict,
+		rates:  collect.NewRateTracker(),
+	}
+	return c, ev
+}
+
+// TestEvictContainerClearsStoreRatesAndLoggedFallback pins Task 2:
+// removing one container must clear all three places its identity can
+// linger — the store (evict, wired to Live.Evict), the RateTracker (the
+// name+"." prefix convention shared by cgroupv2.go/net.go), and the
+// stats-API-fallback dedupe entry (loggedFallback, keyed by name — the
+// stable identity across recreations, spec §5).
+func TestEvictContainerClearsStoreRatesAndLoggedFallback(t *testing.T) {
+	sink := &fakeEventSink{}
+	c, ev := newEvictingCollector(sink)
+
+	c.rates.Rate("web.cpu.usage", time.Now(), 100)
+	c.rates.Rate("web.io.8:0.read", time.Now(), 100)
+	c.loggedFallback.Store("web", struct{}{})
+	require.Equal(t, 2, c.rates.Len())
+
+	c.evictContainer("container", "web")
+
+	require.Equal(t, []string{"container/web"}, ev.snapshot())
+	require.Equal(t, 0, c.rates.Len())
+	_, stillLogged := c.loggedFallback.Load("web")
+	require.False(t, stillLogged)
+}
+
+// TestApplyInventoryRemovalEvictsRateKeysAndLoggedFallback exercises the
+// real wiring: registry.applyInventory calling evictContainer (not a
+// bare store-evict stub) when a container drops out of an inventory
+// refresh.
+func TestApplyInventoryRemovalEvictsRateKeysAndLoggedFallback(t *testing.T) {
+	sink := &fakeEventSink{}
+	c, ev := newEvictingCollector(sink)
+
+	c.reg.applyInventory([]Meta{{ID: "abc", Name: "web", State: "running"}}, sink, c.evictContainer)
+	c.rates.Rate("web.cpu.usage", time.Now(), 100)
+	c.loggedFallback.Store("web", struct{}{})
+
+	c.reg.applyInventory([]Meta{}, sink, c.evictContainer) // "web" removed
+
+	require.Equal(t, []string{"container/web"}, ev.snapshot())
+	require.Equal(t, 0, c.rates.Len())
+	_, stillLogged := c.loggedFallback.Load("web")
+	require.False(t, stillLogged)
+}
+
+// TestApplyEventDestroyEvictsRateKeysAndLoggedFallback is the event-stream
+// counterpart: a destroy event must trigger the same full cleanup as an
+// inventory-diff removal.
+func TestApplyEventDestroyEvictsRateKeysAndLoggedFallback(t *testing.T) {
+	sink := &fakeEventSink{}
+	c, ev := newEvictingCollector(sink)
+
+	c.reg.applyInventory([]Meta{{ID: "abc", Name: "web", State: "running"}}, sink, c.evictContainer)
+	c.rates.Rate("web.cpu.usage", time.Now(), 100)
+	c.loggedFallback.Store("web", struct{}{})
+
+	c.reg.applyEvent(msg(events.ActionDestroy, "abc", map[string]string{"name": "/web"}), sink, c.evictContainer)
+
+	require.Equal(t, []string{"container/web"}, ev.snapshot())
+	require.Equal(t, 0, c.rates.Len())
+	_, stillLogged := c.loggedFallback.Load("web")
+	require.False(t, stillLogged)
+}
+
+// TestChurnManyContainersRateTrackerReturnsToBaseline simulates N
+// containers being created (with real per-container rate keys and a
+// loggedFallback entry) and removed via inventory-diff, asserting the
+// RateTracker's key count and loggedFallback's size both return to
+// their pre-churn baseline every time.
+func TestChurnManyContainersRateTrackerReturnsToBaseline(t *testing.T) {
+	sink := &fakeEventSink{}
+	c, _ := newEvictingCollector(sink)
+
+	c.rates.Rate("steady.cpu.usage", time.Now(), 1) // one key that never gets evicted
+	baseline := c.rates.Len()
+
+	const n = 100
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("churn%d", i)
+		c.reg.applyInventory([]Meta{{ID: name + "-id", Name: name, State: "running"}}, sink, c.evictContainer)
+		c.rates.Rate(name+".cpu.usage", time.Now(), 1)
+		c.rates.Rate(name+".io.8:0.read", time.Now(), 1)
+		c.loggedFallback.Store(name, struct{}{})
+
+		c.reg.applyInventory([]Meta{}, sink, c.evictContainer) // remove it again
+	}
+
+	require.Equal(t, baseline, c.rates.Len(), "churned container rate keys must not accumulate")
+	loggedCount := 0
+	c.loggedFallback.Range(func(_, _ any) bool { loggedCount++; return true })
+	require.Equal(t, 0, loggedCount, "churned containers' loggedFallback entries must not accumulate")
+}
+
 // Collector-level smoke tests (Name/Interval/Probe) — mirrors the host
 // package's TestHostNameAndInterval convention.
 
@@ -333,6 +567,75 @@ func TestDockerCollectorProbeUnavailableWithoutDaemon(t *testing.T) {
 	st := c.Probe(ctx)
 	require.False(t, st.Available)
 	require.NotEmpty(t, st.Detail)
+}
+
+// TestCollectorLookupByNameDelegatesToRegistry pins Collector.LookupByName
+// (Task 4's snapshot-filter dependency) as a thin passthrough to the
+// registry, the same relationship Lookup already has by id.
+func TestCollectorLookupByNameDelegatesToRegistry(t *testing.T) {
+	c := New(nil, nil, func(string, string) {}, "/var/run/docker.sock")
+	sink := &fakeEventSink{}
+	c.reg.applyInventory([]Meta{{ID: "abc", Name: "web", State: "running"}}, sink, func(string, string) {})
+
+	m, ok := c.LookupByName("web")
+	require.True(t, ok)
+	require.Equal(t, "abc", m.ID)
+
+	_, ok = c.LookupByName("ghost")
+	require.False(t, ok)
+}
+
+// TestRecordMetaEmitsStartedAtAndRestartCountForRunningOnly pins
+// recordMeta (refreshInventory's new per-poll metric emission): a
+// running container gets both meta.started_at (its StartedAt, as unix
+// seconds) and meta.restart_count; a non-running one gets neither --
+// recording either for a stopped-but-still-known container would keep
+// resetting its sampleAge in buildSnapshot's stopped-container filter
+// (see recordMeta's own doc), which must stay driven only by the
+// per-container stats cgroupv2.go/apistats.go already restrict to
+// running containers.
+func TestRecordMetaEmitsStartedAtAndRestartCountForRunningOnly(t *testing.T) {
+	sink := newFakeSink()
+	c := New(sink, nil, func(string, string) {}, "/var/run/docker.sock")
+
+	started := time.Unix(1_600_000_000, 0)
+	metas := []Meta{
+		{ID: "a", Name: "web", State: "running", StartedAt: started, RestartCount: 3},
+		{ID: "b", Name: "batch", State: "exited", StartedAt: started, RestartCount: 9},
+	}
+	c.recordMeta(metas, time.Unix(1_700_000_000, 0))
+
+	gotStarted, ok := sink.value("web", "meta.started_at")
+	require.True(t, ok)
+	require.Equal(t, float64(started.Unix()), gotStarted)
+	gotRestarts, ok := sink.value("web", "meta.restart_count")
+	require.True(t, ok)
+	require.Equal(t, 3.0, gotRestarts)
+
+	_, ok = sink.value("batch", "meta.started_at")
+	require.False(t, ok, "a non-running container must not get a fresh sample")
+	_, ok = sink.value("batch", "meta.restart_count")
+	require.False(t, ok, "a non-running container must not get a fresh sample")
+}
+
+// TestRecordMetaSkipsStartedAtWhenZeroButStillEmitsRestartCount pins the
+// defensive half of recordMeta: a Meta whose StartedAt was never
+// resolved (e.g. inspect's StartedAt string failed to parse --
+// metaFromInspect leaves the field at its zero value in that case) must
+// not emit a nonsensical "started in 1" timestamp, but restart_count
+// (always a real int, defaulting sensibly to 0) is unaffected by that
+// and still emitted.
+func TestRecordMetaSkipsStartedAtWhenZeroButStillEmitsRestartCount(t *testing.T) {
+	sink := newFakeSink()
+	c := New(sink, nil, func(string, string) {}, "/var/run/docker.sock")
+
+	c.recordMeta([]Meta{{ID: "a", Name: "web", State: "running"}}, time.Unix(1_700_000_000, 0))
+
+	_, ok := sink.value("web", "meta.started_at")
+	require.False(t, ok, "a zero-value StartedAt must not be recorded as a fake unix-epoch timestamp")
+	got, ok := sink.value("web", "meta.restart_count")
+	require.True(t, ok)
+	require.Equal(t, 0.0, got)
 }
 
 // TestDrainReturnsImmediatelyWhenEventsNeverStarted pins I4's Drain()

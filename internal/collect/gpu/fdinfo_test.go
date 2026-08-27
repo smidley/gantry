@@ -11,7 +11,7 @@ func parseFixture(t *testing.T, name string) (FDInfo, bool) {
 	t.Helper()
 	f, err := os.Open("testdata/" + name)
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return ParseFDInfo(f)
 }
 

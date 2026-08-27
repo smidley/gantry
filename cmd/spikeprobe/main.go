@@ -54,7 +54,7 @@ func runS1() bool {
 	pids, _ := filepath.Glob("/proc/[0-9]*")
 	for _, pdir := range pids {
 		var pid int
-		fmt.Sscanf(filepath.Base(pdir), "%d", &pid)
+		_, _ = fmt.Sscanf(filepath.Base(pdir), "%d", &pid)
 		if pid == self {
 			continue
 		}
@@ -69,7 +69,7 @@ func runS1() bool {
 				continue
 			}
 			info, ok := gpu.ParseFDInfo(f)
-			f.Close()
+			_ = f.Close()
 			if !ok {
 				continue
 			}

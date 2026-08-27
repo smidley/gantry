@@ -8,3 +8,6 @@ dist/
 node_modules/
 .DS_Store
 .superpowers/
+internal/server/webdist/
+web/node_modules/
+web/test-results/

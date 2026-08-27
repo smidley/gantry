@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,7 +24,7 @@ func freePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port
 }
 
@@ -69,17 +70,122 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 
 	// Snapshot smoke check: with fake data on, the fake generator writes
 	// host/container series through the same store the real collectors
-	// use, so the snapshot may or may not be empty depending on timing —
-	// only the response shape is asserted here.
+	// use, so any particular METRIC value's presence is still a timing
+	// accident (has a tick landed yet?) — but the fake fleet's inventory
+	// itself (Task 11's Metas()/fakeMetas wiring) is NOT: it's seeded
+	// into every frame the same unconditional way dc.Running() seeds a
+	// real fleet, independent of whether any sample has been recorded
+	// yet. So container PRESENCE and state are asserted deterministically
+	// here; only response shape is asserted for the rest.
 	snapResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/live/snapshot", port))
 	require.NoError(t, err)
 	var snapBody struct {
-		TS int64 `json:"ts"`
+		TS         int64 `json:"ts"`
+		Containers map[string]struct {
+			State string `json:"state"`
+		} `json:"containers"`
 	}
 	require.NoError(t, json.NewDecoder(snapResp.Body).Decode(&snapBody))
 	drainAndClose(snapResp)
 	require.Equal(t, http.StatusOK, snapResp.StatusCode)
 	require.Greater(t, snapBody.TS, int64(0))
+	require.NotEmpty(t, snapBody.Containers, "fake mode's Metas() must survive the DTO-v2 container filter unconditionally")
+	jf, ok := snapBody.Containers["jellyfin"]
+	require.True(t, ok, "fake fleet member must appear in the frame")
+	require.Equal(t, "running", jf.State)
+
+	// /api/series smoke check: Query is now wired straight to
+	// st.QuerySeries (Task 7) -- only the response shape (200, JSON array,
+	// one entry per requested metric) is asserted, not its data, since
+	// whether anything has flushed to samples_1m yet is a timing accident.
+	seriesResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/series?kind=host&metrics=cpu.total", port))
+	require.NoError(t, err)
+	var seriesBody []struct {
+		Metric string `json:"metric"`
+	}
+	require.NoError(t, json.NewDecoder(seriesResp.Body).Decode(&seriesBody))
+	drainAndClose(seriesResp)
+	require.Equal(t, http.StatusOK, seriesResp.StatusCode)
+	require.Len(t, seriesBody, 1)
+	require.Equal(t, "cpu.total", seriesBody[0].Metric)
+
+	// /api/live smoke check: Live/Current are now wired (Task 8) --
+	// read just the connect frame's SSE event (up to the blank line that
+	// ends it) then close, rather than waiting on the 2s publish loop. A
+	// dedicated, timeout-bound client keeps a handler bug (e.g. never
+	// writing the connect frame) a prompt test failure, not a hang.
+	sseClient := &http.Client{Timeout: 5 * time.Second}
+	liveResp, err := sseClient.Get(fmt.Sprintf("http://127.0.0.1:%d/api/live", port))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, liveResp.StatusCode)
+	require.Equal(t, "text/event-stream", liveResp.Header.Get("Content-Type"))
+	reader := bufio.NewReader(liveResp.Body)
+	sawData := false
+	for {
+		line, rerr := reader.ReadString('\n')
+		require.NoError(t, rerr)
+		if strings.HasPrefix(line, "data: ") {
+			sawData = true
+		}
+		if strings.TrimRight(line, "\n") == "" {
+			break // blank line: end of the connect frame's SSE event
+		}
+	}
+	require.True(t, sawData, "connect frame must carry a data: line")
+	_ = liveResp.Body.Close() // unread rest of body: transport closes the connection, freeing the Broadcaster slot
+
+	// /api/containers/{name}/logs smoke check (Task 9): Logs is now wired
+	// to the real dc.StreamLogs, but fake-data mode's synthetic
+	// containers never touch dc's registry (the fake generator writes
+	// straight to the store, bypassing the docker collector entirely) --
+	// so a fake container name must 404 gracefully, exactly the contract
+	// the fake-mode log viewer relies on, rather than erroring some other
+	// way once a real Logs closure is wired.
+	logsResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/containers/jellyfin/logs", port))
+	require.NoError(t, err)
+	drainAndClose(logsResp)
+	require.Equal(t, http.StatusNotFound, logsResp.StatusCode, "a fake-mode container name must 404, not error, against the real Logs closure")
+
+	// /api/settings smoke check (Task 10): exercises the real
+	// settingsAdapter end to end (config resolution + SettingSet), not
+	// just a fake. GET first reflects the compiled defaults with
+	// nothing overridden (none of the four retention env vars are set
+	// for this run), then a PUT's new value is visible on the very next
+	// GET -- the read path doesn't wait on the maintenance loop's own
+	// 10-minute tick, only Maintain's actual retention-pruning behavior
+	// does (see the per-tick RetentionFromConfig comment above).
+	settingsResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/settings", port))
+	require.NoError(t, err)
+	var settingsBody struct {
+		Retention struct {
+			R1Hours int `json:"r1_hours"`
+		} `json:"retention"`
+		EnvOverridden []string `json:"env_overridden"`
+	}
+	require.NoError(t, json.NewDecoder(settingsResp.Body).Decode(&settingsBody))
+	drainAndClose(settingsResp)
+	require.Equal(t, http.StatusOK, settingsResp.StatusCode)
+	require.Equal(t, 48, settingsBody.Retention.R1Hours, "default r1_hours")
+	require.Empty(t, settingsBody.EnvOverridden)
+
+	putReq, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%d/api/settings", port),
+		strings.NewReader(`{"retention":{"r1_hours":72,"r2_days":30,"r3_days":390,"size_cap_mb":512}}`))
+	require.NoError(t, err)
+	putResp, err := http.DefaultClient.Do(putReq)
+	require.NoError(t, err)
+	drainAndClose(putResp)
+	require.Equal(t, http.StatusOK, putResp.StatusCode)
+
+	settingsResp2, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/settings", port))
+	require.NoError(t, err)
+	var settingsBody2 struct {
+		Retention struct {
+			R1Hours int `json:"r1_hours"`
+		} `json:"retention"`
+	}
+	require.NoError(t, json.NewDecoder(settingsResp2.Body).Decode(&settingsBody2))
+	drainAndClose(settingsResp2)
+	require.Equal(t, 72, settingsBody2.Retention.R1Hours, "PUT must persist through the real store, visible on the very next GET")
 
 	// Every request above went through http.DefaultTransport, which keeps
 	// the underlying connection open (keep-alive) for reuse even after its
@@ -107,7 +213,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 // the connection's reuse state ambiguous to the transport.
 func drainAndClose(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 // TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed exercises the
@@ -118,7 +224,7 @@ func drainAndClose(resp *http.Response) {
 func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 
 	st.Record(store.SeriesKey{Kind: "host", Metric: "cpu.total"}, 1000, 12.5)
 	st.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, 1000, 4.2)
@@ -126,25 +232,170 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	st.Record(store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "temp.c"}, 1000, 31)
 	st.Record(store.SeriesKey{Kind: "gpu", Entity: "gpu0", Metric: "engine.render.busy_pct"}, 1000, 5.5)
 	st.Record(store.SeriesKey{Kind: "unraid", Entity: "docker", Metric: "docker.images_bytes"}, 1000, 999)
+	st.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, 1000, 0)
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur)()
+	snap := buildSnapshot(st, dc, ur, sources, nil)() // nil fakeMetas: not exercising Task 11's fake-mode path here
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
-	require.Equal(t, 4.2, snap.Containers["jellyfin"].Metrics["cpu.pct"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
 	require.Equal(t, 5.5, snap.GPU["gpu0"]["engine.render.busy_pct"])
-	require.Equal(t, 999.0, snap.Unraid["docker.images_bytes"])
 	require.Equal(t, "", snap.UnraidVersion, "unraid.Version() before any Tick is empty")
 	require.Empty(t, dc.Running(), "docker.Running() before any Tick is empty")
+	require.Equal(t, map[string]string{"host": "ok"}, snap.Sources, "v2: Sources rides in the frame")
+
+	// v2: Unraid is entity-dimensioned -- docker.img usage and array/parity
+	// data must land in separate buckets, not collide into one flat map.
+	require.Equal(t, 999.0, snap.Unraid["docker"]["docker.images_bytes"])
+	require.Equal(t, 0.0, snap.Unraid["array"]["parity.progress_pct"])
+	require.Len(t, snap.Unraid, 2)
+
+	// jellyfin is neither running (dc never ticked) nor known by name
+	// (dc's registry has never seen it) -- its ancient (year-1970) sample
+	// must not resurrect it into the frame. This is the buildSnapshot-level
+	// half of the stopped-container filter pin; containerFrameEntities'
+	// own tests (below) exercise the freshness/lookup rule directly.
+	_, stillPresent := snap.Containers["jellyfin"]
+	require.False(t, stillPresent, "a container dc doesn't know about must not appear in the frame")
 
 	for _, c := range snap.Containers {
 		for metric := range c.Metrics {
 			require.False(t, strings.HasPrefix(metric, "live:"), "live:-prefixed metrics must never reach the snapshot")
 		}
 	}
+}
+
+// TestBuildSnapshotIncludesFakeMetasWhenWired pins the ledger-carried
+// Batch B fix (folded into Task 11): fake mode's synthetic containers
+// never touch dc's registry at all -- the fake generator writes
+// straight to the store, bypassing docker's registry entirely -- so
+// without fakeMetas, Task 4's DTO-v2 filter (only dc.Running() OR a
+// name with BOTH a fresh live sample AND a known Meta) would empty
+// every fake-mode frame even though the store has live fake-container
+// samples. fakeMetas must be treated exactly like dc.Running()'s real
+// entries: unconditionally seeded, not merely consulted as a fallback
+// lookup.
+func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	st.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, 1000, 4.2)
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas)()
+
+	require.Empty(t, dc.Running(), "dc's own registry never saw this container -- the fix must not depend on it")
+	c, ok := snap.Containers["jellyfin"]
+	require.True(t, ok, "a fake Meta must survive the DTO-v2 filter unconditionally, not as a fallback lookup")
+	require.Equal(t, "running", c.State)
+	require.Equal(t, "healthy", c.Health)
+	require.Equal(t, "demo/jellyfin:latest", c.Image)
+	require.Equal(t, 4.2, c.Metrics["cpu.pct"])
+}
+
+// TestBuildContainersListMergesFakeMetas pins the same fix for
+// /api/containers: the fake fleet must be listed the same way a real
+// running fleet would be, not just present in the live snapshot.
+func TestBuildContainersListMergesFakeMetas(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "frigate", State: "running", Health: "healthy", Image: "demo/frigate:latest"}}
+	}
+
+	list := buildContainersList(dc, fakeMetas)()
+
+	require.Len(t, list, 1)
+	require.Equal(t, "frigate", list[0].Name)
+	require.Equal(t, "running", list[0].State)
+	require.Equal(t, "demo/frigate:latest", list[0].Image)
+}
+
+// TestBuildContainersListNilFakeMetasUnaffected pins real-mode
+// behavior (GANTRY_FAKE_DATA unset): a nil fakeMetas must not change
+// buildContainersList's existing dc.Running()-only contract.
+func TestBuildContainersListNilFakeMetasUnaffected(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+
+	require.Empty(t, buildContainersList(dc, nil)())
+}
+
+// fakeMeta builds a minimal known-container answer for a lookupByName
+// stand-in, without needing a real docker.Collector/daemon.
+func fakeMeta(name string) docker.Meta { return docker.Meta{Name: name} }
+
+// TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup pins the OR's
+// first clause: a name in `running` is included unconditionally — the
+// lookup function must not even be consulted for it (a call for this name
+// fails the test immediately, proving the OR short-circuits).
+func TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup(t *testing.T) {
+	running := map[string]struct{}{"jellyfin": {}}
+	lookup := func(name string) (docker.Meta, bool) {
+		t.Fatalf("lookupByName must not be consulted for a running container, got %q", name)
+		return docker.Meta{}, false
+	}
+
+	got := containerFrameEntities(running, map[string]int64{}, 60, lookup)
+	require.Contains(t, got, "jellyfin")
+}
+
+// TestContainerFrameEntitiesIncludesFreshKnownNonRunning pins the OR's
+// second clause: a non-running name with a live sample younger than
+// maxAge AND a known lookup result is included.
+func TestContainerFrameEntitiesIncludesFreshKnownNonRunning(t *testing.T) {
+	lookup := func(name string) (docker.Meta, bool) { return fakeMeta(name), name == "radarr" }
+
+	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 59}, 60, lookup)
+	require.Contains(t, got, "radarr")
+}
+
+// TestContainerFrameEntitiesExcludesStaleEvenWhenKnown pins the
+// "stopped-and-gone" cutoff itself: once a non-running container's
+// freshest sample is 60s old or older, it drops out of the frame even
+// though lookupByName still recognizes the name (registry cleanup and
+// the frame's own 60s cutoff are two different clocks).
+func TestContainerFrameEntitiesExcludesStaleEvenWhenKnown(t *testing.T) {
+	lookup := func(name string) (docker.Meta, bool) { return fakeMeta(name), true }
+
+	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 60}, 60, lookup)
+	require.NotContains(t, got, "radarr", "age >= maxAge must exclude, not just age > maxAge")
+}
+
+// TestContainerFrameEntitiesExcludesFreshButUnknown pins the other half:
+// a stopped-AND-REMOVED container's lingering fresh sample must not
+// resurrect it once dc no longer knows the name at all.
+func TestContainerFrameEntitiesExcludesFreshButUnknown(t *testing.T) {
+	lookup := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
+
+	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 0}, 60, lookup)
+	require.NotContains(t, got, "radarr", "a name the registry no longer knows must drop immediately")
+}
+
+// TestContainerFrameEntitiesRunningWinsOverStaleSample confirms a name
+// present in both `running` and `sampleAge` (the common case: a running
+// container that also has metric samples) is included via the running
+// clause and isn't accidentally excluded by a stale sampleAge entry.
+func TestContainerFrameEntitiesRunningWinsOverStaleSample(t *testing.T) {
+	running := map[string]struct{}{"jellyfin": {}}
+	lookup := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
+
+	got := containerFrameEntities(running, map[string]int64{"jellyfin": 99999}, 60, lookup)
+	require.Contains(t, got, "jellyfin")
 }
 
 func TestHealthcheckExitPath(t *testing.T) {
@@ -162,7 +413,7 @@ func TestHealthcheckExitPath(t *testing.T) {
 func TestRunReturnsOnBindFailure(t *testing.T) {
 	l, err := net.Listen("tcp", ":0")
 	require.NoError(t, err)
-	defer l.Close() // hold the port for the whole test so run()'s bind fails
+	defer func() { _ = l.Close() }() // hold the port for the whole test so run()'s bind fails
 	port := l.Addr().(*net.TCPAddr).Port
 
 	env := map[string]string{

@@ -11,16 +11,23 @@
   than floating at the fill's exact edge, which would either clip at
   high percentages or need JS text-width measurement to avoid it -- as
   already-formatted text (formatValue); this component has no unit
-  knowledge of its own.
+  knowledge of its own. emptyMessage (additive, optional) lets a caller
+  give its own empty state a window-specific direction (e.g. "No data in
+  the last 7 days yet.") rather than the generic default.
 -->
 <script>
-  let { rows = [], formatValue = (v) => String(v), linkFor = (entity) => `#/containers/${encodeURIComponent(entity)}` } = $props();
+  let {
+    rows = [],
+    formatValue = (v) => String(v),
+    linkFor = (entity) => `#/containers/${encodeURIComponent(entity)}`,
+    emptyMessage = 'No data for this window yet.',
+  } = $props();
 
   let maxValue = $derived(rows.reduce((m, r) => Math.max(m, r.value), 0));
 </script>
 
 {#if rows.length === 0}
-  <p class="microlabel top-bar-list__empty">No data for this window yet.</p>
+  <p class="microlabel top-bar-list__empty">{emptyMessage}</p>
 {:else}
   <ol class="top-bar-list">
     {#each rows as row (row.entity)}

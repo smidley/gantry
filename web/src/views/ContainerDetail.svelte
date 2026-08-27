@@ -207,6 +207,8 @@
 
   {#if fetchFailed}
     <p class="microlabel container-detail__fetch-error">Couldn't load history for this range. Try again shortly.</p>
+  {:else if fetchInFlight}
+    <p class="microlabel container-detail__loading">Loading…</p>
   {/if}
 
   <div class="container-detail__charts">
@@ -329,6 +331,9 @@
   }
   .container-detail__fetch-error {
     color: var(--status-warning);
+  }
+  .container-detail__loading {
+    margin: 0;
   }
   .container-detail__charts {
     display: grid;

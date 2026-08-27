@@ -424,7 +424,7 @@ func TestTopEndpointEmptyArrayWhenTopNotWired(t *testing.T) {
 
 func TestEventsEndpointDelegatesParsedFilter(t *testing.T) {
 	var got store.EventFilter
-	events := func(f store.EventFilter) ([]store.Event, error) {
+	events := func(_ context.Context, f store.EventFilter) ([]store.Event, error) {
 		got = f
 		return []store.Event{{ID: 1, TS: 100, Kind: "container", Entity: "web", Severity: "warning", Detail: "oom"}}, nil
 	}
@@ -451,7 +451,7 @@ func TestEventsEndpointDelegatesParsedFilter(t *testing.T) {
 
 func TestEventsEndpointDefaultLimitIs100(t *testing.T) {
 	var got store.EventFilter
-	events := func(f store.EventFilter) ([]store.Event, error) { got = f; return nil, nil }
+	events := func(_ context.Context, f store.EventFilter) ([]store.Event, error) { got = f; return nil, nil }
 	s := New(Options{Version: "test-1", Started: time.Now(), Events: events})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
@@ -465,7 +465,7 @@ func TestEventsEndpointDefaultLimitIs100(t *testing.T) {
 
 func TestEventsEndpointLimitCappedAt500(t *testing.T) {
 	var got store.EventFilter
-	events := func(f store.EventFilter) ([]store.Event, error) { got = f; return nil, nil }
+	events := func(_ context.Context, f store.EventFilter) ([]store.Event, error) { got = f; return nil, nil }
 	s := New(Options{Version: "test-1", Started: time.Now(), Events: events})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()

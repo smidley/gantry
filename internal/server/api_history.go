@@ -346,7 +346,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, []store.Event{})
 		return
 	}
-	events, err := s.opts.Events(f)
+	events, err := s.opts.Events(r.Context(), f)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

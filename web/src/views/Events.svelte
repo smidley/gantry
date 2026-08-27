@@ -21,10 +21,19 @@
 <script>
   import { onMount } from 'svelte';
   import { fetchEvents } from '../lib/api';
+  import { debounce } from '../lib/debounce';
   import EventFeedItem from '../components/EventFeedItem.svelte';
 
   const PAGE_LIMIT = 200;
   const REFRESH_MS = 30_000;
+  // ENTITY_DEBOUNCE_MS coalesces the entity text field's per-keystroke
+  // changes into one request 300ms after typing pauses -- see I2's own
+  // fix note: an un-debounced free-text filter fired one /api/events call
+  // PER KEYSTROKE. Kind checkboxes and the time-range preset stay
+  // immediate (below, the fetch effect reads selectedKinds/timePreset
+  // directly): only free-text typing produces the rapid-fire changes a
+  // debounce is for.
+  const ENTITY_DEBOUNCE_MS = 300;
 
   // KNOWN_KINDS is the fixed vocabulary the filter row's checkboxes
   // cover -- every event kind any collector/fake generator can emit
@@ -50,6 +59,16 @@
   let selectedKinds = $state(new Set());
   let entityFilter = $state('');
   let timePreset = $state('24h');
+
+  // debouncedEntity is what the fetch effect below actually reads --
+  // starts equal to entityFilter's own initial '' so the first, on-mount
+  // fetch isn't delayed. setDebouncedEntity is created once (a fresh
+  // debounce() per render would never coalesce anything, since each
+  // instance's internal timer would be independent).
+  let debouncedEntity = $state('');
+  const setDebouncedEntity = debounce((v) => {
+    debouncedEntity = v;
+  }, ENTITY_DEBOUNCE_MS);
 
   let events = $state([]);
   let loading = $state(false);
@@ -80,16 +99,25 @@
     activeController = null;
   }
 
-  // Stale-response race: changing a kind checkbox, the entity filter, or
-  // the time preset fast enough that an earlier /api/events call is
-  // still in flight when a newer one starts must not let the earlier
-  // response win. See ContainerDetail.svelte's matching effect for the
-  // full mechanics this mirrors (abort-on-cleanup runs before the next
-  // call to this same effect; a stale request's .catch ignores
+  // Schedules debouncedEntity to follow entityFilter ENTITY_DEBOUNCE_MS
+  // after typing pauses -- kept as its own effect (rather than folded
+  // into the fetch effect below) so kind/preset changes stay immediate:
+  // they're read directly off their own state in the fetch effect, never
+  // through this debounce.
+  $effect(() => {
+    setDebouncedEntity(entityFilter.trim());
+  });
+
+  // Stale-response race: changing a kind checkbox, the (debounced) entity
+  // filter, or the time preset fast enough that an earlier /api/events
+  // call is still in flight when a newer one starts must not let the
+  // earlier response win. See ContainerDetail.svelte's matching effect
+  // for the full mechanics this mirrors (abort-on-cleanup runs before the
+  // next call to this same effect; a stale request's .catch ignores
   // AbortError instead of clearing already-newer state).
   $effect(() => {
     const kinds = Array.from(selectedKinds);
-    const entity = entityFilter.trim();
+    const entity = debouncedEntity;
     const preset = timePreset;
 
     abortInFlight();

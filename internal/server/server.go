@@ -48,8 +48,11 @@ type Options struct {
 	Top func(ctx context.Context, kind, metric string, from, to int64, agg string, limit int) ([]TopRow, error)
 	// Events looks up historical events (main wiring points this at
 	// store.QueryEvents, a straight passthrough) for /api/events. Nil in
-	// tests that don't wire one — see Query.
-	Events func(f store.EventFilter) ([]store.Event, error)
+	// tests that don't wire one — see Query. ctx carries the request's
+	// cancellation the same way Query/Top do — see QueryEvents' own doc
+	// for why this matters more here (the entity filter fires per
+	// keystroke).
+	Events func(ctx context.Context, f store.EventFilter) ([]store.Event, error)
 
 	// Live fans out SSE frames to connected /api/live clients (main wiring
 	// constructs one *Broadcaster and feeds it from a periodic

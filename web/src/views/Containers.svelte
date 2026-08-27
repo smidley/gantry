@@ -12,6 +12,7 @@
   import { fmtBytes, fmtPct, fmtRate } from '../lib/format';
   import { seriesPointsToRing } from '../lib/livering';
   import { fetchContainers, fetchSeries } from '../lib/api';
+  import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
   import ContainerRow from '../components/ContainerRow.svelte';
 
@@ -243,6 +244,7 @@
           <a class="card containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>
             <div class="containers-view__card-head">
               <HealthDot status={containerHealthStatus(c.state, c.health)} />
+              <ContainerIcon {name} icon={c.icon} size={20} />
               <span class="containers-view__card-name">{name}</span>
             </div>
             <div class="containers-view__card-stats">
@@ -282,6 +284,7 @@
               <a class="card containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>
                 <div class="containers-view__card-head">
                   <HealthDot status={containerHealthStatus(c.state, c.health)} />
+                  <ContainerIcon {name} icon={c.icon} size={20} />
                   <span class="containers-view__card-name">{name}</span>
                 </div>
                 <div class="containers-view__card-stats">

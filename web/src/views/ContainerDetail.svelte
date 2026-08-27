@@ -24,6 +24,7 @@
   import { GPU_ENGINE_ORDER } from '../lib/metrics';
   import { eventsToMarkers } from '../lib/eventMarkers';
 
+  import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
   import TimeChart from '../components/TimeChart.svelte';
   import LogViewer from '../components/LogViewer.svelte';
@@ -72,6 +73,19 @@
     liveRings[metric] = liveRing((f) => f.containers?.[name]?.metrics?.[metric], LIVE_WINDOW_SEC);
   }
 
+  // liveSeedPending gates the four live-mode chart cards' own empty-state
+  // messages below, same as GPUEntityCard's own field of the same name:
+  // while true, a truly-empty live ring stays silent instead of flashing
+  // "No CPU/memory/network/disk IO data for this range" the instant this
+  // view mounts (or remounts on a container-to-container navigation, per
+  // the {#key} wrapper's own doc), before the seed fetch just below has
+  // even had a chance to say whether there's real history or not --
+  // reproduced live (a ~100-150ms flash on every route swap into this
+  // page). Flips false once the seed settles either way (found data,
+  // found none, or failed); `name` is stable for this component's whole
+  // lifetime, so this only ever needs to run once.
+  let liveSeedPending = $state(true);
+
   // Seed every live ring from server history on mount, once: `name` is
   // stable for this component's whole lifetime (App.svelte's own {#key}
   // wrapper fully remounts ContainerDetail on a container-name change --
@@ -89,9 +103,11 @@
     fetchSeries({ kind: 'container', entity: containerName, metrics: ALL_METRICS, from, to, signal: controller.signal })
       .then((results) => {
         for (const r of results) liveRings[r.metric]?.seed(seriesPointsToRing(r.points));
+        liveSeedPending = false;
       })
       .catch((err) => {
         if (err?.name === 'AbortError') return; // unmounted (or -- can't actually happen, name is stable -- superseded) before the seed resolved
+        liveSeedPending = false;
       });
     return () => controller.abort();
   });
@@ -228,6 +244,7 @@
 <div class="container-detail">
   <div class="container-detail__header">
     <div class="container-detail__identity">
+      <ContainerIcon {name} icon={c?.icon} size={28} />
       <h1 class="page-title container-detail__title">{name}</h1>
       {#if c}
         <HealthDot status={containerHealthStatus(c.state, c.health)} label={c.state} />
@@ -270,6 +287,12 @@
       <span class="microlabel">CPU</span>
       {#if hasPoints('cpu.pct')}
         <TimeChart series={cpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
+      {:else if activeRange === 'live' && liveSeedPending}
+        <!-- Live ring is still cold AND we don't yet know whether the seed
+             found real history -- rendering nothing here (rather than the
+             empty message below) avoids a false "no CPU data" flash before
+             the seed has actually settled. Same gate as GPUEntityCard's own
+             template, repeated per chart card below. -->
       {:else}
         <p class="microlabel container-detail__empty">No CPU data for this range.</p>
       {/if}
@@ -278,6 +301,8 @@
       <span class="microlabel">Memory</span>
       {#if hasPoints('mem.bytes')}
         <TimeChart series={memSeries} formatValue={fmtBytes} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
+      {:else if activeRange === 'live' && liveSeedPending}
+        <!-- see the CPU card's own doc above -->
       {:else}
         <p class="microlabel container-detail__empty">No memory data for this range.</p>
       {/if}
@@ -286,6 +311,8 @@
       <span class="microlabel">Network</span>
       {#if hasPoints('net.rx_bps') || hasPoints('net.tx_bps')}
         <TimeChart series={netSeries} formatValue={fmtRate} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
+      {:else if activeRange === 'live' && liveSeedPending}
+        <!-- see the CPU card's own doc above -->
       {:else}
         <p class="microlabel container-detail__empty">No network data for this range.</p>
       {/if}
@@ -294,6 +321,8 @@
       <span class="microlabel">Disk IO</span>
       {#if hasPoints('io.read_bps') || hasPoints('io.write_bps')}
         <TimeChart series={ioSeries} formatValue={fmtRate} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
+      {:else if activeRange === 'live' && liveSeedPending}
+        <!-- see the CPU card's own doc above -->
       {:else}
         <p class="microlabel container-detail__empty">No disk IO data for this range.</p>
       {/if}

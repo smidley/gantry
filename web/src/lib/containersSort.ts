@@ -64,7 +64,7 @@ export function sortContainerNames(
   dir: SortDir,
   nowTs: number,
 ): string[] {
-  const empty: ContainerDTO = { state: '', health: '', image: '', metrics: {} };
+  const empty: ContainerDTO = { state: '', health: '', image: '', icon: '', metrics: {} };
   return [...names].sort((a, b) => {
     const ka = sortKey(a, containers[a] ?? empty, column, nowTs);
     const kb = sortKey(b, containers[b] ?? empty, column, nowTs);

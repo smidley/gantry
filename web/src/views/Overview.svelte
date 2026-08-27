@@ -95,18 +95,14 @@
     tween.set(value, { duration: prefersReducedMotion.current ? 0 : TWEEN_MS, easing: cubicOut });
   }
 
-  let cpuTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let memTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let netRxTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
+  // netTxTween/ioWriteTween are value2's own live tween -- StatTile's
+  // hero number (value/liveValue below) now owns its OWN Tween
+  // internally (hover-scrub needs a raw number to ease toward/from), but
+  // value2 has no sparkline to scrub against and stays exactly as it was.
   let netTxTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let ioReadTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
   let ioWriteTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
 
-  $effect(() => tweenTo(cpuTween, host['cpu.total'] ?? 0));
-  $effect(() => tweenTo(memTween, host['mem.used_pct'] ?? 0));
-  $effect(() => tweenTo(netRxTween, netRx));
   $effect(() => tweenTo(netTxTween, netTx));
-  $effect(() => tweenTo(ioReadTween, ioRead));
   $effect(() => tweenTo(ioWriteTween, ioWrite));
 
   let containerEntries = $derived(Object.entries(live.frame?.containers ?? {}));
@@ -129,12 +125,24 @@
   // it's looked at again).
   let events = $state([]);
 
+  // eventsSeedPending gates the "No events yet." message below the same
+  // way ContainerDetail/GPUEntityCard's own liveSeedPending gates their
+  // chart cards: while true, a truly-empty `events` stays silent instead
+  // of flashing that message the instant this view mounts (or remounts,
+  // navigating away and back), before the very first loadEvents() below
+  // has had a chance to resolve. Only ever flips false once, on that
+  // first resolution (success or failure) -- a later poll/focus refresh
+  // finding zero events is a real "No events yet.", not a pending state.
+  let eventsSeedPending = $state(true);
+
   async function loadEvents() {
     try {
       events = await fetchEvents({ limit: 8 });
     } catch {
       // A transient fetch failure leaves the last-good feed showing
       // rather than blanking it -- the next poll or focus tries again.
+    } finally {
+      eventsSeedPending = false;
     }
   }
 
@@ -154,18 +162,20 @@
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
   <div class="overview__tiles">
-    <StatTile label="CPU" value={fmtPct(cpuTween.current)} sparklinePoints={cpuRing.points} />
-    <StatTile label="Memory" value={fmtPct(memTween.current)} sparklinePoints={memRing.points} />
+    <StatTile label="CPU" liveValue={host['cpu.total'] ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
+    <StatTile label="Memory" liveValue={host['mem.used_pct'] ?? 0} formatValue={fmtPct} sparklinePoints={memRing.points} />
     <StatTile
       label="Network"
-      value={`↓ ${fmtRate(netRxTween.current)}`}
+      liveValue={netRx}
+      formatValue={(v) => `↓ ${fmtRate(v)}`}
       value2={fmtRate(netTxTween.current)}
       label2="↑"
       sparklinePoints={netRxRing.points}
     />
     <StatTile
       label="Disk IO"
-      value={`r ${fmtRate(ioReadTween.current)}`}
+      liveValue={ioRead}
+      formatValue={(v) => `r ${fmtRate(v)}`}
       value2={fmtRate(ioWriteTween.current)}
       label2="w"
       sparklinePoints={ioReadRing.points}
@@ -218,7 +228,9 @@
 
     <div class="card overview__events">
       <span class="microlabel">Recent events</span>
-      {#if events.length === 0}
+      {#if eventsSeedPending}
+        <!-- first loadEvents() call hasn't settled yet -- see eventsSeedPending's own doc -->
+      {:else if events.length === 0}
         <p class="microlabel overview__events-empty">No events yet.</p>
       {:else}
         <div class="overview__events-list">

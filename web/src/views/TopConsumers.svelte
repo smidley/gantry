@@ -161,7 +161,7 @@
     {:else if loading}
       <p class="microlabel top-consumers__loading">Loading…</p>
     {:else}
-      <TopBarList {rows} formatValue={FORMATTERS[resource]} {emptyMessage} />
+      <TopBarList {rows} formatValue={FORMATTERS[resource]} {emptyMessage} live={windowKey === 'now'} />
     {/if}
   </div>
 </div>

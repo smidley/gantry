@@ -137,3 +137,29 @@ test('LivePulse shows live state while frames flow', async ({ page }) => {
   });
   await expect(page.locator('.live-pulse__text')).toHaveText('live · 2s');
 });
+
+// Smooth-streaming (docs/superpowers/sdd/smooth-streaming) adds a shared
+// rAF-driven animation loop for live charts/numbers, but the whole
+// feature is a no-op under prefers-reduced-motion -- the driver never
+// starts at all (see lib/streamdriver.svelte.ts), and every svelte/
+// motion Tween collapses to duration 0. This context is scoped to just
+// this describe block (test.use here doesn't affect the suite's other
+// tests, which run under normal motion) so it can assert the ONE thing
+// that must still be true regardless: data keeps flowing, just without
+// any animation smoothing it.
+test.describe('reduced motion', () => {
+  test.use({ reducedMotion: 'reduce' });
+
+  test('overview still renders and ticks discretely under prefers-reduced-motion', async ({ page }) => {
+    await page.goto('#/');
+    await expect(page.locator('h1.page-title')).toHaveText('Overview');
+
+    // Same locator/assertion shape as the un-reduced "CPU tile ticks"
+    // test above -- reduced motion must not break the underlying SSE
+    // data flow, only the animation on top of it.
+    const cpuNumber = page.locator('.overview__tiles .stat-tile').first().locator('.stat-tile__number');
+    await expect(cpuNumber).toBeVisible();
+    const initial = await cpuNumber.textContent();
+    await expect.poll(() => cpuNumber.textContent(), { timeout: 6_000 }).not.toBe(initial);
+  });
+});

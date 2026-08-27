@@ -8,6 +8,9 @@
 -->
 <script>
   import { onMount } from 'svelte';
+  import { Tween } from 'svelte/motion';
+  import { cubicOut } from 'svelte/easing';
+  import { prefersReducedMotion } from 'svelte/motion';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { fmtPct, fmtRate } from '../lib/format';
@@ -24,6 +27,7 @@
   import EventFeedItem from '../components/EventFeedItem.svelte';
 
   const EVENTS_POLL_MS = 30_000;
+  const TWEEN_MS = 400;
 
   let cpuRing = liveRing((f) => f.host?.['cpu.total']);
   let memRing = liveRing((f) => f.host?.['mem.used_pct']);
@@ -33,6 +37,29 @@
   let host = $derived(live.frame?.host ?? {});
   let ioRead = $derived(sumMetricsByPattern(host, 'diskio', '.read_bps'));
   let ioWrite = $derived(sumMetricsByPattern(host, 'diskio', '.write_bps'));
+
+  // Tweened numbers (mechanism 3, smooth-streaming): the top-row stat
+  // tiles ease toward each new SSE value over TWEEN_MS rather than
+  // snapping every 2s. The raw number is what's tweened; format.ts still
+  // does all the display formatting below, just fed a smoothed number
+  // instead of the instantaneous one (see streamdriver's own design doc).
+  function tweenTo(tween, value) {
+    tween.set(value, { duration: prefersReducedMotion.current ? 0 : TWEEN_MS, easing: cubicOut });
+  }
+
+  let cpuTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
+  let memTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
+  let netRxTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
+  let netTxTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
+  let ioReadTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
+  let ioWriteTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
+
+  $effect(() => tweenTo(cpuTween, host['cpu.total'] ?? 0));
+  $effect(() => tweenTo(memTween, host['mem.used_pct'] ?? 0));
+  $effect(() => tweenTo(netRxTween, host['net.rx_bps'] ?? 0));
+  $effect(() => tweenTo(netTxTween, host['net.tx_bps'] ?? 0));
+  $effect(() => tweenTo(ioReadTween, ioRead));
+  $effect(() => tweenTo(ioWriteTween, ioWrite));
 
   let containerEntries = $derived(Object.entries(live.frame?.containers ?? {}));
   let runningCount = $derived(containerEntries.filter(([, c]) => c.state === 'running').length);
@@ -79,19 +106,19 @@
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
   <div class="overview__tiles">
-    <StatTile label="CPU" value={fmtPct(host['cpu.total'] ?? 0)} sparklinePoints={cpuRing.points} />
-    <StatTile label="Memory" value={fmtPct(host['mem.used_pct'] ?? 0)} sparklinePoints={memRing.points} />
+    <StatTile label="CPU" value={fmtPct(cpuTween.current)} sparklinePoints={cpuRing.points} />
+    <StatTile label="Memory" value={fmtPct(memTween.current)} sparklinePoints={memRing.points} />
     <StatTile
       label="Network"
-      value={`↓ ${fmtRate(host['net.rx_bps'] ?? 0)}`}
-      value2={fmtRate(host['net.tx_bps'] ?? 0)}
+      value={`↓ ${fmtRate(netRxTween.current)}`}
+      value2={fmtRate(netTxTween.current)}
       label2="↑"
       sparklinePoints={netRxRing.points}
     />
     <StatTile
       label="Disk IO"
-      value={`r ${fmtRate(ioRead)}`}
-      value2={fmtRate(ioWrite)}
+      value={`r ${fmtRate(ioReadTween.current)}`}
+      value2={fmtRate(ioWriteTween.current)}
       label2="w"
       sparklinePoints={ioReadRing.points}
     />
@@ -138,7 +165,7 @@
         <span class="microlabel">Top consumers &middot; CPU</span>
         <a href="#/top" class="overview__top-link">View all &rarr;</a>
       </div>
-      <TopBarList rows={topCPU} formatValue={fmtPct} />
+      <TopBarList rows={topCPU} formatValue={fmtPct} live={true} />
     </div>
 
     <div class="card overview__events">

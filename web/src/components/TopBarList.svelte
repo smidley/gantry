@@ -14,13 +14,23 @@
   knowledge of its own. emptyMessage (additive, optional) lets a caller
   give its own empty state a window-specific direction (e.g. "No data in
   the last 7 days yet.") rather than the generic default.
+
+  live (additive, optional, default false -- smooth-streaming mechanism
+  3) opts a caller into tweening each row's own bar width AND value --
+  TopConsumers passes `live={windowKey === 'now'}` (only Now recomputes
+  every SSE frame; every fetched window must stay static), while
+  Overview's always-live compact module just passes true. Each row's own
+  Tween actually lives in TopBarRow (see its doc for why).
 -->
 <script>
+  import TopBarRow from './TopBarRow.svelte';
+
   let {
     rows = [],
     formatValue = (v) => String(v),
     linkFor = (entity) => `#/containers/${encodeURIComponent(entity)}`,
     emptyMessage = 'No data for this window yet.',
+    live = false,
   } = $props();
 
   let maxValue = $derived(rows.reduce((m, r) => Math.max(m, r.value), 0));
@@ -31,13 +41,7 @@
 {:else}
   <ol class="top-bar-list">
     {#each rows as row (row.entity)}
-      <li class="top-bar-list__row">
-        <a class="top-bar-list__name" href={linkFor(row.entity)} title={row.entity}>{row.entity}</a>
-        <div class="top-bar-list__track">
-          <div class="top-bar-list__bar" style="width: {maxValue > 0 ? (row.value / maxValue) * 100 : 0}%"></div>
-        </div>
-        <span class="top-bar-list__value tabular-nums">{formatValue(row.value)}</span>
-      </li>
+      <TopBarRow {row} {maxValue} {formatValue} {linkFor} {live} />
     {/each}
   </ol>
 {/if}
@@ -50,46 +54,6 @@
     margin: 0;
     padding: 0;
     list-style: none;
-  }
-  .top-bar-list__row {
-    display: grid;
-    grid-template-columns: minmax(5rem, 9rem) 1fr auto;
-    align-items: center;
-    gap: 0.6rem;
-  }
-  .top-bar-list__name {
-    color: var(--ink);
-    text-decoration: none;
-    font-size: 0.85rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-height: 40px;
-    display: flex;
-    align-items: center;
-  }
-  .top-bar-list__name:hover {
-    text-decoration: underline;
-  }
-  .top-bar-list__track {
-    position: relative;
-    height: 18px;
-    background: color-mix(in oklab, var(--ink) 6%, transparent);
-    border-radius: 4px;
-  }
-  .top-bar-list__bar {
-    position: absolute;
-    inset: 0 auto 0 0;
-    background: var(--series-1);
-    border-radius: 4px;
-    min-width: 2px;
-  }
-  .top-bar-list__value {
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
-    color: var(--ink);
-    white-space: nowrap;
-    text-align: right;
   }
   .top-bar-list__empty {
     margin: 0;

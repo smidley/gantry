@@ -107,6 +107,24 @@ export function seqStep(pct: number): string {
   return `var(--seq-${step}00)`;
 }
 
+// parityIsRunning applies the parity-progress wire semantic var.go's
+// collector and the fake generator both now guarantee: a check is
+// running iff parity.progress_pct is present AND strictly positive.
+// Presence alone used to be sufficient (the metric was only ever written
+// while a check was active), but the finish tick now ALSO writes one
+// explicit terminal sample of 0 for both parity.progress_pct/speed_bps
+// (see var.go's tickArray and fake.go's emitArray) precisely so the live
+// frame has a permanent, unambiguous "not running" value instead of the
+// last real sample (e.g. 99.9%) sticking forever -- the store's live
+// ring has no sample expiry of its own. A genuinely-running check can
+// never legitimately read exactly 0: progress is pos/size*100 with
+// pos>0 by definition of "running", a strictly positive float for any
+// pos>=1 (down to a small fraction of a percent on a multi-TB array), so
+// ">0" never misclassifies an early-but-real check as idle.
+export function parityIsRunning(pct: number | undefined): boolean {
+  return pct !== undefined && pct > 0;
+}
+
 // etaFromProgress estimates seconds-to-completion from two progress
 // percentage observations spaced apart in time -- a parity check's
 // backend-reported progress_pct and speed_bps use unrelated units

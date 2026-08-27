@@ -284,7 +284,8 @@ func TestTickTwiceEmitsArrayStateEventInIsolation(t *testing.T) {
 func TestTickThriceEmitsParityStartThenFinishWithoutStateNoise(t *testing.T) {
 	dir := t.TempDir()
 	events := &fakeEvents{}
-	c := New(newFakeSink(), events, dir, t.TempDir())
+	sink := newFakeSink()
+	c := New(sink, events, dir, t.TempDir())
 
 	copyFixture(t, "testdata/var_started.ini", filepath.Join(dir, "var.ini"))
 	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
@@ -302,6 +303,19 @@ func TestTickThriceEmitsParityStartThenFinishWithoutStateNoise(t *testing.T) {
 		{Kind: "parity.start", Entity: "array", Severity: "info"},
 		{Kind: "parity.finish", Entity: "array", Severity: "info", Detail: "reached 50.0%"},
 	}, events.events, "STARTED throughout means only the parity edge should fire, isolated from any state event")
+
+	// On the same finish tick, the collector must overwrite both parity
+	// metrics with an explicit final zero -- otherwise the last real
+	// sample recorded above (50%, 128MB/s) is what Ring.Latest keeps
+	// forever, since nothing else ever writes those keys again until a
+	// NEXT check starts. This is the fix for the live frame reading as
+	// "still running" indefinitely after a real finish (Storage/
+	// ArrayCard's parityRunning derivation depends on this "zero means
+	// not running" wire semantic).
+	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}], 1e-9,
+		"finish must overwrite parity.progress_pct with an explicit 0, not leave the last running sample in place")
+	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}], 1e-9,
+		"finish must overwrite parity.speed_bps with an explicit 0, not leave the last running sample in place")
 }
 
 func TestTickMissingVarIniReturnsError(t *testing.T) {

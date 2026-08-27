@@ -4,6 +4,7 @@ import {
   etaFromProgress,
   GPU_ENGINE_ORDER,
   GPU_ENTITY_ENGINE_ORDER,
+  parityIsRunning,
   seqStep,
   sharesFromMetrics,
   sumMetricsByPattern,
@@ -127,6 +128,23 @@ describe('seqStep', () => {
   it('clamps out-of-range input to the nearest end stop', () => {
     expect(seqStep(-10)).toBe('var(--seq-100)');
     expect(seqStep(150)).toBe('var(--seq-700)');
+  });
+});
+
+describe('parityIsRunning', () => {
+  it('is false when parity.progress_pct is absent (never started, or the key genuinely is not there)', () => {
+    expect(parityIsRunning(undefined)).toBe(false);
+  });
+
+  it('is false at exactly 0 -- the finish-tick sentinel var.go/fake.go now write on completion', () => {
+    expect(parityIsRunning(0)).toBe(false);
+  });
+
+  it('is true for any positive value, including a fractional just-started reading', () => {
+    expect(parityIsRunning(0.0001)).toBe(true);
+    expect(parityIsRunning(50)).toBe(true);
+    expect(parityIsRunning(99.99)).toBe(true);
+    expect(parityIsRunning(100)).toBe(true);
   });
 });
 

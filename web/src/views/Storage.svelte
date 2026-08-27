@@ -12,7 +12,7 @@
   import { live } from '../lib/sse.svelte';
   import { fetchEvents } from '../lib/api';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtRelTime } from '../lib/format';
-  import { etaFromProgress, seqStep, sharesFromMetrics } from '../lib/metrics';
+  import { etaFromProgress, parityIsRunning, seqStep, sharesFromMetrics } from '../lib/metrics';
   import { diskRole, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import HealthDot from '../components/HealthDot.svelte';
 
@@ -29,7 +29,12 @@
   let started = $derived(array['array.started']);
   let parityPct = $derived(array['parity.progress_pct']);
   let paritySpeed = $derived(array['parity.speed_bps']);
-  let parityRunning = $derived(parityPct !== undefined);
+  // parityIsRunning treats an explicit 0 (the wire value var.go/fake.go
+  // now both write on finish -- see its own doc) as idle, not merely
+  // "key present" -- a bare `!== undefined` check would read that
+  // finish-zero as still running forever, right back into the bug this
+  // is fixing.
+  let parityRunning = $derived(parityIsRunning(parityPct));
   let moverRunning = $derived(array['mover.running'] === 1);
   let shares = $derived(sharesFromMetrics(array));
 

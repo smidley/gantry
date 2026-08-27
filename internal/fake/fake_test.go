@@ -207,13 +207,19 @@ func TestParityCheckStartsTwoMinutesAfterBootAndFinishesMonotonically(t *testing
 	for _, s := range progress {
 		require.GreaterOrEqual(t, s.TS, boot.Add(2*time.Minute).Unix(), "no progress before the 2-minute start")
 	}
-	for i := 1; i < len(progress); i++ {
-		require.GreaterOrEqual(t, progress[i].Val, progress[i-1].Val, "progress must be monotonically non-decreasing while running")
+	// The very last sample is the one-time finish-zero (asserted below),
+	// deliberately NOT part of the "running" climb -- excluded here so
+	// the monotonic check still covers only the climb itself.
+	runningProgress := progress[:len(progress)-1]
+	for i := 1; i < len(runningProgress); i++ {
+		require.GreaterOrEqual(t, runningProgress[i].Val, runningProgress[i-1].Val, "progress must be monotonically non-decreasing while running")
 	}
 
 	speed := sink.recs[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}]
 	require.NotEmpty(t, speed)
-	for _, s := range speed {
+	runningSpeed := speed[:len(speed)-1]
+	require.NotEmpty(t, runningSpeed, "the run must have produced at least one real speed sample before the finish-zero")
+	for _, s := range runningSpeed {
 		require.InDelta(t, 130_000_000, s.Val, 130_000_000*0.15, "parity speed must be ~130MB/s")
 	}
 
@@ -225,6 +231,20 @@ func TestParityCheckStartsTwoMinutesAfterBootAndFinishesMonotonically(t *testing
 	require.Equal(t, "array", finishes[0].Entity)
 	require.Contains(t, finishes[0].Detail, "%", "finish detail should report reached progress, mirroring var.go's transitionEvents")
 	require.Greater(t, finishes[0].TS, starts[0].TS)
+
+	// Mirrors real var.go's identical fix: the finish tick must also
+	// overwrite both parity metrics with an explicit terminal zero, on
+	// the SAME tick as parity.finish -- otherwise the live frame keeps
+	// reporting the last real sample (~100%, ~130MB/s) forever, since
+	// nothing else ever writes those keys again until a next check
+	// starts (see var_test.go's TestTickThriceEmitsParityStartThenFinish
+	// WithoutStateNoise for the real-collector half of this same fix).
+	lastProgress := progress[len(progress)-1]
+	lastSpeed := speed[len(speed)-1]
+	require.Equal(t, 0.0, lastProgress.Val, "finish must append an explicit zero progress sample")
+	require.Equal(t, 0.0, lastSpeed.Val, "finish must append an explicit zero speed sample")
+	require.Equal(t, finishes[0].TS, lastProgress.TS, "the zero progress sample must land on the same tick as parity.finish")
+	require.Equal(t, finishes[0].TS, lastSpeed.TS, "the zero speed sample must land on the same tick as parity.finish")
 }
 
 func TestMoverTogglesRoughlyEverySevenMinutes(t *testing.T) {

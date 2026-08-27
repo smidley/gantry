@@ -132,6 +132,21 @@ func (c *Collector) tickArray(now time.Time) error {
 	if next.ParityRunning {
 		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, ts, next.ParityProgress)
 		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}, ts, next.ParitySpeedBps)
+	} else if c.havePrevArray && c.prevArray.ParityRunning {
+		// The ParityRunning true->false transition: record ONE final zero
+		// sample for each parity metric so "not running" has an explicit,
+		// permanent wire value. Without this, the store's live ring simply
+		// keeps whatever was last recorded while the run was active (e.g.
+		// 99.9%, 135 MB/s) forever -- Ring.Latest has no expiry -- so the
+		// live frame reads as "still running" indefinitely after a finish.
+		// "Zero when not running" is now the wire semantic the UI's
+		// parityRunning derivation depends on (see parityIsRunning in
+		// web/src/lib/metrics.ts). Guarded on the prev-tick's own
+		// ParityRunning (checked before c.prevArray is overwritten below)
+		// so this fires exactly once, on the same tick as the
+		// parity.finish event, never on every idle tick after.
+		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, ts, 0)
+		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}, ts, 0)
 	}
 
 	if c.havePrevArray {

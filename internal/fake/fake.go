@@ -338,6 +338,19 @@ func (g *Generator) emitArray(ts int64, elapsed time.Duration) {
 		speed := paritySpeedBps * (0.95 + 0.1*g.rng.Float64())
 		g.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, ts, progress)
 		g.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}, ts, speed)
+	} else if g.parityStarted && !g.parityFinished {
+		// Mirrors real var.go's identical fix (see its tickArray doc): on
+		// the one tick where the check flips from running to not, record
+		// an explicit zero for both metrics so the live frame doesn't
+		// keep reporting the last real sample (e.g. 98%, ~130MB/s)
+		// forever -- the store's live ring has no sample-expiry. Guarded
+		// on parityStarted && !parityFinished (both still reflecting the
+		// PRIOR tick's state -- the switch below is what sets
+		// parityFinished, after this) so it fires exactly once, on the
+		// same tick as the parity.finish event, not on every idle tick
+		// before the check even started.
+		g.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, ts, 0)
+		g.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}, ts, 0)
 	}
 
 	switch {

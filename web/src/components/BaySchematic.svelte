@@ -60,6 +60,12 @@
     gap: 4px;
     height: 46px;
     flex-wrap: wrap;
+    /* A flagged bar's callout floats above its own top edge (see
+       .bay-schematic__callout below) -- extra top margin keeps it clear
+       of the "Array · N members" label immediately above instead of
+       crowding its line (reproduced live at 375px, where the two
+       nearly touched). */
+    margin-top: 0.65rem;
   }
   .bay-schematic__bar {
     position: relative;

@@ -531,7 +531,15 @@
     display: grid;
     grid-template-columns: 1.25fr 1fr;
     gap: 2.5rem;
-    align-items: center;
+    /* start, not the mockup's own center: the real rail carries live
+       sparklines on every row (Network/Disk IO's existing rings are
+       preserved, not dropped to match the mockup's text-only versions
+       of those two rows), so it's routinely taller than the headline
+       zone -- centering two columns of very different heights left an
+       awkward, asymmetric gap above the shorter one (reproduced live).
+       Aligning both to the top reads cleanly regardless of which
+       column ends up taller. */
+    align-items: start;
     padding-bottom: 1.5rem;
   }
   @media (max-width: 47.9375rem) {

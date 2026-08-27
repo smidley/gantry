@@ -28,3 +28,19 @@ jobs:
       - run: cd web && npm test
       - run: go build -tags webdist ./...
       - run: docker build -t gantry:ci .
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: cd web && npm ci
+      - run: cd web && npx playwright install --with-deps chromium
+      - run: cd web && npx playwright test

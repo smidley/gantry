@@ -45,10 +45,21 @@ test('overview: status headline reflects fleet/array/disk state, the fleet strip
   await expect(page.locator('.overview__attention')).toHaveCount(isAllClear ? 0 : 1);
 
   // Fleet strip is D2's own "countable, literal" evidence -- one unit
-  // per container, so its count must equal the fake fleet's own size
-  // (20 archetypes, fake.go's `fleet`).
+  // per container, so its count must equal the fleet sentence's own
+  // stated total. Deliberately NOT a hardcoded 20: this box's docker
+  // collector runs for real alongside fake.go's 20 synthetic
+  // archetypes (reproduced live while building this -- a handful of
+  // the sandbox's own real containers showed up in the fleet total
+  // too), so the true size varies by environment. This instead checks
+  // that the strip and the sentence -- two client-side views of the
+  // exact same live container set -- agree with each other.
+  const fleetSentence = page.locator('.overview__sub-line').first();
+  await expect(fleetSentence).toBeVisible();
+  const statedTotal = Number((await fleetSentence.textContent())?.match(/^(\d+)/)?.[1]);
+  expect(statedTotal).toBeGreaterThan(0);
+
   const fleetUnits = page.locator('.fleet-strip .fleet-unit');
-  await expect.poll(() => fleetUnits.count()).toBe(20);
+  await expect.poll(() => fleetUnits.count()).toBe(statedTotal);
 
   // CPU tile is the first row of Overview's instrument rail. The fake
   // generator writes host cpu.total with real per-tick jitter (see

@@ -20,7 +20,7 @@ test('overview: hovering one stat-tile sparkline scrubs and pins every tile in s
 
   await page.goto('#/');
 
-  const tiles = page.locator('.overview__tiles .stat-tile');
+  const tiles = page.locator('.overview__metrics-rail .stat-tile');
   const tile1 = tiles.nth(0);
   const tile2 = tiles.nth(1);
   await expect(tile1).toBeVisible();

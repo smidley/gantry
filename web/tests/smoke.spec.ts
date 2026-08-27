@@ -23,19 +23,39 @@ test('every route renders its h1 landmark', async ({ page }) => {
   }
 });
 
-test('overview: fleet count reflects the fake fleet and the CPU tile ticks', async ({ page }) => {
+test('overview: status headline reflects fleet/array/disk state, the fleet strip is fully countable, and the CPU tile ticks', async ({
+  page,
+}) => {
   await page.goto('#/');
 
-  const runningCount = page.locator('.overview__fleet-count').first().locator('.tabular-nums');
-  await expect(runningCount).toBeVisible();
-  expect(Number(await runningCount.textContent())).toBeGreaterThanOrEqual(15);
+  // D2's headline replaces the old fleet-count card: a plain sentence,
+  // either the all-clear or a counted "N things need you" -- the fake
+  // fleet boots 100% running/healthy (fake.go's Metas()) and its one
+  // disk.errors trigger is 5 real minutes into server uptime, well
+  // outside this test's own window, so "Everything is running" is the
+  // expected reading fresh off a CI-built server; a long-lived reused
+  // local dev server (reuseExistingServer, non-CI only) could
+  // legitimately have crossed that mark, so both readings are accepted
+  // and checked for internal consistency instead of asserting one only.
+  const headline = page.locator('.overview__headline-text');
+  await expect(headline).toBeVisible();
+  const headlineText = await headline.textContent();
+  const isAllClear = headlineText === 'Everything is running';
+  expect(isAllClear || /^\d+ things? need(s)? you$/.test(headlineText ?? '')).toBe(true);
+  await expect(page.locator('.overview__attention')).toHaveCount(isAllClear ? 0 : 1);
 
-  // CPU tile is the first of Overview's four top-row stat tiles. The fake
+  // Fleet strip is D2's own "countable, literal" evidence -- one unit
+  // per container, so its count must equal the fake fleet's own size
+  // (20 archetypes, fake.go's `fleet`).
+  const fleetUnits = page.locator('.fleet-strip .fleet-unit');
+  await expect.poll(() => fleetUnits.count()).toBe(20);
+
+  // CPU tile is the first row of Overview's instrument rail. The fake
   // generator writes host cpu.total with real per-tick jitter (see
   // fake.go's Tick), so two samples a few ticks apart should differ --
   // expect.poll (not a fixed sleep) waits only as long as it actually
   // takes, up to the 6s window the brief allows.
-  const cpuNumber = page.locator('.overview__tiles .stat-tile').first().locator('.stat-tile__number');
+  const cpuNumber = page.locator('.overview__metrics-rail .stat-tile').first().locator('.stat-tile__number');
   const initial = await cpuNumber.textContent();
   await expect.poll(() => cpuNumber.textContent(), { timeout: 6_000 }).not.toBe(initial);
 });
@@ -157,7 +177,7 @@ test.describe('reduced motion', () => {
     // Same locator/assertion shape as the un-reduced "CPU tile ticks"
     // test above -- reduced motion must not break the underlying SSE
     // data flow, only the animation on top of it.
-    const cpuNumber = page.locator('.overview__tiles .stat-tile').first().locator('.stat-tile__number');
+    const cpuNumber = page.locator('.overview__metrics-rail .stat-tile').first().locator('.stat-tile__number');
     await expect(cpuNumber).toBeVisible();
     const initial = await cpuNumber.textContent();
     await expect.poll(() => cpuNumber.textContent(), { timeout: 6_000 }).not.toBe(initial);

@@ -7,12 +7,24 @@
   cursor (to = the oldest loaded event's ts, minus one so that inclusive
   boundary isn't re-fetched) -- see loadMore's own doc for the one
   known edge case that cursor shape accepts, per the brief's own spec.
+
+  Auto-refresh: this is a monitoring page, so it can't rely on the user
+  ever re-triggering the filter effect below -- left open, it would show
+  the same page-load snapshot forever. refreshFirstPage() re-fetches just
+  the first page on a 30s interval and on window focus, the same
+  onMount + setInterval + focus-listener shape Overview's loadEvents and
+  Storage's loadParityHistory both already use for their own out-of-frame
+  event fetches. See refreshFirstPage's own doc for why a background
+  refresh REPLACES the whole list (discarding any extra "Load more" pages)
+  rather than trying to preserve or re-fetch them.
 -->
 <script>
+  import { onMount } from 'svelte';
   import { fetchEvents } from '../lib/api';
   import EventFeedItem from '../components/EventFeedItem.svelte';
 
   const PAGE_LIMIT = 200;
+  const REFRESH_MS = 30_000;
 
   // KNOWN_KINDS is the fixed vocabulary the filter row's checkboxes
   // cover -- every event kind any collector/fake generator can emit
@@ -151,6 +163,75 @@
       }
     }
   }
+
+  // refreshFirstPage silently re-fetches the first page on the current
+  // filters, on a timer and on window focus -- see this file's top-of-
+  // file doc for why a monitoring page needs this at all. Two choices
+  // that need naming, both made in favor of "simple and provably
+  // correct" over "clever":
+  //
+  // 1. No loading/failed toggling, and a transient failure just leaves
+  //    the last-good list showing -- matching Overview's loadEvents /
+  //    Storage's loadParityHistory background-refresh convention. loading
+  //    is reserved for user-driven actions (a filter change, a Load More
+  //    click); flipping it on a silent 30s timer would flash the whole
+  //    list to "Loading…" for no user-visible reason.
+  // 2. On success this REPLACES the entire events array with the fresh
+  //    first page, discarding any extra pages the user had reached via
+  //    Load More, rather than trying to keep or re-fetch them. Keeping
+  //    them by array position (fresh page 1 + old events.slice(PAGE_LIMIT))
+  //    is NOT actually correct: if any events arrived since the last
+  //    full load, the fresh first page's oldest row shifts, opening a gap
+  //    (events that fall between the new page's cutoff and the old
+  //    second page's start that were never fetched) with no way to
+  //    detect it from array position alone. Re-fetching every already-
+  //    loaded page instead (chaining `to` cursors the way loadMore
+  //    itself does) IS correct, but is a background loop of N requests
+  //    for what's meant to be a lightweight silent refresh -- not the
+  //    simpler option. Resetting to a fresh, fully self-consistent first
+  //    page has no seam to get wrong; the user can just click Load More
+  //    again if they want to go further back.
+  //
+  // Uses the same abortInFlight()/activeController dance as the filter
+  // effect and loadMore -- so a filter change or a Load More click that
+  // happens to land while this is in flight still correctly wins (this
+  // request gets aborted, its catch swallows that silently), and this
+  // refresh correctly aborts either of THEM if a tick lands mid-flight.
+  async function refreshFirstPage() {
+    const kinds = Array.from(selectedKinds);
+    const entity = entityFilter.trim();
+    const preset = timePreset;
+
+    abortInFlight();
+    const controller = new AbortController();
+    activeController = controller;
+    try {
+      const result = await fetchEvents({
+        kinds: kinds.length > 0 ? kinds : undefined,
+        entity: entity || undefined,
+        from: presetFrom(preset),
+        limit: PAGE_LIMIT,
+        signal: controller.signal,
+      });
+      events = result;
+      hasMore = result.length === PAGE_LIMIT;
+    } catch {
+      // Aborted (superseded by a real user action) or a transient
+      // network failure -- either way, leave the last-good list showing
+      // rather than blanking it; the next tick or focus tries again.
+    } finally {
+      if (activeController === controller) activeController = null;
+    }
+  }
+
+  onMount(() => {
+    const interval = setInterval(refreshFirstPage, REFRESH_MS);
+    window.addEventListener('focus', refreshFirstPage);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', refreshFirstPage);
+    };
+  });
 </script>
 
 <div class="events-view">

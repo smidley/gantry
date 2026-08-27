@@ -195,14 +195,14 @@
   <div class="storage-view__row">
     <div class="card storage-shares">
       <span class="microlabel">Shares</span>
-      <p class="microlabel storage-shares__caption">
-        Share sizes are the backing array or pool total — Unraid doesn't track true per-share usage.
-      </p>
       {#if shares.length === 0}
         <p class="microlabel storage-shares__empty">
           No share data yet.{sources.unraid && sources.unraid !== 'ok' ? ` ${sources.unraid}` : ''}
         </p>
       {:else}
+        <p class="microlabel storage-shares__caption">
+          Share sizes are the backing array or pool total — Unraid doesn't track true per-share usage.
+        </p>
         <div class="storage-shares__table-wrap">
           <table class="storage-shares__table">
             <thead>

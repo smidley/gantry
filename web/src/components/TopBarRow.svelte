@@ -84,6 +84,7 @@
     background: var(--series-1);
     border-radius: 4px;
     min-width: 2px;
+    transition: filter 150ms ease;
   }
   .top-bar-list__value {
     font-family: var(--font-mono);
@@ -91,5 +92,14 @@
     color: var(--ink);
     white-space: nowrap;
     text-align: right;
+  }
+  /* Bars are current-state, not time series -- no scrubbing, just
+     animated emphasis on hover (brightness + a weight-up on the value
+     already sitting right next to it). */
+  .top-bar-list__row:hover .top-bar-list__bar {
+    filter: brightness(1.15);
+  }
+  .top-bar-list__row:hover .top-bar-list__value {
+    font-weight: 700;
   }
 </style>

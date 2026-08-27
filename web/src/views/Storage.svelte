@@ -397,11 +397,21 @@
   }
   .storage-disk__usage-fill {
     height: 100%;
+    transition: filter 150ms ease;
   }
   .storage-disk__usage-pct {
     font-size: 0.78rem;
     min-width: 3em;
     text-align: right;
+  }
+  /* Bars are current-state, not time series -- no scrubbing, just
+     animated emphasis on hover; pct+bytes are already shown adjacent,
+     so this is emphasis only, no new value display. */
+  .storage-disk__usage:hover .storage-disk__usage-fill {
+    filter: brightness(1.15);
+  }
+  .storage-disk__usage:hover .storage-disk__usage-pct {
+    font-weight: 700;
   }
   .storage-disk__bytes {
     font-size: 0.75rem;

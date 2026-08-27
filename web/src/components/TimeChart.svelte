@@ -41,6 +41,20 @@
   // fetched/historical range must stay exactly as static as it is today.
   let { series = [], unit = '', height = 220, markers = [], syncKey = undefined, formatValue = undefined, live = false } = $props();
 
+  // FOCUS_DIM_ALPHA/FOCUS_PROX_PX (hover-scrub design's "per-series
+  // focus"): uPlot's own built-in cursor.focus mechanism handles this
+  // entirely -- no custom code needed. Enabling it dims every series
+  // (canvas stroke/fill, its own DOM cursor-point marker, AND its own
+  // legend row -- all three, automatically) except whichever one is
+  // nearest the cursor, which stays full-alpha; that relative contrast
+  // IS the "nearest series emphasized" the design asks for. FOCUS_PROX_PX
+  // is deliberately huge (the type's own doc caps meaningful values at
+  // 1e6) so a series is always considered "close enough" to focus
+  // regardless of the cursor's actual y-distance from it -- this always
+  // resolves to nearest-by-y rather than only within some pixel radius.
+  const FOCUS_DIM_ALPHA = 0.35;
+  const FOCUS_PROX_PX = 1e6;
+
   const SEVERITY_VAR = {
     info: '--status-good',
     warning: '--status-warning',
@@ -302,8 +316,10 @@
         ],
         cursor: {
           points: { show: true },
+          focus: { prox: FOCUS_PROX_PX },
           ...(syncKey ? { sync: { key: syncKey } } : {}),
         },
+        focus: { alpha: FOCUS_DIM_ALPHA },
         legend: { show: series.length >= 2 },
         hooks: {
           draw: [drawMarkers],
@@ -459,6 +475,17 @@
     color: var(--ink);
     font-family: var(--font-mono);
     font-size: 0.75rem;
+  }
+  /* Per-series focus dimming (see FOCUS_DIM_ALPHA above) sets opacity as
+     a plain inline style/class straight from uPlot's own JS -- these
+     transitions are the only thing that makes that step change read as
+     an eased fade rather than a snap; the DIMMING decision itself stays
+     entirely uPlot's, this is CSS-only polish on top of it. */
+  .time-chart :global(.u-legend tr) {
+    transition: opacity 150ms ease;
+  }
+  .time-chart :global(.u-cursor-pt) {
+    transition: opacity 150ms ease;
   }
   .time-chart__tooltip {
     position: absolute;

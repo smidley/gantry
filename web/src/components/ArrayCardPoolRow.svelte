@@ -61,11 +61,21 @@
   }
   .array-card__pool-fill {
     height: 100%;
+    transition: filter 150ms ease;
   }
   .array-card__pool-pct {
     font-size: 0.75rem;
     min-width: 3em;
     text-align: right;
+  }
+  /* Bars are current-state, not time series -- no scrubbing, just
+     animated emphasis on hover; pct+bytes are already shown adjacent,
+     so this is emphasis only, no new value display. */
+  .array-card__pool-row:hover .array-card__pool-fill {
+    filter: brightness(1.15);
+  }
+  .array-card__pool-row:hover .array-card__pool-pct {
+    font-weight: 700;
   }
   .array-card__pool-bytes {
     font-size: 0.72rem;

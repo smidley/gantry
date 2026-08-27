@@ -43,13 +43,24 @@
   });
 
   onMount(() => {
-    let cancelled = false;
+    // abortController actually tears down the underlying fetch/reader on
+    // cleanup, rather than merely flagging the consumer loop to stop
+    // reading from it. A bare boolean flag (the previous shape here)
+    // left reader.read() parked forever for a quiet container: nothing
+    // told the fetch, or the server's own follow=1 goroutine behind it
+    // (see api_logs.go's drain doc), to actually stop, so the connection
+    // -- and everything it holds open server-side -- outlived the
+    // component that opened it, for every container ever visited in a
+    // session. Aborting rejects the pending read with an AbortError,
+    // which unwinds the for-await loop below through streamLogs' own
+    // `finally` (reader.cancel()) and out to this catch, where it's
+    // recognized and treated as an intentional stop, not a real failure.
+    const controller = new AbortController();
 
     (async () => {
       let pendingPartial = '';
       try {
-        for await (const chunk of streamLogs(name, { follow: true, tail: 500 })) {
-          if (cancelled) break;
+        for await (const chunk of streamLogs(name, { follow: true, tail: 500, signal: controller.signal })) {
           connecting = false;
           // paused: drop incoming lines rather than buffering them
           // invisibly -- there's no separate off-screen store here, so
@@ -66,19 +77,18 @@
             lines = [...lines, ...parts].slice(-MAX_LINES);
           }
         }
-        if (!cancelled && pendingPartial) {
+        if (pendingPartial) {
           lines = [...lines, pendingPartial].slice(-MAX_LINES);
         }
       } catch (err) {
-        if (!cancelled) {
-          connecting = false;
-          error = err instanceof Error ? err.message : String(err);
-        }
+        if (err?.name === 'AbortError') return; // unmounted, or the container name changed
+        connecting = false;
+        error = err instanceof Error ? err.message : String(err);
       }
     })();
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   });
 </script>

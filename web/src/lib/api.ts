@@ -73,8 +73,17 @@ export type TopResource = 'cpu' | 'mem' | 'net' | 'io' | 'gpu';
 export type TopWindow = 'now' | '1h' | '24h' | '7d';
 export type TopAgg = 'avg' | 'peak';
 
-async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+// signal (threaded through every helper below that a view might call
+// repeatedly on a fast-changing selection -- range/resource/window/agg
+// tabs) lets a caller cancel a request it no longer cares about. Passing
+// one through to fetch() does two things together: it actually tears
+// down the in-flight network request (rather than just letting its
+// result be ignored later), and it rejects the returned promise with a
+// DOMException named "AbortError" -- callers distinguish that from a
+// real failure via `err?.name === 'AbortError'` and simply ignore it,
+// since a newer request has already superseded it.
+async function getJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(url, { signal });
   if (!res.ok) {
     throw new Error(`GET ${url}: ${res.status} ${res.statusText}`);
   }
@@ -87,6 +96,7 @@ export function fetchSeries(params: {
   metrics: string[];
   from?: number;
   to?: number;
+  signal?: AbortSignal;
 }): Promise<SeriesResult[]> {
   const q = new URLSearchParams({
     kind: params.kind,
@@ -95,7 +105,7 @@ export function fetchSeries(params: {
   });
   if (params.from !== undefined) q.set('from', String(params.from));
   if (params.to !== undefined) q.set('to', String(params.to));
-  return getJSON<SeriesResult[]>(`/api/series?${q.toString()}`);
+  return getJSON<SeriesResult[]>(`/api/series?${q.toString()}`, params.signal);
 }
 
 export function fetchTop(params: {
@@ -103,11 +113,12 @@ export function fetchTop(params: {
   window: TopWindow;
   agg?: TopAgg;
   limit?: number;
+  signal?: AbortSignal;
 }): Promise<TopRow[]> {
   const q = new URLSearchParams({ resource: params.resource, window: params.window });
   if (params.agg) q.set('agg', params.agg);
   if (params.limit !== undefined) q.set('limit', String(params.limit));
-  return getJSON<TopRow[]>(`/api/top?${q.toString()}`);
+  return getJSON<TopRow[]>(`/api/top?${q.toString()}`, params.signal);
 }
 
 export function fetchEvents(
@@ -161,16 +172,29 @@ export async function putSettings(retention: RetentionSettings): Promise<Setting
 // `for await` loop; breaking out of that loop triggers the generator's
 // `finally`, which cancels the underlying reader so the connection
 // doesn't linger.
+//
+// opts.signal, when given, is passed straight through to fetch(): a
+// follow=1 stream otherwise sits in reader.read() forever for a quiet
+// container, with nothing telling the underlying fetch (or the server's
+// own follow goroutine, see api_logs.go's drain doc) to stop just
+// because the caller stopped consuming -- an unmount or a container
+// switch must actively abort, not merely stop reading. Aborting rejects
+// the pending fetch/read with a DOMException named "AbortError", which
+// propagates out of this generator (through the same `finally` below)
+// for the caller's own try/catch to recognize via `err?.name ===
+// 'AbortError'` and treat as an intentional stop, not a real failure.
 export async function* streamLogs(
   name: string,
-  opts: { follow?: boolean; tail?: number } = {},
+  opts: { follow?: boolean; tail?: number; signal?: AbortSignal } = {},
 ): AsyncGenerator<string> {
   const q = new URLSearchParams();
   if (opts.follow) q.set('follow', '1');
   if (opts.tail !== undefined) q.set('tail', String(opts.tail));
   const qs = q.toString();
 
-  const res = await fetch(`/api/containers/${encodeURIComponent(name)}/logs${qs ? `?${qs}` : ''}`);
+  const res = await fetch(`/api/containers/${encodeURIComponent(name)}/logs${qs ? `?${qs}` : ''}`, {
+    signal: opts.signal,
+  });
   if (!res.ok || !res.body) {
     throw new Error(`logs ${name}: ${res.status} ${res.statusText}`);
   }

@@ -78,32 +78,51 @@
   let fetchInFlight = $state(false);
   let fetchFailed = $state(false);
 
+  // Stale-response race: switching range (or container name) fast enough
+  // that an earlier /api/series call is still in flight when a newer one
+  // starts must not let the earlier response win just because it happens
+  // to resolve last -- e.g. Live->1h->24h in quick succession must not
+  // let 1h's response land after 24h's and silently show 1h's data under
+  // 24h's active button. The effect's own cleanup (the returned function)
+  // runs BEFORE the next call to this same effect, so aborting there
+  // guarantees every superseded request is cancelled before its
+  // replacement's fetch even starts. The aborted request's own .then is
+  // never reached (fetch rejects instead); its .catch recognizes the
+  // abort via err?.name and ignores it rather than clearing already-newer
+  // state, and its .finally only clears fetchInFlight when IT wasn't the
+  // one aborted (a stale request's finally firing after its replacement
+  // has already set fetchInFlight=true must not clobber that back to
+  // false).
   $effect(() => {
     const range = activeRange;
     const containerName = name;
     if (range === 'live') {
       fetchedSeries = {};
       fetchFailed = false;
+      fetchInFlight = false;
       return;
     }
     const seconds = RANGE_SECONDS[range];
     const to = Math.floor(Date.now() / 1000);
     const from = to - seconds;
+    const controller = new AbortController();
     fetchInFlight = true;
     fetchFailed = false;
-    fetchSeries({ kind: 'container', entity: containerName, metrics: ALL_METRICS, from, to })
+    fetchSeries({ kind: 'container', entity: containerName, metrics: ALL_METRICS, from, to, signal: controller.signal })
       .then((results) => {
         const byMetric = {};
         for (const r of results) byMetric[r.metric] = r.points;
         fetchedSeries = byMetric;
       })
-      .catch(() => {
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // superseded by a newer range/name switch
         fetchedSeries = {};
         fetchFailed = true;
       })
       .finally(() => {
-        fetchInFlight = false;
+        if (!controller.signal.aborted) fetchInFlight = false;
       });
+    return () => controller.abort();
   });
 
   // pointsFor reads either shape (live ring 2-tuples [ts,val], or fetched

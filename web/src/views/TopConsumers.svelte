@@ -49,6 +49,15 @@
   let loading = $state(false);
   let failed = $state(false);
 
+  // Stale-response race: flipping resource/window/agg fast enough that
+  // an earlier /api/top call is still in flight when a newer one starts
+  // must not let the earlier response win just because it resolves
+  // last -- e.g. CPU->Memory->Network in quick succession must not leave
+  // Network's tab active but showing CPU's numbers. See ContainerDetail's
+  // matching effect for the full mechanics (abort-on-cleanup runs before
+  // the next call to this same effect; a stale request's .catch ignores
+  // AbortError instead of clearing already-newer state; its .finally
+  // only clears `loading` when IT wasn't the one aborted).
   $effect(() => {
     const r = resource;
     const w = windowKey;
@@ -58,19 +67,22 @@
       loading = false;
       return;
     }
+    const controller = new AbortController();
     loading = true;
     failed = false;
-    fetchTop({ resource: r, window: w, agg: a, limit: 10 })
+    fetchTop({ resource: r, window: w, agg: a, limit: 10, signal: controller.signal })
       .then((result) => {
         fetchedRows = result;
       })
-      .catch(() => {
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // superseded by a newer resource/window/agg switch
         fetchedRows = [];
         failed = true;
       })
       .finally(() => {
-        loading = false;
+        if (!controller.signal.aborted) loading = false;
       });
+    return () => controller.abort();
   });
 
   let rows = $derived(windowKey === 'now' ? nowRows : fetchedRows);
@@ -146,6 +158,8 @@
   <div class="card top-consumers__panel">
     {#if failed}
       <p class="microlabel top-consumers__error">Couldn't load this window. Try again shortly.</p>
+    {:else if loading}
+      <p class="microlabel top-consumers__loading">Loading…</p>
     {:else}
       <TopBarList {rows} formatValue={FORMATTERS[resource]} {emptyMessage} />
     {/if}
@@ -222,5 +236,8 @@
   .top-consumers__error {
     margin: 0;
     color: var(--status-warning);
+  }
+  .top-consumers__loading {
+    margin: 0;
   }
 </style>

@@ -25,6 +25,16 @@
   care whether ITS OWN sparkline is the one being hovered or some OTHER
   tile/row is; it just renders its own metric's value at the bus's
   shared ts whenever one is published, same as every other owner.
+
+  bare (additive, optional -- D2 Overview) swaps the card-chrome
+  presentation for a borderless instrument-rail row (label and value on
+  one baseline, a bottom hairline instead of a bordered box): Overview's
+  metrics rail uses this; every other caller (Settings' own two tiles)
+  leaves it false and renders byte-for-byte as before. Nothing about the
+  underlying mechanism changes either way -- same Tween, same scrub-bus
+  wiring, same Sparkline instance -- `bare` only picks which markup
+  arrangement wraps the identical value/sparkline snippets below, so
+  hover-scrub and the live tween keep working identically in both modes.
 -->
 <script>
   import { Tween } from 'svelte/motion';
@@ -51,6 +61,7 @@
     value2 = undefined,
     unit2 = '',
     label2 = '',
+    bare = false,
   } = $props();
 
   // scrubHit is null while live; {ts, value} whenever the shared bus has
@@ -84,25 +95,48 @@
   });
 </script>
 
-<div class="card stat-tile">
-  <div class="stat-tile__head">
-    <span class="microlabel">{label}</span>
-    {#if status}<HealthDot {status} />{/if}
-  </div>
-  <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
-  <div class="stat-tile__value">
-    <span class="stat-tile__number tabular-nums">{formatValue(numberTween.current)}</span>
-    {#if unit}<span class="stat-tile__unit">{unit}</span>{/if}
-  </div>
-  {#if value2 !== undefined}
-    <div class="stat-tile__value2 tabular-nums">
-      {#if label2}<span class="stat-tile__value2-label">{label2}</span>{/if}
-      {value2}
-      {#if unit2}<span class="stat-tile__unit">{unit2}</span>{/if}
+{#snippet valueBlock()}
+  <span class="stat-tile__number tabular-nums">{formatValue(numberTween.current)}</span>
+  {#if unit}<span class="stat-tile__unit">{unit}</span>{/if}
+{/snippet}
+
+{#snippet value2Block()}
+  {#if label2}<span class="stat-tile__value2-label">{label2}</span>{/if}
+  {value2}
+  {#if unit2}<span class="stat-tile__unit">{unit2}</span>{/if}
+{/snippet}
+
+<div class="stat-tile" class:card={!bare} class:stat-tile--bare={bare}>
+  {#if bare}
+    <div class="stat-tile__row">
+      <span class="stat-tile__row-label">
+        <span class="microlabel">{label}</span>
+        {#if status}<HealthDot {status} />{/if}
+      </span>
+      <span class="stat-tile__row-value">
+        <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
+        <span class="stat-tile__value">{@render valueBlock()}</span>
+      </span>
     </div>
-  {/if}
-  {#if sparklinePoints}
-    <Sparkline points={sparklinePoints} color={sparklineColor} />
+    {#if sparklinePoints}
+      <Sparkline points={sparklinePoints} color={sparklineColor} />
+    {/if}
+    {#if value2 !== undefined}
+      <div class="stat-tile__value2 tabular-nums">{@render value2Block()}</div>
+    {/if}
+  {:else}
+    <div class="stat-tile__head">
+      <span class="microlabel">{label}</span>
+      {#if status}<HealthDot {status} />{/if}
+    </div>
+    <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
+    <div class="stat-tile__value">{@render valueBlock()}</div>
+    {#if value2 !== undefined}
+      <div class="stat-tile__value2 tabular-nums">{@render value2Block()}</div>
+    {/if}
+    {#if sparklinePoints}
+      <Sparkline points={sparklinePoints} color={sparklineColor} />
+    {/if}
   {/if}
 </div>
 
@@ -127,6 +161,55 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+  }
+  /* bare (D2's instrument rail): no card box at all -- a hairline seam
+     between rows instead, computed off --ink like every other hairline
+     in this app (SourcesBanner, EventFeedItem, ...), not a new token. */
+  .stat-tile--bare {
+    padding: 1.05rem 0;
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    border-bottom: 1px solid color-mix(in oklab, var(--ink) 14%, transparent);
+  }
+  .stat-tile--bare:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+  .stat-tile--bare:first-child {
+    padding-top: 0;
+  }
+  .stat-tile--bare:hover {
+    border-color: color-mix(in oklab, var(--series-1) 35%, transparent);
+  }
+  .stat-tile__row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .stat-tile__row-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .stat-tile__row-value {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+  /* The chip floats over the card layout (see .stat-tile__chip below) so
+     it never reserves space there -- in the rail row it instead sits
+     inline just left of the value, in normal flow, since the row's own
+     baseline already has room and there's no card edge for it to hug. */
+  .stat-tile--bare .stat-tile__chip {
+    position: static;
+    top: auto;
+    right: auto;
+  }
+  .stat-tile--bare .stat-tile__number {
+    font-size: 1.45rem;
   }
   .stat-tile__chip {
     position: absolute;

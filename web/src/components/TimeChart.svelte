@@ -19,7 +19,15 @@
   import { theme, resolveToken } from '../lib/theme.svelte';
   import { fmtRelTime } from '../lib/format';
 
-  let { series = [], unit = '', height = 220, markers = [], syncKey = undefined } = $props();
+  // formatValue (additive, optional -- Task 14-17's own fold-in note:
+  // "views pre-format tooltip values (or formatter callback) -- TimeChart
+  // stays generic") lets a caller render its y-axis ticks and tooltip
+  // values through format.ts (fmtBytes/fmtRate/fmtPct/...) instead of a
+  // bare number -- a memory chart's tooltip otherwise reads "900000000 B"
+  // rather than "900.0 MB". Undefined preserves the exact original
+  // behavior (raw number + a plain unit suffix) for any caller that
+  // hasn't been updated to pass one.
+  let { series = [], unit = '', height = 220, markers = [], syncKey = undefined, formatValue = undefined } = $props();
 
   const SEVERITY_VAR = {
     info: '--status-good',
@@ -105,11 +113,18 @@
             x: u.cursor.left,
             y: u.cursor.top ?? 0,
             ts: u.data[0][idx],
-            rows: series.map((s, i) => ({
-              label: s.label,
-              color: resolveToken(s.colorVar),
-              value: u.data[i + 1][idx],
-            })),
+            rows: series.map((s, i) => {
+              const raw = u.data[i + 1][idx];
+              // A real gap (null -- see buildAlignedData) stays unformatted
+              // ('—' is rendered by the template below) rather than being
+              // handed to formatValue, which would otherwise turn a
+              // missing sample into a misleadingly concrete "0.0 B".
+              return {
+                label: s.label,
+                color: resolveToken(s.colorVar),
+                value: raw == null ? null : formatValue ? formatValue(raw) : raw,
+              };
+            }),
           };
 
     const HOVER_PX = 6;
@@ -143,7 +158,25 @@
           {
             stroke: ink,
             grid: { stroke: gridColor, width: 1 },
-            values: (_u, vals) => vals.map((v) => (unit ? `${v} ${unit}` : `${v}`)),
+            values: (_u, vals) => vals.map((v) => (formatValue ? formatValue(v) : unit ? `${v} ${unit}` : `${v}`)),
+            // uPlot's own default y-axis gutter width is sized for short
+            // bare numbers; a formatValue label ("858.3 MiB", "12.4 MB/s")
+            // is wider and was observed getting left-clipped (text-align
+            // right against too narrow a box runs the label's leading
+            // characters off the canvas's left edge) -- size the gutter
+            // off the actual longest rendered label instead of trusting
+            // uPlot's un-aware default. The 7px/char + 14px estimate is
+            // deliberately generous (default font is small/proportional,
+            // not truly 7px-per-char monospace) since a slightly wide
+            // gutter costs a little plot area, while a narrow one clips.
+            size: (_u, values) => {
+              // uPlot calls this during layout passes where `values` can
+              // be null (e.g. before any ticks are computed yet) --
+              // guard defensively rather than let a null.reduce blank
+              // the whole chart (reproduced live while building this).
+              const longest = (values ?? []).reduce((max, v) => Math.max(max, String(v ?? '').length), 0);
+              return Math.max(40, longest * 7 + 14);
+            },
           },
         ],
         series: [
@@ -178,6 +211,7 @@
     series;
     unit;
     markers;
+    formatValue;
     theme.resolved;
     build();
   });
@@ -204,7 +238,9 @@
         <div class="time-chart__tooltip-row">
           <span class="time-chart__swatch" style="background: {row.color}"></span>
           <span>{row.label}</span>
-          <span class="tabular-nums">{row.value ?? '—'}{unit ? ` ${unit}` : ''}</span>
+          <span class="tabular-nums">
+            {row.value ?? '—'}{!formatValue && unit && row.value !== null ? ` ${unit}` : ''}
+          </span>
         </div>
       {/each}
     </div>

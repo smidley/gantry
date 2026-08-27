@@ -1,6 +1,6 @@
 <!--
-  App: the route table. Overview/Containers (Tasks 14-15) render their
-  real views; Container-detail/Top Consumers (Tasks 16-17, this same SDD
+  App: the route table. Overview/Containers/Container-detail (Tasks
+  14-16) render their real views; Top Consumers (Task 17, this same SDD
   batch) and Storage/GPU/Events/Settings (later Tasks 18-20) still render
   a placeholder <h1> -- this proves the shell is navigable end to end for
   every route regardless of which task has landed.
@@ -13,6 +13,7 @@
 
   import Overview from './views/Overview.svelte';
   import Containers from './views/Containers.svelte';
+  import ContainerDetail from './views/ContainerDetail.svelte';
 
   onMount(() => {
     live.connect();
@@ -20,7 +21,6 @@
   });
 
   const ROUTE_TITLES = {
-    'container-detail': 'Container',
     top: 'Top Consumers',
     storage: 'Storage',
     gpu: 'GPU',
@@ -35,6 +35,17 @@
     <Overview />
   {:else if $route.name === 'containers'}
     <Containers />
+  {:else if $route.name === 'container-detail'}
+    <!-- Keyed on the name param: navigating straight from one
+         container's detail page to another's must fully reset every
+         per-container piece of state (live rings, fetched series,
+         events) rather than reusing the component instance with just a
+         new prop value -- see ContainerDetail's own liveRing calls,
+         which would otherwise keep accumulating points from BOTH
+         containers into the same ring. -->
+    {#key $route.params.name}
+      <ContainerDetail name={$route.params.name} />
+    {/key}
   {:else}
     <h1>{ROUTE_TITLES[$route.name] ?? ROUTE_TITLES['not-found']}</h1>
     <p class="microlabel">View content lands in a later task.</p>

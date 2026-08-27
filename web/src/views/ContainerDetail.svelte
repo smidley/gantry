@@ -17,6 +17,7 @@
   import { untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
+  import { seriesPointsToRing } from '../lib/livering';
   import { fetchEvents, fetchSeries } from '../lib/api';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { containerHealthStatus } from '../lib/containerStatus';
@@ -70,6 +71,30 @@
   for (const metric of ALL_METRICS) {
     liveRings[metric] = liveRing((f) => f.containers?.[name]?.metrics?.[metric], LIVE_WINDOW_SEC);
   }
+
+  // Seed every live ring from server history on mount, once: `name` is
+  // stable for this component's whole lifetime (App.svelte's own {#key}
+  // wrapper fully remounts ContainerDetail on a container-name change --
+  // see its doc), so this effect's only real dependency never varies,
+  // same as the events effect below. Runs regardless of which range tab
+  // is active so a later switch BACK to Live finds it already filled,
+  // not empty-then-refetching. A failed/empty seed leaves every ring
+  // exactly as unseeded as it is today (see mergeSeed's own doc) -- no
+  // error banner, no new skeleton state, just today's cold start.
+  $effect(() => {
+    const containerName = name;
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - LIVE_WINDOW_SEC;
+    const controller = new AbortController();
+    fetchSeries({ kind: 'container', entity: containerName, metrics: ALL_METRICS, from, to, signal: controller.signal })
+      .then((results) => {
+        for (const r of results) liveRings[r.metric]?.seed(seriesPointsToRing(r.points));
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // unmounted (or -- can't actually happen, name is stable -- superseded) before the seed resolved
+      });
+    return () => controller.abort();
+  });
 
   // fetchedSeries holds the non-live ranges' /api/series result, keyed by
   // metric -- refetched ONLY when activeRange (or name) changes, never

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pushRing } from './livering';
+import { pushRing, appendAfterSeed, mergeSeed, seriesPointsToRing } from './livering';
 
 describe('pushRing', () => {
   it('appends a point to an empty ring', () => {
@@ -63,5 +63,119 @@ describe('pushRing', () => {
     }
     expect(points.length).toBeLessThanOrEqual(1200);
     expect(points[points.length - 1]).toEqual([1499, 1499]);
+  });
+});
+
+describe('mergeSeed + appendAfterSeed', () => {
+  it('seeds an empty ring, sorting out-of-order input and dropping non-finite entries', () => {
+    const seeded = mergeSeed(
+      [],
+      [
+        [110, 2],
+        [100, 1],
+        [NaN, 9],
+        [120, Infinity],
+      ],
+      900,
+    );
+    expect(seeded).toEqual([
+      [100, 1],
+      [110, 2],
+    ]);
+  });
+
+  it('seed then append newer: merges the live append onto the seeded history', () => {
+    let ring = mergeSeed(
+      [],
+      [
+        [100, 1],
+        [110, 2],
+      ],
+      900,
+    );
+    ring = appendAfterSeed(ring, 120, 3, 900);
+    expect(ring).toEqual([
+      [100, 1],
+      [110, 2],
+      [120, 3],
+    ]);
+  });
+
+  it('append duplicate-ts: ignored outright, not replaced', () => {
+    const ring = mergeSeed(
+      [],
+      [
+        [100, 1],
+        [110, 2],
+      ],
+      900,
+    );
+    // Unlike pushRing's own same-instant rule (replace), a seeded ring's
+    // appendAfterSeed must leave the ring byte-for-byte unchanged -- same
+    // reference back -- for a duplicate of its own newest point.
+    expect(appendAfterSeed(ring, 110, 99, 900)).toBe(ring);
+  });
+
+  it('append older: ignored, never inserted out of order', () => {
+    const ring = mergeSeed(
+      [],
+      [
+        [100, 1],
+        [110, 2],
+      ],
+      900,
+    );
+    expect(appendAfterSeed(ring, 90, 99, 900)).toBe(ring);
+  });
+
+  it('empty seed behaves as today: an already-pushed ring is returned unchanged, by reference', () => {
+    let existing = pushRing([], 100, 1);
+    existing = pushRing(existing, 110, 2);
+    expect(mergeSeed(existing, [], 900)).toBe(existing);
+  });
+
+  it('folds a live point that arrived before the seed resolved in on top, deduped', () => {
+    // Simulates the seed->stream race: one live frame already pushed
+    // (ts=120) before the seed fetch (history ending at ts=110) lands.
+    const held = pushRing([], 120, 5);
+    const merged = mergeSeed(held, [
+      [100, 1],
+      [110, 2],
+    ]);
+    expect(merged).toEqual([
+      [100, 1],
+      [110, 2],
+      [120, 5],
+    ]);
+  });
+
+  it('trims seeded history to the window, relative to its own newest point', () => {
+    const seed: [number, number][] = [
+      [0, 1],
+      [50, 2],
+      [150, 3],
+    ];
+    expect(mergeSeed([], seed, 100)).toEqual([
+      [50, 2],
+      [150, 3],
+    ]);
+  });
+});
+
+describe('seriesPointsToRing', () => {
+  it('keeps ts+avg, dropping max', () => {
+    expect(
+      seriesPointsToRing([
+        [100, 1.5, 3],
+        [110, 2.5, 4],
+      ]),
+    ).toEqual([
+      [100, 1.5],
+      [110, 2.5],
+    ]);
+  });
+
+  it('maps an empty series to an empty ring', () => {
+    expect(seriesPointsToRing([])).toEqual([]);
   });
 });

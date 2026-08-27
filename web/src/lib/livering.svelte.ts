@@ -8,7 +8,7 @@
 // at runtime -- nothing would ever have compiled the call away.
 import { untrack } from 'svelte';
 import { live } from './sse.svelte';
-import { pushRing, type RingPoint } from './livering';
+import { pushRing, appendAfterSeed, mergeSeed, type RingPoint } from './livering';
 import type { SnapshotDTO } from './api';
 
 // liveRing wires pushRing to the live store: call it once per metric
@@ -25,6 +25,18 @@ import type { SnapshotDTO } from './api';
 // frame rather than pushing a false 0.
 export function liveRing(extract: (frame: SnapshotDTO) => number | undefined, windowSec = 900) {
   let points = $state<RingPoint[]>([]);
+  // seeded flips true the first time seed() below actually applies real
+  // history (never on an empty/failed seed -- see mergeSeed's own doc).
+  // A plain closure variable, not $state: nothing ever needs to react to
+  // IT changing on its own, only the `points` write that always
+  // accompanies its flip. Gates which append rule the effect below uses
+  // -- a ring seed() was never called for (or that only ever saw an
+  // empty seed) keeps pushRing's plain replace-on-tie behavior exactly
+  // as it is today; only a genuinely-seeded ring switches to
+  // appendAfterSeed's stricter ignore-on-tie-or-older rule, for the
+  // seed->stream handoff race that rule exists for (see its own doc).
+  let seeded = false;
+
   $effect(() => {
     live.frameCount;
     const frame = live.frame;
@@ -39,11 +51,41 @@ export function liveRing(extract: (frame: SnapshotDTO) => number | undefined, wi
     // runtime catches and throws effect_update_depth_exceeded on
     // (reproduced live while building this). untrack breaks that cycle:
     // the write below is unaffected (writes never register as reads).
-    points = pushRing(untrack(() => points), frame.ts, value, windowSec);
+    points = untrack(() =>
+      seeded ? appendAfterSeed(points, frame.ts, value, windowSec) : pushRing(points, frame.ts, value, windowSec),
+    );
   });
   return {
     get points() {
       return points;
+    },
+    // seed folds an /api/series history fetch's result in as this ring's
+    // initial contents -- see mergeSeed's own doc for the exact merge
+    // rule (the seed as the base, anything this ring already pushed
+    // live before the fetch resolved folded in on top, deduped rather
+    // than duplicated). Callers pass seriesPointsToRing(result.points);
+    // an empty/all-invalid seed is a deliberate no-op (mergeSeed returns
+    // `held` back unchanged, by reference) -- `seeded` stays false and
+    // every future push keeps behaving exactly as it does today.
+    //
+    // `held` is read ONCE, under untrack, and reused for the no-op check
+    // below rather than re-reading the live `points` getter a second
+    // time -- a caller (ContainerRow, for the Containers view's seeding)
+    // can call seed() SYNCHRONOUSLY from inside its own $effect, unlike
+    // every other caller, which only ever schedules a fetch whose
+    // .then() runs later, detached from any effect. A second untracked
+    // read wouldn't be untracked at all if it happened outside untrack's
+    // callback -- reproduced live: `points` got attributed as a
+    // dependency of THAT caller's effect, which this same line's write
+    // then re-dirtied, re-running the effect, calling seed() again,
+    // forever -- effect_update_depth_exceeded. Comparing against the
+    // already-captured `held` instead needs no second read at all.
+    seed(seedPoints: RingPoint[]) {
+      const held = untrack(() => points);
+      const merged = mergeSeed(held, seedPoints, windowSec);
+      if (merged === held) return; // empty seed -- see mergeSeed's own doc
+      seeded = true;
+      points = merged;
     },
   };
 }

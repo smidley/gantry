@@ -283,6 +283,7 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 				State:   m.State,
 				Health:  m.Health,
 				Image:   m.Image,
+				Icon:    m.Icon,
 				Metrics: map[string]float64{},
 			}
 		}
@@ -399,7 +400,7 @@ func buildContainersList(dc *docker.Collector, fakeMetas func() []docker.Meta) f
 		}
 		out := make([]server.ContainerInfo, 0, len(running))
 		for _, m := range running {
-			out = append(out, server.ContainerInfo{Name: m.Name, State: m.State, Health: m.Health, Image: m.Image})
+			out = append(out, server.ContainerInfo{Name: m.Name, State: m.State, Health: m.Health, Image: m.Image, Icon: m.Icon})
 		}
 		return out
 	}

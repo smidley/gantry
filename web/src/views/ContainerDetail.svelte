@@ -24,6 +24,7 @@
   import { GPU_ENGINE_ORDER } from '../lib/metrics';
   import { eventsToMarkers } from '../lib/eventMarkers';
 
+  import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
   import TimeChart from '../components/TimeChart.svelte';
   import LogViewer from '../components/LogViewer.svelte';
@@ -243,6 +244,7 @@
 <div class="container-detail">
   <div class="container-detail__header">
     <div class="container-detail__identity">
+      <ContainerIcon {name} icon={c?.icon} size={28} />
       <h1 class="page-title container-detail__title">{name}</h1>
       {#if c}
         <HealthDot status={containerHealthStatus(c.state, c.health)} label={c.state} />

@@ -21,6 +21,7 @@
   import { containerHealthStatus } from '../lib/containerStatus';
   import { nearestPointAt } from '../lib/scrub';
   import { scrubBus } from '../lib/scrubbus.svelte';
+  import ContainerIcon from './ContainerIcon.svelte';
   import HealthDot from './HealthDot.svelte';
   import Sparkline from './Sparkline.svelte';
 
@@ -115,7 +116,10 @@
   <tr class="container-row">
     <td><HealthDot status={containerHealthStatus(c.state, c.health)} /></td>
     <td class="container-row__name-cell">
-      <a href={`#/containers/${encodeURIComponent(name)}`}>{name}</a>
+      <a href={`#/containers/${encodeURIComponent(name)}`}>
+        <ContainerIcon {name} icon={c.icon} size={20} />
+        {name}
+      </a>
     </td>
     <td class="container-row__cpu-cell">
       <span class="tabular-nums">{fmtPct(cpuTween.current)}</span>
@@ -150,6 +154,9 @@
     vertical-align: middle;
   }
   .container-row__name-cell a {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     color: var(--ink);
     text-decoration: none;
     font-weight: 500;

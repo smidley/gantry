@@ -17,11 +17,11 @@ import (
 // collector (cgroup/API stats, per-container net, GPU attribution)
 // consumes via Lookup/Running.
 type Meta struct {
-	ID, Name, Image, State, Health string
-	Pid                            int
-	StartedAt                      time.Time
-	HostNet                        bool
-	RestartCount                   int
+	ID, Name, Image, Icon, State, Health string
+	Pid                                  int
+	StartedAt                            time.Time
+	HostNet                              bool
+	RestartCount                         int
 }
 
 // EventSink is the narrow slice of store.Store the docker collector needs

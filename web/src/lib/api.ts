@@ -9,6 +9,7 @@ export interface ContainerDTO {
   state: string;
   health: string;
   image: string;
+  icon: string;
   metrics: Record<string, number>;
 }
 
@@ -28,6 +29,7 @@ export interface ContainerInfo {
   state: string;
   health: string;
   image: string;
+  icon: string;
 }
 
 // SeriesPoint is [ts, avg, max] -- an array, not an object, matching

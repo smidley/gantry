@@ -7,7 +7,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { theme, resolveToken, withAlpha } from '../lib/theme.svelte';
   import { needsRebuild } from '../lib/chartRebuild';
-  import { headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
+  import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
   import { prefersReducedMotion } from 'svelte/motion';
 
@@ -42,24 +42,16 @@
     return [pts.map((p) => p[0]), pts.map((p) => p[1])];
   }
 
-  function advanceHeadState(pts, nowMs) {
-    if (pts.length === 0) return null;
-    const raw = pts[pts.length - 1][1];
-    if (!headState) return { prevValue: raw, targetValue: raw, arrivalMs: nowMs };
-    if (headState.targetValue === raw) return headState;
-    return { prevValue: headState.targetValue, targetValue: raw, arrivalMs: nowMs };
-  }
-
-  // applyHeadState returns a COPY of [xs, ys] with only the tail y
-  // patched to its current eased value -- same "copy the tail, never
-  // mutate the source" contract as TimeChart's own version. Same
-  // reduced-motion durationMs override too -- see its doc.
+  // applyHeadState patches the tail of `data`'s y-array to its current
+  // eased value, MUTATING in place rather than returning a copy -- same
+  // "safe because alignedData is rebuilt wholesale before its next real
+  // read" contract as TimeChart's own version (see its doc), and the same
+  // per-tick array-clone this skips.
   function applyHeadState(data, state, nowMs, durationMs = HEAD_EASE_MS) {
     if (!state) return data;
-    const [xs, ys] = data;
-    const patched = ys.slice();
-    patched[patched.length - 1] = headValue(state.prevValue, state.targetValue, state.arrivalMs, nowMs, durationMs);
-    return [xs, patched];
+    const ys = data[1];
+    ys[ys.length - 1] = headValue(state.prevValue, state.targetValue, state.arrivalMs, nowMs, durationMs);
+    return data;
   }
 
   function build() {
@@ -119,8 +111,17 @@
       // simpler than skipping it conditionally.
       const nowMs = Date.now();
       const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
+      // See TimeChart's matching comment: under reduced motion the shared
+      // driver never ticks, so nothing else would ever step this window --
+      // step it here too, once per real data arrival, so it doesn't freeze
+      // wherever it happened to be (whether reduced motion was already on
+      // at mount, or flipped on mid-session).
+      if (prefersReducedMotion.current) {
+        const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
+        chart.setScale('x', { min, max });
+      }
       alignedData = toData(points);
-      headState = advanceHeadState(points, nowMs);
+      headState = points.length === 0 ? null : advanceHeadState(headState, points[points.length - 1][1], nowMs, durationMs);
       chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
     } else if (!rebuilding) {
       chart.setData(toData(points));

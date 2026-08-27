@@ -19,7 +19,7 @@
   import { theme, resolveToken } from '../lib/theme.svelte';
   import { fmtRelTime } from '../lib/format';
   import { needsRebuild } from '../lib/chartRebuild';
-  import { headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
+  import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
   import { prefersReducedMotion } from 'svelte/motion';
 
@@ -137,45 +137,41 @@
     return null;
   }
 
-  // advanceHeadState folds one fresh aligned-data result into headState:
-  // a series whose tail hasn't actually changed keeps easing toward the
-  // target it already had (so an animation tick between two SSE frames
-  // never restarts an in-flight ease); a series reporting its first real
-  // value, or a genuinely new tail value, starts a fresh ease FROM
-  // wherever it last was TOWARD the new value; a tail that's gone null
-  // (a real gap) drops to null (no ease -- applyHeadState below passes
-  // a null series straight through).
-  function advanceHeadState(alignedYs, nowMs) {
+  // Per-series advanceHeadState folding lives in lib/streamdriver.ts now
+  // (pure, unit-tested there) -- this is just the aligned-data-shape glue:
+  // extract series i's own raw tail value (or null for a real gap, which
+  // must stay a gap here rather than easing toward a stale earlier one)
+  // and fold it via the shared function, one series at a time.
+  function advanceAll(alignedYs, nowMs, durationMs) {
     return alignedYs.map((ys, i) => {
       const raw = tailValue(ys);
-      if (raw === null) return null;
-      const prevState = headState[i];
-      if (!prevState) return { prevValue: raw, targetValue: raw, arrivalMs: nowMs };
-      if (prevState.targetValue === raw) return prevState;
-      return { prevValue: prevState.targetValue, targetValue: raw, arrivalMs: nowMs };
+      return raw === null ? null : advanceHeadState(headState[i], raw, nowMs, durationMs);
     });
   }
 
-  // applyHeadState returns a COPY of aligned data with only the LAST
-  // index of each series patched to its current eased value -- copying
-  // just the tail (never the source ring, never even the rest of
-  // `alignedData` in place) is the explicit smooth-streaming contract:
-  // setData's own array here is disposable per-tick scratch. durationMs
-  // defaults to the real ease (HEAD_EASE_MS); callers under reduced
-  // motion pass 0 so headValue snaps straight to targetValue -- the
-  // driver's own ticks never run in that state (see streamdriver.svelte.ts),
-  // so without this the tail would otherwise freeze one arrival stale
-  // forever instead of tracking each new value immediately.
+  // applyHeadState patches only the LAST index of each series to its
+  // current eased value, MUTATING `aligned` in place rather than
+  // returning a copy -- safe because `alignedData` is only ever the
+  // pristine target array immediately after the data effect rebuilds it
+  // wholesale via buildAlignedData(); every read of a series' true raw
+  // tail (tailValue, above) happens before this runs again for that
+  // series, so patching the disposable last slot here can never leak a
+  // stale eased value back out as if it were real data. Skips the
+  // per-tick array-clone this would otherwise cost at up to 30fps across
+  // every series of every live chart on screen. durationMs defaults to
+  // the real ease (HEAD_EASE_MS); callers under reduced motion pass 0 so
+  // headValue snaps straight to targetValue -- the driver's own ticks
+  // never run in that state (see streamdriver.svelte.ts), so without this
+  // the tail would otherwise freeze one arrival stale forever instead of
+  // tracking each new value immediately.
   function applyHeadState(aligned, state, nowMs, durationMs = HEAD_EASE_MS) {
-    const [xs, ...ys] = aligned;
-    const patched = ys.map((oneSeries, i) => {
+    for (let i = 0; i < state.length; i++) {
       const s = state[i];
-      if (!s) return oneSeries;
-      const tail = oneSeries.slice();
-      tail[tail.length - 1] = headValue(s.prevValue, s.targetValue, s.arrivalMs, nowMs, durationMs);
-      return tail;
-    });
-    return [xs, ...patched];
+      if (!s) continue;
+      const oneSeries = aligned[i + 1];
+      oneSeries[oneSeries.length - 1] = headValue(s.prevValue, s.targetValue, s.arrivalMs, nowMs, durationMs);
+    }
+    return aligned;
   }
 
   function markerColor(severity) {
@@ -363,8 +359,21 @@
       // simple.
       const nowMs = Date.now();
       const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
+      // The shared driver's own ticks are what normally step this
+      // chart's x-window (see the animation-tick effect below) -- but
+      // under reduced motion the driver never ticks at all, so nothing
+      // else would ever move the window. Stepping it here too, from the
+      // data-arrival path itself, means the window still advances once
+      // per real SSE frame instead of freezing wherever it happened to
+      // be the moment reduced motion took hold (whether that was already
+      // true when this chart mounted, or flipped on mid-session) --
+      // a discrete step per arrival, exactly the pre-feature behavior.
+      if (prefersReducedMotion.current) {
+        const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
+        chart.setScale('x', { min, max });
+      }
       alignedData = buildAlignedData(series);
-      headState = advanceHeadState(alignedData.slice(1), nowMs);
+      headState = advanceAll(alignedData.slice(1), nowMs, durationMs);
       chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
     } else if (!rebuilding) {
       chart.setData(buildAlignedData(series));

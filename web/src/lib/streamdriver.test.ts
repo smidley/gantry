@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  advanceHeadState,
   easeOutCubic,
   gateReducer,
   headValue,
@@ -9,6 +10,7 @@ import {
   liveWindowRange,
   shouldBroadcast,
   type GateState,
+  type HeadState,
 } from './streamdriver';
 
 describe('lerp', () => {
@@ -73,6 +75,54 @@ describe('headValue', () => {
     expect(headValue(NaN, 50, 1000, 1000)).toBe(50);
     expect(headValue(10, NaN, 1000, 1000)).toBe(NaN); // targetValue itself is NaN -- nothing sensible to fall back to
     expect(headValue(Infinity, 50, 1000, 1000)).toBe(50);
+  });
+});
+
+describe('advanceHeadState', () => {
+  it('starts an unanimated ease (prevValue === targetValue) for the first real value', () => {
+    const s = advanceHeadState(null, 42, 1000);
+    expect(s).toEqual({ prevValue: 42, targetValue: 42, arrivalMs: 1000 });
+  });
+
+  it('keeps the existing state when the raw value has not actually changed', () => {
+    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 1000 };
+    expect(advanceHeadState(prev, 50, 1200)).toBe(prev); // same reference, not just equal
+  });
+
+  // Regression: re-arrival mid-ease must continue from the value CURRENTLY
+  // ON SCREEN, not restart from the old target -- getting this wrong is
+  // exactly the one-frame jump smooth-streaming exists to remove. Trace:
+  // an ease from 10 toward 50 starts at t=0 (arrivalMs=0); a new frame
+  // reports 80 at nowMs=300, 1/5 of the way through the default 1500ms
+  // ease. At that instant the display reads headValue(10,50,0,300) --
+  // easeOutCubic(0.2) = 1-0.8^3 = 0.488, so 10 + 0.488*40 = 29.52 -- and
+  // that, not the old target 50, must become the new ease's prevValue.
+  it('seeds the new ease from the currently-displayed value, not the old target', () => {
+    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 0 };
+    const next = advanceHeadState(prev, 80, 300);
+    expect(next.prevValue).toBeCloseTo(29.52, 10);
+    expect(next.targetValue).toBe(80);
+    expect(next.arrivalMs).toBe(300);
+  });
+
+  it('renders the seeded value immediately, proving no jump at the instant of re-arrival', () => {
+    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 0 };
+    const next = advanceHeadState(prev, 80, 300);
+    // At the exact moment `next` takes effect (nowMs === next.arrivalMs),
+    // the displayed value must equal what was ALREADY on screen the
+    // instant before -- headValue(...) at t=0 returns prevValue verbatim,
+    // so this only holds if seeding used the live 29.52, not the buggy 50.
+    expect(headValue(next.prevValue, next.targetValue, next.arrivalMs, 300)).toBeCloseTo(29.52, 10);
+    expect(headValue(next.prevValue, next.targetValue, next.arrivalMs, 300)).not.toBe(50);
+  });
+
+  it('honors a caller-supplied durationMs when computing the seed (reduced motion already settled)', () => {
+    // durationMs=0 means the PRIOR ease had already snapped straight to
+    // its target, so re-arriving mid-"ease" (there is none) must seed
+    // from that settled target, same number either way here.
+    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 0 };
+    const next = advanceHeadState(prev, 80, 300, 0);
+    expect(next.prevValue).toBe(50);
   });
 });
 

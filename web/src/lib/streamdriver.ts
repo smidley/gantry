@@ -69,6 +69,50 @@ export function headValue(
   return lerp(prevValue, targetValue, easeOutCubic(t));
 }
 
+// HeadState is one series' own in-flight head ease: prevValue/targetValue
+// bracket the ease, arrivalMs anchors it in wall-clock time -- see
+// headValue's own doc for how the three combine into a displayed value.
+export interface HeadState {
+  prevValue: number;
+  targetValue: number;
+  arrivalMs: number;
+}
+
+// advanceHeadState folds one freshly-arrived raw value into a series' own
+// HeadState (mechanism 2, TimeChart/Sparkline's shared per-series
+// bookkeeping -- both components call this once per real data arrival,
+// TimeChart once per series, Sparkline once for its own single series).
+// null prevState means "no ease yet" (the series' first real value,
+// or fresh after a structural rebuild): snaps in unanimated, prevValue
+// === targetValue. An unchanged raw value (an animation tick landing
+// between two identical SSE frames, or a data-shape change with no new
+// sample) keeps the EXISTING state so an in-flight ease never restarts.
+//
+// The one case that actually matters: raw has genuinely changed while a
+// previous ease might still be mid-flight. The new ease's prevValue seeds
+// from headValue(...) -- the value CURRENTLY ON SCREEN at nowMs, per the
+// prior state -- never from prevState.targetValue (the old ease's
+// destination). Seeding from the old target is the bug this function
+// exists to not have: a re-arrival before the previous ease finishes
+// (ordinary jitter, or a buffered catch-up burst) would otherwise jump
+// the display straight to wherever the OLD ease was heading before
+// continuing on to the new one -- a visible one-frame discontinuity,
+// exactly what this whole feature exists to remove. svelte/motion's own
+// Tween.set has the same contract: re-calling it captures the tween's
+// live interpolated .current as the new start, never the previous
+// target.
+export function advanceHeadState(
+  prevState: HeadState | null,
+  raw: number,
+  nowMs: number,
+  durationMs: number = HEAD_EASE_MS,
+): HeadState {
+  if (!prevState) return { prevValue: raw, targetValue: raw, arrivalMs: nowMs };
+  if (prevState.targetValue === raw) return prevState;
+  const displayed = headValue(prevState.prevValue, prevState.targetValue, prevState.arrivalMs, nowMs, durationMs);
+  return { prevValue: displayed, targetValue: raw, arrivalMs: nowMs };
+}
+
 // shouldBroadcast is the driver's own 30fps throttle decision: true once
 // at least 1000/maxFps ms have elapsed since the last broadcast (or
 // immediately, the very first time -- lastMs === null). A plain

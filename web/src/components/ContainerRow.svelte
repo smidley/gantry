@@ -19,6 +19,8 @@
   import { liveRing } from '../lib/livering.svelte';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { containerHealthStatus } from '../lib/containerStatus';
+  import { nearestPointAt } from '../lib/scrub';
+  import { scrubBus } from '../lib/scrubbus.svelte';
   import HealthDot from './HealthDot.svelte';
   import Sparkline from './Sparkline.svelte';
 
@@ -80,13 +82,17 @@
   let ioReadTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
   let ioWriteTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
 
-  // cpuScrubHit (hover-scrub): non-null while the pointer is over this
-  // row's own CPU sparkline -- cpuTween's effect below then eases toward
-  // the hovered ring value instead of the live one, at the faster
-  // scrub-follow duration, exactly like StatTile's own hero number (see
-  // its doc for the identical shape). Every other cell in this row stays
-  // live-only; only the CPU cell has a sparkline to scrub against.
-  let cpuScrubHit = $state(null);
+  // cpuScrubHit (hover-scrub, synced): non-null whenever the shared bus
+  // has a published ts, regardless of whether THIS row's own sparkline
+  // is the one being hovered -- Scott's own requirement is that
+  // scrubbing any one metric auto-scrubs every related one, and every
+  // row on this page is "related" (same page, same instant), so every
+  // row reads the SAME bus and finds ITS OWN cpu value at that instant.
+  // cpuTween's effect below then eases toward that instead of the live
+  // one, at the faster scrub-follow duration, exactly like StatTile's
+  // own hero number (see its doc for the identical shape). Every other
+  // cell in this row stays live-only; only the CPU cell has a sparkline.
+  let cpuScrubHit = $derived(scrubBus.ts === null ? null : nearestPointAt(cpuRing.points, scrubBus.ts));
 
   $effect(() => {
     const reduced = prefersReducedMotion.current;
@@ -96,10 +102,6 @@
       cpuTween.set(m['cpu.pct'] ?? 0, { duration: reduced ? 0 : TWEEN_MS, easing: cubicOut });
     }
   });
-
-  function handleCpuScrub(hit) {
-    cpuScrubHit = hit;
-  }
 
   $effect(() => tweenTo(memBytesTween, m['mem.bytes'] ?? 0));
   $effect(() => tweenTo(memPctTween, m['mem.pct'] ?? 0));
@@ -117,7 +119,7 @@
     </td>
     <td class="container-row__cpu-cell">
       <span class="tabular-nums">{fmtPct(cpuTween.current)}</span>
-      <Sparkline points={cpuRing.points} onScrub={handleCpuScrub} />
+      <Sparkline points={cpuRing.points} />
     </td>
     <td class="tabular-nums container-row__nowrap">
       {fmtBytes(memBytesTween.current)}

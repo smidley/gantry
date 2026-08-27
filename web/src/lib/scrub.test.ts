@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { nearestPointAt, tsAtFraction } from './scrub';
+import { clearScrubIfOwner, initialScrubBusState, nearestPointAt, publishScrub, tsAtFraction } from './scrub';
 
 describe('tsAtFraction', () => {
   it('returns min at fraction 0 and max at fraction 1', () => {
@@ -94,5 +94,53 @@ describe('nearestPointAt', () => {
     const points: [number, number][] = Array.from({ length: 50 }, (_, i) => [i * 10, i]);
     expect(nearestPointAt(points, 234)).toEqual({ ts: 230, value: 23, index: 23 });
     expect(nearestPointAt(points, 236)).toEqual({ ts: 240, value: 24, index: 24 });
+  });
+});
+
+describe('publishScrub', () => {
+  it('publishes ts+sourceId unconditionally, regardless of any prior state', () => {
+    expect(publishScrub(1000, 'a')).toEqual({ ts: 1000, sourceId: 'a' });
+  });
+
+  it('a fresh publish always wins ownership, even from a different source', () => {
+    // Whoever is generating real pointer events right now always
+    // supersedes whatever the previous owner published -- there is no
+    // scenario where an already-scrubbing surface should reject a newly
+    // hovered one.
+    expect(publishScrub(2000, 'b')).toEqual({ ts: 2000, sourceId: 'b' });
+  });
+});
+
+describe('clearScrubIfOwner', () => {
+  it('clears the bus when the caller is the current owner', () => {
+    const state = publishScrub(1000, 'a');
+    expect(clearScrubIfOwner(state, 'a')).toEqual(initialScrubBusState);
+  });
+
+  it('is a no-op, same reference back, when the caller is not the current owner', () => {
+    // The core race this guards: sparkline A's pointerleave (or its own
+    // onDestroy) firing AFTER sparkline B has already published must not
+    // wipe out B's fresh scrub and strand every other synced surface
+    // back on "live" a frame after they'd just synced to B.
+    const state = publishScrub(2000, 'b');
+    expect(clearScrubIfOwner(state, 'a')).toBe(state);
+  });
+
+  it('is a no-op against the untouched initial state', () => {
+    expect(clearScrubIfOwner(initialScrubBusState, 'a')).toBe(initialScrubBusState);
+  });
+
+  it('clearing twice in a row with the same owner is idempotent', () => {
+    const state = publishScrub(1000, 'a');
+    const cleared = clearScrubIfOwner(state, 'a');
+    expect(clearScrubIfOwner(cleared, 'a')).toEqual(initialScrubBusState);
+  });
+
+  it('treats distinct object/symbol identities as distinct owners, not just distinct strings', () => {
+    const ownerA = Symbol('a');
+    const ownerB = Symbol('b');
+    const state = publishScrub(1000, ownerA);
+    expect(clearScrubIfOwner(state, ownerB)).toBe(state);
+    expect(clearScrubIfOwner(state, ownerA)).toEqual(initialScrubBusState);
   });
 });

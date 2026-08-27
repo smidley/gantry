@@ -10,6 +10,7 @@
   import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
   import { nearestPointAt, tsAtFraction } from '../lib/scrub';
+  import { scrubBus } from '../lib/scrubbus.svelte';
   import { prefersReducedMotion } from 'svelte/motion';
 
   // live defaults true: every real Sparkline in this app charts a
@@ -17,14 +18,7 @@
   // no historical/fetched Sparkline usage today, unlike TimeChart, which
   // is why that component requires an explicit opt-in instead. See its
   // own doc for the full mechanism 1+2 rationale this mirrors.
-  //
-  // onScrub (additive, optional -- hover-scrub): called with
-  // {ts, value} while the pointer hovers a real point, or null on
-  // leave/cancel/no-target. Sparkline stays presentation-only -- it
-  // renders its OWN hover dot/hairline from this same computation, but
-  // hands the hit to its caller (StatTile/ContainerRow) to own whatever
-  // number that hit actually updates.
-  let { points = [], color = 'var(--series-1)', live = true, onScrub = undefined } = $props();
+  let { points = [], color = 'var(--series-1)', live = true } = $props();
 
   let el;
   let chart = null;
@@ -92,6 +86,12 @@
       toData(points),
       el,
     );
+    // A rebuild's fresh uPlot instance has no idea where the bus's own
+    // marker (if a scrub is already active) belongs in ITS new pixel
+    // space -- resync immediately rather than waiting for the next bus
+    // publish (which may not come for a while, e.g. an already-scrubbed
+    // page sitting still under a theme flip).
+    syncMarkerFromBus();
   }
 
   $effect(() => {
@@ -163,6 +163,85 @@
     return unsubscribe;
   });
 
+  // --- Hover-scrub, synced across every mounted scrub-aware surface -----
+  //
+  // sourceId is this instance's own opaque ownership token for the
+  // shared bus (see lib/scrubbus.svelte's doc) -- stable for the whole
+  // mounted lifetime, never compared to anything but itself.
+  const sourceId = Symbol('sparkline');
+
+  // lastClientX is the FIX for a real bug the pixel-anchored version of
+  // this had: recomputing ts from Date.now() on every single pointermove
+  // means a pointer that's genuinely stationary but still firing repeat
+  // move events (real trackpad/mouse sensor jitter -- reproduced: the
+  // SAME pixel, re-hovered 49s later, resolved to a different value)
+  // creeps the published ts steadily forward through history even
+  // though the pointer never actually moved. Skipping any event whose
+  // clientX matches the last one we actually acted on makes this
+  // properly timestamp-anchored: ts only ever changes on a genuine
+  // pointer move, never merely because time itself passed.
+  let lastClientX = null;
+
+  // scrubActive/markerPos are this Sparkline's OWN presentation state
+  // for its dot+hairline -- driven by the BUS below, not by whether
+  // THIS instance is the one currently tracking the pointer, so a
+  // follower (any other mounted sparkline while one of them is being
+  // scrubbed) renders identically to the initiator. markerPos
+  // deliberately keeps its last real position when scrubActive goes
+  // false rather than resetting, so the fade-out (an always-mounted
+  // element, opacity toggled by class) fades out IN PLACE instead of
+  // jumping to a stale 0,0 first.
+  let scrubActive = $state(false);
+  let markerPos = $state({ left: 0, top: 0 });
+
+  // syncMarkerFromBus positions THIS sparkline's own dot/hairline at
+  // wherever ITS OWN points land nearest the bus's shared ts -- the
+  // follower half of the sync (every mounted sparkline runs this off
+  // the SAME bus.ts), and also what the initiator's own dot uses, via
+  // the reactive effect below: nothing here cares who published.
+  function syncMarkerFromBus() {
+    if (!chart) return;
+    const ts = scrubBus.ts;
+    const hit = ts === null ? null : nearestPointAt(points, ts);
+    scrubActive = hit !== null;
+    if (hit) markerPos = { left: chart.valToPos(hit.ts, 'x', false), top: chart.valToPos(hit.value, 'y', false) };
+  }
+
+  $effect(() => {
+    scrubBus.ts;
+    points;
+    syncMarkerFromBus();
+  });
+
+  // publishFromPointer is the INITIATOR half: maps a client-space x to a
+  // timestamp across the same [now-15m, now] window the chart's own
+  // x-scale is set to (liveWindowRange -- see the module doc), NOT the
+  // points' own span, so an early/sparse ring still scrubs anywhere
+  // across the tile rather than only across whatever narrow span
+  // already has data -- and publishes that ts to the shared bus rather
+  // than computing a "hit" locally, since every surface (including this
+  // one, via the effect above) derives its own hit from the bus's ts
+  // independently.
+  function publishFromPointer(clientX) {
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const fraction = (clientX - rect.left) / (rect.width || 1);
+    const [min, max] = liveWindowRange(Date.now(), LIVE_WINDOW_SEC);
+    scrubBus.publish(tsAtFraction(fraction, min, max), sourceId);
+  }
+
+  function clearScrub() {
+    lastClientX = null;
+    scrubBus.clear(sourceId);
+  }
+
+  function handlePointerMove(e) {
+    if (!live) return;
+    if (e.clientX === lastClientX) return;
+    lastClientX = e.clientX;
+    publishFromPointer(e.clientX);
+  }
+
   onMount(() => {
     // Previously, resize was handled for free: a full rebuild every
     // frame re-read el.clientWidth from scratch. Now that data-only
@@ -179,47 +258,16 @@
   onDestroy(() => {
     ro?.disconnect();
     chart?.destroy();
+    // An unmounting owner (navigating away mid-scrub, or a Containers
+    // row whose container just disappeared from the live frame) must
+    // release the bus itself -- nothing else ever will, since no more
+    // pointer events can ever come from a destroyed component. Without
+    // this, every OTHER mounted surface would stay permanently pinned to
+    // whatever this one last published, with no way back to live.
+    // clearScrubIfOwner's own guard (see lib/scrub.ts) makes this a
+    // harmless no-op when this instance isn't the current owner anyway.
+    scrubBus.clear(sourceId);
   });
-
-  // --- Hover-scrub (additive, optional -- onScrub only) -----------------
-  //
-  // scrubActive/markerPos are Sparkline's OWN presentation state for the
-  // dot+hairline overlay; markerPos deliberately keeps its last real
-  // position when scrubActive goes false rather than resetting, so the
-  // fade-out below (an always-mounted element, opacity toggled by class)
-  // fades out IN PLACE instead of jumping to a stale 0,0 first.
-  let scrubActive = $state(false);
-  let markerPos = $state({ left: 0, top: 0 });
-
-  // computeScrub maps a client-space x back to a ring value via the same
-  // [now-15m, now] window the chart's own x-scale is set to (liveWindowRange
-  // -- see the module doc), NOT the points' own span: an early/sparse ring
-  // still scrubs anywhere across the tile to its nearest real sample
-  // instead of only across whatever narrow span already has data.
-  function computeScrub(clientX) {
-    if (!chart || !el) return;
-    const rect = el.getBoundingClientRect();
-    const fraction = (clientX - rect.left) / (rect.width || 1);
-    const [min, max] = liveWindowRange(Date.now(), LIVE_WINDOW_SEC);
-    const hit = nearestPointAt(points, tsAtFraction(fraction, min, max));
-    if (!hit) {
-      clearScrub();
-      return;
-    }
-    markerPos = { left: chart.valToPos(hit.ts, 'x', false), top: chart.valToPos(hit.value, 'y', false) };
-    scrubActive = true;
-    onScrub?.({ ts: hit.ts, value: hit.value });
-  }
-
-  function clearScrub() {
-    if (scrubActive) onScrub?.(null);
-    scrubActive = false;
-  }
-
-  function handlePointerMove(e) {
-    if (!onScrub || !live) return;
-    computeScrub(e.clientX);
-  }
 </script>
 
 <div

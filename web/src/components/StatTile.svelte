@@ -18,6 +18,13 @@
   tweens, which fed it a string) so it has a raw number to ease FROM/TO
   for both the ordinary live cadence and the fast scrub-follow one --
   formatValue renders whichever raw number is currently live.
+
+  Scrubbing is synced across every mounted scrub-aware surface (Scott's
+  own requirement: scrubbing one metric auto-scrubs the others at the
+  same instant) via lib/scrubbus.svelte's shared bus -- StatTile doesn't
+  care whether ITS OWN sparkline is the one being hovered or some OTHER
+  tile/row is; it just renders its own metric's value at the bus's
+  shared ts whenever one is published, same as every other owner.
 -->
 <script>
   import { Tween } from 'svelte/motion';
@@ -25,6 +32,8 @@
   import { prefersReducedMotion } from 'svelte/motion';
   import { untrack } from 'svelte';
   import { fmtRelTime } from '../lib/format';
+  import { nearestPointAt } from '../lib/scrub';
+  import { scrubBus } from '../lib/scrubbus.svelte';
   import HealthDot from './HealthDot.svelte';
   import Sparkline from './Sparkline.svelte';
 
@@ -44,13 +53,16 @@
     label2 = '',
   } = $props();
 
-  // scrubHit is null while live; {ts, value} while the pointer is over
-  // the sparkline. numberTween's own target/duration below switch on it,
+  // scrubHit is null while live; {ts, value} whenever the shared bus has
+  // a published ts AND this tile's own sparklinePoints has a nearest
+  // sample for it -- {ts, value} is THIS metric's own reading at the
+  // bus's shared instant, independent of whichever surface actually
+  // published it. numberTween's own target/duration below switch on it,
   // so the hero number always eases FROM wherever it currently is,
   // whichever mode it's easing toward (Tween.set's own re-seed-from-
   // .current contract -- see streamdriver.ts's doc for the same point
   // made about svelte/motion's Tween generally).
-  let scrubHit = $state(null);
+  let scrubHit = $derived(scrubBus.ts === null || !sparklinePoints ? null : nearestPointAt(sparklinePoints, scrubBus.ts));
   let numberTween = new Tween(untrack(() => liveValue ?? 0), { duration: LIVE_TWEEN_MS, easing: cubicOut });
 
   $effect(() => {
@@ -61,10 +73,6 @@
       numberTween.set(liveValue ?? 0, { duration: reduced ? 0 : LIVE_TWEEN_MS, easing: cubicOut });
     }
   });
-
-  function handleScrub(hit) {
-    scrubHit = hit;
-  }
 
   // chipText retains its last real value across scrubHit going back to
   // null (rather than blanking instantly) so the corner chip's own CSS
@@ -94,7 +102,7 @@
     </div>
   {/if}
   {#if sparklinePoints}
-    <Sparkline points={sparklinePoints} color={sparklineColor} onScrub={handleScrub} />
+    <Sparkline points={sparklinePoints} color={sparklineColor} />
   {/if}
 </div>
 

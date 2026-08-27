@@ -52,3 +52,38 @@ export function nearestPointAt(points: RingPoint[], ts: number): ScrubHit | null
     ? { ts: before[0], value: before[1], index: lo - 1 }
     : { ts: after[0], value: after[1], index: lo };
 }
+
+// --- Scrub bus (synced scrubbing across related metrics) --------------
+//
+// The bus itself is one page-global {ts, sourceId} pair (see
+// lib/scrubbus.svelte.ts for the thin $state wrapper around this pure
+// state) -- ts is the single shared instant every mounted scrub-aware
+// surface (every Sparkline, StatTile, ContainerRow) renders itself
+// against, and sourceId is an opaque token identifying whichever
+// surface is CURRENTLY the one actually tracking the pointer. The only
+// real decision this needs to make is clearScrubIfOwner's own guard,
+// below; publishScrub is a plain unconditional overwrite (whoever is
+// generating real pointer events right now always wins ownership,
+// unconditionally superseding whatever the previous owner published).
+export interface ScrubBusState {
+  ts: number | null;
+  sourceId: unknown | null;
+}
+
+export const initialScrubBusState: ScrubBusState = { ts: null, sourceId: null };
+
+export function publishScrub(ts: number, sourceId: unknown): ScrubBusState {
+  return { ts, sourceId };
+}
+
+// clearScrubIfOwner is the one piece of real logic: a clear only takes
+// effect if `sourceId` is STILL the bus's current owner, a no-op
+// otherwise. This is what makes a stale clear harmless -- e.g. the
+// pointer crossing directly from sparkline A to sparkline B fires A's
+// pointerleave (and, in Sparkline's own onDestroy, an unmounting owner's
+// cleanup) slightly after B may have already published; without this
+// guard, that late clear would wipe out B's fresh scrub and strand every
+// OTHER surface back on "live" a frame after they'd just synced to B.
+export function clearScrubIfOwner(state: ScrubBusState, sourceId: unknown): ScrubBusState {
+  return state.sourceId === sourceId ? initialScrubBusState : state;
+}

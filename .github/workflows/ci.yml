@@ -12,21 +12,31 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-      - run: make lint
-      - run: go test ./... -race
-      - run: go test -tags dockertest ./internal/collect/docker/ -race
-      - run: make build
+      # Node/web setup moved ahead of lint: `make lint` now also compiles
+      # the -tags webdist build (see the Makefile's own comment on that),
+      # which needs internal/server/webdist populated first -- `make web`
+      # below is what populates it.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: make web
+      # v9 is the current major; per its README's Compatibility section,
+      # v7.0.0+ supports golangci-lint v2 only -- v6 unconditionally passed
+      # a v1-only --out-format flag that v2's CLI rejects outright, failing
+      # the step before golangci-lint ever ran a single rule. version is
+      # pinned to the v2 line .golangci.yml's own `version: "2"` requires,
+      # rather than left floating on `latest`, so a future v3 release can't
+      # silently reintroduce this same class of mismatch.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13
+      - run: make lint
+      - run: go test ./... -race
+      - run: go test -tags dockertest ./internal/collect/docker/ -race
+      - run: make build
       - run: cd web && npm test
-      - run: go build -tags webdist ./...
       - run: docker build -t gantry:ci .
 
   ui:

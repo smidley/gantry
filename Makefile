@@ -8,6 +8,9 @@ build:
 # web builds the Vite SPA into internal/server/webdist/, which
 # webfs_dist.go (-tags webdist) then embeds. Not needed for `build` or
 # `test` above -- only `release` and `docker` need a node toolchain.
+# `lint` below opportunistically type-checks the -tags webdist build too,
+# but only when this has already populated the directory -- it doesn't
+# require a node toolchain on its own.
 web:
 	cd web && npm ci && npm run build
 
@@ -25,6 +28,16 @@ lint:
 	else \
 		echo "golangci-lint not installed, falling back to go vet"; \
 		go vet ./...; \
+	fi
+	@# webfs_dist.go (-tags webdist) is otherwise never type-checked by a
+	@# plain `go vet`/`go test` -- catch it going stale whenever `web` has
+	@# already been run at least once (CI always runs `web` first; a bare
+	@# local clone that's never run `make web` skips this gracefully,
+	@# same as the golangci-lint-not-installed fallback above).
+	@if [ -n "$$(ls -A internal/server/webdist 2>/dev/null)" ]; then \
+		go build -tags webdist ./...; \
+	else \
+		echo "internal/server/webdist not populated (run 'make web' first) -- skipping the webdist-tagged build check"; \
 	fi
 	@test -z "$$(gofmt -l .)" || (echo "gofmt needed on:"; gofmt -l .; exit 1)
 

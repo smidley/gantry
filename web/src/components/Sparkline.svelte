@@ -9,6 +9,7 @@
   import { needsRebuild } from '../lib/chartRebuild';
   import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
+  import { nearestPointAt, tsAtFraction } from '../lib/scrub';
   import { prefersReducedMotion } from 'svelte/motion';
 
   // live defaults true: every real Sparkline in this app charts a
@@ -16,7 +17,14 @@
   // no historical/fetched Sparkline usage today, unlike TimeChart, which
   // is why that component requires an explicit opt-in instead. See its
   // own doc for the full mechanism 1+2 rationale this mirrors.
-  let { points = [], color = 'var(--series-1)', live = true } = $props();
+  //
+  // onScrub (additive, optional -- hover-scrub): called with
+  // {ts, value} while the pointer hovers a real point, or null on
+  // leave/cancel/no-target. Sparkline stays presentation-only -- it
+  // renders its OWN hover dot/hairline from this same computation, but
+  // hands the hit to its caller (StatTile/ContainerRow) to own whatever
+  // number that hit actually updates.
+  let { points = [], color = 'var(--series-1)', live = true, onScrub = undefined } = $props();
 
   let el;
   let chart = null;
@@ -172,13 +180,94 @@
     ro?.disconnect();
     chart?.destroy();
   });
+
+  // --- Hover-scrub (additive, optional -- onScrub only) -----------------
+  //
+  // scrubActive/markerPos are Sparkline's OWN presentation state for the
+  // dot+hairline overlay; markerPos deliberately keeps its last real
+  // position when scrubActive goes false rather than resetting, so the
+  // fade-out below (an always-mounted element, opacity toggled by class)
+  // fades out IN PLACE instead of jumping to a stale 0,0 first.
+  let scrubActive = $state(false);
+  let markerPos = $state({ left: 0, top: 0 });
+
+  // computeScrub maps a client-space x back to a ring value via the same
+  // [now-15m, now] window the chart's own x-scale is set to (liveWindowRange
+  // -- see the module doc), NOT the points' own span: an early/sparse ring
+  // still scrubs anywhere across the tile to its nearest real sample
+  // instead of only across whatever narrow span already has data.
+  function computeScrub(clientX) {
+    if (!chart || !el) return;
+    const rect = el.getBoundingClientRect();
+    const fraction = (clientX - rect.left) / (rect.width || 1);
+    const [min, max] = liveWindowRange(Date.now(), LIVE_WINDOW_SEC);
+    const hit = nearestPointAt(points, tsAtFraction(fraction, min, max));
+    if (!hit) {
+      clearScrub();
+      return;
+    }
+    markerPos = { left: chart.valToPos(hit.ts, 'x', false), top: chart.valToPos(hit.value, 'y', false) };
+    scrubActive = true;
+    onScrub?.({ ts: hit.ts, value: hit.value });
+  }
+
+  function clearScrub() {
+    if (scrubActive) onScrub?.(null);
+    scrubActive = false;
+  }
+
+  function handlePointerMove(e) {
+    if (!onScrub || !live) return;
+    computeScrub(e.clientX);
+  }
 </script>
 
-<div bind:this={el} class="sparkline"></div>
+<div
+  bind:this={el}
+  class="sparkline"
+  role="presentation"
+  onpointermove={handlePointerMove}
+  onpointerleave={clearScrub}
+  onpointercancel={clearScrub}
+>
+  <div class="sparkline__hairline" class:sparkline__hairline--visible={scrubActive} style="left: {markerPos.left}px"></div>
+  <div
+    class="sparkline__dot"
+    class:sparkline__dot--visible={scrubActive}
+    style="left: {markerPos.left}px; top: {markerPos.top}px; background: {color}"
+  ></div>
+</div>
 
 <style>
   .sparkline {
     height: 28px;
     width: 100%;
+    position: relative;
+  }
+  .sparkline__hairline {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: color-mix(in oklab, var(--ink) 35%, transparent);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+  .sparkline__hairline--visible {
+    opacity: 1;
+  }
+  .sparkline__dot {
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    transform: translate(-3px, -3px);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+  .sparkline__dot--visible {
+    opacity: 1;
   }
 </style>

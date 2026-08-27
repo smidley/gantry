@@ -95,18 +95,14 @@
     tween.set(value, { duration: prefersReducedMotion.current ? 0 : TWEEN_MS, easing: cubicOut });
   }
 
-  let cpuTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let memTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let netRxTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
+  // netTxTween/ioWriteTween are value2's own live tween -- StatTile's
+  // hero number (value/liveValue below) now owns its OWN Tween
+  // internally (hover-scrub needs a raw number to ease toward/from), but
+  // value2 has no sparkline to scrub against and stays exactly as it was.
   let netTxTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let ioReadTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
   let ioWriteTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
 
-  $effect(() => tweenTo(cpuTween, host['cpu.total'] ?? 0));
-  $effect(() => tweenTo(memTween, host['mem.used_pct'] ?? 0));
-  $effect(() => tweenTo(netRxTween, netRx));
   $effect(() => tweenTo(netTxTween, netTx));
-  $effect(() => tweenTo(ioReadTween, ioRead));
   $effect(() => tweenTo(ioWriteTween, ioWrite));
 
   let containerEntries = $derived(Object.entries(live.frame?.containers ?? {}));
@@ -154,18 +150,20 @@
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
   <div class="overview__tiles">
-    <StatTile label="CPU" value={fmtPct(cpuTween.current)} sparklinePoints={cpuRing.points} />
-    <StatTile label="Memory" value={fmtPct(memTween.current)} sparklinePoints={memRing.points} />
+    <StatTile label="CPU" liveValue={host['cpu.total'] ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
+    <StatTile label="Memory" liveValue={host['mem.used_pct'] ?? 0} formatValue={fmtPct} sparklinePoints={memRing.points} />
     <StatTile
       label="Network"
-      value={`↓ ${fmtRate(netRxTween.current)}`}
+      liveValue={netRx}
+      formatValue={(v) => `↓ ${fmtRate(v)}`}
       value2={fmtRate(netTxTween.current)}
       label2="↑"
       sparklinePoints={netRxRing.points}
     />
     <StatTile
       label="Disk IO"
-      value={`r ${fmtRate(ioReadTween.current)}`}
+      liveValue={ioRead}
+      formatValue={(v) => `r ${fmtRate(v)}`}
       value2={fmtRate(ioWriteTween.current)}
       label2="w"
       sparklinePoints={ioReadRing.points}

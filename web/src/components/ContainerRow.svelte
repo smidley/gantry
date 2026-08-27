@@ -70,6 +70,8 @@
     tween.set(value, { duration: prefersReducedMotion.current ? 0 : TWEEN_MS, easing: cubicOut });
   }
 
+  const SCRUB_TWEEN_MS = 120;
+
   let cpuTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
   let memBytesTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
   let memPctTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
@@ -78,7 +80,27 @@
   let ioReadTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
   let ioWriteTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
 
-  $effect(() => tweenTo(cpuTween, m['cpu.pct'] ?? 0));
+  // cpuScrubHit (hover-scrub): non-null while the pointer is over this
+  // row's own CPU sparkline -- cpuTween's effect below then eases toward
+  // the hovered ring value instead of the live one, at the faster
+  // scrub-follow duration, exactly like StatTile's own hero number (see
+  // its doc for the identical shape). Every other cell in this row stays
+  // live-only; only the CPU cell has a sparkline to scrub against.
+  let cpuScrubHit = $state(null);
+
+  $effect(() => {
+    const reduced = prefersReducedMotion.current;
+    if (cpuScrubHit) {
+      cpuTween.set(cpuScrubHit.value, { duration: reduced ? 0 : SCRUB_TWEEN_MS, easing: cubicOut });
+    } else {
+      cpuTween.set(m['cpu.pct'] ?? 0, { duration: reduced ? 0 : TWEEN_MS, easing: cubicOut });
+    }
+  });
+
+  function handleCpuScrub(hit) {
+    cpuScrubHit = hit;
+  }
+
   $effect(() => tweenTo(memBytesTween, m['mem.bytes'] ?? 0));
   $effect(() => tweenTo(memPctTween, m['mem.pct'] ?? 0));
   $effect(() => tweenTo(netRxTween, m['net.rx_bps'] ?? 0));
@@ -95,7 +117,7 @@
     </td>
     <td class="container-row__cpu-cell">
       <span class="tabular-nums">{fmtPct(cpuTween.current)}</span>
-      <Sparkline points={cpuRing.points} />
+      <Sparkline points={cpuRing.points} onScrub={handleCpuScrub} />
     </td>
     <td class="tabular-nums container-row__nowrap">
       {fmtBytes(memBytesTween.current)}

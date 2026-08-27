@@ -1,9 +1,7 @@
 <!--
-  App: the route table. Overview/Containers/Container-detail/Top
-  Consumers/Storage/GPU (Tasks 14-19) render their real views; Events/
-  Settings (later Task 20) still render a placeholder <h1> -- this
-  proves the shell is navigable end to end for every route regardless of
-  which task has landed.
+  App: the route table. Every Phase 3 view (Overview through Settings,
+  Tasks 14-20) renders its real component; only the unmatched fallback
+  ("not-found") still renders a placeholder <h1>.
 -->
 <script>
   import { onMount } from 'svelte';
@@ -17,6 +15,8 @@
   import TopConsumers from './views/TopConsumers.svelte';
   import Storage from './views/Storage.svelte';
   import GPU from './views/GPU.svelte';
+  import Events from './views/Events.svelte';
+  import Settings from './views/Settings.svelte';
 
   onMount(() => {
     live.connect();
@@ -24,8 +24,6 @@
   });
 
   const ROUTE_TITLES = {
-    events: 'Events',
-    settings: 'Settings',
     'not-found': 'Not found',
   };
 </script>
@@ -52,6 +50,10 @@
     <Storage />
   {:else if $route.name === 'gpu'}
     <GPU />
+  {:else if $route.name === 'events'}
+    <Events />
+  {:else if $route.name === 'settings'}
+    <Settings />
   {:else}
     <h1>{ROUTE_TITLES[$route.name] ?? ROUTE_TITLES['not-found']}</h1>
     <p class="microlabel">View content lands in a later task.</p>

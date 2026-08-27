@@ -3,12 +3,18 @@
   GantryEvent (api.ts) -- store.Event's wire shape has no json tags, so
   its capitalized Go field names (ID, TS, Kind, Entity, Severity,
   Detail) are the JSON/prop keys as-is.
+
+  showAbsoluteTime (additive, optional -- Task 20) renders the event's
+  browser-local absolute timestamp alongside the relative one, for the
+  Events view's own "relative + absolute time" contract. Overview's
+  compact feed leaves it false (its default), keeping that view's exact
+  original single-timestamp rendering.
 -->
 <script>
   import HealthDot from './HealthDot.svelte';
   import { fmtRelTime } from '../lib/format';
 
-  let { event } = $props();
+  let { event, showAbsoluteTime = false } = $props();
 
   // The store's actual severity vocabulary is info/warning/alert (see
   // internal/store/events.go and every AppendEvent call site) -- NOT
@@ -27,7 +33,12 @@
     <div class="event-feed-item__head">
       <span class="event-feed-item__kind">{event.Kind}</span>
       {#if event.Entity}<span class="event-feed-item__entity">{event.Entity}</span>{/if}
-      <span class="microlabel event-feed-item__time">{fmtRelTime(event.TS)}</span>
+      <span class="microlabel event-feed-item__time">
+        {fmtRelTime(event.TS)}
+        {#if showAbsoluteTime}
+          <span class="event-feed-item__time-abs">&middot; {new Date(event.TS * 1000).toLocaleString()}</span>
+        {/if}
+      </span>
     </div>
     {#if event.Detail}
       <div class="event-feed-item__detail">{event.Detail}</div>
@@ -63,6 +74,10 @@
   .event-feed-item__time {
     margin-left: auto;
     white-space: nowrap;
+  }
+  .event-feed-item__time-abs {
+    text-transform: none;
+    letter-spacing: normal;
   }
   .event-feed-item__detail {
     color: var(--ink-2);

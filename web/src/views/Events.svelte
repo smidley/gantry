@@ -1,0 +1,327 @@
+<!--
+  Events: a filterable feed over /api/events -- kind multi-select (a
+  fixed known-kinds list; none checked means no kind filter at all, not
+  "show nothing"), an entity text filter (exact match, matching the
+  API's own `entity = ?` semantics -- see fetchEvents/api_history.go),
+  and a time-range preset. "Load more" pages backward via a before-
+  cursor (to = the oldest loaded event's ts, minus one so that inclusive
+  boundary isn't re-fetched) -- see loadMore's own doc for the one
+  known edge case that cursor shape accepts, per the brief's own spec.
+-->
+<script>
+  import { fetchEvents } from '../lib/api';
+  import EventFeedItem from '../components/EventFeedItem.svelte';
+
+  const PAGE_LIMIT = 200;
+
+  // KNOWN_KINDS is the fixed vocabulary the filter row's checkboxes
+  // cover -- every event kind any collector/fake generator can emit
+  // (see store.Event call sites across docker/registry.go, unraid's
+  // var.go/disks.go, and fake.go), in the task's own given order.
+  const KNOWN_KINDS = [
+    'container.start',
+    'container.die',
+    'container.oom',
+    'container.health',
+    'array.state',
+    'parity.start',
+    'parity.finish',
+    'disk.errors',
+  ];
+  const TIME_PRESETS = [
+    { key: '1h', label: '1h', seconds: 3600 },
+    { key: '24h', label: '24h', seconds: 86400 },
+    { key: '7d', label: '7d', seconds: 7 * 86400 },
+    { key: 'all', label: 'All', seconds: null },
+  ];
+
+  let selectedKinds = $state(new Set());
+  let entityFilter = $state('');
+  let timePreset = $state('24h');
+
+  let events = $state([]);
+  let loading = $state(false);
+  let failed = $state(false);
+  let hasMore = $state(false);
+
+  function toggleKind(kind) {
+    const next = new Set(selectedKinds);
+    if (next.has(kind)) next.delete(kind);
+    else next.add(kind);
+    selectedKinds = next;
+  }
+
+  function presetFrom(preset) {
+    const p = TIME_PRESETS.find((t) => t.key === preset);
+    return p?.seconds == null ? undefined : Math.floor(Date.now() / 1000) - p.seconds;
+  }
+
+  // activeController tracks whichever request -- the filter effect's
+  // own, or a loadMore() call -- is currently in flight, so a filter
+  // change or a second loadMore click while one is already running
+  // always aborts the earlier request first, the same "never let a
+  // superseded request win just because it resolves last" contract
+  // ContainerDetail's own history effect documents.
+  let activeController = null;
+  function abortInFlight() {
+    activeController?.abort();
+    activeController = null;
+  }
+
+  // Stale-response race: changing a kind checkbox, the entity filter, or
+  // the time preset fast enough that an earlier /api/events call is
+  // still in flight when a newer one starts must not let the earlier
+  // response win. See ContainerDetail.svelte's matching effect for the
+  // full mechanics this mirrors (abort-on-cleanup runs before the next
+  // call to this same effect; a stale request's .catch ignores
+  // AbortError instead of clearing already-newer state).
+  $effect(() => {
+    const kinds = Array.from(selectedKinds);
+    const entity = entityFilter.trim();
+    const preset = timePreset;
+
+    abortInFlight();
+    const controller = new AbortController();
+    activeController = controller;
+    loading = true;
+    failed = false;
+    fetchEvents({
+      kinds: kinds.length > 0 ? kinds : undefined,
+      entity: entity || undefined,
+      from: presetFrom(preset),
+      limit: PAGE_LIMIT,
+      signal: controller.signal,
+    })
+      .then((result) => {
+        events = result;
+        hasMore = result.length === PAGE_LIMIT;
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // superseded by a newer filter change
+        events = [];
+        hasMore = false;
+        failed = true;
+      })
+      .finally(() => {
+        if (activeController === controller) {
+          loading = false;
+          activeController = null;
+        }
+      });
+    return () => controller.abort();
+  });
+
+  // loadMore pages backward from the oldest currently-loaded event.
+  // Known edge case (accepted -- this is the brief's own "before = min
+  // ts of loaded" cursor, not a different scheme of my own devising):
+  // if more events share that exact oldest timestamp than fit in one
+  // page, the ones that didn't make this page are skipped on the next
+  // one (to = minTs-1 excludes the whole second, not just the rows
+  // already seen) -- rare in practice, and not worth a heavier id-based
+  // cursor for a feed this low-stakes.
+  async function loadMore() {
+    if (loading || events.length === 0) return;
+    const kinds = Array.from(selectedKinds);
+    const entity = entityFilter.trim();
+    const preset = timePreset;
+    const minTs = Math.min(...events.map((e) => e.TS));
+
+    abortInFlight();
+    const controller = new AbortController();
+    activeController = controller;
+    loading = true;
+    failed = false;
+    try {
+      const older = await fetchEvents({
+        kinds: kinds.length > 0 ? kinds : undefined,
+        entity: entity || undefined,
+        from: presetFrom(preset),
+        to: minTs - 1,
+        limit: PAGE_LIMIT,
+        signal: controller.signal,
+      });
+      events = [...events, ...older];
+      hasMore = older.length === PAGE_LIMIT;
+    } catch (err) {
+      if (err?.name !== 'AbortError') failed = true; // superseded requests are silently ignored
+    } finally {
+      if (activeController === controller) {
+        loading = false;
+        activeController = null;
+      }
+    }
+  }
+</script>
+
+<div class="events-view">
+  <h1 class="page-title">Events</h1>
+
+  <div class="card events-view__filters">
+    <fieldset class="events-view__kinds">
+      <legend class="microlabel">Kind</legend>
+      {#each KNOWN_KINDS as kind (kind)}
+        <label class="events-view__kind-checkbox">
+          <input type="checkbox" checked={selectedKinds.has(kind)} onchange={() => toggleKind(kind)} />
+          <span>{kind}</span>
+        </label>
+      {/each}
+    </fieldset>
+
+    <div class="events-view__filter-row">
+      <label class="events-view__entity-field">
+        <span class="microlabel">Entity</span>
+        <input type="text" placeholder="Entity name (exact match)…" bind:value={entityFilter} />
+      </label>
+
+      <div class="events-view__presets" role="group" aria-label="Time range">
+        {#each TIME_PRESETS as p (p.key)}
+          <button
+            type="button"
+            class="events-view__preset-btn"
+            class:events-view__preset-btn--active={timePreset === p.key}
+            onclick={() => (timePreset = p.key)}
+          >
+            {p.label}
+          </button>
+        {/each}
+      </div>
+    </div>
+  </div>
+
+  <div class="card events-view__list">
+    {#if failed}
+      <p class="microlabel events-view__error">Couldn't load events. Try again shortly.</p>
+    {:else if events.length === 0 && !loading}
+      <p class="microlabel events-view__empty">No events match these filters.</p>
+    {:else}
+      <div class="events-view__items">
+        {#each events as event (event.ID)}
+          <EventFeedItem {event} showAbsoluteTime />
+        {/each}
+      </div>
+      {#if loading}
+        <p class="microlabel events-view__loading">Loading…</p>
+      {:else if hasMore}
+        <button type="button" class="events-view__load-more" onclick={loadMore} disabled={loading}>Load more</button>
+      {/if}
+    {/if}
+  </div>
+</div>
+
+<style>
+  .events-view {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .events-view__filters {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .events-view__kinds {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem 1rem;
+    border: none;
+    margin: 0;
+    padding: 0;
+  }
+  .events-view__kinds legend {
+    padding: 0;
+    margin-right: 0.25rem;
+  }
+  .events-view__kind-checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-height: 40px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--ink-2);
+  }
+  .events-view__kind-checkbox input {
+    width: 16px;
+    height: 16px;
+  }
+  .events-view__filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 1rem;
+  }
+  .events-view__entity-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .events-view__entity-field input {
+    min-height: 40px;
+    padding: 0 0.75rem;
+    border-radius: 6px;
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 0.9rem;
+    min-width: 14rem;
+  }
+  .events-view__presets {
+    display: inline-flex;
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .events-view__preset-btn {
+    min-height: 40px;
+    padding: 0 0.85rem;
+    border: none;
+    border-right: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    background: transparent;
+    color: var(--ink-2);
+    font-size: 0.82rem;
+    cursor: pointer;
+  }
+  .events-view__preset-btn:last-child {
+    border-right: none;
+  }
+  .events-view__preset-btn--active {
+    background: color-mix(in oklab, var(--series-1) 15%, transparent);
+    color: var(--series-1);
+    font-weight: 500;
+  }
+  .events-view__list {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .events-view__error {
+    color: var(--status-warning);
+    margin: 0;
+  }
+  .events-view__empty,
+  .events-view__loading {
+    margin: 0;
+  }
+  .events-view__items {
+    display: flex;
+    flex-direction: column;
+  }
+  .events-view__load-more {
+    align-self: center;
+    min-height: 40px;
+    padding: 0 1.25rem;
+    margin-top: 0.4rem;
+    border-radius: 6px;
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    background: transparent;
+    color: var(--ink);
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .events-view__load-more:hover {
+    background: color-mix(in oklab, var(--ink) 6%, transparent);
+  }
+</style>

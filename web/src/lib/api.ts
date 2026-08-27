@@ -128,6 +128,7 @@ export function fetchEvents(
     from?: number;
     to?: number;
     limit?: number;
+    signal?: AbortSignal;
   } = {},
 ): Promise<GantryEvent[]> {
   const q = new URLSearchParams();
@@ -137,7 +138,7 @@ export function fetchEvents(
   if (params.to !== undefined) q.set('to', String(params.to));
   if (params.limit !== undefined) q.set('limit', String(params.limit));
   const qs = q.toString();
-  return getJSON<GantryEvent[]>(`/api/events${qs ? `?${qs}` : ''}`);
+  return getJSON<GantryEvent[]>(`/api/events${qs ? `?${qs}` : ''}`, params.signal);
 }
 
 export function fetchContainers(): Promise<ContainerInfo[]> {
@@ -148,20 +149,61 @@ export function fetchSettings(): Promise<SettingsResponse> {
   return getJSON<SettingsResponse>('/api/settings');
 }
 
+export interface VersionResponse {
+  version: string;
+}
+
+// fetchVersion backs the Settings view's About card. version defaults
+// to the literal string "dev" server-side (main.go's `var version =
+// "dev"`) when the binary wasn't built with -ldflags -X main.version=...
+// -- there is no "unset" case to distinguish from a real release tag.
+export function fetchVersion(): Promise<VersionResponse> {
+  return getJSON<VersionResponse>('/api/version');
+}
+
+// SettingsPutError is what putSettings throws on a non-2xx response: a
+// plain Error (so every existing `err.message`/`err instanceof Error`
+// caller keeps working unchanged) with the server's own structured
+// per-field detail attached -- a 400's {fields: {name: reason}} or a
+// 409's {envOverridden: [name, ...]} (see api_settings.go's
+// handleSettingsPut) -- so the retention editor can point its inline
+// error at the SPECIFIC field that failed, not just show one generic
+// banner message. Both are undefined for a plain 404 (Settings
+// unavailable) or a malformed-body 500, which carry neither.
+export interface SettingsPutError extends Error {
+  fields?: Record<string, string>;
+  envOverridden?: string[];
+}
+
 // putSettings surfaces the server's structured error body (400's
 // {error, fields} or 409's {error, env_overridden}) as the thrown
-// Error's message when the request fails, rather than a generic
-// status-code message -- the settings editor needs that detail to
-// point at the right field.
+// SettingsPutError's message + fields/envOverridden when the request
+// fails, rather than a generic status-code message -- the settings
+// editor needs that detail to point at the right field.
 export async function putSettings(retention: RetentionSettings): Promise<SettingsResponse> {
   const res = await fetch('/api/settings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ retention }),
   });
-  const body = (await res.json()) as SettingsResponse & { error?: string };
+  const body = (await res.json()) as SettingsResponse & {
+    error?: string;
+    fields?: Record<string, string>;
+    env_overridden?: string[];
+  };
   if (!res.ok) {
-    throw new Error(body.error ?? `PUT /api/settings: ${res.status} ${res.statusText}`);
+    const err: SettingsPutError = new Error(body.error ?? `PUT /api/settings: ${res.status} ${res.statusText}`);
+    err.fields = body.fields;
+    // On a 409 body specifically, env_overridden names the SUBMITTED
+    // fields that conflicted with their env-resolved value (a narrower,
+    // per-request list) -- not the general "every currently locked
+    // field" list settingsGetResponse's own same-named key carries on
+    // GET/a successful PUT. Both share the wire name because the server
+    // reuses RetentionSettings' sibling struct shape for both bodies;
+    // the caller distinguishes them by which response this is (an error
+    // vs. a success), not by the key name alone.
+    err.envOverridden = body.env_overridden;
+    throw err;
   }
   return body;
 }

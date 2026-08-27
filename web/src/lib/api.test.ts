@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchSeries, fetchTop, streamLogs } from './api';
+import { fetchEvents, fetchSeries, fetchTop, fetchVersion, putSettings, streamLogs } from './api';
 
 // abortableFetchMock stands in for the real Fetch API's AbortSignal
 // contract without a real network call: it resolves with `response`
@@ -94,6 +94,86 @@ describe('fetchSeries / fetchTop abort support', () => {
     const result = await fetchTop({ resource: 'cpu', window: '1h', signal: controller.signal });
     expect(result).toEqual([{ entity: 'web', value: 1 }]);
     expect(controller.signal.aborted).toBe(false);
+  });
+
+  it('fetchEvents rejects with an AbortError when its signal aborts before the response resolves', async () => {
+    global.fetch = abortableFetchMock([]) as typeof fetch;
+    const controller = new AbortController();
+    const promise = fetchEvents({ limit: 200, signal: controller.signal });
+    controller.abort();
+    await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('fetchEvents passes its signal through to fetch', async () => {
+    const mock = abortableFetchMock([]);
+    global.fetch = mock as typeof fetch;
+    const controller = new AbortController();
+    await fetchEvents({ kinds: ['container.oom'], limit: 200, signal: controller.signal });
+    expect(mock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/events'),
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+});
+
+describe('putSettings error shape', () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it('throws a plain Error carrying the server message and per-field 400 detail', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      json: async () => ({ error: 'invalid retention settings', fields: { r1_hours: 'must be between 1 and 168' } }),
+    })) as unknown as typeof fetch;
+    await expect(putSettings({ r1_hours: 0, r2_days: 7, r3_days: 30, size_cap_mb: 512 })).rejects.toMatchObject({
+      message: 'invalid retention settings',
+      fields: { r1_hours: 'must be between 1 and 168' },
+    });
+  });
+
+  it('attaches envOverridden from a 409 conflict body', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: false,
+      status: 409,
+      statusText: 'Conflict',
+      json: async () => ({ error: 'env-overridden fields cannot be changed here', env_overridden: ['r1_hours'] }),
+    })) as unknown as typeof fetch;
+    await expect(putSettings({ r1_hours: 5, r2_days: 7, r3_days: 30, size_cap_mb: 512 })).rejects.toMatchObject({
+      message: 'env-overridden fields cannot be changed here',
+      envOverridden: ['r1_hours'],
+    });
+  });
+
+  it('resolves with the settings body on success', async () => {
+    const success = { retention: { r1_hours: 48, r2_days: 30, r3_days: 395, size_cap_mb: 512 }, env_overridden: [] };
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => success,
+    })) as unknown as typeof fetch;
+    await expect(putSettings(success.retention)).resolves.toEqual(success);
+  });
+});
+
+describe('fetchVersion', () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it('resolves with the version response', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ version: 'dev' }),
+    })) as unknown as typeof fetch;
+    await expect(fetchVersion()).resolves.toEqual({ version: 'dev' });
   });
 });
 

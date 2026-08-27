@@ -4,6 +4,7 @@ import {
   etaFromProgress,
   GPU_ENGINE_ORDER,
   GPU_ENTITY_ENGINE_ORDER,
+  keysByPattern,
   parityIsRunning,
   seqStep,
   sharesFromMetrics,
@@ -36,6 +37,46 @@ describe('sumMetricsByPattern', () => {
     expect(sumMetricsByPattern(undefined, 'diskio', '.read_bps')).toBe(0);
     expect(sumMetricsByPattern(null, 'diskio', '.read_bps')).toBe(0);
     expect(sumMetricsByPattern({}, 'diskio', '.read_bps')).toBe(0);
+  });
+
+  it('sums real mode net.<iface>.rx_bps and .tx_bps independently', () => {
+    // The bug this exists to catch: Overview's Network tile used to read
+    // a flat "net.rx_bps"/"net.tx_bps" key directly, which real mode
+    // (host.go) never writes -- only per-interface keys. sumMetricsByPattern
+    // already handles this generically (same rule as diskio above); this
+    // case just proves it for net specifically.
+    const host = { 'net.eth0.rx_bps': 100, 'net.eth0.tx_bps': 20, 'net.wlan0.rx_bps': 5, 'net.wlan0.tx_bps': 1 };
+    expect(sumMetricsByPattern(host, 'net', '.rx_bps')).toBe(105);
+    expect(sumMetricsByPattern(host, 'net', '.tx_bps')).toBe(21);
+  });
+
+  it('sums fake mode\'s flat net.rx_bps/net.tx_bps the same way (degenerate single-interface case)', () => {
+    const host = { 'net.rx_bps': 42, 'net.tx_bps': 7 };
+    expect(sumMetricsByPattern(host, 'net', '.rx_bps')).toBe(42);
+    expect(sumMetricsByPattern(host, 'net', '.tx_bps')).toBe(7);
+  });
+});
+
+describe('keysByPattern', () => {
+  it('finds per-device dynamic-middle-segment keys (real-mode shape)', () => {
+    const host = { 'net.eth0.rx_bps': 100, 'net.wlan0.rx_bps': 5, 'net.eth0.tx_bps': 20, 'cpu.total': 1 };
+    expect(keysByPattern(host, 'net', '.rx_bps').sort()).toEqual(['net.eth0.rx_bps', 'net.wlan0.rx_bps']);
+  });
+
+  it('finds a flat key as a degenerate single-match case (fake-mode shape)', () => {
+    const host = { 'net.rx_bps': 42, 'net.tx_bps': 7 };
+    expect(keysByPattern(host, 'net', '.rx_bps')).toEqual(['net.rx_bps']);
+  });
+
+  it('ignores unrelated keys', () => {
+    const host = { 'net.eth0.rx_bps': 100, 'net.eth0.tx_bps': 20, 'cpu.total': 1 };
+    expect(keysByPattern(host, 'net', '.rx_bps')).toEqual(['net.eth0.rx_bps']);
+  });
+
+  it('returns [] for undefined/null/empty input', () => {
+    expect(keysByPattern(undefined, 'net', '.rx_bps')).toEqual([]);
+    expect(keysByPattern(null, 'net', '.rx_bps')).toEqual([]);
+    expect(keysByPattern({}, 'net', '.rx_bps')).toEqual([]);
   });
 });
 

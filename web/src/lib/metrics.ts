@@ -74,6 +74,24 @@ export function sumSeriesPoints(pointArrays: [number, number, number][][]): [num
   return Array.from(sums.entries()).sort((a, b) => a[0] - b[0]);
 }
 
+// keysByPattern is sumMetricsByPattern's discovery-side sibling, same
+// prefix+suffix rule (a flat key -- fake mode's "net.rx_bps" -- matches
+// on its own, the identical degenerate case sumMetricsByPattern's own
+// doc describes; no special-casing between the flat and per-device
+// shapes here either). Used when a caller needs the CONCRETE key names
+// themselves rather than a live-frame sum -- seeding a sum-of-pattern
+// sparkline has to ask /api/series for history by exact metric name, and
+// there's no fixed name to ask for when the real device/interface count
+// is only known from whatever's actually present in the current frame.
+export function keysByPattern(
+  metrics: Record<string, number> | undefined | null,
+  prefix: string,
+  suffix: string,
+): string[] {
+  if (!metrics) return [];
+  return Object.keys(metrics).filter((k) => k.startsWith(prefix) && k.endsWith(suffix));
+}
+
 export interface ShareUsage {
   name: string;
   usedBytes: number;

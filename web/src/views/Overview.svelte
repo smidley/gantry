@@ -15,7 +15,7 @@
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
   import { fmtPct, fmtRate } from '../lib/format';
-  import { sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
+  import { keysByPattern, sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
   import { topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
 
@@ -33,35 +33,41 @@
 
   let cpuRing = liveRing((f) => f.host?.['cpu.total']);
   let memRing = liveRing((f) => f.host?.['mem.used_pct']);
-  let netRxRing = liveRing((f) => f.host?.['net.rx_bps']);
+  // netRxRing sums real mode's per-interface "net.<iface>.rx_bps" keys
+  // (host.go never writes a flat "net.rx_bps" -- only fake mode does,
+  // the degenerate single-match case sumMetricsByPattern's own doc
+  // describes) -- this tile read a flat key directly until now, which
+  // meant it always read 0 on real hardware. Matches ioReadRing's own
+  // pattern-sum below exactly.
+  let netRxRing = liveRing((f) => sumMetricsByPattern(f.host, 'net', '.rx_bps'));
   let ioReadRing = liveRing((f) => sumMetricsByPattern(f.host, 'diskio', '.read_bps'));
 
-  // Seed all four sparklines from server history on mount, once. cpu/mem/
-  // net are each a single fixed host metric, fetched straight by name --
-  // net.rx_bps matches netRxRing's OWN live extractor above exactly
-  // (real mode's per-interface "net.<iface>.rx_bps" isn't summed here
-  // either; seeding stays faithful to whatever a sparkline actually
-  // plots today, not a fix for that separately). ioReadRing sums a
-  // PATTERN of per-device keys instead (sumMetricsByPattern, live-side)
-  // with no fixed name to fetch by itself, so its history needs the
-  // CURRENT exact key names first -- fetchSnapshot() answers that
-  // synchronously, without waiting on (or racing) live.frame's own first
-  // SSE frame, the same discovery sumMetricsByPattern itself does at
-  // read time off whatever frame it's handed.
+  // Seed all four sparklines from server history on mount, once. cpu/mem
+  // are each a single fixed host metric, fetched straight by name.
+  // net/io both sum a PATTERN of per-device keys instead (sumMetricsByPattern,
+  // live-side) with no fixed name to fetch by itself, so their history
+  // needs the CURRENT exact key names first -- fetchSnapshot() answers
+  // that synchronously, without waiting on (or racing) live.frame's own
+  // first SSE frame, the same discovery sumMetricsByPattern itself does
+  // at read time off whatever frame it's handed. keysByPattern is that
+  // discovery step's own pure sibling (same prefix+suffix rule), used
+  // here because seeding needs the CONCRETE key names to ask
+  // /api/series for, not just a live sum.
   onMount(() => {
     const controller = new AbortController();
     const to = Math.floor(Date.now() / 1000);
     const from = to - LIVE_WINDOW_SEC;
     fetchSnapshot()
       .then((snapshot) => {
-        const readKeys = Object.keys(snapshot.host ?? {}).filter((k) => k.startsWith('diskio') && k.endsWith('.read_bps'));
-        const metrics = ['cpu.total', 'mem.used_pct', 'net.rx_bps', ...readKeys];
+        const netRxKeys = keysByPattern(snapshot.host, 'net', '.rx_bps');
+        const readKeys = keysByPattern(snapshot.host, 'diskio', '.read_bps');
+        const metrics = ['cpu.total', 'mem.used_pct', ...netRxKeys, ...readKeys];
         return fetchSeries({ kind: 'host', entity: '', metrics, from, to, signal: controller.signal }).then((results) => {
           const byMetric = {};
           for (const r of results) byMetric[r.metric] = r.points;
           cpuRing.seed(seriesPointsToRing(byMetric['cpu.total'] ?? []));
           memRing.seed(seriesPointsToRing(byMetric['mem.used_pct'] ?? []));
-          netRxRing.seed(seriesPointsToRing(byMetric['net.rx_bps'] ?? []));
+          netRxRing.seed(sumSeriesPoints(netRxKeys.map((k) => byMetric[k] ?? [])));
           ioReadRing.seed(sumSeriesPoints(readKeys.map((k) => byMetric[k] ?? [])));
         });
       })
@@ -75,6 +81,8 @@
   });
 
   let host = $derived(live.frame?.host ?? {});
+  let netRx = $derived(sumMetricsByPattern(host, 'net', '.rx_bps'));
+  let netTx = $derived(sumMetricsByPattern(host, 'net', '.tx_bps'));
   let ioRead = $derived(sumMetricsByPattern(host, 'diskio', '.read_bps'));
   let ioWrite = $derived(sumMetricsByPattern(host, 'diskio', '.write_bps'));
 
@@ -96,8 +104,8 @@
 
   $effect(() => tweenTo(cpuTween, host['cpu.total'] ?? 0));
   $effect(() => tweenTo(memTween, host['mem.used_pct'] ?? 0));
-  $effect(() => tweenTo(netRxTween, host['net.rx_bps'] ?? 0));
-  $effect(() => tweenTo(netTxTween, host['net.tx_bps'] ?? 0));
+  $effect(() => tweenTo(netRxTween, netRx));
+  $effect(() => tweenTo(netTxTween, netTx));
   $effect(() => tweenTo(ioReadTween, ioRead));
   $effect(() => tweenTo(ioWriteTween, ioWrite));
 

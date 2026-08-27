@@ -1,9 +1,9 @@
 <!--
   App: the route table. Overview/Containers/Container-detail/Top
-  Consumers (Tasks 14-17, this whole SDD batch) render their real views;
-  Storage/GPU/Events/Settings (later Tasks 18-20) still render a
-  placeholder <h1> -- this proves the shell is navigable end to end for
-  every route regardless of which task has landed.
+  Consumers/Storage (Tasks 14-18) render their real views; GPU/Events/
+  Settings (later Tasks 19-20) still render a placeholder <h1> -- this
+  proves the shell is navigable end to end for every route regardless of
+  which task has landed.
 -->
 <script>
   import { onMount } from 'svelte';
@@ -15,6 +15,7 @@
   import Containers from './views/Containers.svelte';
   import ContainerDetail from './views/ContainerDetail.svelte';
   import TopConsumers from './views/TopConsumers.svelte';
+  import Storage from './views/Storage.svelte';
 
   onMount(() => {
     live.connect();
@@ -22,7 +23,6 @@
   });
 
   const ROUTE_TITLES = {
-    storage: 'Storage',
     gpu: 'GPU',
     events: 'Events',
     settings: 'Settings',
@@ -48,6 +48,8 @@
     {/key}
   {:else if $route.name === 'top'}
     <TopConsumers />
+  {:else if $route.name === 'storage'}
+    <Storage />
   {:else}
     <h1>{ROUTE_TITLES[$route.name] ?? ROUTE_TITLES['not-found']}</h1>
     <p class="microlabel">View content lands in a later task.</p>

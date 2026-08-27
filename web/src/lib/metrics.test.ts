@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { enginesPresent, etaFromProgress, GPU_ENGINE_ORDER, sumMetricsByPattern } from './metrics';
+import { enginesPresent, etaFromProgress, GPU_ENGINE_ORDER, seqStep, sharesFromMetrics, sumMetricsByPattern } from './metrics';
 
 describe('sumMetricsByPattern', () => {
   it('sums a flat key with no dynamic middle segment (fake-mode shape)', () => {
@@ -29,6 +29,41 @@ describe('sumMetricsByPattern', () => {
   });
 });
 
+describe('sharesFromMetrics', () => {
+  it('extracts every share.<name>.used_bytes key, sorted by used bytes descending', () => {
+    const metrics = {
+      'array.started': 1,
+      'share.appdata.used_bytes': 100,
+      'share.media.used_bytes': 900,
+      'share.backups.used_bytes': 500,
+    };
+    expect(sharesFromMetrics(metrics)).toEqual([
+      { name: 'media', usedBytes: 900 },
+      { name: 'backups', usedBytes: 500 },
+      { name: 'appdata', usedBytes: 100 },
+    ]);
+  });
+
+  it('breaks ties by name ascending', () => {
+    const metrics = { 'share.zeta.used_bytes': 10, 'share.alpha.used_bytes': 10 };
+    expect(sharesFromMetrics(metrics)).toEqual([
+      { name: 'alpha', usedBytes: 10 },
+      { name: 'zeta', usedBytes: 10 },
+    ]);
+  });
+
+  it('ignores unrelated keys on the same entity', () => {
+    const metrics = { 'array.started': 1, 'parity.progress_pct': 40, 'mover.running': 0 };
+    expect(sharesFromMetrics(metrics)).toEqual([]);
+  });
+
+  it('returns an empty array for absent/undefined/null metrics', () => {
+    expect(sharesFromMetrics({})).toEqual([]);
+    expect(sharesFromMetrics(undefined)).toEqual([]);
+    expect(sharesFromMetrics(null)).toEqual([]);
+  });
+});
+
 describe('enginesPresent', () => {
   it('returns engines in the fixed GPU_ENGINE_ORDER, not object order', () => {
     const metrics = {
@@ -51,6 +86,25 @@ describe('enginesPresent', () => {
 
   it('covers every declared engine slot', () => {
     expect(GPU_ENGINE_ORDER).toEqual(['render', 'video', 'video-enhance', 'copy']);
+  });
+});
+
+describe('seqStep', () => {
+  it('buckets 0-100% onto the 7-stop ramp', () => {
+    expect(seqStep(0)).toBe('var(--seq-100)');
+    expect(seqStep(1)).toBe('var(--seq-100)');
+    expect(seqStep(100)).toBe('var(--seq-700)');
+  });
+
+  it('steps up through the middle of the ramp', () => {
+    expect(seqStep(10)).toBe('var(--seq-100)'); // 0.7/7 -> ceil 1
+    expect(seqStep(20)).toBe('var(--seq-200)'); // 1.4/7 -> ceil 2
+    expect(seqStep(50)).toBe('var(--seq-400)'); // 3.5/7 -> ceil 4
+  });
+
+  it('clamps out-of-range input to the nearest end stop', () => {
+    expect(seqStep(-10)).toBe('var(--seq-100)');
+    expect(seqStep(150)).toBe('var(--seq-700)');
   });
 });
 

@@ -6,7 +6,7 @@
 -->
 <script>
   import { fmtBytes, fmtDuration, fmtPct, fmtRate } from '../lib/format';
-  import { etaFromProgress } from '../lib/metrics';
+  import { etaFromProgress, seqStep } from '../lib/metrics';
   import HealthDot from './HealthDot.svelte';
 
   let { array = {}, disks = {}, ts = 0 } = $props();
@@ -64,14 +64,6 @@
     }
     return out.sort((a, b) => a.slot.localeCompare(b.slot));
   });
-
-  // seqStep buckets a 0-100% fill onto tokens.css's 7-stop sequential
-  // ramp (--seq-100..--seq-700) -- a coarse step function, not a
-  // continuous interpolation, since the ramp itself only has 7 stops.
-  function seqStep(pct) {
-    const step = Math.min(7, Math.max(1, Math.ceil((pct / 100) * 7)));
-    return `var(--seq-${step}00)`;
-  }
 </script>
 
 <div class="card array-card">

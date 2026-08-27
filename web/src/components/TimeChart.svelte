@@ -18,6 +18,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { theme, resolveToken } from '../lib/theme.svelte';
   import { fmtRelTime } from '../lib/format';
+  import { needsRebuild } from '../lib/chartRebuild';
 
   // formatValue (additive, optional -- Task 14-17's own fold-in note:
   // "views pre-format tooltip values (or formatter callback) -- TimeChart
@@ -66,6 +67,11 @@
   let plotEl;
   let chart = null;
   let ro = null;
+
+  // prevShape is the last-built chart's structural shape (see
+  // lib/chartRebuild.ts) -- compared against the current one on every
+  // effect run to decide destroy+rebuild vs. the cheap setData path below.
+  let prevShape = null;
 
   // tooltip/hoverMarker are plain $state (not derived from uPlot's own
   // data) because they're driven imperatively from uPlot's cursor
@@ -229,17 +235,41 @@
     );
   }
 
+  // currentShape reads exactly the inputs that change what build() bakes
+  // into the uPlot config -- see lib/chartRebuild.ts's own doc for why
+  // markers and each series' points are excluded (a marker or data-only
+  // change never needs more than the setData path below).
+  function currentShape() {
+    return {
+      series: series.map((s) => ({ label: s.label, colorVar: s.colorVar })),
+      theme: theme.resolved,
+      unit,
+      hasFormatValue: !!formatValue,
+    };
+  }
+
   $effect(() => {
-    // Re-create on new series/unit/markers, or on a theme flip -- every
-    // color above is resolved to a literal at build() time, so a theme
-    // change leaves stale colors baked into the canvas until this
-    // re-runs.
+    // Track every input that can affect either path below: a structural
+    // one (series shape, unit, formatValue, a theme flip) goes through
+    // build(), same as before; markers is tracked here too even though
+    // it's absent from currentShape()'s shape, purely so a marker-only
+    // change still re-runs this effect at all -- drawMarkers/handleCursor
+    // already read the live `markers`/`series` bindings fresh on every
+    // uPlot redraw, so the setData call below is all a marker change
+    // needs to actually show up.
     series;
     unit;
     markers;
     formatValue;
     theme.resolved;
-    build();
+
+    const shape = currentShape();
+    if (!chart || needsRebuild(prevShape, shape)) {
+      build();
+    } else {
+      chart.setData(buildAlignedData(series));
+    }
+    prevShape = shape;
   });
 
   onMount(() => {

@@ -9,6 +9,8 @@
   import { needsRebuild } from '../lib/chartRebuild';
   import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
+  import { nearestPointAt, tsAtFraction } from '../lib/scrub';
+  import { scrubBus } from '../lib/scrubbus.svelte';
   import { prefersReducedMotion } from 'svelte/motion';
 
   // live defaults true: every real Sparkline in this app charts a
@@ -84,6 +86,12 @@
       toData(points),
       el,
     );
+    // A rebuild's fresh uPlot instance has no idea where the bus's own
+    // marker (if a scrub is already active) belongs in ITS new pixel
+    // space -- resync immediately rather than waiting for the next bus
+    // publish (which may not come for a while, e.g. an already-scrubbed
+    // page sitting still under a theme flip).
+    syncMarkerFromBus();
   }
 
   $effect(() => {
@@ -111,15 +119,21 @@
       // simpler than skipping it conditionally.
       const nowMs = Date.now();
       const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
-      // See TimeChart's matching comment: under reduced motion the shared
-      // driver never ticks, so nothing else would ever step this window --
-      // step it here too, once per real data arrival, so it doesn't freeze
-      // wherever it happened to be (whether reduced motion was already on
-      // at mount, or flipped on mid-session).
-      if (prefersReducedMotion.current) {
-        const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
-        chart.setScale('x', { min, max });
-      }
+      // Always step the window here, not only under reduced motion: the
+      // shared driver's own (far more frequent) tick is the ONLY other
+      // place this gets set, and it's gated behind IntersectionObserver
+      // (subscribeWhileVisible) -- a chart that hasn't been on-screen
+      // yet when real data arrives (a live-seed history fetch landing
+      // on one of the Containers view's below-the-fold rows, reproduced
+      // live building this) would otherwise hold that data with no
+      // x-range that ever includes it: setData is always called with
+      // resetScales=false in live mode, so nothing else would ever
+      // range the axis onto it. Redundant with the tick's own
+      // more-frequent update once a chart IS visible -- same formula,
+      // just also invoked here -- so this changes nothing for that case
+      // beyond one extra identical assignment.
+      const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
+      chart.setScale('x', { min, max });
       alignedData = toData(points);
       headState = points.length === 0 ? null : advanceHeadState(headState, points[points.length - 1][1], nowMs, durationMs);
       chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
@@ -149,6 +163,85 @@
     return unsubscribe;
   });
 
+  // --- Hover-scrub, synced across every mounted scrub-aware surface -----
+  //
+  // sourceId is this instance's own opaque ownership token for the
+  // shared bus (see lib/scrubbus.svelte's doc) -- stable for the whole
+  // mounted lifetime, never compared to anything but itself.
+  const sourceId = Symbol('sparkline');
+
+  // lastClientX is the FIX for a real bug the pixel-anchored version of
+  // this had: recomputing ts from Date.now() on every single pointermove
+  // means a pointer that's genuinely stationary but still firing repeat
+  // move events (real trackpad/mouse sensor jitter -- reproduced: the
+  // SAME pixel, re-hovered 49s later, resolved to a different value)
+  // creeps the published ts steadily forward through history even
+  // though the pointer never actually moved. Skipping any event whose
+  // clientX matches the last one we actually acted on makes this
+  // properly timestamp-anchored: ts only ever changes on a genuine
+  // pointer move, never merely because time itself passed.
+  let lastClientX = null;
+
+  // scrubActive/markerPos are this Sparkline's OWN presentation state
+  // for its dot+hairline -- driven by the BUS below, not by whether
+  // THIS instance is the one currently tracking the pointer, so a
+  // follower (any other mounted sparkline while one of them is being
+  // scrubbed) renders identically to the initiator. markerPos
+  // deliberately keeps its last real position when scrubActive goes
+  // false rather than resetting, so the fade-out (an always-mounted
+  // element, opacity toggled by class) fades out IN PLACE instead of
+  // jumping to a stale 0,0 first.
+  let scrubActive = $state(false);
+  let markerPos = $state({ left: 0, top: 0 });
+
+  // syncMarkerFromBus positions THIS sparkline's own dot/hairline at
+  // wherever ITS OWN points land nearest the bus's shared ts -- the
+  // follower half of the sync (every mounted sparkline runs this off
+  // the SAME bus.ts), and also what the initiator's own dot uses, via
+  // the reactive effect below: nothing here cares who published.
+  function syncMarkerFromBus() {
+    if (!chart) return;
+    const ts = scrubBus.ts;
+    const hit = ts === null ? null : nearestPointAt(points, ts);
+    scrubActive = hit !== null;
+    if (hit) markerPos = { left: chart.valToPos(hit.ts, 'x', false), top: chart.valToPos(hit.value, 'y', false) };
+  }
+
+  $effect(() => {
+    scrubBus.ts;
+    points;
+    syncMarkerFromBus();
+  });
+
+  // publishFromPointer is the INITIATOR half: maps a client-space x to a
+  // timestamp across the same [now-15m, now] window the chart's own
+  // x-scale is set to (liveWindowRange -- see the module doc), NOT the
+  // points' own span, so an early/sparse ring still scrubs anywhere
+  // across the tile rather than only across whatever narrow span
+  // already has data -- and publishes that ts to the shared bus rather
+  // than computing a "hit" locally, since every surface (including this
+  // one, via the effect above) derives its own hit from the bus's ts
+  // independently.
+  function publishFromPointer(clientX) {
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const fraction = (clientX - rect.left) / (rect.width || 1);
+    const [min, max] = liveWindowRange(Date.now(), LIVE_WINDOW_SEC);
+    scrubBus.publish(tsAtFraction(fraction, min, max), sourceId);
+  }
+
+  function clearScrub() {
+    lastClientX = null;
+    scrubBus.clear(sourceId);
+  }
+
+  function handlePointerMove(e) {
+    if (!live) return;
+    if (e.clientX === lastClientX) return;
+    lastClientX = e.clientX;
+    publishFromPointer(e.clientX);
+  }
+
   onMount(() => {
     // Previously, resize was handled for free: a full rebuild every
     // frame re-read el.clientWidth from scratch. Now that data-only
@@ -165,14 +258,64 @@
   onDestroy(() => {
     ro?.disconnect();
     chart?.destroy();
+    // An unmounting owner (navigating away mid-scrub, or a Containers
+    // row whose container just disappeared from the live frame) must
+    // release the bus itself -- nothing else ever will, since no more
+    // pointer events can ever come from a destroyed component. Without
+    // this, every OTHER mounted surface would stay permanently pinned to
+    // whatever this one last published, with no way back to live.
+    // clearScrubIfOwner's own guard (see lib/scrub.ts) makes this a
+    // harmless no-op when this instance isn't the current owner anyway.
+    scrubBus.clear(sourceId);
   });
 </script>
 
-<div bind:this={el} class="sparkline"></div>
+<div
+  bind:this={el}
+  class="sparkline"
+  role="presentation"
+  onpointermove={handlePointerMove}
+  onpointerleave={clearScrub}
+  onpointercancel={clearScrub}
+>
+  <div class="sparkline__hairline" class:sparkline__hairline--visible={scrubActive} style="left: {markerPos.left}px"></div>
+  <div
+    class="sparkline__dot"
+    class:sparkline__dot--visible={scrubActive}
+    style="left: {markerPos.left}px; top: {markerPos.top}px; background: {color}"
+  ></div>
+</div>
 
 <style>
   .sparkline {
     height: 28px;
     width: 100%;
+    position: relative;
+  }
+  .sparkline__hairline {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: color-mix(in oklab, var(--ink) 35%, transparent);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+  .sparkline__hairline--visible {
+    opacity: 1;
+  }
+  .sparkline__dot {
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    transform: translate(-3px, -3px);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+  .sparkline__dot--visible {
+    opacity: 1;
   }
 </style>

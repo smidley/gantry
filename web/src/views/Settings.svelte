@@ -7,18 +7,16 @@
 -->
 <script>
   import { onMount } from 'svelte';
-  import { Tween } from 'svelte/motion';
-  import { cubicOut } from 'svelte/easing';
-  import { prefersReducedMotion } from 'svelte/motion';
   import { live } from '../lib/sse.svelte';
   import { theme } from '../lib/theme.svelte';
   import { liveRing } from '../lib/livering.svelte';
-  import { fetchSettings, fetchVersion, putSettings } from '../lib/api';
+  import { seriesPointsToRing } from '../lib/livering';
+  import { fetchSeries, fetchSettings, fetchVersion, putSettings } from '../lib/api';
   import { fmtBytes, fmtPct } from '../lib/format';
   import HealthDot from '../components/HealthDot.svelte';
   import StatTile from '../components/StatTile.svelte';
 
-  const TWEEN_MS = 400;
+  const LIVE_WINDOW_SEC = 900;
 
   const RETENTION_FIELDS = [
     { key: 'r1_hours', label: 'R1 (1 min resolution) retention, hours', min: 1, max: 168 },
@@ -41,17 +39,37 @@
   let cpuPct = $derived(live.frame?.host?.['gantry.cpu_pct']);
   let rssBytes = $derived(live.frame?.host?.['gantry.rss_bytes']);
 
-  // Tweened numbers (mechanism 3, smooth-streaming) -- same treatment as
-  // Overview's own top-row tiles (see its doc): the footprint receipt
-  // eases toward each new reading instead of snapping every 2s.
-  function tweenTo(tween, value) {
-    tween.set(value, { duration: prefersReducedMotion.current ? 0 : TWEEN_MS, easing: cubicOut });
-  }
-
-  let cpuTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let rssTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  $effect(() => tweenTo(cpuTween, cpuPct ?? 0));
-  $effect(() => tweenTo(rssTween, rssBytes ?? 0));
+  // Seed both footprint sparklines from server history on mount, once --
+  // same treatment as every other live ring in this app (ContainerDetail/
+  // GPUEntityCard/Overview/Containers): each is a single fixed host
+  // metric, fetched straight by name, no discovery needed (unlike
+  // Overview's net/io tiles, gantry's own cpu%/rss have no per-device
+  // dimension to sum over). A failed/empty seed leaves both rings exactly
+  // as unseeded as they are today -- no error state, no fabricated
+  // padding.
+  onMount(() => {
+    const controller = new AbortController();
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - LIVE_WINDOW_SEC;
+    fetchSeries({
+      kind: 'host',
+      entity: '',
+      metrics: ['gantry.cpu_pct', 'gantry.rss_bytes'],
+      from,
+      to,
+      signal: controller.signal,
+    })
+      .then((results) => {
+        const byMetric = {};
+        for (const r of results) byMetric[r.metric] = r.points;
+        cpuRing.seed(seriesPointsToRing(byMetric['gantry.cpu_pct'] ?? []));
+        rssRing.seed(seriesPointsToRing(byMetric['gantry.rss_bytes'] ?? []));
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // unmounted before the seed resolved
+      });
+    return () => controller.abort();
+  });
 
   // --- Retention editor -----------------------------------------------
   let retentionLoaded = $state(false);
@@ -220,8 +238,8 @@
     <div class="settings-footprint">
       <span class="microlabel">Gantry footprint</span>
       <div class="settings-footprint__tiles">
-        <StatTile label="CPU" value={fmtPct(cpuTween.current)} sparklinePoints={cpuRing.points} />
-        <StatTile label="Memory" value={fmtBytes(rssTween.current)} sparklinePoints={rssRing.points} />
+        <StatTile label="CPU" liveValue={cpuPct ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
+        <StatTile label="Memory" liveValue={rssBytes ?? 0} formatValue={fmtBytes} sparklinePoints={rssRing.points} />
       </div>
       <p class="microlabel settings-footprint__caption">Budget: core &le;2% &middot; RSS &le;100MB</p>
     </div>

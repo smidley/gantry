@@ -13,10 +13,11 @@
   import { prefersReducedMotion } from 'svelte/motion';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
+  import { seriesPointsToRing } from '../lib/livering';
   import { fmtPct, fmtRate } from '../lib/format';
-  import { sumMetricsByPattern } from '../lib/metrics';
+  import { keysByPattern, sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
   import { topFromFrame } from '../lib/topFromFrame';
-  import { fetchEvents } from '../lib/api';
+  import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
 
   import StatTile from '../components/StatTile.svelte';
   import HealthDot from '../components/HealthDot.svelte';
@@ -28,13 +29,60 @@
 
   const EVENTS_POLL_MS = 30_000;
   const TWEEN_MS = 400;
+  const LIVE_WINDOW_SEC = 900;
 
   let cpuRing = liveRing((f) => f.host?.['cpu.total']);
   let memRing = liveRing((f) => f.host?.['mem.used_pct']);
-  let netRxRing = liveRing((f) => f.host?.['net.rx_bps']);
+  // netRxRing sums real mode's per-interface "net.<iface>.rx_bps" keys
+  // (host.go never writes a flat "net.rx_bps" -- only fake mode does,
+  // the degenerate single-match case sumMetricsByPattern's own doc
+  // describes) -- this tile read a flat key directly until now, which
+  // meant it always read 0 on real hardware. Matches ioReadRing's own
+  // pattern-sum below exactly.
+  let netRxRing = liveRing((f) => sumMetricsByPattern(f.host, 'net', '.rx_bps'));
   let ioReadRing = liveRing((f) => sumMetricsByPattern(f.host, 'diskio', '.read_bps'));
 
+  // Seed all four sparklines from server history on mount, once. cpu/mem
+  // are each a single fixed host metric, fetched straight by name.
+  // net/io both sum a PATTERN of per-device keys instead (sumMetricsByPattern,
+  // live-side) with no fixed name to fetch by itself, so their history
+  // needs the CURRENT exact key names first -- fetchSnapshot() answers
+  // that synchronously, without waiting on (or racing) live.frame's own
+  // first SSE frame, the same discovery sumMetricsByPattern itself does
+  // at read time off whatever frame it's handed. keysByPattern is that
+  // discovery step's own pure sibling (same prefix+suffix rule), used
+  // here because seeding needs the CONCRETE key names to ask
+  // /api/series for, not just a live sum.
+  onMount(() => {
+    const controller = new AbortController();
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - LIVE_WINDOW_SEC;
+    fetchSnapshot()
+      .then((snapshot) => {
+        const netRxKeys = keysByPattern(snapshot.host, 'net', '.rx_bps');
+        const readKeys = keysByPattern(snapshot.host, 'diskio', '.read_bps');
+        const metrics = ['cpu.total', 'mem.used_pct', ...netRxKeys, ...readKeys];
+        return fetchSeries({ kind: 'host', entity: '', metrics, from, to, signal: controller.signal }).then((results) => {
+          const byMetric = {};
+          for (const r of results) byMetric[r.metric] = r.points;
+          cpuRing.seed(seriesPointsToRing(byMetric['cpu.total'] ?? []));
+          memRing.seed(seriesPointsToRing(byMetric['mem.used_pct'] ?? []));
+          netRxRing.seed(sumSeriesPoints(netRxKeys.map((k) => byMetric[k] ?? [])));
+          ioReadRing.seed(sumSeriesPoints(readKeys.map((k) => byMetric[k] ?? [])));
+        });
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // unmounted before the seed resolved
+        // A failed discovery/seed fetch leaves every sparkline exactly
+        // as unseeded as it is today -- no error banner, no new skeleton
+        // state, just today's cold start.
+      });
+    return () => controller.abort();
+  });
+
   let host = $derived(live.frame?.host ?? {});
+  let netRx = $derived(sumMetricsByPattern(host, 'net', '.rx_bps'));
+  let netTx = $derived(sumMetricsByPattern(host, 'net', '.tx_bps'));
   let ioRead = $derived(sumMetricsByPattern(host, 'diskio', '.read_bps'));
   let ioWrite = $derived(sumMetricsByPattern(host, 'diskio', '.write_bps'));
 
@@ -47,18 +95,14 @@
     tween.set(value, { duration: prefersReducedMotion.current ? 0 : TWEEN_MS, easing: cubicOut });
   }
 
-  let cpuTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let memTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let netRxTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
+  // netTxTween/ioWriteTween are value2's own live tween -- StatTile's
+  // hero number (value/liveValue below) now owns its OWN Tween
+  // internally (hover-scrub needs a raw number to ease toward/from), but
+  // value2 has no sparkline to scrub against and stays exactly as it was.
   let netTxTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let ioReadTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
   let ioWriteTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
 
-  $effect(() => tweenTo(cpuTween, host['cpu.total'] ?? 0));
-  $effect(() => tweenTo(memTween, host['mem.used_pct'] ?? 0));
-  $effect(() => tweenTo(netRxTween, host['net.rx_bps'] ?? 0));
-  $effect(() => tweenTo(netTxTween, host['net.tx_bps'] ?? 0));
-  $effect(() => tweenTo(ioReadTween, ioRead));
+  $effect(() => tweenTo(netTxTween, netTx));
   $effect(() => tweenTo(ioWriteTween, ioWrite));
 
   let containerEntries = $derived(Object.entries(live.frame?.containers ?? {}));
@@ -81,12 +125,24 @@
   // it's looked at again).
   let events = $state([]);
 
+  // eventsSeedPending gates the "No events yet." message below the same
+  // way ContainerDetail/GPUEntityCard's own liveSeedPending gates their
+  // chart cards: while true, a truly-empty `events` stays silent instead
+  // of flashing that message the instant this view mounts (or remounts,
+  // navigating away and back), before the very first loadEvents() below
+  // has had a chance to resolve. Only ever flips false once, on that
+  // first resolution (success or failure) -- a later poll/focus refresh
+  // finding zero events is a real "No events yet.", not a pending state.
+  let eventsSeedPending = $state(true);
+
   async function loadEvents() {
     try {
       events = await fetchEvents({ limit: 8 });
     } catch {
       // A transient fetch failure leaves the last-good feed showing
       // rather than blanking it -- the next poll or focus tries again.
+    } finally {
+      eventsSeedPending = false;
     }
   }
 
@@ -106,18 +162,20 @@
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
   <div class="overview__tiles">
-    <StatTile label="CPU" value={fmtPct(cpuTween.current)} sparklinePoints={cpuRing.points} />
-    <StatTile label="Memory" value={fmtPct(memTween.current)} sparklinePoints={memRing.points} />
+    <StatTile label="CPU" liveValue={host['cpu.total'] ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
+    <StatTile label="Memory" liveValue={host['mem.used_pct'] ?? 0} formatValue={fmtPct} sparklinePoints={memRing.points} />
     <StatTile
       label="Network"
-      value={`↓ ${fmtRate(netRxTween.current)}`}
+      liveValue={netRx}
+      formatValue={(v) => `↓ ${fmtRate(v)}`}
       value2={fmtRate(netTxTween.current)}
       label2="↑"
       sparklinePoints={netRxRing.points}
     />
     <StatTile
       label="Disk IO"
-      value={`r ${fmtRate(ioReadTween.current)}`}
+      liveValue={ioRead}
+      formatValue={(v) => `r ${fmtRate(v)}`}
       value2={fmtRate(ioWriteTween.current)}
       label2="w"
       sparklinePoints={ioReadRing.points}
@@ -170,7 +228,9 @@
 
     <div class="card overview__events">
       <span class="microlabel">Recent events</span>
-      {#if events.length === 0}
+      {#if eventsSeedPending}
+        <!-- first loadEvents() call hasn't settled yet -- see eventsSeedPending's own doc -->
+      {:else if events.length === 0}
         <p class="microlabel overview__events-empty">No events yet.</p>
       {:else}
         <div class="overview__events-list">

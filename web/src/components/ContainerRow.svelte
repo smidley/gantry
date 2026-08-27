@@ -19,14 +19,40 @@
   import { liveRing } from '../lib/livering.svelte';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { containerHealthStatus } from '../lib/containerStatus';
+  import { nearestPointAt } from '../lib/scrub';
+  import { scrubBus } from '../lib/scrubbus.svelte';
+  import ContainerIcon from './ContainerIcon.svelte';
   import HealthDot from './HealthDot.svelte';
   import Sparkline from './Sparkline.svelte';
 
   const TWEEN_MS = 400;
 
-  let { name } = $props();
+  // registerSeedTarget (additive, optional -- live-seed history):
+  // Containers.svelte fetches every visible row's cpu.pct history itself
+  // (one AbortController, concurrency-capped, for the whole view -- see
+  // its own doc) and delivers each row's own result through a callback
+  // this row registers on mount, rather than through a prop -- see
+  // registerSeedTarget's own doc in Containers.svelte for why a plain
+  // reactive prop is the wrong shape for this specifically, at 23-rows
+  // scale. Optional/absent in the collapsed Stopped section, which never
+  // registers a target (this row's sparkline just builds up live-only
+  // there, same as before this feature).
+  let { name, registerSeedTarget = undefined } = $props();
 
   let cpuRing = liveRing((f) => f.containers[name]?.metrics['cpu.pct']);
+
+  // Registers once: registerSeedTarget is a stable function reference
+  // (Containers.svelte never reassigns it), so this effect's only
+  // dependency never changes after the first run -- one registration
+  // per row for its whole mounted lifetime, torn down via the returned
+  // cleanup on unmount (a name that starts back up under the same
+  // component instance -- doesn't happen here; Containers.svelte's own
+  // keyed {#each} recreates the row -- but cleanup is still correct
+  // regardless).
+  $effect(() => {
+    if (!registerSeedTarget) return;
+    return registerSeedTarget(name, (points) => cpuRing.seed(points));
+  });
 
   let c = $derived(live.frame?.containers?.[name]);
   let m = $derived(c?.metrics ?? {});
@@ -47,6 +73,8 @@
     tween.set(value, { duration: prefersReducedMotion.current ? 0 : TWEEN_MS, easing: cubicOut });
   }
 
+  const SCRUB_TWEEN_MS = 120;
+
   let cpuTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
   let memBytesTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
   let memPctTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
@@ -55,7 +83,27 @@
   let ioReadTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
   let ioWriteTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
 
-  $effect(() => tweenTo(cpuTween, m['cpu.pct'] ?? 0));
+  // cpuScrubHit (hover-scrub, synced): non-null whenever the shared bus
+  // has a published ts, regardless of whether THIS row's own sparkline
+  // is the one being hovered -- Scott's own requirement is that
+  // scrubbing any one metric auto-scrubs every related one, and every
+  // row on this page is "related" (same page, same instant), so every
+  // row reads the SAME bus and finds ITS OWN cpu value at that instant.
+  // cpuTween's effect below then eases toward that instead of the live
+  // one, at the faster scrub-follow duration, exactly like StatTile's
+  // own hero number (see its doc for the identical shape). Every other
+  // cell in this row stays live-only; only the CPU cell has a sparkline.
+  let cpuScrubHit = $derived(scrubBus.ts === null ? null : nearestPointAt(cpuRing.points, scrubBus.ts));
+
+  $effect(() => {
+    const reduced = prefersReducedMotion.current;
+    if (cpuScrubHit) {
+      cpuTween.set(cpuScrubHit.value, { duration: reduced ? 0 : SCRUB_TWEEN_MS, easing: cubicOut });
+    } else {
+      cpuTween.set(m['cpu.pct'] ?? 0, { duration: reduced ? 0 : TWEEN_MS, easing: cubicOut });
+    }
+  });
+
   $effect(() => tweenTo(memBytesTween, m['mem.bytes'] ?? 0));
   $effect(() => tweenTo(memPctTween, m['mem.pct'] ?? 0));
   $effect(() => tweenTo(netRxTween, m['net.rx_bps'] ?? 0));
@@ -68,7 +116,10 @@
   <tr class="container-row">
     <td><HealthDot status={containerHealthStatus(c.state, c.health)} /></td>
     <td class="container-row__name-cell">
-      <a href={`#/containers/${encodeURIComponent(name)}`}>{name}</a>
+      <a href={`#/containers/${encodeURIComponent(name)}`}>
+        <ContainerIcon {name} icon={c.icon} size={20} />
+        {name}
+      </a>
     </td>
     <td class="container-row__cpu-cell">
       <span class="tabular-nums">{fmtPct(cpuTween.current)}</span>
@@ -103,6 +154,9 @@
     vertical-align: middle;
   }
   .container-row__name-cell a {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     color: var(--ink);
     text-decoration: none;
     font-weight: 500;

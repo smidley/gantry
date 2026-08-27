@@ -225,6 +225,15 @@ func (c *Collector) recordMeta(metas []Meta, now time.Time) {
 	}
 }
 
+// unraidIconLabel is the docker label Unraid's Community Applications
+// sets on every template it installs, naming that container's icon URL
+// (a LAN/remote image, not something CA ships as a docker layer). A
+// container created some other way carries no such label, so a nil-map
+// read of it (Labels is nil, not just missing the key) already yields
+// the correct "" via Go's zero-value map-read rule -- Meta.Icon needs no
+// separate absence check.
+const unraidIconLabel = "net.unraid.docker.icon"
+
 func metaFromInspect(resp container.InspectResponse) Meta {
 	m := Meta{
 		ID:           resp.ID,
@@ -233,6 +242,7 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 	}
 	if resp.Config != nil {
 		m.Image = resp.Config.Image
+		m.Icon = resp.Config.Labels[unraidIconLabel]
 	}
 	if resp.HostConfig != nil {
 		m.HostNet = resp.HostConfig.NetworkMode.IsHost()

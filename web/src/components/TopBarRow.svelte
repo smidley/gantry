@@ -14,10 +14,22 @@
   import { Tween } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
   import { prefersReducedMotion } from 'svelte/motion';
+  import { live as liveStore } from '../lib/sse.svelte';
+  import ContainerIcon from './ContainerIcon.svelte';
 
   const TWEEN_MS = 400;
 
   let { row, maxValue, formatValue, linkFor, live = false } = $props();
+
+  // row.entity is always a container name (every leaderboard on this app
+  // is per-container -- see topFromFrame's own doc) -- reading its icon
+  // straight off the live frame here, the same ambient-store pattern
+  // ContainerRow/ContainerDetail already use, is simpler than threading
+  // a new prop through TopBarList/TopConsumers/Overview for a single
+  // derived lookup. Renamed to liveStore on import only because this
+  // component's own `live` prop (the animate-or-not flag) already owns
+  // that name.
+  let icon = $derived(liveStore.frame?.containers?.[row.entity]?.icon);
 
   // untrack: this is a deliberate ONE-TIME read of row's initial value
   // to seed the Tween -- every value AFTER this (including the very
@@ -44,7 +56,10 @@
 </script>
 
 <li class="top-bar-list__row">
-  <a class="top-bar-list__name" href={linkFor(row.entity)} title={row.entity}>{row.entity}</a>
+  <a class="top-bar-list__name" href={linkFor(row.entity)} title={row.entity}>
+    <ContainerIcon name={row.entity} {icon} size={16} />
+    <span class="top-bar-list__name-text">{row.entity}</span>
+  </a>
   <div class="top-bar-list__track">
     <div class="top-bar-list__bar" style="width: {widthPct}%"></div>
   </div>
@@ -63,11 +78,16 @@
     text-decoration: none;
     font-size: 0.85rem;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     min-height: 40px;
     display: flex;
     align-items: center;
+    gap: 0.4rem;
+  }
+  .top-bar-list__name-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .top-bar-list__name:hover {
     text-decoration: underline;
@@ -84,6 +104,7 @@
     background: var(--series-1);
     border-radius: 4px;
     min-width: 2px;
+    transition: filter 150ms ease;
   }
   .top-bar-list__value {
     font-family: var(--font-mono);
@@ -91,5 +112,14 @@
     color: var(--ink);
     white-space: nowrap;
     text-align: right;
+  }
+  /* Bars are current-state, not time series -- no scrubbing, just
+     animated emphasis on hover (brightness + a weight-up on the value
+     already sitting right next to it). */
+  .top-bar-list__row:hover .top-bar-list__bar {
+    filter: brightness(1.15);
+  }
+  .top-bar-list__row:hover .top-bar-list__value {
+    font-weight: 700;
   }
 </style>

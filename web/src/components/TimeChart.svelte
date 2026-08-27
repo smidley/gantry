@@ -41,6 +41,20 @@
   // fetched/historical range must stay exactly as static as it is today.
   let { series = [], unit = '', height = 220, markers = [], syncKey = undefined, formatValue = undefined, live = false } = $props();
 
+  // FOCUS_DIM_ALPHA/FOCUS_PROX_PX (hover-scrub design's "per-series
+  // focus"): uPlot's own built-in cursor.focus mechanism handles this
+  // entirely -- no custom code needed. Enabling it dims every series
+  // (canvas stroke/fill, its own DOM cursor-point marker, AND its own
+  // legend row -- all three, automatically) except whichever one is
+  // nearest the cursor, which stays full-alpha; that relative contrast
+  // IS the "nearest series emphasized" the design asks for. FOCUS_PROX_PX
+  // is deliberately huge (the type's own doc caps meaningful values at
+  // 1e6) so a series is always considered "close enough" to focus
+  // regardless of the cursor's actual y-distance from it -- this always
+  // resolves to nearest-by-y rather than only within some pixel radius.
+  const FOCUS_DIM_ALPHA = 0.35;
+  const FOCUS_PROX_PX = 1e6;
+
   const SEVERITY_VAR = {
     info: '--status-good',
     warning: '--status-warning',
@@ -302,8 +316,10 @@
         ],
         cursor: {
           points: { show: true },
+          focus: { prox: FOCUS_PROX_PX },
           ...(syncKey ? { sync: { key: syncKey } } : {}),
         },
+        focus: { alpha: FOCUS_DIM_ALPHA },
         legend: { show: series.length >= 2 },
         hooks: {
           draw: [drawMarkers],
@@ -359,19 +375,27 @@
       // simple.
       const nowMs = Date.now();
       const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
-      // The shared driver's own ticks are what normally step this
-      // chart's x-window (see the animation-tick effect below) -- but
-      // under reduced motion the driver never ticks at all, so nothing
-      // else would ever move the window. Stepping it here too, from the
-      // data-arrival path itself, means the window still advances once
-      // per real SSE frame instead of freezing wherever it happened to
-      // be the moment reduced motion took hold (whether that was already
-      // true when this chart mounted, or flipped on mid-session) --
-      // a discrete step per arrival, exactly the pre-feature behavior.
-      if (prefersReducedMotion.current) {
-        const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
-        chart.setScale('x', { min, max });
-      }
+      // The shared driver's own ticks also step this chart's x-window
+      // (see the animation-tick effect below), far more often than this
+      // effect re-runs -- but that subscription is gated behind
+      // IntersectionObserver (subscribeWhileVisible), and under reduced
+      // motion the driver never ticks at all regardless of visibility.
+      // Either way, nothing else would ever set a first x-range for a
+      // chart that hasn't been on-screen yet when real data arrives (a
+      // live-seed history fetch landing while its chart is still below
+      // the fold, reproduced live on the Containers view's lower rows,
+      // whose per-row Sparkline shares this same gap -- see its own
+      // doc): setData is always called with resetScales=false in live
+      // mode, so without this, that data would sit there with no
+      // x-range that ever includes it. Stepping the window here too,
+      // unconditionally, from the data-arrival path itself, fixes both
+      // that and reduced motion's own already-documented freeze -- a
+      // discrete step per arrival under reduced motion, exactly the
+      // pre-feature behavior; a harmless redundant assignment (same
+      // formula, same values) once the driver's own more frequent tick
+      // is already running for a chart that IS visible.
+      const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
+      chart.setScale('x', { min, max });
       alignedData = buildAlignedData(series);
       headState = advanceAll(alignedData.slice(1), nowMs, durationMs);
       chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
@@ -451,6 +475,17 @@
     color: var(--ink);
     font-family: var(--font-mono);
     font-size: 0.75rem;
+  }
+  /* Per-series focus dimming (see FOCUS_DIM_ALPHA above) sets opacity as
+     a plain inline style/class straight from uPlot's own JS -- these
+     transitions are the only thing that makes that step change read as
+     an eased fade rather than a snap; the DIMMING decision itself stays
+     entirely uPlot's, this is CSS-only polish on top of it. */
+  .time-chart :global(.u-legend tr) {
+    transition: opacity 150ms ease;
+  }
+  .time-chart :global(.u-cursor-pt) {
+    transition: opacity 150ms ease;
   }
   .time-chart__tooltip {
     position: absolute;

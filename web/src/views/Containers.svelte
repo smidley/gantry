@@ -5,13 +5,25 @@
   contract: rows must not reorder just because a value ticked.
 -->
 <script>
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { matchesContainerFilter, sortContainerNames } from '../lib/containersSort';
   import { containerHealthStatus } from '../lib/containerStatus';
   import { fmtBytes, fmtPct, fmtRate } from '../lib/format';
+  import { seriesPointsToRing } from '../lib/livering';
+  import { fetchContainers, fetchSeries } from '../lib/api';
+  import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
   import ContainerRow from '../components/ContainerRow.svelte';
+
+  const LIVE_WINDOW_SEC = 900;
+  // MAX_CONCURRENT_SEED_FETCHES caps how many /api/series requests this
+  // view fires at once while seeding every row's CPU sparkline --
+  // 23+ containers all firing their own history fetch simultaneously on
+  // mount would be a needless request burst for data that only ever
+  // backs a 60px-wide sparkline; a small worker pool spreads them out
+  // instead, without making any one row wait on every other's turn.
+  const MAX_CONCURRENT_SEED_FETCHES = 6;
 
   // ariaName covers the one column (health) whose visible label is
   // deliberately empty (just a dot column) -- a sort button with no
@@ -30,6 +42,81 @@
     { key: 'uptime', label: 'Uptime', sortable: true },
     { key: 'image', label: 'Image', sortable: true },
   ];
+
+  // seedContainerCpuRings fetches each running container's own last-15-
+  // minutes cpu.pct history and hands it to that row via onSeeded(name,
+  // points) as each result lands -- a small worker-pool pattern: `limit`
+  // workers each pull the next name off a shared cursor until the list
+  // is exhausted, so at most `limit` fetches are ever in flight
+  // together. A single row's failed fetch just leaves that row unseeded
+  // (its sparkline builds up live-only, same as before this feature)
+  // rather than aborting the rest of the pool.
+  async function seedContainerCpuRings(names, signal, onSeeded) {
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - LIVE_WINDOW_SEC;
+    let cursor = 0;
+    async function worker() {
+      for (;;) {
+        const i = cursor++;
+        if (i >= names.length) return;
+        const name = names[i];
+        try {
+          const results = await fetchSeries({ kind: 'container', entity: name, metrics: ['cpu.pct'], from, to, signal });
+          onSeeded(name, seriesPointsToRing(results[0]?.points ?? []));
+        } catch (err) {
+          if (err?.name === 'AbortError') return; // the whole pool was torn down (unmount) -- stop, don't keep pulling names
+        }
+      }
+    }
+    const poolSize = Math.min(MAX_CONCURRENT_SEED_FETCHES, names.length);
+    await Promise.all(Array.from({ length: poolSize }, worker));
+  }
+
+  // seedTargets: name -> the callback that hands THAT row's own ring its
+  // seed once fetched. Deliberately a plain Map, not $state -- see
+  // registerSeedTarget's own doc for why threading this payload through
+  // reactive state instead (one shared object, updated once per landed
+  // fetch) doesn't work here.
+  const seedTargets = new Map();
+
+  // registerSeedTarget is how a ContainerRow opts into this view's
+  // seeding: it registers its own onSeed callback once, on mount, and
+  // this view calls straight into it later when that row's own fetch
+  // lands -- entirely outside Svelte's reactivity, a plain imperative
+  // handoff. An earlier version of this threaded seed points through one
+  // shared `$state` object instead (one entry added per landed fetch,
+  // read by each row as `seedPointsByName[name]`) -- correct, but
+  // wasteful at this scale: every row's own prop-dependent effect
+  // re-evaluated on EVERY one of the 23 updates to that shared object,
+  // not just the update that actually touched its own key (~500 re-runs
+  // total instead of 23). A plain Map + direct callback call has no
+  // shared reactive dependency for 23 concurrent writes to contend
+  // over: each row's registration effect depends only on this stable
+  // function reference (never reassigned), so it runs exactly once, and
+  // delivering a seed later touches no Svelte state at all until the
+  // row's OWN ring writes to it.
+  function registerSeedTarget(name, onSeed) {
+    seedTargets.set(name, onSeed);
+    return () => seedTargets.delete(name);
+  }
+
+  onMount(() => {
+    const controller = new AbortController();
+    fetchContainers()
+      .then((containers) => {
+        const names = containers.filter((c) => c.state === 'running').map((c) => c.name);
+        return seedContainerCpuRings(names, controller.signal, (name, points) => {
+          seedTargets.get(name)?.(points); // no target: row was filtered out or never mounted -- nothing to seed
+        });
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // unmounted before the inventory fetch resolved
+        // A failed inventory fetch just means no rows get seeded this
+        // visit -- every sparkline still builds up live-only, same as
+        // before this feature.
+      });
+    return () => controller.abort();
+  });
 
   let filterText = $state('');
   let sortColumn = $state('cpu');
@@ -143,7 +230,7 @@
         </thead>
         <tbody>
           {#each runningNames as name (name)}
-            <ContainerRow {name} />
+            <ContainerRow {name} {registerSeedTarget} />
           {/each}
         </tbody>
       </table>
@@ -157,6 +244,7 @@
           <a class="card containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>
             <div class="containers-view__card-head">
               <HealthDot status={containerHealthStatus(c.state, c.health)} />
+              <ContainerIcon {name} icon={c.icon} size={20} />
               <span class="containers-view__card-name">{name}</span>
             </div>
             <div class="containers-view__card-stats">
@@ -184,7 +272,7 @@
           <table class="containers-table">
             <tbody>
               {#each stoppedNames as name (name)}
-                <ContainerRow {name} />
+                <ContainerRow {name} {registerSeedTarget} />
               {/each}
             </tbody>
           </table>
@@ -196,6 +284,7 @@
               <a class="card containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>
                 <div class="containers-view__card-head">
                   <HealthDot status={containerHealthStatus(c.state, c.health)} />
+                  <ContainerIcon {name} icon={c.icon} size={20} />
                   <span class="containers-view__card-name">{name}</span>
                 </div>
                 <div class="containers-view__card-stats">

@@ -18,6 +18,7 @@
   import { fetchSeries } from '../lib/api';
   import { fmtPct } from '../lib/format';
   import { liveRing } from '../lib/livering.svelte';
+  import { seriesPointsToRing } from '../lib/livering';
   import { GPU_ENTITY_ENGINE_ORDER } from '../lib/metrics';
   import TimeChart from './TimeChart.svelte';
 
@@ -42,6 +43,50 @@
   for (const engine of GPU_ENTITY_ENGINE_ORDER) {
     liveRings[engine] = liveRing((f) => f.gpu?.[entity]?.[METRIC_FOR(engine)], LIVE_WINDOW_SEC);
   }
+
+  // liveSeedPending gates the empty-state message below: while true, a
+  // truly-empty live ring stays silent instead of flashing "No engine
+  // activity for this range" the instant this card mounts, before the
+  // seed fetch (typically ~100ms) has even had a chance to say whether
+  // there's real history or not -- see the template's own doc. Flips
+  // false once the seed settles either way (found data, found none, or
+  // failed); each entity's card mounts once per {#each} key (see the GPU
+  // view's own keyed block), so this -- like the seed fetch itself --
+  // only ever needs to run once.
+  let liveSeedPending = $state(true);
+
+  // Seed every engine's live ring from server history on mount, once.
+  // Runs regardless of activeRange (same rationale as ContainerDetail's
+  // matching effect) so switching back to Live later finds it already
+  // filled. Zipped by INDEX against GPU_ENTITY_ENGINE_ORDER rather than
+  // keyed by result.metric: QuerySeries guarantees exactly one
+  // SeriesResult per requested metric, in request order (see its own
+  // doc), and metrics below is built from this same order.
+  $effect(() => {
+    const gpuEntity = entity;
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - LIVE_WINDOW_SEC;
+    const controller = new AbortController();
+    fetchSeries({
+      kind: 'gpu',
+      entity: gpuEntity,
+      metrics: GPU_ENTITY_ENGINE_ORDER.map(METRIC_FOR),
+      from,
+      to,
+      signal: controller.signal,
+    })
+      .then((results) => {
+        GPU_ENTITY_ENGINE_ORDER.forEach((engine, i) => {
+          liveRings[engine]?.seed(seriesPointsToRing(results[i]?.points ?? []));
+        });
+        liveSeedPending = false;
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // unmounted before the seed resolved -- nothing left to update
+        liveSeedPending = false;
+      });
+    return () => controller.abort();
+  });
 
   // fetchedSeries/fetchInFlight/fetchFailed + the AbortController effect
   // below are identical in shape to ContainerDetail.svelte's own history
@@ -132,6 +177,11 @@
     <p class="microlabel gpu-entity-card__loading">Loading…</p>
   {:else if series.length > 0}
     <TimeChart {series} formatValue={fmtPct} {syncKey} live={activeRange === 'live'} />
+  {:else if activeRange === 'live' && liveSeedPending}
+    <!-- Live ring is still cold AND we don't yet know whether the seed
+         found real history -- rendering nothing here (rather than the
+         empty message below) avoids a false "no engine activity" flash
+         before the seed (~100ms on LAN) has actually settled. -->
   {:else}
     <p class="microlabel gpu-entity-card__empty">No engine activity for this range.</p>
   {/if}

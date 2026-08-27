@@ -51,6 +51,47 @@ export function sumMetricsByPattern(
   return sum;
 }
 
+// sumSeriesPoints is sumMetricsByPattern's history-shaped counterpart:
+// where that function sums a pattern-matched key family at one instant
+// (the live frame), this sums several metrics' own /api/series results
+// across TIME, aligning by ts -- Overview's ioReadRing seeds this way
+// because "diskio.<dev>.read_bps" has no fixed metric name to fetch by
+// itself (real mode; fake mode's flat "diskio.read_bps" is the
+// single-array degenerate case of the same sum). A ts present in only
+// some of the inputs still contributes just those metrics' values, the
+// same graceful-partial behavior sumMetricsByPattern has for a metric
+// that's momentarily absent from one frame; non-finite avg/ts entries
+// are skipped rather than poisoning the sum. Output is sorted ascending
+// by ts, matching every other ring-point shape in this app.
+export function sumSeriesPoints(pointArrays: [number, number, number][][]): [number, number][] {
+  const sums = new Map<number, number>();
+  for (const points of pointArrays) {
+    for (const [ts, avg] of points) {
+      if (!Number.isFinite(ts) || !Number.isFinite(avg)) continue;
+      sums.set(ts, (sums.get(ts) ?? 0) + avg);
+    }
+  }
+  return Array.from(sums.entries()).sort((a, b) => a[0] - b[0]);
+}
+
+// keysByPattern is sumMetricsByPattern's discovery-side sibling, same
+// prefix+suffix rule (a flat key -- fake mode's "net.rx_bps" -- matches
+// on its own, the identical degenerate case sumMetricsByPattern's own
+// doc describes; no special-casing between the flat and per-device
+// shapes here either). Used when a caller needs the CONCRETE key names
+// themselves rather than a live-frame sum -- seeding a sum-of-pattern
+// sparkline has to ask /api/series for history by exact metric name, and
+// there's no fixed name to ask for when the real device/interface count
+// is only known from whatever's actually present in the current frame.
+export function keysByPattern(
+  metrics: Record<string, number> | undefined | null,
+  prefix: string,
+  suffix: string,
+): string[] {
+  if (!metrics) return [];
+  return Object.keys(metrics).filter((k) => k.startsWith(prefix) && k.endsWith(suffix));
+}
+
 export interface ShareUsage {
   name: string;
   usedBytes: number;

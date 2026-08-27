@@ -64,12 +64,25 @@
   // needed here for the same reason it isn't in Overview's loadEvents --
   // this isn't a rapid, user-selector-driven fetch that can race itself).
   let parityHistory = $state([]);
+
+  // parityHistorySeedPending gates the "No parity check history yet."
+  // message below the same way ContainerDetail/GPUEntityCard's own
+  // liveSeedPending gates their chart cards: while true, a truly-empty
+  // parityHistory stays silent instead of flashing that message the
+  // instant this view mounts, before the very first loadParityHistory()
+  // below has had a chance to resolve. Only ever flips false once, on
+  // that first resolution -- a later poll/focus refresh finding zero
+  // history is a real "No parity check history yet.", not a pending one.
+  let parityHistorySeedPending = $state(true);
+
   async function loadParityHistory() {
     try {
       parityHistory = await fetchEvents({ kinds: ['parity.start', 'parity.finish'], limit: 5 });
     } catch {
       // A transient fetch failure leaves the last-good history showing
       // rather than blanking it -- the next poll or focus tries again.
+    } finally {
+      parityHistorySeedPending = false;
     }
   }
   onMount(() => {
@@ -128,7 +141,9 @@
 
     <div class="storage-parity__section">
       <span class="microlabel">Recent checks</span>
-      {#if parityHistory.length === 0}
+      {#if parityHistorySeedPending}
+        <!-- first loadParityHistory() call hasn't settled yet -- see parityHistorySeedPending's own doc -->
+      {:else if parityHistory.length === 0}
         <p class="microlabel storage-parity__empty">No parity check history yet.</p>
       {:else}
         <ul class="storage-parity__history">
@@ -397,11 +412,21 @@
   }
   .storage-disk__usage-fill {
     height: 100%;
+    transition: filter 150ms ease;
   }
   .storage-disk__usage-pct {
     font-size: 0.78rem;
     min-width: 3em;
     text-align: right;
+  }
+  /* Bars are current-state, not time series -- no scrubbing, just
+     animated emphasis on hover; pct+bytes are already shown adjacent,
+     so this is emphasis only, no new value display. */
+  .storage-disk__usage:hover .storage-disk__usage-fill {
+    filter: brightness(1.15);
+  }
+  .storage-disk__usage:hover .storage-disk__usage-pct {
+    font-weight: 700;
   }
   .storage-disk__bytes {
     font-size: 0.75rem;

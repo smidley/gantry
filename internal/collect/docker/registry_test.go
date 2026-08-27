@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/store"
@@ -636,6 +637,51 @@ func TestRecordMetaSkipsStartedAtWhenZeroButStillEmitsRestartCount(t *testing.T)
 	got, ok := sink.value("web", "meta.restart_count")
 	require.True(t, ok)
 	require.Equal(t, 0.0, got)
+}
+
+// TestMetaFromInspectExtractsUnraidIconLabel pins Icon's extraction from
+// the net.unraid.docker.icon label Community Applications sets on every
+// template it installs -- a hand-built container.InspectResponse
+// literal, no daemon needed, same pattern apistats_test.go's
+// TestStatsFromAPIMapsFields already uses for the stats API's own
+// response shape.
+func TestMetaFromInspectExtractsUnraidIconLabel(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:    "abc123",
+			Name:  "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{
+			Image:  "jellyfin/jellyfin:latest",
+			Labels: map[string]string{unraidIconLabel: "https://example.com/icons/jellyfin.png"},
+		},
+	}
+
+	m := metaFromInspect(resp)
+
+	require.Equal(t, "https://example.com/icons/jellyfin.png", m.Icon)
+}
+
+// TestMetaFromInspectIconEmptyWhenLabelAbsent pins the fallback half: a
+// container with no net.unraid.docker.icon label (anything not installed
+// via Community Applications, or with no labels at all) comes back with
+// Icon == "" rather than panicking on a nil Labels map -- the frontend's
+// ContainerIcon fallback avatar depends on this being reliably "", not
+// merely absent.
+func TestMetaFromInspectIconEmptyWhenLabelAbsent(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:    "abc123",
+			Name:  "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{Image: "jellyfin/jellyfin:latest"}, // Labels left nil
+	}
+
+	m := metaFromInspect(resp)
+
+	require.Equal(t, "", m.Icon)
 }
 
 // TestDrainReturnsImmediatelyWhenEventsNeverStarted pins I4's Drain()

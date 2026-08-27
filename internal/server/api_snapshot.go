@@ -31,6 +31,7 @@ type ContainerDTO struct {
 	State   string             `json:"state"`
 	Health  string             `json:"health"`
 	Image   string             `json:"image"`
+	Icon    string             `json:"icon"`
 	Metrics map[string]float64 `json:"metrics"`
 }
 
@@ -43,6 +44,7 @@ type ContainerInfo struct {
 	State  string `json:"state"`
 	Health string `json:"health"`
 	Image  string `json:"image"`
+	Icon   string `json:"icon"`
 }
 
 // handleSnapshot serves the assembled snapshot. Options.Snapshot is nil in

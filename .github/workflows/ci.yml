@@ -21,6 +21,7 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - run: go test ./internal/server/ -count=1  # untagged build needs zero node artifacts
       - run: make web
       # v9 is the current major; per its README's Compatibility section,
       # v7.0.0+ supports golangci-lint v2 only -- v6 unconditionally passed

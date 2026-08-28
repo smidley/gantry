@@ -242,6 +242,19 @@ func (g *Generator) Tick(now time.Time) {
 		// is called from other goroutines, so reading it here would race).
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "meta.started_at"}, ts, float64(fakeContainerStartedAt(g.boot, i).Unix()))
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "meta.restart_count"}, ts, 0)
+
+		// live:io.<dev>.read_bps/write_bps mirror cgroupv2.go's
+		// recordContainerStats shape (live-ring-only, per-device) so the
+		// storage panel's device rows have something to show in fake-data
+		// mode too -- "sda"/"nvme0n1" are a plausible fixed pair of device
+		// names, not tied to fakeContainerMounts' share/pool naming (real
+		// per-device IO and Unraid slot names are unrelated namespaces).
+		ioRead := a.netScale * (0.4 + 0.6*g.rng.Float64())
+		ioWrite := ioRead * 0.35 * (0.5 + g.rng.Float64())
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.sda.read_bps"}, ts, ioRead)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.sda.write_bps"}, ts, ioWrite)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.nvme0n1.read_bps"}, ts, ioRead*0.25)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.nvme0n1.write_bps"}, ts, ioWrite*0.15)
 	}
 
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "cpu.total"}, ts, clamp(hostCPU/3+5, 0, 100))
@@ -429,11 +442,29 @@ func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
 	}
 }
 
+// fakeContainerMounts gives fleet member `name` a plausible Unraid mount
+// set for the storage panel to resolve in fake-data mode: every
+// container gets a config bind under the near-universal
+// /mnt/user/appdata/<name> share, and the two transcoding apps also
+// mount the cache pool's /mnt/cache/transcode, so ResolveStoragePath's
+// "share" and "pool" kinds both have something to render, not just one.
+func fakeContainerMounts(name string) []docker.MountInfo {
+	mounts := []docker.MountInfo{
+		{Source: "/mnt/user/appdata/" + name, Destination: "/config", RW: true},
+	}
+	if name == "jellyfin" || name == "plex" {
+		mounts = append(mounts, docker.MountInfo{Source: "/mnt/cache/transcode", Destination: "/transcode", RW: true})
+	}
+	return mounts
+}
+
 // Metas returns one synthetic docker.Meta per fleet archetype, always
 // reporting state "running"/health "healthy" (the fake fleet's own
 // identity never stops or restarts -- emitContainerEvents' periodic
-// events simulate that instead, without actually changing state here).
-// main wiring passes this to buildSnapshot/buildContainersList
+// events simulate that instead, without actually changing state here),
+// plus a plausible Mounts set (fakeContainerMounts) so the storage
+// panel has something to resolve. main wiring passes this to
+// buildSnapshot/buildContainersList/buildContainerStorage
 // (GANTRY_FAKE_DATA=1 only) so the fake fleet is treated exactly like
 // dc.Running()'s real entries: without it, Task 4's DTO-v2 container
 // filter (only dc.Running() OR a name with both a fresh live sample AND
@@ -443,7 +474,7 @@ func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
 func (g *Generator) Metas() []docker.Meta {
 	out := make([]docker.Meta, len(fleet))
 	for i, a := range fleet {
-		out[i] = docker.Meta{Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest"}
+		out[i] = docker.Meta{Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest", Mounts: fakeContainerMounts(a.name)}
 	}
 	return out
 }

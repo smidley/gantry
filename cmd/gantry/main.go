@@ -217,7 +217,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Live:       live,
 		Current:    func() []byte { b, _ := json.Marshal(snapshotFn()); return b },
 		Logs:       dc.StreamLogs,
-		Storage:    buildContainerStorage(dc, ur, st),
+		Storage:    buildContainerStorage(dc, ur, st, fakeMetas),
 		Settings:   settingsAdapter{st: st, cfg: cfg},
 	}).ListenAndServe(runCtx)
 	cancel()
@@ -409,12 +409,27 @@ func buildContainersList(dc *docker.Collector, fakeMetas func() []docker.Meta) f
 }
 
 // buildContainerStorage returns the closure wired to server.Options.
-// Storage: dc.LookupByName and ur.Slots are passed straight through to
-// containerStorage (its own doc explains why that split exists), and
-// st.Live() gives it the live-ring accessor it needs for per-device IO.
-func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store.Store) func(name string) (server.StorageDTO, bool) {
+// Storage -- like buildContainersList/buildSnapshot, dc.LookupByName
+// falls back to fakeMetas' synthetic fleet when GANTRY_FAKE_DATA=1, so a
+// fake container's storage panel resolves instead of 404ing (nil in
+// real mode).
+func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store.Store, fakeMetas func() []docker.Meta) func(name string) (server.StorageDTO, bool) {
+	lookup := dc.LookupByName
+	if fakeMetas != nil {
+		lookup = func(name string) (docker.Meta, bool) {
+			if m, ok := dc.LookupByName(name); ok {
+				return m, true
+			}
+			for _, m := range fakeMetas() {
+				if m.Name == name {
+					return m, true
+				}
+			}
+			return docker.Meta{}, false
+		}
+	}
 	return func(name string) (server.StorageDTO, bool) {
-		return containerStorage(dc.LookupByName, ur.Slots, st.Live(), name)
+		return containerStorage(lookup, ur.Slots, st.Live(), name)
 	}
 }
 

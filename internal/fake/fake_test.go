@@ -1,6 +1,7 @@
 package fake
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -354,6 +355,46 @@ func TestMetasReturnsRunningHealthyDemoImagePerFleetMember(t *testing.T) {
 func TestMetasIsPureAndStable(t *testing.T) {
 	g := New(&capture{}, nil, 1)
 	require.Equal(t, g.Metas(), g.Metas())
+}
+
+// TestMetasIncludesPlausibleMounts pins the fix-round fix (finding 1):
+// fake containers must carry plausible Mounts, the same as a real
+// docker.Collector's inventory poll would populate, so the storage
+// panel's /storage route has something to resolve in fake-data mode
+// instead of an always-empty mount list.
+func TestMetasIncludesPlausibleMounts(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	metas := g.Metas()
+
+	for _, m := range metas {
+		require.NotEmpty(t, m.Mounts, "%s must have at least one plausible mount", m.Name)
+		for _, mount := range m.Mounts {
+			require.True(t, strings.HasPrefix(mount.Source, "/mnt/"), "%s mount source %q must look like a real Unraid path", m.Name, mount.Source)
+		}
+	}
+}
+
+// TestTickEmitsContainerDeviceIOSeries pins the other half of the
+// fix-round fix (finding 1): fake containers must also produce a
+// couple of live:io.<dev>.* samples per tick, the same live-ring-only
+// shape cgroupv2.go's recordContainerStats writes for a real container,
+// so the storage panel's device-IO rows have something to show in
+// fake-data mode too.
+func TestTickEmitsContainerDeviceIOSeries(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	devices := map[string]bool{}
+	for k := range sink.recs {
+		if k.Kind != "container" || k.Entity != "jellyfin" || !strings.HasPrefix(k.Metric, "live:io.") {
+			continue
+		}
+		dev, _, ok := strings.Cut(strings.TrimPrefix(k.Metric, "live:io."), ".")
+		require.True(t, ok)
+		devices[dev] = true
+	}
+	require.GreaterOrEqual(t, len(devices), 2, "want a couple of fake device rows per container")
 }
 
 // TestNilEventSinkDoesNotPanic proves every event-emitting path

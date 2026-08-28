@@ -49,10 +49,12 @@ type DeviceIODTO struct {
 }
 
 // handleStorage serves GET /api/containers/{name}/storage. Options.
-// Storage is nil in tests that don't wire one, and in fake-data mode (no
-// real docker.Collector at all) -- like Logs, there's no meaningful
-// "empty" response for a container this closure doesn't know about, so a
-// nil closure 404s the same way an unrecognized name does (ok == false).
+// Storage is nil only in tests that don't wire one -- main wiring always
+// sets it, fake-data mode included, where buildContainerStorage falls
+// back to fakeMetas for names dc's registry doesn't know (see its own
+// doc). A name neither source recognizes still 404s the same way an
+// unwired closure would (ok == false), the same shape Logs' unknown-name
+// case uses.
 func (s *Server) handleStorage(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if s.opts.Storage == nil {

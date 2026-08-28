@@ -76,12 +76,14 @@ type Options struct {
 	Logs func(ctx context.Context, name string, follow bool, tail int) (io.ReadCloser, error)
 
 	// Storage assembles one container's storage-usage view (main wiring
-	// points this at a closure combining docker.Collector's Meta.Mounts,
-	// unraid.ResolveStoragePath, and store.Live's per-device IO rates)
-	// for GET /api/containers/{name}/storage. ok is false for a name the
-	// closure doesn't recognize, same as docker.Collector.LookupByName's
-	// own shape -- the route then 404s, same as Logs' unknown-name case.
-	// Nil in tests that don't wire one, and in fake-data mode -- see Logs.
+	// points this at a closure combining docker.Collector's Meta.Mounts --
+	// falling back to fakeMetas in fake-data mode, see
+	// buildContainerStorage's own doc -- unraid.ResolveStoragePath, and
+	// store.Live's per-device IO rates) for GET
+	// /api/containers/{name}/storage. ok is false for a name neither
+	// source recognizes, same as docker.Collector.LookupByName's own
+	// shape -- the route then 404s, same as Logs' unknown-name case. Nil
+	// only in tests that don't wire one.
 	Storage func(name string) (StorageDTO, bool)
 
 	// Settings backs GET/PUT /api/settings (main wiring points this at a

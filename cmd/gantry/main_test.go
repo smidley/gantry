@@ -444,7 +444,48 @@ func TestBuildContainerStorageUnknownReturnsFalse(t *testing.T) {
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 
-	_, ok := buildContainerStorage(dc, ur, st)("ghost")
+	_, ok := buildContainerStorage(dc, ur, st, nil)("ghost")
+	require.False(t, ok)
+}
+
+// TestBuildContainerStorageMergesFakeMetas pins the fix-round fix
+// (finding 1): fake-data mode's synthetic containers never touch dc's
+// registry (same reason buildContainersList/buildSnapshot each merge
+// fakeMetas), so without merging it here too, every fake container's
+// /storage route 404s -- lookupMeta must fall back to fakeMetas' entries
+// when dc's registry doesn't know the name.
+func TestBuildContainerStorageMergesFakeMetas(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{
+			Name:   "frigate",
+			Mounts: []docker.MountInfo{{Source: "/mnt/user/appdata/frigate", Destination: "/config", RW: true}},
+		}}
+	}
+
+	dto, ok := buildContainerStorage(dc, ur, st, fakeMetas)("frigate")
+
+	require.True(t, ok, "a fake-mode container must resolve via fakeMetas, not 404")
+	require.Equal(t, []server.MountDTO{
+		{Source: "/mnt/user/appdata/frigate", Destination: "/config", RW: true, Storage: server.StorageRefDTO{Kind: "share", Name: "appdata"}},
+	}, dto.Mounts)
+}
+
+// TestBuildContainerStorageNilFakeMetasUnaffected pins real-mode
+// behavior (GANTRY_FAKE_DATA unset): a nil fakeMetas must not change
+// buildContainerStorage's existing dc.LookupByName-only contract.
+func TestBuildContainerStorageNilFakeMetasUnaffected(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+
+	_, ok := buildContainerStorage(dc, ur, st, nil)("ghost")
 	require.False(t, ok)
 }
 

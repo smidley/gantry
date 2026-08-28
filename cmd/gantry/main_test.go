@@ -342,6 +342,66 @@ func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
 	require.Equal(t, 5e8, c.Metrics["mem.bytes"], "a fresh sibling metric on the same entity must still come through")
 }
 
+// TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary pins
+// the per-sample freshness gate's own boundary (main.go: "nowUnix-
+// sample.TS >= containerFrameMaxAge"): a sample exactly containerFrameMaxAge
+// seconds old must be dropped, not just one older than that -- >=, not >.
+// containerFrameEntities' own boundary (the entity-level cutoff) already
+// has this exact pin; this is the per-sample gate's turn.
+func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().Unix()
+	st.Record(store.SeriesKey{Kind: "container", Entity: "db", Metric: "mem.limit_bytes"}, now-containerFrameMaxAge, 1e9) // exactly at the boundary
+	st.Record(store.SeriesKey{Kind: "container", Entity: "db", Metric: "mem.bytes"}, now-(containerFrameMaxAge-1), 5e8)   // one second younger: must survive
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "db", State: "running"}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+
+	c, ok := snap.Containers["db"]
+	require.True(t, ok)
+	_, hasAtBoundary := c.Metrics["mem.limit_bytes"]
+	require.False(t, hasAtBoundary, "a sample exactly containerFrameMaxAge seconds old must be dropped (>=, not >)")
+	require.Equal(t, 5e8, c.Metrics["mem.bytes"], "a sample one second younger than the boundary must still come through")
+}
+
+// TestBuildSnapshotDropsStaleContainerGPUBusyPct pins main.go's own claim
+// (buildSnapshot's per-sample freshness-gate comment) that the same gate
+// covers container-attributed gpu.*.busy_pct going quiet, not just the
+// mem/cpu-family metrics the other stale-sample test already exercises --
+// gpu.render.busy_pct is one of the four names resourceMetrics' own "gpu"
+// resource family recognizes (api_history.go).
+func TestBuildSnapshotDropsStaleContainerGPUBusyPct(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().Unix()
+	st.Record(store.SeriesKey{Kind: "container", Entity: "plex", Metric: "gpu.render.busy_pct"}, now-90, 42.0) // stale: older than containerFrameMaxAge
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "plex", State: "running"}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+
+	c, ok := snap.Containers["plex"]
+	require.True(t, ok)
+	_, hasStale := c.Metrics["gpu.render.busy_pct"]
+	require.False(t, hasStale, "a stale container-attributed gpu.render.busy_pct sample must be dropped, same as any other stale metric on a running container")
+}
+
 // TestBuildSnapshotMergesDiskMetaFromRealAndFake pins the disk_meta
 // analogue of the fake-Metas test above: a real box's own unraid
 // collector (ticked against a hand-written disks.ini) and fake mode's

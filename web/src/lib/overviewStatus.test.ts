@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveOverviewStatus, describeAnomaly, worstSeverity, type OverviewAnomaly } from './overviewStatus';
+import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, worstSeverity, type OverviewAnomaly } from './overviewStatus';
 
 const BASE = {
   unhealthyNames: [] as string[],
@@ -186,6 +186,45 @@ describe('describeAnomaly', () => {
     expect(src.title).toBe('docker needs attention');
     expect(src.detail).toBe('daemon unreachable');
     expect(src.severity).toBe('critical');
+  });
+});
+
+describe('calloutTextBySlot', () => {
+  it('maps a single disk-usage anomaly to its own detail text', () => {
+    const bySlot = calloutTextBySlot([{ kind: 'disk-usage', slot: 'disk1', usagePct: 95 }]);
+    expect(bySlot.get('disk1')).toBe('95.0% capacity');
+  });
+
+  it('maps a single disk-errors anomaly to its own detail text', () => {
+    const bySlot = calloutTextBySlot([{ kind: 'disk-errors', slot: 'disk2', errors: 3 }]);
+    expect(bySlot.get('disk2')).toBe('3 errors');
+  });
+
+  it('aggregates both details when a slot carries usage AND errors anomalies, instead of the later one silently overwriting the earlier', () => {
+    const bySlot = calloutTextBySlot([
+      { kind: 'disk-usage', slot: 'disk1', usagePct: 95 },
+      { kind: 'disk-errors', slot: 'disk1', errors: 3 },
+    ]);
+    expect(bySlot.get('disk1')).toBe('95.0% capacity · 3 errors');
+  });
+
+  it('keeps different slots independent', () => {
+    const bySlot = calloutTextBySlot([
+      { kind: 'disk-usage', slot: 'disk1', usagePct: 95 },
+      { kind: 'disk-errors', slot: 'disk2', errors: 1 },
+    ]);
+    expect(bySlot.get('disk1')).toBe('95.0% capacity');
+    expect(bySlot.get('disk2')).toBe('1 error');
+  });
+
+  it('ignores non-disk anomaly kinds', () => {
+    const bySlot = calloutTextBySlot([
+      { kind: 'unhealthy', name: 'sonarr' },
+      { kind: 'stopped', count: 2 },
+      { kind: 'array-stopped' },
+      { kind: 'source-critical', source: 'docker', detail: 'daemon unreachable' },
+    ]);
+    expect(bySlot.size).toBe(0);
   });
 });
 

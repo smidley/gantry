@@ -40,7 +40,7 @@
   import { diskKind, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import { isTopResource, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
-  import { deriveOverviewStatus, describeAnomaly, worstSeverity } from '../lib/overviewStatus';
+  import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, worstSeverity } from '../lib/overviewStatus';
 
   import StatTile from '../components/StatTile.svelte';
   import FleetStrip from '../components/FleetStrip.svelte';
@@ -261,10 +261,7 @@
 
   let baySchematicEntries = $derived.by(() => {
     if (!showBaySchematic) return [];
-    const calloutBySlot = new Map();
-    for (const a of diskAnomalies) {
-      calloutBySlot.set(a.slot, describeAnomaly(a).detail);
-    }
+    const calloutBySlot = calloutTextBySlot(diskAnomalies);
     return diskEntries.map((d) => ({
       slot: d.slot,
       pct: d.pct,

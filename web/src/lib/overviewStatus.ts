@@ -177,6 +177,25 @@ export function describeAnomaly(a: OverviewAnomaly): AnomalyText {
   }
 }
 
+// calloutTextBySlot aggregates every disk anomaly's own describeAnomaly()
+// detail onto its slot, for BaySchematic's per-bar title/aria-label (its
+// one accessible string for a bar that's otherwise a bare `role="img"`
+// div). A slot can carry two disk anomalies at once (nearest-to-full AND
+// reporting errors) -- joining keeps both in that one string instead of
+// the later anomaly's detail silently replacing the earlier one's, the
+// same "nothing drops silently" contract the "Needs a look" list above
+// it already gives every anomaly, disk or not.
+export function calloutTextBySlot(anomalies: OverviewAnomaly[]): Map<string, string> {
+  const bySlot = new Map<string, string>();
+  for (const a of anomalies) {
+    if (a.kind !== 'disk-usage' && a.kind !== 'disk-errors') continue;
+    const detail = describeAnomaly(a).detail;
+    const prior = bySlot.get(a.slot);
+    bySlot.set(a.slot, prior ? `${prior} · ${detail}` : detail);
+  }
+  return bySlot;
+}
+
 const SEVERITY_RANK: Record<HealthStatus, number> = { good: 0, warning: 1, serious: 2, critical: 3 };
 
 // worstSeverity picks the single most severe reading across every

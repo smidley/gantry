@@ -427,18 +427,26 @@ func (c *Collector) hostCoresOrNumCPU() int {
 }
 
 // effectiveCPUAllocCores resolves one alloc's CPU ceiling into a single
-// core count against hostCores: a quota always wins outright when set; a
-// cpuset pin only counts when it actually narrows the container below
-// the host's own core count (cpuset.cpus.effective defaults to every
-// host core when nothing is pinned, which must read as unlimited rather
-// than "restricted to N cores" -- and hostCores itself unknown, <= 0,
-// must not be treated as a restriction either); when both are set, the
-// tighter of the two wins. The result is then clamped to hostCores:
+// core count: a quota always wins outright when set; a cpuset pin only
+// counts when it actually narrows the container below hostCores
+// (cpuset.cpus.effective defaults to every host core when nothing is
+// pinned, which must read as unlimited rather than "restricted to N
+// cores" -- and hostCores itself unknown, <= 0, must not be treated as a
+// restriction either); when both are set, the tighter of the two wins.
+//
+// hostCores and rawHostCores are deliberately different params. hostCores
+// (the caller's hostCoresOrNumCPU(), runtime.NumCPU()-backed when the
+// host collector hasn't ticked yet) only ever gates the cpuset-narrowing
+// decision above -- a rough guess is fine there, it's just a yes/no. The
+// final clamp below is different: it can silently overwrite
+// cpu.alloc_cores, a precise config readout, so it may only fire against
+// rawHostCores (the caller's own c.HostCores(), no NumCPU() fallback) --
 // dockerd doesn't validate --cpu-quota against the host's own core
-// count, and a ceiling above the machine is unusable headroom -- left
-// unclamped, alloc_pct would stay permanently capped below 100 even for
-// a container using every cycle the host can give it.
-func effectiveCPUAllocCores(a alloc, hostCores int) (cores float64, ok bool) {
+// count, and a ceiling above the machine is unusable headroom, but a
+// guessed "host size" is the wrong tool to fix that with. rawHostCores
+// <= 0 (host collector hasn't ticked) skips the clamp entirely rather
+// than guess.
+func effectiveCPUAllocCores(a alloc, hostCores, rawHostCores int) (cores float64, ok bool) {
 	cpusetRestricts := a.HasCPUSet && hostCores > 0 && a.CPUSetCores < hostCores
 	switch {
 	case a.HasCPUQuota && cpusetRestricts:
@@ -450,8 +458,8 @@ func effectiveCPUAllocCores(a alloc, hostCores int) (cores float64, ok bool) {
 	default:
 		return 0, false
 	}
-	if hostCores > 0 && cores > float64(hostCores) {
-		cores = float64(hostCores)
+	if rawHostCores > 0 && cores > float64(rawHostCores) {
+		cores = float64(rawHostCores)
 	}
 	return cores, ok
 }
@@ -495,7 +503,7 @@ func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time)
 	}
 
 	hostCores := c.hostCoresOrNumCPU()
-	allocCores, hasAllocCores := effectiveCPUAllocCores(cg.Alloc, hostCores)
+	allocCores, hasAllocCores := effectiveCPUAllocCores(cg.Alloc, hostCores, c.HostCores())
 	if hasAllocCores {
 		c.sink.Record(key("cpu.alloc_cores"), ts, allocCores)
 	}

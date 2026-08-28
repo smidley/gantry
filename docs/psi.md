@@ -1,6 +1,6 @@
 # PSI (Pressure Stall Information)
 
-Gantry's Settings page and Overview banner show a hint when the `pressure` source isn't `ok`: *"PSI disabled — add `psi=1` to the syslinux append line to enable."* This page explains what that means and whether you should bother.
+Gantry's Settings page and Overview banner show a hint when the `pressure` source isn't `ok`: *"PSI disabled — add psi=1 to the syslinux append line to enable (optional; used by insights)"*. This page explains what that means and whether you should bother.
 
 ## What PSI is
 

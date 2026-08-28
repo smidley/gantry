@@ -99,12 +99,12 @@
       {/if}
     </div>
   {:else}
-    <div class="gpu-view__range-picker" role="group" aria-label="Time range">
+    <div class="segmented" role="group" aria-label="Time range">
       {#each RANGES as r (r.key)}
         <button
           type="button"
-          class="gpu-view__range-btn"
-          class:gpu-view__range-btn--active={activeRange === r.key}
+          class="segmented__btn"
+          class:segmented__btn--active={activeRange === r.key}
           onclick={() => (activeRange = r.key)}
         >
           {r.label}
@@ -198,27 +198,6 @@
   }
   .gpu-view__empty-hint {
     margin: 0;
-  }
-  .gpu-view__range-picker {
-    display: flex;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-  .gpu-view__range-btn {
-    min-height: 40px;
-    padding: 0 0.85rem;
-    border-radius: 6px;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    background: transparent;
-    color: var(--ink-2);
-    font-size: 0.82rem;
-    cursor: pointer;
-  }
-  .gpu-view__range-btn--active {
-    background: color-mix(in oklab, var(--series-1) 15%, transparent);
-    border-color: var(--series-1);
-    color: var(--series-1);
-    font-weight: 500;
   }
   .gpu-view__entities {
     display: flex;

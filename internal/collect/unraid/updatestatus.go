@@ -61,6 +61,7 @@ func (r *UpdateStatusReader) Statuses() map[string]string {
 		return nil
 	}
 	if fi.Size() > maxUpdateStatusFileSize {
+		r.clearLast()
 		return nil
 	}
 	data, err := os.ReadFile(r.path)

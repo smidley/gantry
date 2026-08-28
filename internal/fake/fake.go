@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"slices"
 	"time"
 
 	"github.com/smidley/gantry/internal/collect/docker"
@@ -606,7 +607,7 @@ func (g *Generator) Metas() []docker.Meta {
 			HostNet:      a.hostNet,
 			Mounts:       fakeContainerMounts(a.name),
 			UpdateStatus: a.updateStatus, ChangelogURL: a.changelogURL, ProjectURL: a.projectURL,
-			WebUIURL: a.webUIURL, Networks: a.networks, Ports: a.ports,
+			WebUIURL: a.webUIURL, Networks: slices.Clone(a.networks), Ports: slices.Clone(a.ports),
 		}
 	}
 	return out

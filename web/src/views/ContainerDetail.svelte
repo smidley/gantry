@@ -263,12 +263,12 @@
     {/if}
   </div>
 
-  <div class="container-detail__range-picker" role="group" aria-label="Time range">
+  <div class="segmented" role="group" aria-label="Time range">
     {#each RANGES as r (r.key)}
       <button
         type="button"
-        class="container-detail__range-btn"
-        class:container-detail__range-btn--active={activeRange === r.key}
+        class="segmented__btn"
+        class:segmented__btn--active={activeRange === r.key}
         onclick={() => (activeRange = r.key)}
       >
         {r.label}
@@ -391,27 +391,6 @@
     font-size: 0.8rem;
     color: var(--ink-2);
   }
-  .container-detail__range-picker {
-    display: flex;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-  .container-detail__range-btn {
-    min-height: 40px;
-    padding: 0 0.85rem;
-    border-radius: 6px;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    background: transparent;
-    color: var(--ink-2);
-    font-size: 0.82rem;
-    cursor: pointer;
-  }
-  .container-detail__range-btn--active {
-    background: color-mix(in oklab, var(--series-1) 15%, transparent);
-    border-color: var(--series-1);
-    color: var(--series-1);
-    font-weight: 500;
-  }
   .container-detail__fetch-error {
     color: var(--status-warning);
   }
@@ -422,6 +401,15 @@
     display: grid;
     grid-template-columns: repeat(2, 1fr);
     gap: 0.75rem;
+  }
+  /* GPU/PSI only render their own card when that data exists (see the
+     template above), so the grid can land at an ODD total (4 fixed +
+     0-2 conditional) -- an unpaired last card would otherwise leave its
+     row's second cell dead. Span it full-width instead, matching the
+     wasted-space rule everywhere else in this rollout: reproduced with
+     GPU present, PSI absent (5 cards). */
+  .container-detail__chart-card:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
   @media (max-width: 47.9375rem) {
     .container-detail__charts {

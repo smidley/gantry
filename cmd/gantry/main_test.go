@@ -215,7 +215,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	require.NoError(t, json.NewDecoder(imagesResp.Body).Decode(&imagesBody))
 	drainAndClose(imagesResp)
 	require.Equal(t, http.StatusOK, imagesResp.StatusCode)
-	require.Len(t, imagesBody.Images, 12, "fake mode's own dozen-image seed")
+	require.Len(t, imagesBody.Images, 13, "fake mode's own image seed")
 	require.NotEmpty(t, imagesBody.Summary.Note)
 	var danglingFullID string
 	for _, im := range imagesBody.Images {
@@ -272,7 +272,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(imagesResp2.Body).Decode(&imagesBody2))
 	drainAndClose(imagesResp2)
-	require.Len(t, imagesBody2.Images, 12-len(pruneBody.Deleted)-1, "both the prune and the remove must have actually mutated the fake inventory")
+	require.Len(t, imagesBody2.Images, 13-len(pruneBody.Deleted)-1, "both the prune and the remove must have actually mutated the fake inventory")
 
 	// Every request above went through http.DefaultTransport, which keeps
 	// the underlying connection open (keep-alive) for reuse even after its

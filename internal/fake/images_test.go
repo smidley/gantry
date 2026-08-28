@@ -81,6 +81,22 @@ func TestFakeImageSeedShortIDsAreUnique(t *testing.T) {
 	}
 }
 
+// TestFakeImageSeedIncludesADigestPinnedUnusedImage pins N3: the seed
+// had no entry with RepoDigests set and no RepoTags, so GET
+// /api/images' digest-ref display path (see server.digestRefsOrNone)
+// was only ever exercised by a synthetic test fixture, never visible
+// against GANTRY_FAKE_DATA=1 for whoever builds the UI against it.
+func TestFakeImageSeedIncludesADigestPinnedUnusedImage(t *testing.T) {
+	found := false
+	for _, im := range fakeImageSeed {
+		if len(im.RepoTags) == 0 && len(im.RepoDigests) > 0 {
+			found = true
+			require.Equal(t, "unused", im.State, "a digest-pinned image is not dangling -- see classifyImages' own doc")
+		}
+	}
+	require.True(t, found, "fake mode's seed must include at least one digest-pinned (no RepoTags) image")
+}
+
 // TestGeneratorRemoveImagesResolvesUniqueShortID pins the same round
 // trip from RemoveImages' side: a real docker daemon resolves an
 // unambiguous short id prefix on its own (docker.Collector.RemoveImages
@@ -133,9 +149,9 @@ func TestGeneratorImagesReturnsSeedOfMixedStates(t *testing.T) {
 	report, err := g.Images(context.Background())
 
 	require.NoError(t, err)
-	require.Equal(t, 12, len(report.Images))
+	require.Equal(t, 13, len(report.Images))
 	require.Equal(t, 5, report.Summary.InUse)
-	require.Equal(t, 3, report.Summary.Unused)
+	require.Equal(t, 4, report.Summary.Unused)
 	require.Equal(t, 4, report.Summary.Dangling)
 }
 
@@ -214,7 +230,7 @@ func TestGeneratorPruneImagesDanglingRemovesOnlyDangling(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, after.Summary.Dangling)
 	require.Equal(t, 5, after.Summary.InUse)
-	require.Equal(t, 3, after.Summary.Unused)
+	require.Equal(t, 4, after.Summary.Unused)
 }
 
 func TestGeneratorPruneImagesUnusedRemovesOnlyUnused(t *testing.T) {
@@ -222,7 +238,7 @@ func TestGeneratorPruneImagesUnusedRemovesOnlyUnused(t *testing.T) {
 
 	result, err := g.PruneImages(context.Background(), "unused")
 	require.NoError(t, err)
-	require.Len(t, result.Deleted, 3)
+	require.Len(t, result.Deleted, 4)
 
 	after, err := g.Images(context.Background())
 	require.NoError(t, err)

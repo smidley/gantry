@@ -23,10 +23,13 @@ const fakeImagesBaseCreated = 1_735_000_000
 // already be distinct here.
 func fakeImageID(n int64) string { return fmt.Sprintf("sha256:%02x%062x", n, 0) }
 
-// fakeImageSeed is the fake box's dozen-image inventory, mirroring the
+// fakeImageSeed is the fake box's own image inventory, mirroring the
 // SHAPE (not the exact count) of Scott's own real box's numbers: five
-// in-use, three unused (a superseded tag no container references any
-// more), four dangling (untagged leftover layers). Deliberately its own
+// in-use, four unused (three by a superseded tag no container
+// references any more, one digest-pinned instead -- so GET
+// /api/images' digest-ref display path, see server.digestRefsOrNone,
+// has a fake-mode fixture too, not just a synthetic test one), four
+// dangling (untagged leftover layers). Deliberately its own
 // self-contained dataset rather than derived from the fleet var (this
 // package's metrics/container-identity demo data) -- images and
 // containers are unrelated concerns here the way GET /api/images and
@@ -41,6 +44,7 @@ var fakeImageSeed = []docker.ImageInfo{
 	{ID: fakeImageID(6), RepoTags: []string{"lscr.io/linuxserver/radarr:1.2.3-legacy"}, SizeBytes: 415_000_000, Created: fakeImagesBaseCreated - 40*86400, State: "unused"},
 	{ID: fakeImageID(7), RepoTags: []string{"postgres:15"}, SizeBytes: 375_000_000, Created: fakeImagesBaseCreated - 90*86400, State: "unused"},
 	{ID: fakeImageID(8), RepoTags: []string{"redis:7-alpine"}, SizeBytes: 42_000_000, Created: fakeImagesBaseCreated - 12*86400, State: "unused"},
+	{ID: fakeImageID(13), RepoDigests: []string{"lscr.io/linuxserver/prowlarr@" + fakeImageID(99)}, SizeBytes: 320_000_000, Created: fakeImagesBaseCreated - 55*86400, State: "unused"},
 
 	{ID: fakeImageID(9), SizeBytes: 950_000_000, Created: fakeImagesBaseCreated - 6*86400, State: "dangling"},
 	{ID: fakeImageID(10), SizeBytes: 410_000_000, Created: fakeImagesBaseCreated - 7*86400, State: "dangling"},

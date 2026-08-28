@@ -156,6 +156,28 @@ test('container detail: charts render and the log viewer shows its empty state',
   });
 });
 
+// "jellyfin" is the only fake-fleet archetype whose mounts cover three
+// different storage kinds at once (fakeContainerMounts: a share, an
+// array disk, and the flash boot device -- "pool" only resolves on a
+// real box, since it needs a real disks.ini).
+test('container detail: storage panel renders mounts with kind badges', async ({ page }) => {
+  await page.goto('#/containers/jellyfin');
+
+  const mountRow = (destination: string) =>
+    page
+      .locator('.storage-mount')
+      .filter({ has: page.locator('.storage-mount__dest', { hasText: new RegExp(`^${destination}$`) }) });
+
+  await expect(mountRow('/config').locator('.storage-mount__badge')).toContainText('Share · appdata');
+  await expect(mountRow('/config').locator('.storage-mount__ro')).toHaveCount(0); // rw is the default -- not labeled
+
+  await expect(mountRow('/media').locator('.storage-mount__badge')).toContainText('Disk · disk1');
+  await expect(mountRow('/media').locator('.storage-mount__ro')).toBeVisible();
+
+  await expect(mountRow('/flash').locator('.storage-mount__badge')).toContainText('Flash');
+  await expect(mountRow('/flash').locator('.storage-mount__ro')).toBeVisible();
+});
+
 test('top consumers: switching window from Now to 1h renders without erroring', async ({ page }) => {
   await page.goto('#/top');
 

@@ -68,6 +68,26 @@ export interface GantryEvent {
   Detail: string;
 }
 
+// StorageMountDTO/StorageDeviceDTO/StorageDTO mirror internal/server/
+// api_storage.go's MountDTO/DeviceIODTO/StorageDTO exactly.
+export interface StorageMountDTO {
+  source: string;
+  destination: string;
+  rw: boolean;
+  storage: { kind: string; name: string };
+}
+
+export interface StorageDeviceDTO {
+  device: string;
+  read_bps: number;
+  write_bps: number;
+}
+
+export interface StorageDTO {
+  mounts: StorageMountDTO[];
+  devices: StorageDeviceDTO[];
+}
+
 export interface RetentionSettings {
   r1_hours: number;
   r2_days: number;
@@ -154,6 +174,16 @@ export function fetchEvents(
 
 export function fetchContainers(): Promise<ContainerInfo[]> {
   return getJSON<ContainerInfo[]>('/api/containers');
+}
+
+// fetchContainerStorage backs ContainerDetail's Storage section --
+// mounts plus each backing device's current IO rate (the latter is
+// ring-only, never in the SSE frame, hence a plain poll here rather
+// than a read off `live.frame`). A 404 (name docker/fake-mode don't
+// know) throws same as every other getJSON call; the caller treats that
+// as "no storage panel for this container" rather than an error state.
+export function fetchContainerStorage(name: string, signal?: AbortSignal): Promise<StorageDTO> {
+  return getJSON<StorageDTO>(`/api/containers/${encodeURIComponent(name)}/storage`, signal);
 }
 
 // fetchSnapshot backs Overview's live-seed discovery step: host metrics

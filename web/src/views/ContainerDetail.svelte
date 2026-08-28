@@ -18,11 +18,12 @@
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
-  import { fetchEvents, fetchSeries } from '../lib/api';
+  import { fetchContainerStorage, fetchEvents, fetchSeries } from '../lib/api';
   import { fmtBytes, fmtCores, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { containerHealthStatus } from '../lib/containerStatus';
   import { GPU_ENGINE_ORDER } from '../lib/metrics';
   import { eventsToMarkers } from '../lib/eventMarkers';
+  import { normalizeStorageKind, sortMounts } from '../lib/containerStorage';
 
   import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
@@ -33,6 +34,22 @@
 
   const SYNC_KEY = 'container-detail';
   const LIVE_WINDOW_SEC = 900;
+  const STORAGE_POLL_MS = 2000;
+
+  // Storage-system badge vocabulary (StorageRefDTO's own kinds: share,
+  // pool, disk, flash, other). Tints skip --series-1/4 -- this card's
+  // own device rows use those two for read/write, see StorageDeviceRow --
+  // and --series-2/8, both red/orange enough to risk a plain kind badge
+  // misreading as an alarm (Scott's own read on --series-2, extended
+  // here to its close sibling).
+  const STORAGE_KIND_LABEL = { share: 'Share', pool: 'Pool', disk: 'Disk', flash: 'Flash', other: 'Other' };
+  const STORAGE_KIND_TITLE = {
+    share: 'Unraid user share',
+    pool: 'Cache/pool device',
+    disk: 'Array disk',
+    flash: 'Boot (flash) device',
+    other: 'Unresolved host path',
+  };
   const RANGES = [
     { key: 'live', label: 'Live · 15m' },
     { key: '1h', label: '1h' },
@@ -235,6 +252,33 @@
   });
   let markers = $derived(eventsToMarkers(events));
 
+  // Storage section: mounts + per-backing-device live IO, from
+  // /api/containers/{name}/storage. Polled every 2s while this view is
+  // mounted rather than read off the live frame -- per-device rates are
+  // ring-only ("live:"-prefixed samples, see store/query.go's own doc),
+  // so buildSnapshot never puts them in the SSE frame at all. storageData
+  // is the last successful response ever (null before the first one
+  // resolves); a LATER poll failing leaves it showing rather than
+  // blanking it, same resilience Storage.svelte's own parity-history
+  // poll already has. A container this 404s for (or any other fetch
+  // failure before ever succeeding once) simply never gets a panel --
+  // storageData stays null -- rather than an error card.
+  let storageData = $state(null);
+  $effect(() => {
+    const containerName = name;
+    async function poll() {
+      try {
+        storageData = await fetchContainerStorage(containerName);
+      } catch {
+        // leave storageData as it is -- see the doc above.
+      }
+    }
+    poll();
+    const interval = setInterval(poll, STORAGE_POLL_MS);
+    return () => clearInterval(interval);
+  });
+  let sortedMounts = $derived(storageData ? sortMounts(storageData.mounts) : []);
+
   let c = $derived(live.frame?.containers?.[name]);
   let frameTs = $derived(live.frame?.ts ?? 0);
   let startedAt = $derived(c?.metrics?.['meta.started_at']);
@@ -349,6 +393,38 @@
     {/if}
   </div>
 
+  {#if storageData}
+    <div class="card container-detail__storage">
+      <span class="microlabel">Storage</span>
+
+      <div class="container-detail__storage-section">
+        <span class="microlabel">Mounts</span>
+        {#if sortedMounts.length === 0}
+          <p class="microlabel container-detail__storage-empty">No mounts for this container.</p>
+        {:else}
+          <div class="container-detail__storage-mounts">
+            {#each sortedMounts as mount (mount.destination)}
+              {@const kind = normalizeStorageKind(mount.storage.kind)}
+              <div class="storage-mount">
+                <div class="storage-mount__paths">
+                  <span class="storage-mount__dest" title={mount.destination}>{mount.destination}</span>
+                  <span class="storage-mount__arrow" aria-hidden="true">&larr;</span>
+                  <span class="storage-mount__source" title={mount.source}>{mount.source}</span>
+                </div>
+                <div class="storage-mount__tags">
+                  <span class="storage-mount__badge storage-mount__badge--{kind}" title={STORAGE_KIND_TITLE[kind]}>
+                    {STORAGE_KIND_LABEL[kind]}{mount.storage.name ? ` · ${mount.storage.name}` : ''}
+                  </span>
+                  {#if !mount.rw}<span class="storage-mount__ro">ro</span>{/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   <div class="card container-detail__metadata">
     <span class="microlabel">Metadata</span>
     <dl class="container-detail__meta-list">
@@ -444,12 +520,110 @@
     margin: 2rem 0;
     text-align: center;
   }
+  .container-detail__storage,
   .container-detail__metadata,
   .container-detail__logs {
     padding: 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
+  }
+  .container-detail__storage-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .container-detail__storage-empty {
+    margin: 0;
+  }
+  .container-detail__storage-mounts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .storage-mount {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.3rem 0.75rem;
+  }
+  .storage-mount__paths {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    min-width: 0;
+    flex: 1 1 12rem;
+    overflow: hidden;
+  }
+  .storage-mount__dest {
+    font-size: 0.85rem;
+    color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .storage-mount__arrow {
+    color: var(--ink-2);
+    flex-shrink: 0;
+  }
+  .storage-mount__source {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--ink-2);
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .storage-mount__tags {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+    gap: 0.4rem;
+  }
+  /* Storage-system badge: same tinted-pill recipe as Storage.svelte's
+     own disk media badges (storage-disk__media) -- a neutral chip for
+     "share" (the ordinary/majority case, same role hdd plays there),
+     one accent color per other kind. See the STORAGE_KIND_LABEL doc
+     above for why these four particular tokens. */
+  .storage-mount__badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    color: var(--ink-2);
+    background: color-mix(in oklab, var(--ink) 7%, transparent);
+    white-space: nowrap;
+  }
+  .storage-mount__badge--pool {
+    color: var(--series-3);
+    background: color-mix(in oklab, var(--series-3) 12%, transparent);
+  }
+  .storage-mount__badge--disk {
+    color: var(--series-5);
+    background: color-mix(in oklab, var(--series-5) 12%, transparent);
+  }
+  .storage-mount__badge--flash {
+    color: var(--series-6);
+    background: color-mix(in oklab, var(--series-6) 12%, transparent);
+  }
+  .storage-mount__badge--other {
+    color: var(--series-7);
+    background: color-mix(in oklab, var(--series-7) 12%, transparent);
+  }
+  .storage-mount__ro {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--ink) 7%, transparent);
+    color: var(--ink-2);
+    white-space: nowrap;
   }
   .container-detail__meta-list {
     display: grid;

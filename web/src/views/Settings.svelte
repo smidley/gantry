@@ -428,11 +428,21 @@
       grid-template-columns: 1fr;
     }
   }
+  /* min-width:0 -- same released-minimum treatment as ContainerDetail's
+     chart cards (see that file's own longer doc): the tiles' sparkline
+     canvases bake their width in literal pixels, and this card's
+     default min-width:auto would otherwise pin its 1fr track at that
+     stale width when the row narrows, shoving the theme/about cards
+     past the viewport instead of letting Sparkline's own
+     ResizeObserver re-fit the canvas (reproduced at 1920 -> 1200:
+     first track stuck at 550px, About's right edge 16px past the
+     page). */
   .settings-footprint {
     padding: 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    min-width: 0;
   }
   /* bare rail rows (see StatTile's own doc), same instrument-rail
      treatment as Overview's metrics rail -- a hairline between CPU/

@@ -608,11 +608,26 @@
       grid-template-columns: 1fr;
     }
   }
+  /* min-width:0 -- a grid item's default min-width:auto lets the uPlot
+     canvas inside (a replaced element whose width is baked in literal
+     pixels at build/setSize time) act as its track's minimum, so once
+     the content box narrows (window resize, a vertical scrollbar
+     appearing) the 1fr tracks above physically can't shrink and the
+     cards overrun the page sideways. Worse, that state is permanent:
+     TimeChart's own ResizeObserver never gets to re-fit the chart,
+     because the .time-chart it watches is held at its stale width by
+     the very canvas it would resize. Reproduced live at 1440 -> 1200
+     (cards stuck ~210px past the viewport, whole page scrolling
+     horizontally). With the minimum released the cards shrink with
+     their tracks, the observer fires, and the canvas follows within a
+     frame -- same idiom as .stat-tile, the other fixed-pixel-canvas
+     host. */
   .container-detail__chart-card {
     padding: 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    min-width: 0;
   }
   .container-detail__chart-head {
     display: flex;

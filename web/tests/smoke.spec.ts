@@ -404,6 +404,48 @@ test('container detail: storage panel shows a quiet message once every device ha
   await expect(page.locator('.storage-total')).toHaveCount(0);
 });
 
+// Horizontal-overflow regression: TimeChart/Sparkline bake each chart's
+// width in literal canvas pixels (build()/setSize read the host's
+// clientWidth), and a grid item's default min-width:auto lets that
+// baked canvas set its track's minimum -- so when the content box later
+// narrows (window resize, a vertical scrollbar appearing), the 1fr
+// tracks physically can't shrink, cards overrun the page sideways, and
+// the ResizeObserver that's supposed to re-fit the chart can never
+// fire: the element it watches is held at its stale width by the very
+// canvas it would resize. Two live instances of the same trap, both
+// reproduced narrowing 1920 -> 1200: Container Detail's chart cards
+// (the Memory card's right edge sat ~210px past the viewport, whole
+// page scrolling horizontally) and Settings' footprint card (its
+// sparklines pinned the row's first track at 550px, shoving the About
+// card 16px past the page).
+test('chart-hosting grid cards release their tracks when the viewport narrows', async ({ page }) => {
+  const ROWS: { hash: string; canvas: string }[] = [
+    { hash: '#/containers/jellyfin', canvas: '.container-detail__charts canvas' },
+    { hash: '#/settings', canvas: '.settings-footprint canvas' },
+  ];
+  for (const r of ROWS) {
+    await page.setViewportSize({ width: 1920, height: 900 });
+    await page.goto(r.hash);
+
+    // The chart must exist BEFORE the resize -- the bug is a stale
+    // already-built canvas holding its track open, not a fresh build at
+    // the narrow width (which sizes correctly).
+    await expect(page.locator(r.canvas).first()).toBeVisible({ timeout: 10_000 });
+
+    await page.setViewportSize({ width: 1200, height: 900 });
+
+    // expect.poll gives the ResizeObserver -> setSize chain a beat to
+    // settle; the invariant is "no horizontal overflow anywhere on the
+    // page" (documentElement.clientWidth already excludes any vertical
+    // scrollbar, so a positive difference is a real sideways spill).
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), {
+        message: `horizontal overflow on ${r.hash} after narrowing`,
+      })
+      .toBeLessThanOrEqual(0);
+  }
+});
+
 test('top consumers: switching window from Now to 1h renders without erroring', async ({ page }) => {
   await page.goto('#/top');
 

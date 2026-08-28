@@ -56,6 +56,14 @@ func TestResolveStoragePath(t *testing.T) {
 		{"empty path", "", StorageRef{Kind: "other"}},
 		{"docker anonymous volume real location", "/var/lib/docker/volumes/jellyfin_cache/_data", StorageRef{Kind: "other"}},
 		{"arbitrary host bind mount", "/home/user/appdata", StorageRef{Kind: "other"}},
+
+		// Unclean paths: filepath.Clean must run before segment-splitting,
+		// not after -- a ".." climbing back out of a share into a disk
+		// slot, and a doubled slash inside an otherwise-valid share path,
+		// must resolve by their post-Clean shape, not their literal one.
+		{"dot-dot climbs back out of a user share into a disk slot", "/mnt/user/../disk1/x", StorageRef{Kind: "disk", Name: "disk1"}},
+		{"doubled slash within a user share", "/mnt/user//Movies", StorageRef{Kind: "share", Name: "Movies"}},
+		{"relative path (no leading slash) never resolves", "mnt/user/appdata", StorageRef{Kind: "other"}},
 	}
 
 	for _, tt := range tests {

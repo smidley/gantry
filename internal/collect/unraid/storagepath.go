@@ -1,6 +1,7 @@
 package unraid
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -47,6 +48,11 @@ var diskSlotPattern = regexp.MustCompile(`^disk[0-9]+$`)
 // exhaustively table-testable without any ini fixture or Collector at
 // all.
 func ResolveStoragePath(path string, pools []string) StorageRef {
+	if !strings.HasPrefix(path, "/") {
+		return StorageRef{Kind: "other"}
+	}
+	path = filepath.Clean(path)
+
 	trimmed := strings.TrimPrefix(path, "/")
 	top, rest := splitFirstSegment(trimmed)
 

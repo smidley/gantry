@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { isTopResource, resourceMetricKeys, resourceSecondaryMetricKey, TOP_RESOURCES, topFromFrame } from './topFromFrame';
+import {
+  isTopResource,
+  resourceMetricKeys,
+  resourceScaleMax,
+  resourceSecondaryMetricKey,
+  TOP_RESOURCES,
+  topFromFrame,
+} from './topFromFrame';
 import type { SnapshotDTO } from './api';
 
 describe('TOP_RESOURCES', () => {
@@ -63,6 +70,38 @@ describe('resourceSecondaryMetricKey', () => {
     expect(resourceSecondaryMetricKey('net')).toBeUndefined();
     expect(resourceSecondaryMetricKey('io')).toBeUndefined();
     expect(resourceSecondaryMetricKey('gpu')).toBeUndefined();
+  });
+});
+
+describe('resourceScaleMax', () => {
+  it('is a fixed 100 for cpu and gpu, regardless of the frame', () => {
+    expect(resourceScaleMax('cpu', frameWith({}))).toBe(100);
+    expect(resourceScaleMax('gpu', frameWith({}))).toBe(100);
+    expect(resourceScaleMax('cpu', null)).toBe(100);
+    expect(resourceScaleMax('gpu', undefined)).toBe(100);
+  });
+
+  it('is undefined for net and io -- no natural ceiling, stay relative-to-max', () => {
+    expect(resourceScaleMax('net', frameWith({}))).toBeUndefined();
+    expect(resourceScaleMax('io', frameWith({}))).toBeUndefined();
+  });
+
+  it('derives the host total bytes for mem from used_bytes/used_pct', () => {
+    const frame = frameWith({});
+    frame.host = { 'mem.used_bytes': 4_000_000_000, 'mem.used_pct': 50 };
+    expect(resourceScaleMax('mem', frame)).toBe(8_000_000_000);
+  });
+
+  it('falls back to undefined for mem when the host has no mem stats yet', () => {
+    expect(resourceScaleMax('mem', frameWith({}))).toBeUndefined();
+    expect(resourceScaleMax('mem', null)).toBeUndefined();
+    expect(resourceScaleMax('mem', undefined)).toBeUndefined();
+  });
+
+  it('falls back to undefined for mem when used_pct is 0 -- can\'t divide by it', () => {
+    const frame = frameWith({});
+    frame.host = { 'mem.used_bytes': 0, 'mem.used_pct': 0 };
+    expect(resourceScaleMax('mem', frame)).toBeUndefined();
   });
 });
 

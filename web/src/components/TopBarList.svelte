@@ -24,6 +24,16 @@
 
   formatSecondary (additive, optional): passed straight through to every
   row -- see TopBarRow's own doc for what it renders and when.
+
+  scaleMax (additive, optional): the denominator a bar's width reads
+  against. Given (cpu/gpu's fixed 100, mem's derived host-total-bytes --
+  see topFromFrame's resourceScaleMax), every row's bar reads as an
+  absolute fraction of the machine, so a quiet 6.5% consumer draws a bar
+  6.5% full rather than a nearly-full one just because nothing else is
+  busy right now. Omitted (net/io, or mem before a host stat has landed)
+  falls back to the previous relative-to-the-list's-own-max behavior --
+  net/io have no natural ceiling, so "busiest of what's showing" is the
+  only scale that ever made sense for them.
 -->
 <script>
   import TopBarRow from './TopBarRow.svelte';
@@ -35,9 +45,10 @@
     linkFor = (entity) => `#/containers/${encodeURIComponent(entity)}`,
     emptyMessage = 'No data for this window yet.',
     live = false,
+    scaleMax = undefined,
   } = $props();
 
-  let maxValue = $derived(rows.reduce((m, r) => Math.max(m, r.value), 0));
+  let maxValue = $derived(scaleMax ?? rows.reduce((m, r) => Math.max(m, r.value), 0));
 </script>
 
 {#if rows.length === 0}

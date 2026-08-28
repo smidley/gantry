@@ -38,7 +38,7 @@
   import { fmtBytes, fmtCores, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { keysByPattern, sumMetricsByPattern, sumSeriesPoints, parityIsRunning, etaFromProgress } from '../lib/metrics';
   import { diskKind, diskUsagePct, sortDiskEntities } from '../lib/disks';
-  import { isTopResource, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
+  import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
   import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, worstSeverity } from '../lib/overviewStatus';
 
@@ -401,6 +401,7 @@
           formatValue={TOP_FORMATTERS[topResource]}
           formatSecondary={TOP_SECONDARY_FORMATTERS[topResource]}
           live={true}
+          scaleMax={resourceScaleMax(topResource, live.frame)}
         />
       </div>
     </div>

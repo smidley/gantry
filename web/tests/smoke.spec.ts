@@ -175,6 +175,46 @@ test('top consumers: CPU rows read as a host-share percentage with a quiet cores
   await expect(page.locator('.top-bar-list__secondary').first()).toHaveText(/^≈\d+\.\d cores$/);
 });
 
+// Regression coverage for Scott's own report: a quiet 6.5%-busy container
+// used to draw a nearly-full bar just because nothing else running was any
+// busier -- the leaderboard scaled every bar relative to its OWN top row,
+// not to the machine. cpu/gpu are both read on a fixed 0-100 scale (see
+// topFromFrame's resourceScaleMax), so a row's bar width and its own
+// printed percentage must always agree, on every row, not just the top
+// one. Two separate page.goto calls (rather than clicking between tabs on
+// one page) sidesteps a separate, already-flagged bug where a container
+// present on both leaderboards keeps its prior tab's value for a while
+// after a same-page tab switch -- irrelevant to the scale math this pins,
+// but no reason to couple this test to it.
+test('top consumers: CPU and GPU bar widths read as an absolute fraction of 100, not relative to the busiest row', async ({
+  page,
+}) => {
+  async function assertBarMatchesItsOwnValue(hash: string) {
+    await page.goto(hash);
+    const rows = page.locator('.top-bar-list__row');
+    await expect(rows.first()).toBeVisible();
+    const count = await rows.count();
+    for (let i = 0; i < count; i++) {
+      const { value, actualPct } = await rows.nth(i).evaluate((el) => {
+        const value = Number(el.querySelector('.top-bar-list__value')!.textContent!.replace('%', ''));
+        const track = el.querySelector('.top-bar-list__track')!.getBoundingClientRect();
+        const bar = el.querySelector('.top-bar-list__bar')!.getBoundingClientRect();
+        return { value, actualPct: (bar.width / track.width) * 100 };
+      });
+      // A whole point of slack absorbs the value text's own 1-decimal
+      // rounding -- a relative-to-max regression would be off by tens of
+      // points on every row but the top one, well outside this.
+      expect(actualPct, `${hash} row ${i}: value ${value}%, bar reads ${actualPct.toFixed(1)}%`).toBeGreaterThan(
+        value - 1,
+      );
+      expect(actualPct).toBeLessThan(value + 1);
+    }
+  }
+
+  await assertBarMatchesItsOwnValue('#/top/cpu');
+  await assertBarMatchesItsOwnValue('#/top/gpu');
+});
+
 test('overview: the Top Consumers module shows the same host-share cores secondary on CPU rows', async ({ page }) => {
   await page.goto('#/');
 

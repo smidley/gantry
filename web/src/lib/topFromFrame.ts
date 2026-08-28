@@ -84,6 +84,35 @@ function sumPresentMetrics(c: ContainerDTO, metricKeys: string[]): { sum: number
   return { sum, present };
 }
 
+// resourceScaleMax names the denominator a leaderboard bar's width should
+// read against, so a lone quiet container doesn't render a nearly-full
+// bar just because it happens to be the busiest thing running right now.
+// cpu (host-share, already 0-100) and gpu (a busy_pct sum, also read on
+// a 0-100 scale -- see resourceMetricKeys) are absolute: 100 always means
+// "the whole machine." mem's rows are mem.bytes, not a percentage, so its
+// 100-equivalent is the host's own total memory, backed into from the
+// host tile's mem.used_bytes/mem.used_pct pair (frame.host carries no
+// total directly) -- undefined (no scale yet, or a stat this old
+// snapshot never carried) falls the caller back to the previous
+// dynamic-max-of-rows behavior, same as net/io get unconditionally.
+// net/io are byte rates with no natural ceiling -- deliberately left
+// relative-to-max, not absolute; see this fix's own commit for why.
+export function resourceScaleMax(resource: TopResource, frame: SnapshotDTO | null | undefined): number | undefined {
+  switch (resource) {
+    case 'cpu':
+    case 'gpu':
+      return 100;
+    case 'mem': {
+      const usedBytes = frame?.host?.['mem.used_bytes'];
+      const usedPct = frame?.host?.['mem.used_pct'];
+      if (usedBytes === undefined || !usedPct) return undefined;
+      return (usedBytes * 100) / usedPct;
+    }
+    default:
+      return undefined;
+  }
+}
+
 // topFromFrame mirrors the server's topFromSnapshot (api_history.go):
 // sums resourceMetricKeys(resource)'s metrics per container from one live
 // frame, ranks descending by value (ties broken by entity name ascending,

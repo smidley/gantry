@@ -75,7 +75,12 @@
     formatSecondary && row.secondary !== undefined ? formatSecondary(secondaryTween.current) : '',
   );
 
-  let widthPct = $derived(maxValue > 0 ? (valueTween.current / maxValue) * 100 : 0);
+  // Clamped to 100: maxValue is usually the list's own max (nothing can
+  // exceed it), but a fixed scale (TopBarList's scaleMax, e.g. gpu's 100)
+  // has no such guarantee -- a container using more than one GPU engine
+  // at once can sum past 100, and its bar must still stop at the track's
+  // own edge rather than overflow it.
+  let widthPct = $derived(maxValue > 0 ? Math.min(100, Math.max(0, (valueTween.current / maxValue) * 100)) : 0);
 </script>
 
 <li class="top-bar-list__row">

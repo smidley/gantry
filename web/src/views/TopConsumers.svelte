@@ -13,7 +13,7 @@
   import { live } from '../lib/sse.svelte';
   import { fetchTop } from '../lib/api';
   import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
-  import { isTopResource, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
+  import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import TopBarList from '../components/TopBarList.svelte';
 
   // initialResource: App.svelte's route table passes $route.params.resource
@@ -175,6 +175,7 @@
         formatSecondary={SECONDARY_FORMATTERS[resource]}
         {emptyMessage}
         live={windowKey === 'now'}
+        scaleMax={resourceScaleMax(resource, live.frame)}
       />
     {/if}
   </div>

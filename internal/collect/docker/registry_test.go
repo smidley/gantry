@@ -1025,6 +1025,29 @@ func TestMetaFromInspectNetworksSliceNotAliasedAcrossCalls(t *testing.T) {
 	require.Equal(t, "172.17.0.2", m2.Networks[0].IP, "each metaFromInspect call must build its own fresh Networks slice")
 }
 
+// TestMetaFromInspectPortsSliceNotAliasedAcrossCalls mirrors
+// TestMetaFromInspectNetworksSliceNotAliasedAcrossCalls for Ports: the
+// same immutability invariant applies to both of Meta's slice fields,
+// not just Networks.
+func TestMetaFromInspectPortsSliceNotAliasedAcrossCalls(t *testing.T) {
+	ns := &container.NetworkSettings{}
+	ns.Ports = nat.PortMap{"8096/tcp": []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: "8096"}}} // plain field assignment, not a NetworkSettingsBase literal -- see networkSettingsWithPorts' own doc in netinfo_test.go
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config:          &container.Config{Image: "jellyfin/jellyfin:latest"},
+		NetworkSettings: ns,
+	}
+
+	m1 := metaFromInspect(resp, nil)
+	m2 := metaFromInspect(resp, nil)
+
+	m1.Ports[0].HostPort = 9999
+	require.Equal(t, 8096, m2.Ports[0].HostPort, "each metaFromInspect call must build its own fresh Ports slice")
+}
+
 // TestDrainReturnsImmediatelyWhenEventsNeverStarted pins I4's Drain()
 // against the case where the daemon was never reachable: Probe never got
 // past Ping, so startEvents never fired and eventsWG's counter is still

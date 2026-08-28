@@ -7,10 +7,20 @@
   actually needs a look, connected purely by proximity (no frame, no
   leader line -- see the corrective-pass note below), with a miniature
   array bay schematic when a disk itself is the reason; the top-row stat
-  tiles become a quiet instrument rail. Top Consumers, Recent events,
-  and the GPU strip are unchanged in substance, restyled only.
-  Everything still reads straight off the live SSE frame -- no fetch,
-  no polling -- except the events feed, exactly as before.
+  tiles become a quiet instrument rail. The GPU strip is unchanged in
+  substance, restyled only. Top Consumers gained its own compact CPU/
+  Mem/Net/IO/GPU switcher (see overview__top-switcher's own doc) on top
+  of that same restyle. Everything still reads straight off the live SSE
+  frame -- no fetch, no polling -- except the events feed, exactly as
+  before.
+
+  Density pass (Scott: "reduce the amount of wasted space... panels
+  should fit together nicely"): headline-zone+rail and Top Consumers+
+  Recent events used to be two separate two-column grids stacked on top
+  of each other, which left the headline zone's own column dead below
+  the fleet strip whenever the rail (four sparkline tiles) ran taller
+  than it, a common case in the healthy/no-attention state. See
+  overview__body's own doc for the two-independent-column fix.
 
   Corrective pass (post-deploy, Scott's own read: "there's lines in the
   middle of text that are not used"): the first cut over-decorated this
@@ -309,130 +319,132 @@
   <h1 class="page-title">Overview</h1>
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
-  <div class="overview__hero">
-    <div class="overview__headline-zone">
-      <div class="overview__headline-row">
-        <span
-          class="overview__headline-dot"
-          class:overview__headline-dot--pulse={!overviewStatus.ok}
-          style={`background:${statusColor}; color:${statusColor}`}
-          aria-hidden="true"
-        ></span>
-        <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
-      </div>
-      <div class="overview__headline-subs">
-        <p class="overview__sub-line">{fleetSentence}</p>
-        <FleetStrip containers={fleetContainers} />
-        <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
-        {#if hottestSentence}
-          <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
+  <div class="overview__body">
+    <div class="overview__col overview__col-left">
+      <div class="overview__headline-zone">
+        <div class="overview__headline-row">
+          <span
+            class="overview__headline-dot"
+            class:overview__headline-dot--pulse={!overviewStatus.ok}
+            style={`background:${statusColor}; color:${statusColor}`}
+            aria-hidden="true"
+          ></span>
+          <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
+        </div>
+        <div class="overview__headline-subs">
+          <p class="overview__sub-line">{fleetSentence}</p>
+          <FleetStrip containers={fleetContainers} />
+          <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
+          {#if hottestSentence}
+            <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
+          {/if}
+        </div>
+
+        {#if !overviewStatus.ok}
+          <section class="overview__attention">
+            <span class="microlabel">Needs a look</span>
+            {#each overviewStatus.anomalies as anomaly, i (i)}
+              {@const text = describeAnomaly(anomaly)}
+              <div class="overview__attn-row">
+                <span class="overview__attn-dot" style={`background:var(--status-${text.severity})`} aria-hidden="true"
+                ></span>
+                <div>
+                  <div class="overview__attn-title">
+                    {#if text.linkContainer}
+                      <a href={`#/containers/${encodeURIComponent(text.linkContainer)}`}>{text.title}</a>
+                    {:else}
+                      {text.title}
+                    {/if}
+                  </div>
+                  {#if text.detail}
+                    <div class="overview__attn-detail">{text.detail}</div>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+
+            {#if showBaySchematic}
+              <BaySchematic entries={baySchematicEntries} />
+            {/if}
+
+            {#if closingLine}
+              <p class="overview__closing-line">{closingLine}</p>
+            {/if}
+          </section>
         {/if}
       </div>
 
-      {#if !overviewStatus.ok}
-        <section class="overview__attention">
-          <span class="microlabel">Needs a look</span>
-          {#each overviewStatus.anomalies as anomaly, i (i)}
-            {@const text = describeAnomaly(anomaly)}
-            <div class="overview__attn-row">
-              <span class="overview__attn-dot" style={`background:var(--status-${text.severity})`} aria-hidden="true"
-              ></span>
-              <div>
-                <div class="overview__attn-title">
-                  {#if text.linkContainer}
-                    <a href={`#/containers/${encodeURIComponent(text.linkContainer)}`}>{text.title}</a>
-                  {:else}
-                    {text.title}
-                  {/if}
-                </div>
-                {#if text.detail}
-                  <div class="overview__attn-detail">{text.detail}</div>
-                {/if}
-              </div>
-            </div>
-          {/each}
-
-          {#if showBaySchematic}
-            <BaySchematic entries={baySchematicEntries} />
-          {/if}
-
-          {#if closingLine}
-            <p class="overview__closing-line">{closingLine}</p>
-          {/if}
-        </section>
-      {/if}
-    </div>
-
-    <div class="overview__metrics-rail">
-      <StatTile bare label="CPU" liveValue={host['cpu.total'] ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
-      <StatTile
-        bare
-        label="Memory"
-        liveValue={host['mem.used_pct'] ?? 0}
-        formatValue={fmtPct}
-        sparklinePoints={memRing.points}
-      />
-      <StatTile
-        bare
-        label="Network"
-        liveValue={netRx}
-        formatValue={(v) => `↓ ${fmtRate(v)}`}
-        sparklinePoints={netRxRing.points}
-        liveValue2={netTx}
-        value2Points={netTxRing.points}
-        formatValue2={fmtRate}
-        label2="↑"
-      />
-      <StatTile
-        bare
-        label="Disk IO"
-        liveValue={ioRead}
-        formatValue={(v) => `r ${fmtRate(v)}`}
-        sparklinePoints={ioReadRing.points}
-        liveValue2={ioWrite}
-        value2Points={ioWriteRing.points}
-        formatValue2={fmtRate}
-        label2="w"
-      />
-    </div>
-  </div>
-
-  <div class="overview__grid">
-    <div class="card overview__top">
-      <div class="overview__top-head">
-        <span class="microlabel">Top consumers</span>
-        <a href={`#/top/${topResource}`} class="overview__top-link">View all &rarr;</a>
-      </div>
-      <div class="overview__top-switcher" role="tablist" aria-label="Top consumers metric">
-        {#each TOP_RESOURCES as r (r.key)}
-          <button
-            type="button"
-            role="tab"
-            aria-selected={topResource === r.key}
-            class="overview__top-switch"
-            class:overview__top-switch--active={topResource === r.key}
-            onclick={() => selectTopResource(r.key)}
-          >
-            {r.shortLabel}
-          </button>
-        {/each}
-      </div>
-      <TopBarList rows={topRows} formatValue={TOP_FORMATTERS[topResource]} live={true} />
-    </div>
-
-    <div class="card overview__events">
-      <span class="microlabel">Recent events</span>
-      {#if eventsSeedPending}
-        <!-- first loadEvents() call hasn't settled yet -- see eventsSeedPending's own doc -->
-      {:else if events.length === 0}
-        <p class="microlabel overview__events-empty">No events yet.</p>
-      {:else}
-        <div class="overview__events-list">
-          {#each events as event (event.ID)}
-            <EventFeedItem {event} />
+      <div class="card overview__top">
+        <div class="overview__top-head">
+          <span class="microlabel">Top consumers</span>
+          <a href={`#/top/${topResource}`} class="overview__top-link">View all &rarr;</a>
+        </div>
+        <div class="overview__top-switcher" role="tablist" aria-label="Top consumers metric">
+          {#each TOP_RESOURCES as r (r.key)}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={topResource === r.key}
+              class="overview__top-switch"
+              class:overview__top-switch--active={topResource === r.key}
+              onclick={() => selectTopResource(r.key)}
+            >
+              {r.shortLabel}
+            </button>
           {/each}
         </div>
-      {/if}
+        <TopBarList rows={topRows} formatValue={TOP_FORMATTERS[topResource]} live={true} />
+      </div>
+    </div>
+
+    <div class="overview__col overview__col-right">
+      <div class="overview__metrics-rail">
+        <StatTile bare label="CPU" liveValue={host['cpu.total'] ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
+        <StatTile
+          bare
+          label="Memory"
+          liveValue={host['mem.used_pct'] ?? 0}
+          formatValue={fmtPct}
+          sparklinePoints={memRing.points}
+        />
+        <StatTile
+          bare
+          label="Network"
+          liveValue={netRx}
+          formatValue={(v) => `↓ ${fmtRate(v)}`}
+          sparklinePoints={netRxRing.points}
+          liveValue2={netTx}
+          value2Points={netTxRing.points}
+          formatValue2={fmtRate}
+          label2="↑"
+        />
+        <StatTile
+          bare
+          label="Disk IO"
+          liveValue={ioRead}
+          formatValue={(v) => `r ${fmtRate(v)}`}
+          sparklinePoints={ioReadRing.points}
+          liveValue2={ioWrite}
+          value2Points={ioWriteRing.points}
+          formatValue2={fmtRate}
+          label2="w"
+        />
+      </div>
+
+      <div class="card overview__events">
+        <span class="microlabel">Recent events</span>
+        {#if eventsSeedPending}
+          <!-- first loadEvents() call hasn't settled yet -- see eventsSeedPending's own doc -->
+        {:else if events.length === 0}
+          <p class="microlabel overview__events-empty">No events yet.</p>
+        {:else}
+          <div class="overview__events-list">
+            {#each events as event (event.ID)}
+              <EventFeedItem {event} />
+            {/each}
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 
@@ -446,26 +458,41 @@
     gap: 1.25rem;
   }
 
-  /* --- Stage / hero row -------------------------------------------- */
+  /* --- Body: two independent-height columns ------------------------
 
-  .overview__hero {
-    display: grid;
-    grid-template-columns: 1.25fr 1fr;
+     A real CSS grid here (as this used to be, in two separate grids --
+     one for headline+rail, another below for Top Consumers+Events)
+     forces each ROW to the height of its tallest column: the rail
+     routinely runs taller than the headline zone (four live-sparkline
+     tiles vs. a few lines of text), which left the headline zone's own
+     column dead below the fleet strip in the healthy state -- reported
+     live, "there's wasted space in the left column." Two plain flex
+     columns have no such row to share: each stacks its own two blocks
+     (headline zone then Top Consumers; rail then Recent events) to
+     its OWN height, so Top Consumers flows straight up against
+     whichever is shorter, and the columns' bottoms are free to differ. */
+
+  .overview__body {
+    display: flex;
+    align-items: flex-start;
     gap: 2.5rem;
-    /* start, not the mockup's own center: the real rail carries live
-       sparklines on every row (Network/Disk IO's existing rings are
-       preserved, not dropped to match the mockup's text-only versions
-       of those two rows), so it's routinely taller than the headline
-       zone -- centering two columns of very different heights left an
-       awkward, asymmetric gap above the shorter one (reproduced live).
-       Aligning both to the top reads cleanly regardless of which
-       column ends up taller. */
-    align-items: start;
     padding-bottom: 1.5rem;
   }
+  .overview__col {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+  .overview__col-left {
+    flex: 1.25 1 0;
+  }
+  .overview__col-right {
+    flex: 1 1 0;
+  }
   @media (max-width: 47.9375rem) {
-    .overview__hero {
-      grid-template-columns: 1fr;
+    .overview__body {
+      flex-direction: column;
       gap: 1.5rem;
     }
   }
@@ -594,22 +621,9 @@
     margin: 0;
   }
 
-  /* --- Supporting grid (Top Consumers / Recent events) ---------------- */
+  /* --- Top Consumers / Recent events (each now stacked in its own
+     column above -- see overview__body's own doc) ------------------- */
 
-  .overview__grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 0.75rem;
-    align-items: start;
-  }
-  .overview__grid > :global(*) {
-    min-width: 0;
-  }
-  @media (max-width: 47.9375rem) {
-    .overview__grid {
-      grid-template-columns: 1fr;
-    }
-  }
   .overview__top,
   .overview__events {
     padding: 1rem;

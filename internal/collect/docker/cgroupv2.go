@@ -341,6 +341,24 @@ func parseCPUSetCount(s string) (count int, ok bool) {
 	return count, true
 }
 
+// fallbackAlloc merges the stats-API path's own allocation reading
+// (apiAlloc, today only ever carrying Alloc.Pids* -- see statsFromAPI)
+// with m.Alloc's HostConfig-derived one (hostConfigAlloc) for a fallback
+// tick: HostConfig supplies mem/cpu/cpuset unconditionally, since the
+// stats API has no room for those at all, while pids prefers apiAlloc's
+// own reading -- PidsStats.Limit catches a daemon-level
+// --default-pids-limit that never reaches HostConfig -- falling back to
+// hostConfigAlloc's PidsLimit only when the API reported none. Extracted
+// as a pure function so this priority is testable without a live docker
+// daemon.
+func fallbackAlloc(apiAlloc, hostConfigAlloc alloc) alloc {
+	merged := hostConfigAlloc
+	if apiAlloc.HasPidsLimit {
+		merged.PidsLimit, merged.HasPidsLimit = apiAlloc.PidsLimit, apiAlloc.HasPidsLimit
+	}
+	return merged
+}
+
 // tickStats records per-container stats every tick: the cgroup v2 fast
 // path for each container the registry reports as running, falling back
 // to a one-shot docker stats API call (apistats.go) when the cgroup dir
@@ -350,12 +368,15 @@ func parseCPUSetCount(s string) (count int, ok bool) {
 // evictContainer prunes on removal) so a whole-fleet v1 box doesn't spam
 // the log every 2s.
 //
-// statsViaAPI's response has no room for allocation data (it's a
-// HostConfig field, not part of the stats endpoint), so a fallback tick
-// borrows m.Alloc -- captured at inspect time, refreshed on the 10s
-// inventory poll rather than fresh every 2s like the fast path's own
-// read. recordContainerStats runs the exact same allocation math either
-// way; only how current the ceiling is can differ by source.
+// statsViaAPI's response has room for only the pids ceiling (PidsStats.
+// Limit, mapped into cg.Alloc by statsFromAPI); mem/cpu/cpuset have no
+// stats-API equivalent at all. fallbackAlloc merges the two sources with
+// pids preferring the API's own reading -- see its own doc. m.Alloc is
+// captured at inspect time, refreshed on the 10s inventory poll rather
+// than fresh every 2s like the fast path's own read. recordContainerStats
+// runs the exact same allocation math either way; only how current the
+// ceiling is (and, for pids, which of two sources fed it) can differ by
+// source.
 func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 	for _, m := range c.reg.running() {
 		dir := filepath.Join(c.CgroupRoot, "docker", m.ID)
@@ -365,7 +386,7 @@ func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 			if err != nil {
 				continue
 			}
-			cg.Alloc = m.Alloc
+			cg.Alloc = fallbackAlloc(cg.Alloc, m.Alloc)
 			if _, alreadyLogged := c.loggedFallback.LoadOrStore(m.Name, struct{}{}); !alreadyLogged {
 				log.Printf("docker: %s: cgroup v2 stats unavailable, using stats API fallback", m.Name)
 			}

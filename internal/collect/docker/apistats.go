@@ -13,6 +13,16 @@ import (
 // cgStats shape readCgroupStats produces, so recordContainerStats runs
 // identically regardless of source — including cpu.throttled_pct, which
 // needs ThrottlingData mapped here just like the cgroup path's cpu.stat.
+//
+// PidsStats.Limit is the one allocation field the stats API actually has
+// room for (0 meaning unlimited, per its own doc comment) -- it's mapped
+// into cg.Alloc here so tickStats' fallbackAlloc can prefer it over
+// HostConfig's own PidsLimit, catching a daemon-level
+// --default-pids-limit that HostConfig never reflects at all.
+// MemoryStats.Limit is deliberately left unmapped despite existing: unlike
+// PidsStats.Limit, it reports the HOST's total RAM when a container has no
+// memory limit of its own, rather than a sentinel meaning unlimited -- using
+// it here would break the mem.limit_bytes absence-means-unlimited contract.
 func statsFromAPI(resp container.StatsResponse) cgStats {
 	cg := cgStats{
 		CPUUsageUsec:    resp.CPUStats.CPUUsage.TotalUsage / 1000,          // ns -> usec
@@ -22,6 +32,9 @@ func statsFromAPI(resp container.StatsResponse) cgStats {
 		MemInactiveFile: resp.MemoryStats.Stats["inactive_file"],
 		Pids:            resp.PidsStats.Current,
 		IO:              make(map[string]ioCounters),
+	}
+	if resp.PidsStats.Limit > 0 {
+		cg.Alloc.PidsLimit, cg.Alloc.HasPidsLimit = resp.PidsStats.Limit, true
 	}
 	for _, e := range resp.BlkioStats.IoServiceBytesRecursive {
 		key := strconv.FormatUint(e.Major, 10) + ":" + strconv.FormatUint(e.Minor, 10)

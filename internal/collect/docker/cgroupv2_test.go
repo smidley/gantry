@@ -547,6 +547,36 @@ func TestEffectiveCPUAllocCores(t *testing.T) {
 	}
 }
 
+// TestFallbackAllocPrefersAPIPidsLimitOverHostConfig pins the pids
+// priority order on the stats-API fallback path: when the API's own
+// reading (apiAlloc, as statsFromAPI maps PidsStats.Limit) has a pids
+// ceiling, it wins over HostConfig's own PidsLimit -- the API is the
+// only place a daemon-level --default-pids-limit shows up at all. Every
+// other field has no stats-API equivalent, so HostConfig supplies those
+// unconditionally.
+func TestFallbackAllocPrefersAPIPidsLimitOverHostConfig(t *testing.T) {
+	apiAlloc := alloc{PidsLimit: 512, HasPidsLimit: true}
+	hostConfigAlloc := alloc{
+		PidsLimit: 2048, HasPidsLimit: true,
+		MemLimitBytes: 999, HasMemLimit: true,
+	}
+
+	got := fallbackAlloc(apiAlloc, hostConfigAlloc)
+	require.True(t, got.HasPidsLimit)
+	require.Equal(t, uint64(512), got.PidsLimit)
+	require.Equal(t, uint64(999), got.MemLimitBytes, "mem/cpu/cpuset always come from HostConfig -- the API has no room for them")
+}
+
+// TestFallbackAllocFallsBackToHostConfigPidsLimitWhenAPIHasNone pins the
+// fallback half: when the API itself reports no pids ceiling (the
+// common case until this fix, since nothing read PidsStats.Limit at
+// all), HostConfig's own PidsLimit still applies.
+func TestFallbackAllocFallsBackToHostConfigPidsLimitWhenAPIHasNone(t *testing.T) {
+	got := fallbackAlloc(alloc{}, alloc{PidsLimit: 2048, HasPidsLimit: true})
+	require.True(t, got.HasPidsLimit)
+	require.Equal(t, uint64(2048), got.PidsLimit)
+}
+
 // TestRecordContainerStatsMemLimitEmitsBytesAndExactPct pins the
 // mem.limit_pct worked example verbatim: 512MiB used of a 1GiB limit is
 // 50.0%, exactly.

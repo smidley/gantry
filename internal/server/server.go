@@ -94,6 +94,37 @@ type Options struct {
 	// unlike Logs), and PUT — which has no meaningful no-op success for
 	// a write with nowhere to write to — answers 404.
 	Settings SettingsIface
+
+	// Images lists every image plus a usage-classification summary for
+	// GET /api/images (main wiring: a small adapter over
+	// docker.Collector.Images in real mode, fake.Generator.Images in
+	// fake mode — see api_images.go). Nil in tests that don't wire one —
+	// the route then reports an empty images list and a zeroed summary,
+	// matching Containers' own nil->empty convention.
+	Images func(ctx context.Context) (ImagesDTO, error)
+	// RemoveImages deletes the given image ids for POST
+	// /api/images/remove (main wiring: docker.Collector.RemoveImages /
+	// fake.Generator.RemoveImages). Nil in tests that don't wire one —
+	// unlike Images, there's no meaningful no-op success for a write
+	// with nowhere to write to, so the route 404s the same way Settings'
+	// PUT does for the same reason.
+	RemoveImages func(ctx context.Context, ids []string) ([]ImageRemoveResult, error)
+	// PruneImages deletes every image in one mode's set ("dangling" or
+	// "unused") for POST /api/images/prune (main wiring:
+	// docker.Collector.PruneImages / fake.Generator.PruneImages). Nil in
+	// tests that don't wire one — see RemoveImages.
+	PruneImages func(ctx context.Context, mode string) (ImagePruneResult, error)
+	// ReadOnly, when true, makes every /api/images mutating route answer
+	// 403 without ever calling RemoveImages/PruneImages (GET /api/images
+	// is unaffected) — main wiring resolves this once at startup from
+	// GANTRY_READ_ONLY, Gantry's write-path kill switch. Default false.
+	ReadOnly bool
+	// AppendEvent records one event (main wiring: store.Store.
+	// AppendEvent, a direct passthrough, same as Events) so a successful
+	// image removal/prune shows up in the Events view. Nil in tests that
+	// don't wire one — a successful mutation then simply skips event
+	// logging rather than panicking.
+	AppendEvent func(e store.Event) (int64, error)
 }
 
 type Server struct {
@@ -137,6 +168,9 @@ func New(o Options) *Server {
 	s.mux.Handle("GET /api/containers/{name}/storage", withGzip(http.HandlerFunc(s.handleStorage)))
 	s.mux.Handle("GET /api/settings", withGzip(http.HandlerFunc(s.handleSettingsGet)))
 	s.mux.Handle("PUT /api/settings", withGzip(http.HandlerFunc(s.handleSettingsPut)))
+	s.mux.Handle("GET /api/images", withGzip(http.HandlerFunc(s.handleImagesList)))
+	s.mux.Handle("POST /api/images/remove", withGzip(http.HandlerFunc(s.handleImagesRemove)))
+	s.mux.Handle("POST /api/images/prune", withGzip(http.HandlerFunc(s.handleImagesPrune)))
 
 	s.mux.Handle("GET /", withGzip(webHandler()))
 	return s

@@ -34,4 +34,5 @@ Inputs for the Phase 3 plan — none block Phase 2, all triaged fix-in-phase-3 b
 - `parity.finish` event gains duration with Phase 4's parity-result work.
 
 ## Metric semantic changes
-- 2026-08-28: per-container `cpu.pct` redefined from docker-stats' own per-core percent (100% = one full core, could read >100% on a multicore box) to a host-share percent (that core usage ÷ the host's own core count) -- the "container says 100%, host says 30%" confusion report. New `cpu.cores` metric carries the old per-core-style number instead. Samples recorded before this date under the old meaning were left as-is: dev-phase acceptable, no migration.
+- 2026-08-28: per-container `cpu.pct` redefined from docker-stats' own per-core percent (100% = one full core, could read >100% on a multicore box) to a host-share percent (that core usage ÷ the host's own core count) -- the "container says 100%, host says 30%" confusion report. New `cpu.cores` metric carries the old per-core-style number instead (= old cpu.pct ÷ 100). Samples recorded before this date under the old meaning were left as-is: dev-phase acceptable, no migration.
+- `cpu.cores` carries no `live:` prefix, so it flushes to every history tier like any other metric -- deliberate, not an oversight: it's kept for a historical per-container cores chart later.

@@ -15,7 +15,8 @@ import (
 // Meta is a snapshot of one container's inventory and health state,
 // refreshed on the collector's 10s poll. It's the id -> data every other
 // collector (cgroup/API stats, per-container net, GPU attribution)
-// consumes via Lookup/Running.
+// consumes via Lookup/Running. Metas are immutable once published --
+// never mutate a field in place, build a fresh Meta instead.
 type Meta struct {
 	ID, Name, Image, Icon, State, Health string
 	Pid                                  int

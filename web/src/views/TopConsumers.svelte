@@ -99,14 +99,14 @@
   <h1 class="page-title">Top Consumers</h1>
 
   <div class="top-consumers__controls">
-    <div class="top-consumers__tabs" role="tablist" aria-label="Resource">
+    <div class="segmented" role="tablist" aria-label="Resource">
       {#each TOP_RESOURCES as r (r.key)}
         <button
           type="button"
           role="tab"
           aria-selected={resource === r.key}
-          class="top-consumers__tab"
-          class:top-consumers__tab--active={resource === r.key}
+          class="segmented__btn"
+          class:segmented__btn--active={resource === r.key}
           onclick={() => (resource = r.key)}
         >
           {r.label}
@@ -115,12 +115,12 @@
     </div>
 
     <div class="top-consumers__row">
-      <div class="top-consumers__segmented" role="group" aria-label="Window">
+      <div class="segmented" role="group" aria-label="Window">
         {#each WINDOWS as w (w.key)}
           <button
             type="button"
-            class="top-consumers__segment"
-            class:top-consumers__segment--active={windowKey === w.key}
+            class="segmented__btn"
+            class:segmented__btn--active={windowKey === w.key}
             onclick={() => (windowKey = w.key)}
           >
             {w.label}
@@ -129,19 +129,19 @@
       </div>
 
       {#if showAggToggle}
-        <div class="top-consumers__segmented" role="group" aria-label="Aggregation">
+        <div class="segmented" role="group" aria-label="Aggregation">
           <button
             type="button"
-            class="top-consumers__segment"
-            class:top-consumers__segment--active={agg === 'avg'}
+            class="segmented__btn"
+            class:segmented__btn--active={agg === 'avg'}
             onclick={() => (agg = 'avg')}
           >
             Average
           </button>
           <button
             type="button"
-            class="top-consumers__segment"
-            class:top-consumers__segment--active={agg === 'peak'}
+            class="segmented__btn"
+            class:segmented__btn--active={agg === 'peak'}
             onclick={() => (agg = 'peak')}
           >
             Peak
@@ -179,55 +179,10 @@
     flex-direction: column;
     gap: 0.6rem;
   }
-  .top-consumers__tabs {
-    display: flex;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-  .top-consumers__tab {
-    min-height: 40px;
-    padding: 0 0.9rem;
-    border-radius: 6px;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    background: transparent;
-    color: var(--ink-2);
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-  .top-consumers__tab--active {
-    background: color-mix(in oklab, var(--series-1) 15%, transparent);
-    border-color: var(--series-1);
-    color: var(--series-1);
-    font-weight: 500;
-  }
   .top-consumers__row {
     display: flex;
     gap: 0.75rem;
     flex-wrap: wrap;
-  }
-  .top-consumers__segmented {
-    display: inline-flex;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .top-consumers__segment {
-    min-height: 40px;
-    padding: 0 0.75rem;
-    border: none;
-    border-right: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    background: transparent;
-    color: var(--ink-2);
-    font-size: 0.8rem;
-    cursor: pointer;
-  }
-  .top-consumers__segment:last-child {
-    border-right: none;
-  }
-  .top-consumers__segment--active {
-    background: color-mix(in oklab, var(--series-1) 15%, transparent);
-    color: var(--series-1);
-    font-weight: 500;
   }
   .top-consumers__caption {
     margin: 0;

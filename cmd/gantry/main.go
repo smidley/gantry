@@ -80,17 +80,22 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 
 	var wg sync.WaitGroup
 
-	// fakeMetas, when fake-data mode is on, is threaded into
+	// fakeMetas/fakeDiskMeta, when fake-data mode is on, are threaded into
 	// buildSnapshot/buildContainersList below so the fake fleet is
 	// treated exactly like dc.Running()'s real entries (Task 11's
 	// ledger-carried fix -- see fake.Generator.Metas' own doc for why
 	// that's required at all: this generator writes samples straight to
-	// the store, never touching dc's registry).
+	// the store, never touching dc's registry, and disks.go's own
+	// unraid.Collector similarly never sees a real disks.ini in fake
+	// mode). fakeDiskMeta mirrors fakeMetas' shape for disk device/type
+	// metadata (see fake.Generator.DiskMetas' own doc).
 	var fakeMetas func() []docker.Meta
+	var fakeDiskMeta func() map[string]unraid.DiskMeta
 	if cfg.Bool("fake_data", false) {
 		log.Println("fake data mode: synthesizing a demo fleet")
 		fk := fake.New(st, st, time.Now().UnixNano())
 		fakeMetas = fk.Metas
+		fakeDiskMeta = fk.DiskMetas
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -174,7 +179,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// snapshot (Options.Snapshot), /api/live's connect frame (Options.
 	// Current), and the publish loop below -- all three read the exact
 	// same assembly, just on different triggers (poll, connect, tick).
-	snapshotFn := buildSnapshot(st, dc, ur, registry.Sources, fakeMetas)
+	snapshotFn := buildSnapshot(st, dc, ur, registry.Sources, fakeMetas, fakeDiskMeta)
 	live := server.NewBroadcaster()
 
 	// SSE publish loop: every 2s, marshal the current snapshot and fan it
@@ -249,14 +254,18 @@ const containerFrameMaxAge = 60
 // fakeMetas is nil outside fake-data mode; when non-nil its entries are
 // treated exactly like dc.Running()'s -- unconditionally seeded, not a
 // mere lookup fallback -- so the fake fleet survives the same filter a
-// real one does.
+// real one does. fakeDiskMeta is its disk-metadata analogue: ur.DiskMeta()
+// (a real box's own unraid collector) is merged into dto.DiskMeta first,
+// then fakeDiskMeta's entries on top when wired -- see server.DiskMetaDTO's
+// own doc for why disk type/device strings ride their own map rather than
+// Disks' numeric one.
 //
 // Containers is filtered, not just seeded: an entity not in the merged
 // running set only stays in the frame while containerFrameEntities says
 // so (a live sample younger than containerFrameMaxAge AND a name
 // lookupByName still recognizes) — see containerFrameEntities' own doc
 // for why that's two different conditions, not one.
-func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, sources func() map[string]string, fakeMetas func() []docker.Meta) func() server.SnapshotDTO {
+func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta) func() server.SnapshotDTO {
 	return func() server.SnapshotDTO {
 		dto := server.SnapshotDTO{
 			TS:            time.Now().Unix(),
@@ -264,12 +273,26 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 			Host:          map[string]float64{},
 			Containers:    map[string]server.ContainerDTO{},
 			Disks:         map[string]map[string]float64{},
+			DiskMeta:      map[string]server.DiskMetaDTO{},
 			Unraid:        map[string]map[string]float64{},
 			GPU:           map[string]map[string]float64{},
 			Sources:       map[string]string{},
 		}
 		if sources != nil {
 			dto.Sources = sources()
+		}
+
+		// DiskMeta: real first, then fake-mode's own overlay when wired --
+		// mirrors fakeMetas' "treated exactly like the real source, not a
+		// mere fallback" contract just below, though in practice the two
+		// never actually collide (fake mode has no real disks.ini to read).
+		for slot, m := range ur.DiskMeta() {
+			dto.DiskMeta[slot] = server.DiskMetaDTO{Device: m.Device, Kind: m.Kind}
+		}
+		if fakeDiskMeta != nil {
+			for slot, m := range fakeDiskMeta() {
+				dto.DiskMeta[slot] = server.DiskMetaDTO{Device: m.Device, Kind: m.Kind}
+			}
 		}
 
 		metas := dc.Running()

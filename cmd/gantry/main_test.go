@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/collect/unraid"
+	"github.com/smidley/gantry/internal/server"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
 )
@@ -238,7 +240,7 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur, sources, nil)() // nil fakeMetas: not exercising Task 11's fake-mode path here
+	snap := buildSnapshot(st, dc, ur, sources, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
@@ -292,7 +294,7 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
 
 	require.Empty(t, dc.Running(), "dc's own registry never saw this container -- the fix must not depend on it")
 	c, ok := snap.Containers["jellyfin"]
@@ -301,6 +303,49 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 	require.Equal(t, "healthy", c.Health)
 	require.Equal(t, "demo/jellyfin:latest", c.Image)
 	require.Equal(t, 4.2, c.Metrics["cpu.pct"])
+}
+
+// TestBuildSnapshotMergesDiskMetaFromRealAndFake pins the disk_meta
+// analogue of the fake-Metas test above: a real box's own unraid
+// collector (ticked against a hand-written disks.ini) and fake mode's
+// own DiskMeta overlay both land in snap.DiskMeta, keyed by their own
+// disjoint slots, neither one clobbering the other.
+func TestBuildSnapshotMergesDiskMetaFromRealAndFake(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	unraidDir := t.TempDir()
+	// var.ini is Tick's one hard dependency (tickArray's own doc) -- a
+	// minimal but valid one, so Tick actually reaches tickDisks below
+	// rather than short-circuiting on a missing-file error.
+	require.NoError(t, os.WriteFile(filepath.Join(unraidDir, "var.ini"), []byte(`version="7.3.2"
+mdState="STARTED"
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(unraidDir, "disks.ini"), []byte(`["disk1"]
+name="disk1"
+device="sdc"
+status="DISK_OK"
+temp="31"
+numErrors="0"
+fsSize="0"
+fsFree="0"
+spundown="0"
+rotational="1"
+`), 0o644))
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, unraidDir, "/proc")
+	require.NoError(t, ur.Tick(context.Background(), time.Unix(1000, 0)))
+	sources := func() map[string]string { return map[string]string{} }
+	fakeDiskMeta := func() map[string]unraid.DiskMeta {
+		return map[string]unraid.DiskMeta{"flash": {Device: "sdi", Kind: "usb"}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, nil, fakeDiskMeta)()
+
+	require.Equal(t, server.DiskMetaDTO{Device: "sdc", Kind: "hdd"}, snap.DiskMeta["disk1"], "the real unraid collector's own DiskMeta must survive into the DTO")
+	require.Equal(t, server.DiskMetaDTO{Device: "sdi", Kind: "usb"}, snap.DiskMeta["flash"], "fake mode's own DiskMeta overlay must land alongside it, not replace it")
 }
 
 // TestBuildContainersListMergesFakeMetas pins the same fix for

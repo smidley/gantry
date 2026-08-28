@@ -1,10 +1,12 @@
 package docker
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/stretchr/testify/require"
 )
@@ -261,4 +263,72 @@ func TestPruneUnusedWithSumsReclaimedBytesAndCollectsPerIDErrors(t *testing.T) {
 	require.Equal(t, []DeletedImage{{ID: "sha256:a", RepoTags: []string{"old:1"}, SizeBytes: 100}}, result.Deleted)
 	require.Equal(t, int64(100), result.ReclaimedBytes)
 	require.Equal(t, []string{"sha256:b: in use"}, result.Errors)
+}
+
+// fakeImagesClient is a hand-rolled imagesClient double -- injected via
+// Collector's own imgCli field (see imagesClient's own doc) so
+// pruneDangling/RemoveImages' real wrapper calls (not just the pure
+// orchestration functions above, already covered without any client at
+// all) can be pinned without a daemon.
+type fakeImagesClient struct {
+	imageListReturn     []image.Summary
+	containerListReturn []container.Summary
+
+	imageListFilters   []filters.Args
+	imagesPruneFilters []filters.Args
+	imageRemoveOptions []image.RemoveOptions
+
+	imagesPruneReturn image.PruneReport
+}
+
+func (f *fakeImagesClient) ImageList(_ context.Context, options image.ListOptions) ([]image.Summary, error) {
+	f.imageListFilters = append(f.imageListFilters, options.Filters)
+	return f.imageListReturn, nil
+}
+
+func (f *fakeImagesClient) ContainerList(_ context.Context, _ container.ListOptions) ([]container.Summary, error) {
+	return f.containerListReturn, nil
+}
+
+func (f *fakeImagesClient) ImageRemove(_ context.Context, _ string, options image.RemoveOptions) ([]image.DeleteResponse, error) {
+	f.imageRemoveOptions = append(f.imageRemoveOptions, options)
+	return nil, nil
+}
+
+func (f *fakeImagesClient) ImagesPrune(_ context.Context, pruneFilters filters.Args) (image.PruneReport, error) {
+	f.imagesPruneFilters = append(f.imagesPruneFilters, pruneFilters)
+	return f.imagesPruneReturn, nil
+}
+
+// TestPruneDanglingFiltersBothImageListAndImagesPruneByDanglingTrue pins
+// F5: pruneDangling's own doc says it hands the whole operation to the
+// daemon's dangling=true filter -- assert that's actually the filter
+// going out on BOTH calls it makes (the pre-fetch ImageList, and the
+// real ImagesPrune), not just trust the literal never drifts.
+func TestPruneDanglingFiltersBothImageListAndImagesPruneByDanglingTrue(t *testing.T) {
+	fc := &fakeImagesClient{}
+	c := &Collector{imgCli: fc}
+
+	_, err := c.pruneDangling(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, fc.imageListFilters, 1)
+	require.Equal(t, []string{"true"}, fc.imageListFilters[0].Get("dangling"))
+	require.Len(t, fc.imagesPruneFilters, 1)
+	require.Equal(t, []string{"true"}, fc.imagesPruneFilters[0].Get("dangling"))
+}
+
+// TestRemoveImagesCallsImageRemoveWithForceFalseAndPruneChildrenTrue pins
+// F5's other half: RemoveImages' own doc promises Force:false (never
+// forced past an in-use conflict) and PruneChildren:true (matching
+// `docker rmi`'s own default) -- assert those are the actual options
+// reaching the real wrapper, not just the doc's word for it.
+func TestRemoveImagesCallsImageRemoveWithForceFalseAndPruneChildrenTrue(t *testing.T) {
+	fc := &fakeImagesClient{}
+	c := &Collector{imgCli: fc}
+
+	_, err := c.RemoveImages(context.Background(), []string{"sha256:" + fmt.Sprintf("%064x", 1)})
+
+	require.NoError(t, err)
+	require.Equal(t, []image.RemoveOptions{{Force: false, PruneChildren: true}}, fc.imageRemoveOptions)
 }

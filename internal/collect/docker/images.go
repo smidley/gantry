@@ -214,19 +214,32 @@ func pruneUnusedWith(unused []ImageInfo, removeOne func(id string) error) ImageP
 	return out
 }
 
+// imagesClient is the narrow slice of *client.Client this file's own
+// Collector methods call -- Collector.imgCli's declared type, so tests
+// can inject a fake there and pin exactly what RemoveImages/pruneDangling/
+// pruneUnused send the daemon (filter args, remove options) without a
+// real one. *client.Client already implements this; New sets imgCli to
+// the same value as cli.
+type imagesClient interface {
+	ImageList(ctx context.Context, options image.ListOptions) ([]image.Summary, error)
+	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
+	ImageRemove(ctx context.Context, imageID string, options image.RemoveOptions) ([]image.DeleteResponse, error)
+	ImagesPrune(ctx context.Context, pruneFilters filters.Args) (image.PruneReport, error)
+}
+
 // Images lists every image on the daemon (ImageList All:true) joined
 // against every container (ContainerList All:true) -- see
 // classifyImages for the join/classification rule itself, kept as a
 // pure function so it's unit-testable without a real daemon.
 func (c *Collector) Images(ctx context.Context) (ImagesReport, error) {
-	if c.cli == nil {
+	if c.imgCli == nil {
 		return ImagesReport{}, fmt.Errorf("docker client: invalid socket path %s", c.sockPath)
 	}
-	imgs, err := c.cli.ImageList(ctx, image.ListOptions{All: true})
+	imgs, err := c.imgCli.ImageList(ctx, image.ListOptions{All: true})
 	if err != nil {
 		return ImagesReport{}, fmt.Errorf("list images: %w", err)
 	}
-	cts, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
+	cts, err := c.imgCli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
 		return ImagesReport{}, fmt.Errorf("list containers: %w", err)
 	}
@@ -238,19 +251,19 @@ func (c *Collector) Images(ctx context.Context) (ImagesReport, error) {
 // forced past). PruneChildren:true also removes any now-unreferenced
 // parent layers, the same default `docker rmi` uses.
 func (c *Collector) RemoveImages(ctx context.Context, ids []string) ([]ImageRemoveResult, error) {
-	if c.cli == nil {
+	if c.imgCli == nil {
 		return nil, fmt.Errorf("docker client: invalid socket path %s", c.sockPath)
 	}
 	// Fetched BEFORE removing anything -- see ImageRemoveResult's own doc
 	// for why: once an id is gone, no second call could recover this.
 	pre := map[string]image.Summary{}
-	if imgs, err := c.cli.ImageList(ctx, image.ListOptions{All: true}); err == nil {
+	if imgs, err := c.imgCli.ImageList(ctx, image.ListOptions{All: true}); err == nil {
 		for _, im := range imgs {
 			pre[im.ID] = im
 		}
 	}
 	return removeImagesWith(ids, pre, func(id string) error {
-		_, err := c.cli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
+		_, err := c.imgCli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
 		return err
 	}), nil
 }
@@ -278,13 +291,13 @@ func (c *Collector) PruneImages(ctx context.Context, mode string) (ImagePruneRes
 // to the daemon is safe and lets it be atomic.
 func (c *Collector) pruneDangling(ctx context.Context) (ImagePruneResult, error) {
 	danglingFilter := filters.NewArgs(filters.Arg("dangling", "true"))
-	pre, _ := c.cli.ImageList(ctx, image.ListOptions{Filters: danglingFilter}) // best-effort size enrichment; see mergeDanglingPrune's own doc
+	pre, _ := c.imgCli.ImageList(ctx, image.ListOptions{Filters: danglingFilter}) // best-effort size enrichment; see mergeDanglingPrune's own doc
 	sizeByID := make(map[string]int64, len(pre))
 	for _, im := range pre {
 		sizeByID[im.ID] = im.Size
 	}
 
-	report, err := c.cli.ImagesPrune(ctx, danglingFilter)
+	report, err := c.imgCli.ImagesPrune(ctx, danglingFilter)
 	if err != nil {
 		return ImagePruneResult{}, fmt.Errorf("prune dangling images: %w", err)
 	}
@@ -309,7 +322,7 @@ func (c *Collector) pruneUnused(ctx context.Context) (ImagePruneResult, error) {
 		}
 	}
 	return pruneUnusedWith(unused, func(id string) error {
-		_, err := c.cli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
+		_, err := c.imgCli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
 		return err
 	}), nil
 }

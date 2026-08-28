@@ -17,12 +17,20 @@ import (
 // collector (cgroup/API stats, per-container net, GPU attribution)
 // consumes via Lookup/Running. Metas are immutable once published --
 // never mutate a field in place, build a fresh Meta instead.
+//
+// Alloc carries the HostConfig resource ceiling (allocFromHostConfig) --
+// the API-fallback path's primary source of allocation data (of the
+// ceilings, only PidsStats.Limit rides along in the stats response
+// itself). Like the rest of Meta, it's only as fresh as the last 10s
+// inventory poll, unlike the cgroup v2 fast path's own allocation read
+// (cgroupv2.go), which is fresh every 2s tick.
 type Meta struct {
 	ID, Name, Image, Icon, State, Health string
 	Pid                                  int
 	StartedAt                            time.Time
 	HostNet                              bool
 	RestartCount                         int
+	Alloc                                alloc
 	Mounts                               []MountInfo
 }
 

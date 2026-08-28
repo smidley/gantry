@@ -377,6 +377,9 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 				if _, ok := include[key.Entity]; !ok {
 					continue // filtered out: stopped, stale, or no longer known
 				}
+				if nowUnix-sample.TS >= containerFrameMaxAge {
+					continue // this ONE sample is stale, even though its entity is still in the frame -- e.g. `docker update --memory 0` stops mem.limit_bytes without stopping the container, and the same gate covers container-attributed gpu.*.busy_pct going quiet
+				}
 				c := dto.Containers[key.Entity]
 				c.Metrics[key.Metric] = sample.Val
 				dto.Containers[key.Entity] = c

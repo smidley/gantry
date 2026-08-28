@@ -290,7 +290,7 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = st.Close() })
 
-	st.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, 1000, 4.2)
+	st.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, time.Now().Unix(), 4.2)
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
@@ -310,6 +310,41 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 	require.Equal(t, "healthy", c.Health)
 	require.Equal(t, "demo/jellyfin:latest", c.Image)
 	require.Equal(t, 4.2, c.Metrics["cpu.pct"])
+}
+
+// TestBuildSnapshotDropsStaleSampleFromRunningContainer pins the
+// per-sample freshness gate a running container's metrics still need:
+// containerFrameEntities/include only decide whether the ENTITY belongs
+// in the frame, so a still-running container's own individual samples
+// were previously included unconditionally, no matter how old. That let
+// a metric that stops being emitted (e.g. `docker update --memory 0`
+// clearing mem.limit_bytes) serve its last recorded value as "current"
+// forever. A sample this stale must be dropped even though its
+// container is very much still in the frame; a fresh sibling metric on
+// the same entity must be unaffected.
+func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().Unix()
+	st.Record(store.SeriesKey{Kind: "container", Entity: "db", Metric: "mem.limit_bytes"}, now-90, 1e9) // stale: older than containerFrameMaxAge
+	st.Record(store.SeriesKey{Kind: "container", Entity: "db", Metric: "mem.bytes"}, now-5, 5e8)        // fresh sibling on the same entity
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "db", State: "running"}} // running unconditionally, per buildSnapshot's own entity-level contract
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+
+	c, ok := snap.Containers["db"]
+	require.True(t, ok)
+	_, hasStale := c.Metrics["mem.limit_bytes"]
+	require.False(t, hasStale, "a >containerFrameMaxAge-old sample must not linger just because its container is still running")
+	require.Equal(t, 5e8, c.Metrics["mem.bytes"], "a fresh sibling metric on the same entity must still come through")
 }
 
 // TestBuildSnapshotMergesDiskMetaFromRealAndFake pins the disk_meta

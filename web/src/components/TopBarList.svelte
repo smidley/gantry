@@ -53,8 +53,18 @@
   falls back to the previous relative-to-the-list's-own-max behavior --
   net/io have no natural ceiling, so "busiest of what's showing" is the
   only scale that ever made sense for them.
+
+  Row order (live only): displayRows re-sorts `rows` by each entity's
+  last-tick value rather than the brand-new one just computed -- see
+  lib/topFromFrame.ts's reorderByLastDisplayedValue for the full "rank
+  must track the display, not the still-gliding-toward-it target" fix
+  this exists for. previousValues is this component instance's own
+  persistent state (mutated in place across ticks, deliberately plain --
+  not $state -- since nothing here reads it directly; only the effect's
+  own re-sorted OUTPUT, displayRows, needs to be reactive).
 -->
 <script>
+  import { reorderByLastDisplayedValue } from '../lib/topFromFrame';
   import TopBarRow from './TopBarRow.svelte';
 
   let {
@@ -71,13 +81,19 @@
   } = $props();
 
   let maxValue = $derived(scaleMax ?? rows.reduce((m, r) => Math.max(m, r.value), 0));
+
+  const previousValues = new Map();
+  let displayRows = $state([]);
+  $effect(() => {
+    displayRows = live ? reorderByLastDisplayedValue(rows, previousValues, metricKey) : rows;
+  });
 </script>
 
 {#if rows.length === 0}
   <p class="microlabel top-bar-list__empty">{emptyMessage}</p>
 {:else}
   <ol class="top-bar-list">
-    {#each rows as row (`${row.entity}::${metricKey}`)}
+    {#each displayRows as row (`${row.entity}::${metricKey}`)}
       <TopBarRow {row} {maxValue} {formatValue} {formatSecondary} {formatDirection} {directionLabels} {linkFor} {live} />
     {/each}
   </ol>

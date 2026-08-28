@@ -251,6 +251,51 @@ export function reduceSeriesPoints(points: SeriesPoint[], agg: 'avg' | 'peak'): 
   return points.reduce((sum, p) => sum + p[1], 0) / points.length;
 }
 
+// reorderByLastDisplayedValue re-sorts `rows` by each entity's own value
+// from the PREVIOUS call (falling back to its current value the first
+// time an entity appears), not the brand-new value just computed for
+// THIS tick -- rank should track what's actually ON SCREEN, and
+// TopBarRow's own Tween is still gliding the display from last tick's
+// value toward this one for the whole ~glideMs leg (sse.svelte.ts's
+// cadence-driven glide), so ranking by the fresh target instead of the
+// value still settling toward it let a row hop ahead of another whose
+// number, on screen, was still visibly larger (reproduced live: a
+// leaderboard flashing "4.2 KB/s" ranked above "5.9 KB/s"). In the
+// common case (glideMs already elapsed since the prior tick) the old
+// glide has fully settled, so "last tick's raw value" already equals
+// what's on screen -- this is a close, cheap stand-in for re-deriving
+// the exact in-flight eased value, without needing TopBarRow's own
+// Tween state to escape that component.
+//
+// A row with linkable===false (the attribution page's own pinned
+// "unattributed" summary) is never reordered -- it stays wherever the
+// caller put it (trailing every real row), so it can't get shuffled
+// into the middle of the leaderboard just because its own value happens
+// to rank high.
+//
+// `previous` is the caller's own persistent Map (keyed by
+// "metricKey::entity", so a resource switch can't read a stale value
+// left by a different metric), mutated in place across ticks -- see
+// TopBarList.svelte's own call site.
+export function reorderByLastDisplayedValue<T extends { entity: string; value: number; linkable?: boolean }>(
+  rows: T[],
+  previous: Map<string, number>,
+  metricKey: string,
+): T[] {
+  const pinned = rows.filter((r) => r.linkable === false);
+  const ranked = rows.filter((r) => r.linkable !== false);
+
+  const sorted = [...ranked].sort((a, b) => {
+    const av = previous.get(`${metricKey}::${a.entity}`) ?? a.value;
+    const bv = previous.get(`${metricKey}::${b.entity}`) ?? b.value;
+    return bv !== av ? bv - av : a.entity.localeCompare(b.entity);
+  });
+
+  for (const row of ranked) previous.set(`${metricKey}::${row.entity}`, row.value);
+
+  return [...sorted, ...pinned];
+}
+
 // unattributedValue is the attribution page's own honest-labeling math:
 // whatever the host is doing that no tracked container accounts for
 // (kernel, other host processes, SMB/mover/parity IO, ...), clamped at

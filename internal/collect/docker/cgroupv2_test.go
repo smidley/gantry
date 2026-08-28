@@ -136,9 +136,9 @@ func TestReadCgroupStatsEmptyIOStatYieldsEmptyMap(t *testing.T) {
 
 // TestParseCPUSetCount pins cpuset.cpus.effective's list-format parse
 // exactly (real-box fixture: "0,1,2,3,4,5,13,14,15" pinned to 9 of 16
-// threads) -- mixed ranges and singles, and the malformed/empty cases
-// FEATURE requires to read as "unrestricted" (ok=false) rather than a
-// hard error, since a garbled cpuset file must not block the rest of a
+// threads) -- mixed ranges and singles, and the malformed/empty cases,
+// which must read as "unrestricted" (ok=false) rather than a hard
+// error, since a garbled cpuset file must not block the rest of a
 // tick's allocation reporting.
 func TestParseCPUSetCount(t *testing.T) {
 	cases := []struct {
@@ -455,8 +455,8 @@ func TestRecordContainerStatsMemBytesFloorsAtZero(t *testing.T) {
 	require.Equal(t, 0.0, memBytes)
 }
 
-// TestEffectiveCPUAllocCores pins the allocation-side CPU decision table
-// FEATURE specifies: a quota always wins outright when set; a cpuset pin
+// TestEffectiveCPUAllocCores pins the allocation-side CPU decision
+// table: a quota always wins outright when set; a cpuset pin
 // only counts when it actually narrows the container below the host's
 // own core count (cpuset.cpus.effective defaults to every host core when
 // nothing is pinned, which must read as unlimited, not "restricted to N
@@ -519,8 +519,9 @@ func TestEffectiveCPUAllocCores(t *testing.T) {
 	}
 }
 
-// TestRecordContainerStatsMemLimitEmitsBytesAndExactPct pins FEATURE's
-// worked example verbatim: 512MiB used of a 1GiB limit is 50.0%, exactly.
+// TestRecordContainerStatsMemLimitEmitsBytesAndExactPct pins the
+// mem.limit_pct worked example verbatim: 512MiB used of a 1GiB limit is
+// 50.0%, exactly.
 func TestRecordContainerStatsMemLimitEmitsBytesAndExactPct(t *testing.T) {
 	sink := newFakeSink()
 	c := newStatsCollector(sink)
@@ -555,9 +556,9 @@ func TestRecordContainerStatsMemLimitZeroBytesSkipsPctButEmitsLimitBytes(t *test
 	require.False(t, ok, "must not divide by a zero limit")
 }
 
-// TestRecordContainerStatsCPUAllocQuotaEmitsCoresFromFirstTick pins
-// FEATURE's "2.0 cores on a 4-core quota -> cpu.alloc_pct 50.0" worked
-// example, and that cpu.alloc_cores (the ceiling itself, not a usage
+// TestRecordContainerStatsCPUAllocQuotaEmitsCoresFromFirstTick pins the
+// "2.0 cores on a 4-core quota -> cpu.alloc_pct 50.0" worked example,
+// and that cpu.alloc_cores (the ceiling itself, not a usage
 // rate) is available from the very first tick -- unlike cpu.cores/
 // cpu.pct, which need a second sample before RateTracker has a delta.
 func TestRecordContainerStatsCPUAllocQuotaEmitsCoresFromFirstTick(t *testing.T) {
@@ -579,9 +580,9 @@ func TestRecordContainerStatsCPUAllocQuotaEmitsCoresFromFirstTick(t *testing.T) 
 	require.Equal(t, 50.0, allocPct)
 }
 
-// TestRecordContainerStatsCPUAllocCpusetPinnedExactPct pins FEATURE's
-// other worked example: pinned 9 of 16 cores with 1.8 cores of usage is
-// 20.0% of the allocation, exactly.
+// TestRecordContainerStatsCPUAllocCpusetPinnedExactPct pins the other
+// cpu.alloc_pct worked example: pinned 9 of 16 cores with 1.8 cores of
+// usage is 20.0% of the allocation, exactly.
 func TestRecordContainerStatsCPUAllocCpusetPinnedExactPct(t *testing.T) {
 	sink := newFakeSink()
 	c := newStatsCollector(sink)
@@ -659,8 +660,8 @@ func TestRecordContainerStatsPidsLimitZeroSkipsPctButEmitsLimit(t *testing.T) {
 	require.False(t, ok, "must not divide by a zero limit")
 }
 
-// TestRecordContainerStatsUnlimitedAllocEmitsNoAllocMetrics pins
-// FEATURE's "absence = unlimited" contract: a container with real usage
+// TestRecordContainerStatsUnlimitedAllocEmitsNoAllocMetrics pins the
+// "absence = unlimited" contract: a container with real usage
 // but no allocation data at all (the real-box default for most
 // containers) must get none of the six allocation-pair metrics.
 func TestRecordContainerStatsUnlimitedAllocEmitsNoAllocMetrics(t *testing.T) {

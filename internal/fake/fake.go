@@ -34,7 +34,7 @@ type archetype struct {
 	memBytes float64
 	netScale float64 // bytes/s magnitude
 
-	// memLimitBytes/cpuAllocCores are FEATURE's allocation-side demo
+	// memLimitBytes/cpuAllocCores are the allocation-side demo
 	// variety: 0 means unlimited (the real-box default, and most of this
 	// fleet) -- only postgres (a memory limit) and minecraft (a cpuset
 	// pin) get one, matching the "at least one of each, most containers
@@ -51,7 +51,7 @@ var fleet = []archetype{
 	{name: "prowlarr", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 150e6, netScale: 5e4},
 	{name: "qbittorrent", cpuBase: 6, cpuAmp: 4, cpuSpike: 0.01, memBytes: 500e6, netScale: 8e6},
 	{name: "sabnzbd", cpuBase: 2, cpuAmp: 6, cpuSpike: 0.01, memBytes: 400e6, netScale: 9e6},
-	// postgres: FEATURE's memory-limited demo container, ~60-80% of its limit.
+	// postgres: the memory-limited demo container, ~60-80% of its limit.
 	{name: "postgres", cpuBase: 2, cpuAmp: 0.5, cpuSpike: 0.001, memBytes: 1.2e9, netScale: 1e5, memLimitBytes: 1.7e9},
 	{name: "redis", cpuBase: 0.5, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 200e6, netScale: 8e4},
 	{name: "homeassistant", cpuBase: 3, cpuAmp: 1, cpuSpike: 0.005, memBytes: 700e6, netScale: 1e5},
@@ -62,7 +62,7 @@ var fleet = []archetype{
 	{name: "immich", cpuBase: 5, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.5e9, netScale: 1e6},
 	{name: "paperless", cpuBase: 1, cpuAmp: 2, cpuSpike: 0.01, memBytes: 400e6, netScale: 8e4},
 	{name: "gitea", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 300e6, netScale: 6e4},
-	// minecraft: FEATURE's cpuset-pinned demo container (pinned to 2 of the fake host's 8 cores).
+	// minecraft: the cpuset-pinned demo container (pinned to 2 of the fake host's 8 cores).
 	{name: "minecraft", cpuBase: 8, cpuAmp: 5, cpuSpike: 0.01, memBytes: 2.5e9, netScale: 3e5, cpuAllocCores: 2.0},
 	{name: "frigate", cpuBase: 12, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.1e9, netScale: 5e6},
 	{name: "unifi-controller", cpuBase: 2, cpuAmp: 1, cpuSpike: 0.005, memBytes: 900e6, netScale: 2e5},

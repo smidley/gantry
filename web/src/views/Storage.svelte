@@ -186,55 +186,58 @@
       No disk data yet.{sources.unraid && sources.unraid !== 'ok' ? ` ${sources.unraid}` : ''}
     </p>
   {:else}
-    <div class="storage-view__disk-grid">
-      {#each diskNames as name (name)}
-        {@const metrics = disks[name]}
-        {@const role = diskRole(name)}
-        {@const mediaType = diskMediaType(metrics)}
-        {@const temp = diskTempState(metrics)}
-        {@const usagePct = diskUsagePct(metrics)}
-        {@const errors = metrics['errors'] ?? 0}
-        <div class="card storage-disk">
-          <div class="storage-disk__head">
-            <span class="microlabel storage-disk__eyebrow">
-              <span>{ROLE_LABEL[role]}</span>
-              {#if mediaType}
-                <span class="storage-disk__media" title={MEDIA_TITLE[mediaType]}>
-                  {@render diskMediaGlyph(mediaType)}{MEDIA_LABEL[mediaType]}
-                </span>
+    <div class="card storage-disks">
+      <span class="microlabel">Disks &middot; {diskNames.length}</span>
+      <div class="storage-disks__list">
+        {#each diskNames as name (name)}
+          {@const metrics = disks[name]}
+          {@const role = diskRole(name)}
+          {@const mediaType = diskMediaType(metrics)}
+          {@const temp = diskTempState(metrics)}
+          {@const usagePct = diskUsagePct(metrics)}
+          {@const errors = metrics['errors'] ?? 0}
+          <div class="storage-disk">
+            <div class="storage-disk__head">
+              <span class="microlabel storage-disk__eyebrow">
+                <span>{ROLE_LABEL[role]}</span>
+                {#if mediaType}
+                  <span class="storage-disk__media" title={MEDIA_TITLE[mediaType]}>
+                    {@render diskMediaGlyph(mediaType)}{MEDIA_LABEL[mediaType]}
+                  </span>
+                {/if}
+              </span>
+              {#if temp.kind === 'reading'}
+                <span class="tabular-nums storage-disk__temp">{temp.celsius.toFixed(1)}&deg;C</span>
+              {:else}
+                <span class="storage-disk__chip">{temp.kind === 'spun-down' ? 'Spun down' : 'No sensor'}</span>
               {/if}
-            </span>
-            {#if temp.kind === 'reading'}
-              <span class="tabular-nums storage-disk__temp">{temp.celsius.toFixed(1)}&deg;C</span>
-            {:else}
-              <span class="storage-disk__chip">{temp.kind === 'spun-down' ? 'Spun down' : 'No sensor'}</span>
+            </div>
+            <div class="storage-disk__name">{name}</div>
+
+            {#if usagePct !== null}
+              <div class="storage-disk__usage">
+                <div class="storage-disk__usage-track">
+                  <div
+                    class="storage-disk__usage-fill"
+                    style="width: {usagePct}%; background: {seqStep(usagePct)}"
+                  ></div>
+                </div>
+                <span class="tabular-nums storage-disk__usage-pct">{fmtPct(usagePct)}</span>
+                <span class="tabular-nums storage-disk__bytes">
+                  {fmtBytes(metrics['fs.used_bytes'])} / {fmtBytes(metrics['fs.used_bytes'] + metrics['fs.free_bytes'])}
+                </span>
+                {#if usagePct > 90}
+                  <HealthDot status="warning" label="High usage" />
+                {/if}
+              </div>
+            {/if}
+
+            {#if errors > 0}
+              <HealthDot status="serious" label={`${errors} error${errors === 1 ? '' : 's'}`} />
             {/if}
           </div>
-          <div class="storage-disk__name">{name}</div>
-
-          {#if usagePct !== null}
-            <div class="storage-disk__usage">
-              <div class="storage-disk__usage-track">
-                <div
-                  class="storage-disk__usage-fill"
-                  style="width: {usagePct}%; background: {seqStep(usagePct)}"
-                ></div>
-              </div>
-              <span class="tabular-nums storage-disk__usage-pct">{fmtPct(usagePct)}</span>
-            </div>
-            <div class="tabular-nums storage-disk__bytes">
-              {fmtBytes(metrics['fs.used_bytes'])} / {fmtBytes(metrics['fs.used_bytes'] + metrics['fs.free_bytes'])}
-            </div>
-            {#if usagePct > 90}
-              <HealthDot status="warning" label="High usage" />
-            {/if}
-          {/if}
-
-          {#if errors > 0}
-            <HealthDot status="serious" label={`${errors} error${errors === 1 ? '' : 's'}`} />
-          {/if}
-        </div>
-      {/each}
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -392,16 +395,34 @@
     white-space: nowrap;
   }
 
-  .storage-view__disk-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
-    gap: 0.75rem;
-  }
-  .storage-disk {
-    padding: 0.85rem 1rem;
+  .storage-disks {
+    padding: 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.6rem;
+  }
+  .storage-disks__list {
+    display: flex;
+    flex-direction: column;
+  }
+  /* Rail row, not a card -- was one .card per disk (parity/data/cache
+     alike, 5-20+ of them depending on the array), the exact "same
+     module at every scale" pattern this rollout replaces elsewhere: a
+     hairline between rows instead, same convention as StatTile's own
+     bare rail and EventFeedItem. */
+  .storage-disk {
+    padding: 0.65rem 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    border-bottom: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+  }
+  .storage-disk:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+  .storage-disk:first-child {
+    padding-top: 0;
   }
   .storage-disk__head {
     display: flex;
@@ -458,10 +479,11 @@
   .storage-disk__usage {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.5rem;
   }
   .storage-disk__usage-track {
-    flex: 1;
+    flex: 1 1 6rem;
     height: 8px;
     border-radius: 4px;
     background: color-mix(in oklab, var(--ink) 8%, transparent);
@@ -488,6 +510,7 @@
   .storage-disk__bytes {
     font-size: 0.75rem;
     color: var(--ink-2);
+    white-space: nowrap;
   }
 
   .storage-view__row {

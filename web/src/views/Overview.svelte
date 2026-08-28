@@ -32,6 +32,8 @@
 -->
 <script>
   import { onMount, untrack } from 'svelte';
+  import { flip } from 'svelte/animate';
+  import { fade, fly } from 'svelte/transition';
   import { Tween } from 'svelte/motion';
   import { linear } from 'svelte/easing';
   import { prefersReducedMotion } from 'svelte/motion';
@@ -62,6 +64,11 @@
 
   const EVENTS_POLL_MS = 30_000;
   const LIVE_WINDOW_SEC = 900;
+  // FEED_MOTION_MS: the events feed's own flip/fly/fade duration --
+  // modest, matching TopBarList's identical constant (Scott's own ask:
+  // "make the transition... flow smooth instead of just a hard swap or
+  // new entry"). 0 under prefers-reduced-motion.
+  const FEED_MOTION_MS = 250;
 
   // Top consumers module: same formatter-per-resource mapping
   // TopConsumers.svelte's own full page uses, kept local to each view
@@ -146,6 +153,8 @@
       });
     return () => controller.abort();
   });
+
+  let feedMotionMs = $derived(prefersReducedMotion.current ? 0 : FEED_MOTION_MS);
 
   let host = $derived(live.frame?.host ?? {});
   let netRx = $derived(sumMetricsByPattern(host, 'net', '.rx_bps'));
@@ -499,7 +508,13 @@
         {:else}
           <div class="overview__events-list">
             {#each events as event (event.ID)}
-              <EventFeedItem {event} />
+              <div
+                animate:flip={{ duration: feedMotionMs }}
+                in:fly={{ y: -12, duration: feedMotionMs }}
+                out:fade={{ duration: feedMotionMs }}
+              >
+                <EventFeedItem {event} />
+              </div>
             {/each}
           </div>
         {/if}

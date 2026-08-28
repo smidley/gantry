@@ -62,10 +62,24 @@
   persistent state (mutated in place across ticks, deliberately plain --
   not $state -- since nothing here reads it directly; only the effect's
   own re-sorted OUTPUT, displayRows, needs to be reactive).
+
+  Reordering itself animates (Scott: "when items change place in
+  something like top consumers... make the transition flow smooth
+  instead of just a hard swap or new entry") -- animate:flip glides a row
+  that's still present to its new position; transition:fade covers a row
+  actually entering/leaving the list (a container crossing onto or off
+  the leaderboard). Both collapse to 0 under prefers-reduced-motion.
 -->
 <script>
+  import { flip } from 'svelte/animate';
+  import { fade } from 'svelte/transition';
+  import { prefersReducedMotion } from 'svelte/motion';
   import { reorderByLastDisplayedValue } from '../lib/topFromFrame';
   import TopBarRow from './TopBarRow.svelte';
+
+  // FLIP_DURATION_MS: modest, per the ask -- long enough to read as a
+  // glide, short enough not to lag behind the next tick.
+  const FLIP_DURATION_MS = 250;
 
   let {
     rows = [],
@@ -81,6 +95,7 @@
   } = $props();
 
   let maxValue = $derived(scaleMax ?? rows.reduce((m, r) => Math.max(m, r.value), 0));
+  let flipDuration = $derived(prefersReducedMotion.current ? 0 : FLIP_DURATION_MS);
 
   const previousValues = new Map();
   let displayRows = $state([]);
@@ -94,7 +109,9 @@
 {:else}
   <ol class="top-bar-list">
     {#each displayRows as row (`${row.entity}::${metricKey}`)}
-      <TopBarRow {row} {maxValue} {formatValue} {formatSecondary} {formatDirection} {directionLabels} {linkFor} {live} />
+      <li animate:flip={{ duration: flipDuration }} transition:fade={{ duration: flipDuration }}>
+        <TopBarRow {row} {maxValue} {formatValue} {formatSecondary} {formatDirection} {directionLabels} {linkFor} {live} />
+      </li>
     {/each}
   </ol>
 {/if}

@@ -20,9 +20,17 @@
 -->
 <script>
   import { onMount } from 'svelte';
+  import { flip } from 'svelte/animate';
+  import { fade, fly } from 'svelte/transition';
+  import { prefersReducedMotion } from 'svelte/motion';
   import { fetchEvents } from '../lib/api';
   import { debounce } from '../lib/debounce';
   import EventFeedItem from '../components/EventFeedItem.svelte';
+
+  // FEED_MOTION_MS: modest, matching TopBarList's own flip duration --
+  // long enough to read as a glide/fly, short enough not to lag behind
+  // the next arrival. 0 under prefers-reduced-motion (Scott's own ask).
+  const FEED_MOTION_MS = 250;
 
   const PAGE_LIMIT = 200;
   const REFRESH_MS = 30_000;
@@ -55,6 +63,8 @@
     { key: '7d', label: '7d', seconds: 7 * 86400 },
     { key: 'all', label: 'All', seconds: null },
   ];
+
+  let feedMotionMs = $derived(prefersReducedMotion.current ? 0 : FEED_MOTION_MS);
 
   let selectedKinds = $state(new Set());
   let entityFilter = $state('');
@@ -305,7 +315,13 @@
     {:else}
       <div class="events-view__items">
         {#each events as event (event.ID)}
-          <EventFeedItem {event} showAbsoluteTime />
+          <div
+            animate:flip={{ duration: feedMotionMs }}
+            in:fly={{ y: -12, duration: feedMotionMs }}
+            out:fade={{ duration: feedMotionMs }}
+          >
+            <EventFeedItem {event} showAbsoluteTime />
+          </div>
         {/each}
       </div>
       {#if loading}

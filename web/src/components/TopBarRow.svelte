@@ -1,14 +1,20 @@
 <!--
-  TopBarRow: one leaderboard row, split out of TopBarList (mirroring
-  ContainerRow's own precedent -- see its doc) so a live row can own its
-  OWN Tween across re-renders. TopBarList's {#each} keys on entity+metric
-  (see its own doc for why metric is part of the key too), so the SAME
-  TopBarRow instance (and therefore the same Tween) survives a value tick
-  or a re-rank, and only a genuine leave/enter -- an entity dropping off
-  or climbing onto the leaderboard, OR the metric itself switching --
-  tears one down. A Tween instantiated straight inside the parent's
-  {#each} block would get recreated (and its glide restarted from zero)
-  on every value tick instead.
+  TopBarRow: one leaderboard row's CONTENT, split out of TopBarList
+  (mirroring ContainerRow's own precedent -- see its doc) so a live row
+  can own its OWN Tween across re-renders. TopBarList's {#each} keys on
+  entity+metric (see its own doc for why metric is part of the key too),
+  so the SAME TopBarRow instance (and therefore the same Tween) survives
+  a value tick or a re-rank, and only a genuine leave/enter -- an entity
+  dropping off or climbing onto the leaderboard, OR the metric itself
+  switching -- tears one down. A Tween instantiated straight inside the
+  parent's {#each} block would get recreated (and its glide restarted
+  from zero) on every value tick instead.
+
+  Root is a plain <div>, not the <li> this used to render directly:
+  TopBarList now owns the <li> itself (one level up), so animate:flip/
+  transition:fade -- directives that only apply to real DOM elements,
+  not component tags -- can land on it without nesting an <li> inside
+  another one.
 -->
 <script>
   import { untrack } from 'svelte';
@@ -123,7 +129,7 @@
   let widthPct = $derived(maxValue > 0 ? Math.min(100, Math.max(0, (valueTween.current / maxValue) * 100)) : 0);
 </script>
 
-<li class="top-bar-list__row">
+<div class="top-bar-list__row">
   <svelte:element
     this={linkable ? 'a' : 'span'}
     class="top-bar-list__name"
@@ -153,7 +159,7 @@
       {/if}
     </div>
   {/if}
-</li>
+</div>
 
 <style>
   .top-bar-list__row {

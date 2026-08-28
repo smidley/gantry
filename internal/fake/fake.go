@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/smidley/gantry/internal/collect/docker"
@@ -180,10 +181,27 @@ type Generator struct {
 	// jellyfinBurstTicks counts down a GPU-usage burst in progress; 0
 	// means idle and eligible to roll a new burst.
 	jellyfinBurstTicks int
+
+	// imagesMu guards images, this Generator's own mutable copy of
+	// fakeImageSeed (see New) -- Images/RemoveImages/PruneImages
+	// (images.go) are called concurrently by HTTP handlers, unlike
+	// everything else on Generator, which only Run's single goroutine
+	// ever touches.
+	imagesMu sync.Mutex
+	images   []docker.ImageInfo
 }
 
 func New(sink store.MetricSink, events EventSink, seed int64) *Generator {
-	return &Generator{sink: sink, events: events, rng: rand.New(rand.NewSource(seed))}
+	return &Generator{
+		sink: sink, events: events, rng: rand.New(rand.NewSource(seed)),
+		// A shallow copy of the slice header: RemoveImages/PruneImages
+		// only ever remove whole elements (never mutate one in place), so
+		// sharing fakeImageSeed's element structs/inner slices across
+		// every Generator is safe -- only the top-level slice itself must
+		// be independent, or one instance's append/delete would corrupt
+		// another's view into the same backing array.
+		images: append([]docker.ImageInfo(nil), fakeImageSeed...),
+	}
 }
 
 func clamp(v, lo, hi float64) float64 { return math.Max(lo, math.Min(hi, v)) }

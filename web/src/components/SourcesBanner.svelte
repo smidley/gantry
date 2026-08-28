@@ -5,14 +5,23 @@
   fleet view depends on it); every other source gets a quiet, dismissible
   hint. Dismissal is per-source and resets on reload -- this is a hint,
   not a standing alert queue.
+
+  NVIDIA presence gate (Scott: "I don't have an nvidia GPU, so this
+  shouldn't be showing up for me"): a source reporting sourceStatus.ts's
+  own SOURCE_NOT_APPLICABLE sentinel (NvidiaCollector.Probe, when no
+  NVIDIA GPU is on the box at all) is filtered out by degradedSources
+  itself -- it's neither "ok" nor a fixable hint, so this banner stays
+  silent for it entirely. Settings' own sources list still shows it, as
+  a quiet ok-styled row with its own explanatory copy.
 -->
 <script>
   import HealthDot from './HealthDot.svelte';
+  import { degradedSources } from '../lib/sourceStatus';
 
   let { sources = {} } = $props();
   let dismissed = $state(new Set());
 
-  let degraded = $derived(Object.entries(sources).filter(([, detail]) => detail !== 'ok'));
+  let degraded = $derived(degradedSources(sources));
   let dockerDegraded = $derived(degraded.find(([name]) => name === 'docker'));
   let otherDegraded = $derived(degraded.filter(([name]) => name !== 'docker' && !dismissed.has(name)));
 

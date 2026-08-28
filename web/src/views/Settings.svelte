@@ -13,10 +13,18 @@
   import { seriesPointsToRing } from '../lib/livering';
   import { fetchSeries, fetchSettings, fetchVersion, putSettings } from '../lib/api';
   import { fmtBytes, fmtPct } from '../lib/format';
+  import { SOURCE_NOT_APPLICABLE } from '../lib/sourceStatus';
   import HealthDot from '../components/HealthDot.svelte';
   import StatTile from '../components/StatTile.svelte';
 
   const LIVE_WINDOW_SEC = 900;
+
+  // NOT_APPLICABLE_COPY: per-source friendly wording for a
+  // SOURCE_NOT_APPLICABLE row (NVIDIA presence gate) -- the raw sentinel
+  // string is never shown verbatim. Falls back to a generic sentence for
+  // any future source that starts using the sentinel without its own
+  // entry here yet.
+  const NOT_APPLICABLE_COPY = { nvidia: 'No NVIDIA GPU detected.' };
 
   const RETENTION_FIELDS = [
     { key: 'r1_hours', label: 'R1 (1 min resolution) retention, hours', min: 1, max: 168 },
@@ -179,11 +187,12 @@
       {#each sourceNames as name (name)}
         {@const detail = sources[name]}
         {@const ok = detail === 'ok'}
+        {@const notApplicable = detail === SOURCE_NOT_APPLICABLE}
         <li class="settings-sources__row">
-          <HealthDot status={ok ? 'good' : 'warning'} label={name} />
+          <HealthDot status={ok || notApplicable ? 'good' : 'warning'} label={name} />
           {#if !ok}
             <span class="settings-sources__detail">
-              {detail}
+              {notApplicable ? (NOT_APPLICABLE_COPY[name] ?? 'Not applicable on this system.') : detail}
               {#if name === 'pressure'}
                 <a
                   class="settings-sources__learn-more"

@@ -206,6 +206,8 @@ func TestParseCPUSetCount(t *testing.T) {
 		{name: "range span just under the materialization guard is allowed", in: "0-65535", want: 65536, ok: true},
 		{name: "range span at the materialization guard is rejected", in: "0-65536", want: 0, ok: false},
 		{name: "grossly oversized range rejected rather than materialized", in: "0-4294967295", want: 0, ok: false},
+		{name: "many disjoint ranges, each under the per-range guard, rejected once their TOTAL crosses it", in: "0-49999,60000-109999", want: 0, ok: false},
+		{name: "disjoint ranges summing to exactly the total guard are allowed", in: "0-32767,40000-72767", want: 65536, ok: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

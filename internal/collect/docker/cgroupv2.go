@@ -310,12 +310,15 @@ func readCPUMax(path string) (quotaUsec, periodUsec uint64, hasQuota bool, err e
 	return quotaUsec, periodUsec, true, nil
 }
 
-// maxCPUSetRangeSpan caps how wide a single "lo-hi" range in a cpuset
-// list may be before parseCPUSetCount rejects it outright: no real host
-// has anywhere near this many cores, so a range this wide is either a
+// maxCPUSetRangeSpan caps both how wide a single "lo-hi" range in a
+// cpuset list may be AND how many distinct ids the list may name in
+// total, before parseCPUSetCount rejects it outright: no real host has
+// anywhere near this many cores, so either kind of excess is either a
 // corrupt read or an adversarial value, and materializing it into the
 // id set below (one map entry per core) would otherwise size that
-// allocation off an attacker- or corruption-controlled number.
+// allocation off an attacker- or corruption-controlled number. The
+// per-range check alone isn't enough: many disjoint ranges, each
+// individually under it, can still sum to an arbitrarily large total.
 const maxCPUSetRangeSpan = 1 << 16
 
 // parseCPUSetCount parses a cgroup cpuset core list ("0-5,13-15",
@@ -326,11 +329,15 @@ const maxCPUSetRangeSpan = 1 << 16
 // summed range-by-range, since HostConfig.CpusetCpus stores whatever raw
 // string a caller passed to --cpuset-cpus verbatim, and docker doesn't
 // reject overlapping ranges ("0-3,2-5") the way cpuset.cpus.effective's
-// own kernel-normalized form never would. A range spanning
-// maxCPUSetRangeSpan or more ids is treated as malformed rather than
-// materialized (see its own doc). Shared verbatim by the cgroup v2 fast
-// path (cpuset.cpus.effective) and the API fallback (HostConfig.
-// CpusetCpus, docker.go's allocFromHostConfig).
+// own kernel-normalized form never would. A single range spanning
+// maxCPUSetRangeSpan or more ids is rejected outright (see its own
+// doc), and so is the list as a whole once its running total of
+// distinct ids crosses that same cap -- checked after every
+// comma-separated part, so many disjoint ranges that each individually
+// pass the per-range check can't still add up to an unbounded total.
+// Shared verbatim by the cgroup v2 fast path (cpuset.cpus.effective)
+// and the API fallback (HostConfig.CpusetCpus, docker.go's
+// allocFromHostConfig).
 func parseCPUSetCount(s string) (count int, ok bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -345,17 +352,20 @@ func parseCPUSetCount(s string) (count int, ok bool) {
 		}
 		if !isRange {
 			ids[loN] = struct{}{}
-			continue
+		} else {
+			hiN, err := strconv.Atoi(hi)
+			if err != nil || hiN < loN {
+				return 0, false
+			}
+			if hiN-loN >= maxCPUSetRangeSpan {
+				return 0, false
+			}
+			for i := loN; i <= hiN; i++ {
+				ids[i] = struct{}{}
+			}
 		}
-		hiN, err := strconv.Atoi(hi)
-		if err != nil || hiN < loN {
-			return 0, false
-		}
-		if hiN-loN >= maxCPUSetRangeSpan {
-			return 0, false
-		}
-		for i := loN; i <= hiN; i++ {
-			ids[i] = struct{}{}
+		if len(ids) > maxCPUSetRangeSpan {
+			return 0, false // per-part total cap: catches many disjoint under-cap ranges summing past it
 		}
 	}
 	return len(ids), true

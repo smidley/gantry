@@ -17,11 +17,11 @@ type StorageRef struct {
 }
 
 // diskSlotPattern matches an array disk slot's name -- "disk" followed
-// by one or more digits (disk1 .. disk28 and beyond) -- Unraid's fixed,
-// reserved naming for array data disks; a pool can't be named this, so
-// no fleet lookup is needed to tell a disk slot apart from a pool one
-// (contrast poolSlot membership below, which does need the fleet: pool
-// names are arbitrary).
+// by disk1 and up; Unraid has no disk0 (disk1 .. disk28 and beyond) --
+// Unraid's fixed, reserved naming for array data disks; a pool can't be
+// named this, so no fleet lookup is needed to tell a disk slot apart
+// from a pool one (contrast poolSlot membership below, which does need
+// the fleet: pool names are arbitrary).
 var diskSlotPattern = regexp.MustCompile(`^disk[1-9][0-9]*$`)
 
 // ResolveStoragePath maps a container mount's host source path to the

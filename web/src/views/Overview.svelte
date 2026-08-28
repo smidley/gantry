@@ -2,16 +2,26 @@
   Overview: the landing page, D2 ("plain-reading anchor") design --
   see .superpowers/design-exploration/{direction-d2.md,mockup-d2.html}.
   A plain-language status headline (with a countable fleet strip as its
-  own evidence) replaces the earlier fleet-summary card; a bracket-framed
-  attention module promotes whatever actually needs a look, with a
-  miniature array bay schematic when a disk itself is the reason; the
-  top-row stat tiles become a quiet instrument rail. Top Consumers,
-  Recent events, and the GPU strip are unchanged in substance, restyled
-  only. Everything still reads straight off the live SSE frame -- no
-  fetch, no polling -- except the events feed, exactly as before.
+  own evidence) replaces the earlier fleet-summary card; an attention
+  section right under the headline's own sublines promotes whatever
+  actually needs a look, connected purely by proximity (no frame, no
+  leader line -- see the corrective-pass note below), with a miniature
+  array bay schematic when a disk itself is the reason; the top-row stat
+  tiles become a quiet instrument rail. Top Consumers, Recent events,
+  and the GPU strip are unchanged in substance, restyled only.
+  Everything still reads straight off the live SSE frame -- no fetch,
+  no polling -- except the events feed, exactly as before.
+
+  Corrective pass (post-deploy, Scott's own read: "there's lines in the
+  middle of text that are not used"): the first cut over-decorated this
+  -- a tick ruler that measured nothing, a dotted leader line that ran
+  straight through the sublines' own text and left a dead void above
+  "Needs a look", and orphaned corner-bracket glyphs, all deleted
+  outright. The one rule that survived: a line either separates two
+  real regions or encodes real data, or it doesn't exist.
 -->
 <script>
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
   import { Tween } from 'svelte/motion';
   import { cubicOut } from 'svelte/easing';
   import { prefersReducedMotion } from 'svelte/motion';
@@ -36,10 +46,6 @@
   const EVENTS_POLL_MS = 30_000;
   const TWEEN_MS = 400;
   const LIVE_WINDOW_SEC = 900;
-  // Matches the leader line's own CSS breakpoint (.overview__leader's
-  // `display` toggle) -- md, 48rem/768px, same threshold the sidebar
-  // itself swaps for the mobile TabBar at.
-  const LEADER_MIN_WIDTH = 768;
 
   let cpuRing = liveRing((f) => f.host?.['cpu.total']);
   let memRing = liveRing((f) => f.host?.['mem.used_pct']);
@@ -252,77 +258,6 @@
     return rest === 1 ? '1 other array member is within normal range.' : `${rest} other array members are within normal range.`;
   });
 
-  // --- Leader line (headline dot -> attention module) ---------------------
-  //
-  // An absolutely-positioned SVG overlay measures two real DOM nodes
-  // (getBoundingClientRect) and redraws a dotted elbowed path between
-  // them -- same technique as mockup-d2.html's own script, upgraded per
-  // direction-d.md's own noted risk: a ResizeObserver on the stage
-  // (catches content-driven reflow -- a longer anomaly list changes the
-  // stage's own height) alongside a window resize listener (viewport
-  // changes), rather than resize-only. Hidden below LEADER_MIN_WIDTH,
-  // matching the CSS breakpoint that hides .overview__leader itself.
-  let stageEl = $state(null);
-  let headlineDotEl = $state(null);
-  let attentionFrameEl = $state(null);
-  let leaderGeometry = $state(null);
-
-  function drawLeader() {
-    if (!stageEl || !headlineDotEl || !attentionFrameEl || window.innerWidth < LEADER_MIN_WIDTH) {
-      leaderGeometry = null;
-      return;
-    }
-    const stageRect = stageEl.getBoundingClientRect();
-    const dotRect = headlineDotEl.getBoundingClientRect();
-    const frameRect = attentionFrameEl.getBoundingClientRect();
-
-    const startX = dotRect.left - stageRect.left + dotRect.width / 2;
-    const startY = dotRect.top - stageRect.top + dotRect.height / 2;
-    const endX = frameRect.left - stageRect.left + 14;
-    const endY = frameRect.top - stageRect.top;
-    const midY = endY - 22;
-
-    leaderGeometry = { w: stageRect.width, h: stageRect.height, startX, startY, midY, endX, endY };
-  }
-
-  onMount(() => {
-    drawLeader();
-    const ro = new ResizeObserver(() => drawLeader());
-    if (stageEl) ro.observe(stageEl);
-    window.addEventListener('resize', drawLeader);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('resize', drawLeader);
-    };
-  });
-
-  // statusOk/anomalyCount are deliberately their own primitive $derived
-  // values, not just `overviewStatus.ok`/`.anomalies.length` read
-  // straight off the compound object below: overviewStatus itself is a
-  // brand-new object every SSE frame (disks/sources are read off
-  // live.frame, which is reassigned wholesale every tick), but a
-  // $derived's own downstream notification is cut off whenever its
-  // OUTPUT is unchanged -- true for a primitive number/boolean even
-  // when its upstream recomputed, not true for a freshly-allocated
-  // object, which never equals its predecessor by reference. Depending
-  // on these two (plus showBaySchematic, already boolean) instead of
-  // overviewStatus directly is what keeps the effect below from
-  // re-measuring on every single live frame.
-  let statusOk = $derived(overviewStatus.ok);
-  let anomalyCount = $derived(overviewStatus.anomalies.length);
-
-  // Direct backstop for the very first paint after the attention module
-  // itself mounts/unmounts or changes shape -- the ResizeObserver above
-  // catches the same change, but only on its own next-frame callback;
-  // this re-measures as soon as Svelte has actually applied the DOM
-  // update (tick), rather than waiting on that.
-  $effect(() => {
-    statusOk;
-    anomalyCount;
-    showBaySchematic;
-    tick().then(drawLeader);
-  });
-
   // events: unlike everything else on this view, events are NOT in the
   // SSE frame at all (see sse.svelte.ts's own doc) -- fetched once on
   // mount, then re-fetched on a 30s poll and on window focus (a tab that
@@ -366,72 +301,28 @@
   <h1 class="page-title">Overview</h1>
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
-  <div class="overview__stage" bind:this={stageEl}>
-    <div class="overview__hero">
-      <div class="overview__headline-zone">
-        <div class="overview__headline-scale" aria-hidden="true">
-          {#each Array.from({ length: 17 }) as _, i (i)}
-            <span class:overview__headline-tick--tall={i % 4 === 0}></span>
-          {/each}
-        </div>
-        <div class="overview__headline-row">
-          <span
-            class="overview__headline-dot"
-            class:overview__headline-dot--pulse={!overviewStatus.ok}
-            style={`background:${statusColor}; color:${statusColor}`}
-            bind:this={headlineDotEl}
-            aria-hidden="true"
-          ></span>
-          <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
-        </div>
-        <div class="overview__headline-subs">
-          <p class="overview__sub-line">{fleetSentence}</p>
-          <FleetStrip containers={fleetContainers} />
-          <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
-          {#if hottestSentence}
-            <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
-          {/if}
-        </div>
+  <div class="overview__hero">
+    <div class="overview__headline-zone">
+      <div class="overview__headline-row">
+        <span
+          class="overview__headline-dot"
+          class:overview__headline-dot--pulse={!overviewStatus.ok}
+          style={`background:${statusColor}; color:${statusColor}`}
+          aria-hidden="true"
+        ></span>
+        <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
+      </div>
+      <div class="overview__headline-subs">
+        <p class="overview__sub-line">{fleetSentence}</p>
+        <FleetStrip containers={fleetContainers} />
+        <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
+        {#if hottestSentence}
+          <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
+        {/if}
       </div>
 
-      <div class="overview__metrics-rail">
-        <StatTile bare label="CPU" liveValue={host['cpu.total'] ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
-        <StatTile
-          bare
-          label="Memory"
-          liveValue={host['mem.used_pct'] ?? 0}
-          formatValue={fmtPct}
-          sparklinePoints={memRing.points}
-        />
-        <StatTile
-          bare
-          label="Network"
-          liveValue={netRx}
-          formatValue={(v) => `↓ ${fmtRate(v)}`}
-          value2={fmtRate(netTxTween.current)}
-          label2="↑"
-          sparklinePoints={netRxRing.points}
-        />
-        <StatTile
-          bare
-          label="Disk IO"
-          liveValue={ioRead}
-          formatValue={(v) => `r ${fmtRate(v)}`}
-          value2={fmtRate(ioWriteTween.current)}
-          label2="w"
-          sparklinePoints={ioReadRing.points}
-        />
-      </div>
-    </div>
-
-    {#if !overviewStatus.ok}
-      <section class="overview__attention" bind:this={attentionFrameEl}>
-        <span class="overview__attention-corner overview__attention-corner--tl"></span>
-        <span class="overview__attention-corner overview__attention-corner--tr"></span>
-        <span class="overview__attention-corner overview__attention-corner--bl"></span>
-        <span class="overview__attention-corner overview__attention-corner--br"></span>
-
-        <div class="overview__attention-body">
+      {#if !overviewStatus.ok}
+        <section class="overview__attention">
           <span class="microlabel">Needs a look</span>
           {#each overviewStatus.anomalies as anomaly, i (i)}
             {@const text = describeAnomaly(anomaly)}
@@ -460,31 +351,38 @@
           {#if closingLine}
             <p class="overview__closing-line">{closingLine}</p>
           {/if}
-        </div>
-      </section>
-
-      {#if leaderGeometry}
-        <svg
-          class="overview__leader"
-          viewBox={`0 0 ${leaderGeometry.w} ${leaderGeometry.h}`}
-          width={leaderGeometry.w}
-          height={leaderGeometry.h}
-          aria-hidden="true"
-        >
-          <path
-            class="overview__leader-path"
-            d={`M${leaderGeometry.startX},${leaderGeometry.startY} L${leaderGeometry.startX},${leaderGeometry.midY} L${leaderGeometry.endX},${leaderGeometry.midY} L${leaderGeometry.endX},${leaderGeometry.endY}`}
-          />
-          <circle
-            class="overview__leader-dot"
-            cx={leaderGeometry.startX}
-            cy={leaderGeometry.startY}
-            r="2"
-            style={`fill:${statusColor}`}
-          />
-        </svg>
+        </section>
       {/if}
-    {/if}
+    </div>
+
+    <div class="overview__metrics-rail">
+      <StatTile bare label="CPU" liveValue={host['cpu.total'] ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
+      <StatTile
+        bare
+        label="Memory"
+        liveValue={host['mem.used_pct'] ?? 0}
+        formatValue={fmtPct}
+        sparklinePoints={memRing.points}
+      />
+      <StatTile
+        bare
+        label="Network"
+        liveValue={netRx}
+        formatValue={(v) => `↓ ${fmtRate(v)}`}
+        value2={fmtRate(netTxTween.current)}
+        label2="↑"
+        sparklinePoints={netRxRing.points}
+      />
+      <StatTile
+        bare
+        label="Disk IO"
+        liveValue={ioRead}
+        formatValue={(v) => `r ${fmtRate(v)}`}
+        value2={fmtRate(ioWriteTween.current)}
+        label2="w"
+        sparklinePoints={ioReadRing.points}
+      />
+    </div>
   </div>
 
   <div class="overview__grid">
@@ -524,9 +422,6 @@
 
   /* --- Stage / hero row -------------------------------------------- */
 
-  .overview__stage {
-    position: relative;
-  }
   .overview__hero {
     display: grid;
     grid-template-columns: 1.25fr 1fr;
@@ -554,29 +449,6 @@
     flex-direction: column;
     gap: 1rem;
     min-width: 0;
-  }
-
-  /* The tick scale is the ring's own bezel, unrolled into a line -- pure
-     atmosphere (the same job the page's corner brackets do elsewhere),
-     never meant to be read as data. */
-  .overview__headline-scale {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-    width: 100%;
-    max-width: 25rem;
-    height: 10px;
-    border-bottom: 1px solid color-mix(in oklab, var(--ink) 14%, transparent);
-  }
-  .overview__headline-scale span {
-    width: 1px;
-    height: 5px;
-    background: var(--ink-2);
-    opacity: 0.45;
-  }
-  .overview__headline-scale span.overview__headline-tick--tall {
-    height: 9px;
-    opacity: 0.75;
   }
 
   .overview__headline-row {
@@ -653,43 +525,14 @@
     min-width: 0;
   }
 
-  /* --- Attention module ---------------------------------------------- */
+  /* --- Attention: plain content, connected to the headline by
+     PROXIMITY alone -- it's just the next thing in the headline-zone's
+     own flex column, spaced by that column's own gap, same as every
+     other subline above it. No frame, no brackets, no leader line: the
+     one rule surviving the corrective pass is that a line either
+     separates two real regions or encodes real data. -------------- */
 
   .overview__attention {
-    position: relative;
-    padding: 1.1rem 1.35rem 1.25rem;
-    margin-top: 0.25rem;
-  }
-  .overview__attention-corner {
-    position: absolute;
-    width: 12px;
-    height: 12px;
-  }
-  .overview__attention-corner--tl {
-    top: 0;
-    left: 0;
-    border-top: 1.5px solid var(--ink-2);
-    border-left: 1.5px solid var(--ink-2);
-  }
-  .overview__attention-corner--tr {
-    top: 0;
-    right: 0;
-    border-top: 1.5px solid var(--ink-2);
-    border-right: 1.5px solid var(--ink-2);
-  }
-  .overview__attention-corner--bl {
-    bottom: 0;
-    left: 0;
-    border-bottom: 1.5px solid var(--ink-2);
-    border-left: 1.5px solid var(--ink-2);
-  }
-  .overview__attention-corner--br {
-    bottom: 0;
-    right: 0;
-    border-bottom: 1.5px solid var(--ink-2);
-    border-right: 1.5px solid var(--ink-2);
-  }
-  .overview__attention-body {
     display: flex;
     flex-direction: column;
     gap: 0.9rem;
@@ -723,28 +566,6 @@
     color: var(--ink-2);
     font-size: 0.88rem;
     margin: 0;
-  }
-
-  .overview__leader {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    height: 100%;
-    pointer-events: none;
-    z-index: 1;
-    display: none;
-  }
-  .overview__leader-path {
-    fill: none;
-    stroke: color-mix(in oklab, var(--ink) 45%, transparent);
-    stroke-width: 1.25;
-    stroke-dasharray: 4 3;
-  }
-  @media (min-width: 48rem) {
-    .overview__leader {
-      display: block;
-    }
   }
 
   /* --- Supporting grid (Top Consumers / Recent events) ---------------- */

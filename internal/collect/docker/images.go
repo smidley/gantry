@@ -74,7 +74,9 @@ type DeletedImage struct {
 // ImagePruneResult is Collector.PruneImages'/fake.Generator.PruneImages'
 // shared return shape.
 type ImagePruneResult struct {
-	Deleted        []DeletedImage
+	Deleted []DeletedImage
+	// ReclaimedBytes sums per-image sizes, so shared layers make it an
+	// upper bound ("up to"), same as the GET summary's reclaimable note.
 	ReclaimedBytes int64
 	Errors         []string
 }
@@ -298,8 +300,9 @@ func (c *Collector) PruneImages(ctx context.Context, mode string) (ImagePruneRes
 // here. moby's two image stores disagree on it: the containerd store's
 // isDanglingImage is name-based and leaves a digest-pinned image alone,
 // but the classic store -- what Unraid actually runs -- prunes anything
-// without a NamedTagged ref, tags or no, deleting exactly what this
-// package's own classification calls "unused" instead. Same
+// lacking a NamedTagged ref (only a real tag exempts an image there),
+// which sweeps up digest-pinned images this package classifies as
+// "unused", not "dangling". Same
 // one-source-of-truth reasoning as pruneUnused: acting on Gantry's own
 // classification, never the daemon's, is what keeps "what's dangling"
 // from having two disagreeing answers.

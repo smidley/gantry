@@ -77,9 +77,11 @@ type DeletedImage struct {
 
 // ImagePruneResult is POST /api/images/prune's response shape.
 type ImagePruneResult struct {
-	Deleted        []DeletedImage `json:"deleted"`
-	ReclaimedBytes int64          `json:"reclaimed_bytes"`
-	Errors         []string       `json:"errors"`
+	Deleted []DeletedImage `json:"deleted"`
+	// ReclaimedBytes sums per-image sizes, so shared layers make it an
+	// upper bound ("up to"), same as the GET summary's reclaimable note.
+	ReclaimedBytes int64    `json:"reclaimed_bytes"`
+	Errors         []string `json:"errors"`
 }
 
 // shortImageID trims a full "sha256:..." digest to docker's own

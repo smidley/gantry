@@ -115,6 +115,34 @@ test('containers: clicking a header sorts the table', async ({ page }) => {
   expect(after).toEqual([...after].sort((a, b) => a.localeCompare(b)));
 });
 
+// Regression coverage for Scott's own report: "when values change, the
+// width of the columns change size. this happens constantly and is not
+// good looking." table-layout:fixed + the <colgroup> (Containers.svelte)
+// mean every column's width comes from ITS OWN fixed spec, never
+// recomputed from a row's live content -- so column x-positions must
+// stay byte-identical across two real live ticks (2s cadence), even
+// though the cell TEXT underneath them keeps changing length
+// ("17.2 KB/s" vs "947.6 B/s").
+test('containers: column widths do not jitter as live values tick', async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.goto('#/containers');
+
+  const headers = page.locator('table.containers-table:has(thead) thead th');
+  await expect.poll(() => headers.count()).toBeGreaterThan(0);
+
+  async function headerRects() {
+    return headers.evaluateAll((ths) => ths.map((th) => ({ left: th.getBoundingClientRect().left, width: th.getBoundingClientRect().width })));
+  }
+
+  const before = await headerRects();
+  // Comfortably more than one 2s tick, so at least one visible value's
+  // rendered string length has actually changed underneath these cells.
+  await page.waitForTimeout(6_000);
+  const after = await headerRects();
+
+  expect(after).toEqual(before);
+});
+
 test('container detail: charts render and the log viewer shows its empty state', async ({ page }) => {
   await page.goto('#/containers/jellyfin');
 

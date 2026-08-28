@@ -13,7 +13,7 @@
 -->
 <script>
   import { Tween } from 'svelte/motion';
-  import { cubicOut } from 'svelte/easing';
+  import { cubicOut, linear } from 'svelte/easing';
   import { prefersReducedMotion } from 'svelte/motion';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
@@ -24,8 +24,6 @@
   import ContainerIcon from './ContainerIcon.svelte';
   import HealthDot from './HealthDot.svelte';
   import Sparkline from './Sparkline.svelte';
-
-  const TWEEN_MS = 400;
 
   // registerSeedTarget (additive, optional -- live-seed history):
   // Containers.svelte fetches every visible row's cpu.pct history itself
@@ -59,29 +57,31 @@
   let ts = $derived(live.frame?.ts ?? 0);
   let gpuPct = $derived((m['gpu.video.busy_pct'] ?? 0) + (m['gpu.render.busy_pct'] ?? 0));
 
-  // Tweened numbers (mechanism 3, smooth-streaming): every cpu/mem/net/io
-  // cell eases toward its newest value over TWEEN_MS instead of snapping
-  // every 2s -- independent of the CPU column's own Sparkline, which
-  // gets its OWN glide/ease from Sparkline's live mode (mechanisms 1+2).
-  // ContainerRow is already its own component (one per container name,
-  // kept stable by Containers.svelte's keyed {#each}), so a plain Tween
-  // declared here persists across ticks the same way cpuRing already
-  // does -- no extra per-row wrapper needed for these, unlike TopBarRow/
-  // ArrayCardPoolRow, which exist because THEIR parents don't already
-  // instantiate a component per row.
+  // Tweened numbers (mechanism 3, perpetual-glide motion pass): every
+  // cpu/mem/net/io cell glides toward its newest value over the shared
+  // driver's own measured cadence (live.glideMs, linear curve) instead of
+  // a fixed guessed duration and a front-loaded curve -- see
+  // streamdriver.ts's "Cadence-driven glide" doc -- independent of the
+  // CPU column's own Sparkline, which gets its OWN glide from
+  // Sparkline's live mode (mechanisms 1+2). ContainerRow is already its
+  // own component (one per container name, kept stable by
+  // Containers.svelte's keyed {#each}), so a plain Tween declared here
+  // persists across ticks the same way cpuRing already does -- no extra
+  // per-row wrapper needed for these, unlike TopBarRow, which exists
+  // because ITS parent doesn't already instantiate a component per row.
   function tweenTo(tween, value) {
-    tween.set(value, { duration: prefersReducedMotion.current ? 0 : TWEEN_MS, easing: cubicOut });
+    tween.set(value, { duration: prefersReducedMotion.current ? 0 : live.glideMs, easing: linear });
   }
 
   const SCRUB_TWEEN_MS = 120;
 
-  let cpuTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let memBytesTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let memPctTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let netRxTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let netTxTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let ioReadTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
-  let ioWriteTween = new Tween(0, { duration: TWEEN_MS, easing: cubicOut });
+  let cpuTween = new Tween(0, { duration: live.glideMs, easing: linear });
+  let memBytesTween = new Tween(0, { duration: live.glideMs, easing: linear });
+  let memPctTween = new Tween(0, { duration: live.glideMs, easing: linear });
+  let netRxTween = new Tween(0, { duration: live.glideMs, easing: linear });
+  let netTxTween = new Tween(0, { duration: live.glideMs, easing: linear });
+  let ioReadTween = new Tween(0, { duration: live.glideMs, easing: linear });
+  let ioWriteTween = new Tween(0, { duration: live.glideMs, easing: linear });
 
   // cpuScrubHit (hover-scrub, synced): non-null whenever the shared bus
   // has a published ts, regardless of whether THIS row's own sparkline
@@ -100,7 +100,7 @@
     if (cpuScrubHit) {
       cpuTween.set(cpuScrubHit.value, { duration: reduced ? 0 : SCRUB_TWEEN_MS, easing: cubicOut });
     } else {
-      cpuTween.set(m['cpu.pct'] ?? 0, { duration: reduced ? 0 : TWEEN_MS, easing: cubicOut });
+      cpuTween.set(m['cpu.pct'] ?? 0, { duration: reduced ? 0 : live.glideMs, easing: linear });
     }
   });
 
@@ -118,7 +118,7 @@
     <td class="container-row__name-cell">
       <a href={`#/containers/${encodeURIComponent(name)}`}>
         <ContainerIcon {name} icon={c.icon} size={20} />
-        {name}
+        <span class="container-row__name-text">{name}</span>
       </a>
     </td>
     <td class="container-row__cpu-cell">
@@ -156,6 +156,12 @@
     border-bottom: 1px solid color-mix(in oklab, var(--ink) 6%, transparent);
     font-size: 0.82rem;
     vertical-align: middle;
+    /* Column-width jitter fix: Containers.svelte's <colgroup> now owns
+       every column's actual width (table-layout:fixed) -- a cell's own
+       content never grows the column, so anything that can run long
+       (the name link, in particular) must clip with an ellipsis instead
+       of forcing an overflow. */
+    overflow: hidden;
   }
   .container-row__name-cell a {
     display: flex;
@@ -164,16 +170,22 @@
     color: var(--ink);
     text-decoration: none;
     font-weight: 500;
+    overflow: hidden;
   }
   .container-row__name-cell a:hover {
     text-decoration: underline;
+  }
+  .container-row__name-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0; /* lets the flex child actually shrink+ellipsis instead of pushing the fixed column wider */
   }
   .container-row__cpu-cell {
     display: flex;
     align-items: center;
     justify-content: flex-end;
     gap: 0.5rem;
-    min-width: 14rem;
   }
   .container-row__cpu-cell :global(.sparkline) {
     width: 170px;

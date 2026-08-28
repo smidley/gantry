@@ -30,16 +30,33 @@
   // visible text and no aria-label has NO accessible name at all until
   // it becomes the active column (sortIndicator only renders once
   // active), which a screen reader user would hit on every page load.
+  //
+  // width (additive -- column-width jitter fix, Scott: "when values
+  // change, the width of the columns change size... this happens
+  // constantly and is not good looking") feeds the <colgroup> below,
+  // which is what makes table-layout:fixed's per-column widths real:
+  // fixed layout sizes columns from the FIRST row it sees (a colgroup's
+  // own <col> widths, when present) rather than from every row's actual
+  // content on every render, which is what let a value's string length
+  // changing ("17.2 KB/s" -> "947.6 B/s") recompute the whole table's
+  // column widths under the PREVIOUS auto layout. Sized for each
+  // column's own worst-case rendered text (see ContainerRow's per-cell
+  // formatting) with some slack, not the current narrowest content.
+  // image is the one column left undefined: table-layout:fixed gives
+  // any column with no explicit width whatever's left over from
+  // width:100% once every other column's own width is subtracted, which
+  // is exactly the "flexible, takes the remaining slack" the ask wants
+  // for the one column whose content (image tags) varies the most.
   const COLUMNS = [
-    { key: 'health', label: 'ST', ariaName: 'Health', sortable: true },
-    { key: 'name', label: 'Name', sortable: true },
-    { key: 'cpu', label: 'CPU', sortable: true, numeric: true },
-    { key: 'mem', label: 'Mem', sortable: true, numeric: true },
-    { key: 'net', label: 'Net', sortable: true, numeric: true },
-    { key: 'io', label: 'IO', sortable: true, numeric: true },
-    { key: 'gpu', label: 'GPU', sortable: true, numeric: true },
-    { key: 'pids', label: 'PIDs', sortable: true, numeric: true },
-    { key: 'uptime', label: 'Uptime', sortable: true, numeric: true },
+    { key: 'health', label: 'ST', ariaName: 'Health', sortable: true, width: '2.25rem' },
+    { key: 'name', label: 'Name', sortable: true, width: '10.5rem' },
+    { key: 'cpu', label: 'CPU', sortable: true, numeric: true, width: '15.5rem' }, // icon+sparkline(170px, flex-shrink:0)+text -- matches ContainerRow's own cpu-cell sizing
+    { key: 'mem', label: 'Mem', sortable: true, numeric: true, width: '9rem' }, // e.g. "888.8 MiB (88.8%)"
+    { key: 'net', label: 'Net', sortable: true, numeric: true, width: '7.5rem' }, // stacked "↓ 888.8 KB/s" / "↑ 888.8 KB/s"
+    { key: 'io', label: 'IO', sortable: true, numeric: true, width: '7.5rem' }, // stacked "r 888.8 KB/s" / "w 888.8 KB/s"
+    { key: 'gpu', label: 'GPU', sortable: true, numeric: true, width: '4rem' },
+    { key: 'pids', label: 'PIDs', sortable: true, numeric: true, width: '3.5rem' },
+    { key: 'uptime', label: 'Uptime', sortable: true, numeric: true, width: '6rem' }, // e.g. "365d 23h"
     { key: 'image', label: 'Image', sortable: true },
   ];
 
@@ -212,6 +229,11 @@
          never the page. -->
     <div class="card containers-view__table-wrap hidden md:block">
       <table class="containers-table">
+        <colgroup>
+          {#each COLUMNS as col (col.key)}
+            <col style={col.width ? `width: ${col.width}` : undefined} />
+          {/each}
+        </colgroup>
         <thead>
           <tr>
             {#each COLUMNS as col (col.key)}
@@ -273,6 +295,11 @@
       {#if stoppedExpanded}
         <div class="card containers-view__table-wrap hidden md:block">
           <table class="containers-table">
+            <colgroup>
+              {#each COLUMNS as col (col.key)}
+                <col style={col.width ? `width: ${col.width}` : undefined} />
+              {/each}
+            </colgroup>
             <tbody>
               {#each stoppedNames as name (name)}
                 <ContainerRow {name} {registerSeedTarget} />
@@ -325,16 +352,26 @@
     overflow-x: auto;
     padding: 0;
   }
+  /* table-layout:fixed (column-width jitter fix) sizes every column ONCE,
+     from the <colgroup> above -- never recomputed from a row's own
+     content -- so a value's string length changing on live tick can't
+     nudge any column's width, the CONSTANT churn Scott flagged ("this
+     happens constantly and is not good looking"). min-width/width still
+     set the table's own overall floor/fill exactly as before; the fix
+     is entirely in HOW the space inside that gets divided among columns. */
   .containers-table {
     width: 100%;
     border-collapse: collapse;
     min-width: 72rem;
+    table-layout: fixed;
   }
   .containers-table thead th {
     padding: 0.5rem 0.6rem;
     text-align: left;
     border-bottom: 1px solid color-mix(in oklab, var(--ink) 12%, transparent);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .containers-table__th--numeric {
     text-align: right;

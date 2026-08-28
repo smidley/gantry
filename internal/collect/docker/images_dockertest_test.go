@@ -5,14 +5,12 @@
 //
 // Deliberately read-only: it exercises Collector.Images (ImageList +
 // ContainerList against whatever this real daemon actually has), never
-// RemoveImages/PruneImages -- those two ultimately call ImageRemove/
-// ImagesPrune against a daemon this test doesn't control and can't
-// safely scope a deletion on (ImagesPrune's dangling filter, in
-// particular, has no way to target only an image this test created).
-// Their own interesting logic (partial failure, enrichment, aggregation)
-// is already fully covered without a daemon at all -- see
-// removeImagesWith/mergeDanglingPrune/pruneUnusedWith's own tests in
-// images_test.go.
+// RemoveImages/PruneImages -- those two ultimately call ImageRemove
+// against a daemon this test doesn't control and can't safely scope a
+// deletion on. Their own interesting logic (partial failure,
+// enrichment, aggregation, classification-driven filtering) is already
+// fully covered without a daemon at all -- see removeImagesWith/
+// pruneImagesWith's own tests in images_test.go.
 package docker
 
 import (

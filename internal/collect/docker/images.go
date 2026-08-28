@@ -8,7 +8,6 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 )
 
@@ -98,9 +97,12 @@ type ImagePruneResult struct {
 // digest-pinned image (pulled by "repo@sha256:...", so RepoTags is
 // empty) is not garbage just because it was never tagged, and must
 // classify "unused" like any other named-but-unreferenced image, not
-// "dangling" (which the daemon's own dangling=true filter, used by
-// pruneDangling, would never delete either). ReclaimableBytes sums every
-// unused+dangling image's size (see ImagesSummary's own doc on why
+// "dangling". This is also why pruneDangling removes by this exact
+// State rather than delegating to the daemon's own dangling=true filter
+// (see pruneDangling's own doc): moby's two image stores disagree on a
+// digest-pinned image, and the classic store Unraid actually runs would
+// delete it right alongside a true dangling one. ReclaimableBytes sums
+// every unused+dangling image's size (see ImagesSummary's own doc on why
 // that's an upper bound).
 func classifyImages(imgs []image.Summary, containers []container.Summary) ImagesReport {
 	byID := make(map[string]image.Summary, len(imgs))
@@ -179,34 +181,13 @@ func removeImagesWith(ids []string, pre map[string]image.Summary, removeOne func
 	return out
 }
 
-// mergeDanglingPrune builds pruneDangling's result from the daemon's own
-// PruneReport plus a same-filter pre-fetch's id->size map (fetched
-// before pruning, for the same reason removeImagesWith's pre is). A
-// moby prune response names a removed image via Deleted (the content
-// itself removed) or, if only its last tag was removed, Untagged --
-// either way it's the id this entry is about.
-func mergeDanglingPrune(report image.PruneReport, sizeByID map[string]int64) ImagePruneResult {
-	out := ImagePruneResult{ReclaimedBytes: int64(report.SpaceReclaimed)}
-	for _, d := range report.ImagesDeleted {
-		id := d.Deleted
-		if id == "" {
-			id = d.Untagged
-		}
-		if id == "" {
-			continue
-		}
-		out.Deleted = append(out.Deleted, DeletedImage{ID: id, SizeBytes: sizeByID[id]})
-	}
-	return out
-}
-
 // multiTagConflictText is the one piece of a moby by-id removal
 // conflict's message that's unique to the "2+ tags" case (see
 // describePruneUnusedError's own doc) -- verbatim from moby's own
 // imageDeleteConflict message, daemon/images/image_delete.go.
 const multiTagConflictText = "image is referenced in multiple repositories"
 
-// describePruneUnusedError maps removeOne's error to pruneUnusedWith's
+// describePruneUnusedError maps removeOne's error to pruneImagesWith's
 // per-id message, for the one conflict that's actually permanent here:
 // removing a 2+-tag image by id -- which is all pruneUnused ever does,
 // see PruneImages' own doc -- conflicts unless Force is set (never is,
@@ -223,12 +204,14 @@ func describePruneUnusedError(err error) string {
 	return err.Error()
 }
 
-// pruneUnusedWith is pruneUnused's pure orchestration -- see
-// removeImagesWith for why the removal call is injected rather than
-// called directly.
-func pruneUnusedWith(unused []ImageInfo, removeOne func(id string) error) ImagePruneResult {
+// pruneImagesWith is pruneDangling's and pruneUnused's shared pure
+// orchestration -- see removeImagesWith for why the removal call is
+// injected rather than called directly. imgs is whichever State the
+// caller already filtered classifyImages' own output to; this has no
+// opinion of its own on what "dangling" or "unused" means.
+func pruneImagesWith(imgs []ImageInfo, removeOne func(id string) error) ImagePruneResult {
 	var out ImagePruneResult
-	for _, im := range unused {
+	for _, im := range imgs {
 		if err := removeOne(im.ID); err != nil {
 			out.Errors = append(out.Errors, im.ID+": "+describePruneUnusedError(err))
 			continue
@@ -249,7 +232,6 @@ type imagesClient interface {
 	ImageList(ctx context.Context, options image.ListOptions) ([]image.Summary, error)
 	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
 	ImageRemove(ctx context.Context, imageID string, options image.RemoveOptions) ([]image.DeleteResponse, error)
-	ImagesPrune(ctx context.Context, pruneFilters filters.Args) (image.PruneReport, error)
 }
 
 // Images lists every image on the daemon (ImageList All:true) joined
@@ -309,24 +291,33 @@ func (c *Collector) PruneImages(ctx context.Context, mode string) (ImagePruneRes
 	}
 }
 
-// pruneDangling delegates to the daemon's own ImagesPrune(dangling=true)
-// rather than looping ImageRemove -- unlike "unused" (this package's own
-// container-join concept), "dangling" (no RepoTags at all) is an
-// unambiguous, daemon-agreed definition, so handing the whole operation
-// to the daemon is safe and lets it be atomic.
+// pruneDangling removes every image this package's own classifyImages
+// currently calls "dangling", one ImageRemove at a time -- deliberately
+// NOT the daemon's own ImagesPrune(dangling=true), even though
+// "dangling" sounds like the one unambiguous, daemon-agreed definition
+// here. moby's two image stores disagree on it: the containerd store's
+// isDanglingImage is name-based and leaves a digest-pinned image alone,
+// but the classic store -- what Unraid actually runs -- prunes anything
+// without a NamedTagged ref, tags or no, deleting exactly what this
+// package's own classification calls "unused" instead. Same
+// one-source-of-truth reasoning as pruneUnused: acting on Gantry's own
+// classification, never the daemon's, is what keeps "what's dangling"
+// from having two disagreeing answers.
 func (c *Collector) pruneDangling(ctx context.Context) (ImagePruneResult, error) {
-	danglingFilter := filters.NewArgs(filters.Arg("dangling", "true"))
-	pre, _ := c.imgCli.ImageList(ctx, image.ListOptions{Filters: danglingFilter}) // best-effort size enrichment; see mergeDanglingPrune's own doc
-	sizeByID := make(map[string]int64, len(pre))
-	for _, im := range pre {
-		sizeByID[im.ID] = im.Size
-	}
-
-	report, err := c.imgCli.ImagesPrune(ctx, danglingFilter)
+	report, err := c.Images(ctx)
 	if err != nil {
-		return ImagePruneResult{}, fmt.Errorf("prune dangling images: %w", err)
+		return ImagePruneResult{}, err
 	}
-	return mergeDanglingPrune(report, sizeByID), nil
+	var dangling []ImageInfo
+	for _, im := range report.Images {
+		if im.State == "dangling" {
+			dangling = append(dangling, im)
+		}
+	}
+	return pruneImagesWith(dangling, func(id string) error {
+		_, err := c.imgCli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
+		return err
+	}), nil
 }
 
 // pruneUnused deletes this package's own computed "unused" set via
@@ -346,7 +337,7 @@ func (c *Collector) pruneUnused(ctx context.Context) (ImagePruneResult, error) {
 			unused = append(unused, im)
 		}
 	}
-	return pruneUnusedWith(unused, func(id string) error {
+	return pruneImagesWith(unused, func(id string) error {
 		_, err := c.imgCli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
 		return err
 	}), nil

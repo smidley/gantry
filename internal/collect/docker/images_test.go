@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/errdefs"
 	"github.com/stretchr/testify/require"
@@ -221,34 +220,7 @@ func TestRemoveImagesWithSucceedsWithoutEnrichmentWhenIDMissingFromPre(t *testin
 	require.Equal(t, []ImageRemoveResult{{ID: "sha256:unknown", OK: true}}, results)
 }
 
-func TestMergeDanglingPruneUsesDeletedIDAndPreFetchedSize(t *testing.T) {
-	report := image.PruneReport{
-		ImagesDeleted:  []image.DeleteResponse{{Deleted: "sha256:abc"}},
-		SpaceReclaimed: 1234,
-	}
-	sizeByID := map[string]int64{"sha256:abc": 999}
-
-	result := mergeDanglingPrune(report, sizeByID)
-
-	require.Equal(t, ImagePruneResult{
-		Deleted:        []DeletedImage{{ID: "sha256:abc", SizeBytes: 999}},
-		ReclaimedBytes: 1234,
-	}, result)
-}
-
-func TestMergeDanglingPruneFallsBackToUntaggedIDWhenDeletedIsEmpty(t *testing.T) {
-	// A moby prune response can report an image solely as "Untagged"
-	// (its last tag removed) rather than "Deleted" (the content itself
-	// removed) -- either way it's gone from `docker images`, so either
-	// field names the id this result is about.
-	report := image.PruneReport{ImagesDeleted: []image.DeleteResponse{{Untagged: "sha256:abc"}}}
-
-	result := mergeDanglingPrune(report, nil)
-
-	require.Equal(t, []DeletedImage{{ID: "sha256:abc"}}, result.Deleted)
-}
-
-func TestPruneUnusedWithSumsReclaimedBytesAndCollectsPerIDErrors(t *testing.T) {
+func TestPruneImagesWithSumsReclaimedBytesAndCollectsPerIDErrors(t *testing.T) {
 	unused := []ImageInfo{
 		{ID: "sha256:a", RepoTags: []string{"old:1"}, SizeBytes: 100},
 		{ID: "sha256:b", RepoTags: []string{"old:2"}, SizeBytes: 200},
@@ -260,26 +232,26 @@ func TestPruneUnusedWithSumsReclaimedBytesAndCollectsPerIDErrors(t *testing.T) {
 		return nil
 	}
 
-	result := pruneUnusedWith(unused, removeOne)
+	result := pruneImagesWith(unused, removeOne)
 
 	require.Equal(t, []DeletedImage{{ID: "sha256:a", RepoTags: []string{"old:1"}, SizeBytes: 100}}, result.Deleted)
 	require.Equal(t, int64(100), result.ReclaimedBytes)
 	require.Equal(t, []string{"sha256:b: in use"}, result.Errors)
 }
 
-// TestPruneUnusedWithMapsMultiTagConflictToAClearerMessage pins F6: by-id
+// TestPruneImagesWithMapsMultiTagConflictToAClearerMessage pins F6: by-id
 // removal of a 2+-tag image permanently conflicts ("must be forced" --
 // moby only skips that specific soft conflict when removing by id AND
 // the image has at most one reference; see imageIDPattern's own doc for
 // the same by-id resolution moby does). pruneUnused never sets Force,
 // so this isn't transient -- map it to a clearer message, but keep the
 // raw daemon string so nothing's lost.
-func TestPruneUnusedWithMapsMultiTagConflictToAClearerMessage(t *testing.T) {
+func TestPruneImagesWithMapsMultiTagConflictToAClearerMessage(t *testing.T) {
 	raw := "conflict: unable to delete deadbeefcafe (must be forced) - image is referenced in multiple repositories"
 	unused := []ImageInfo{{ID: "sha256:multi", RepoTags: []string{"app:v1", "app:v2"}, SizeBytes: 100}}
 	removeOne := func(string) error { return errdefs.Conflict(errors.New(raw)) }
 
-	result := pruneUnusedWith(unused, removeOne)
+	result := pruneImagesWith(unused, removeOne)
 
 	require.Empty(t, result.Deleted)
 	require.Len(t, result.Errors, 1)
@@ -287,12 +259,12 @@ func TestPruneUnusedWithMapsMultiTagConflictToAClearerMessage(t *testing.T) {
 	require.Contains(t, result.Errors[0], raw, "the raw daemon string must still be present, not discarded")
 }
 
-// TestPruneUnusedWithLeavesOtherConflictsAloneAndNonConflictErrorsAlone
+// TestPruneImagesWithLeavesOtherConflictsAloneAndNonConflictErrorsAlone
 // guards the mapping in the test above against over-firing: a
 // DIFFERENT conflict (e.g. a container started using the image between
 // classification and removal) and a plain non-conflict error must both
 // keep their own raw message verbatim, never the multi-tag wording.
-func TestPruneUnusedWithLeavesOtherConflictsAloneAndNonConflictErrorsAlone(t *testing.T) {
+func TestPruneImagesWithLeavesOtherConflictsAloneAndNonConflictErrorsAlone(t *testing.T) {
 	containerConflict := "conflict: unable to delete deadbeefcafe (cannot be forced) - image is being used by running container abc123"
 	unused := []ImageInfo{
 		{ID: "sha256:race", RepoTags: []string{"app:v1"}, SizeBytes: 100},
@@ -305,7 +277,7 @@ func TestPruneUnusedWithLeavesOtherConflictsAloneAndNonConflictErrorsAlone(t *te
 		return fmt.Errorf("some other failure")
 	}
 
-	result := pruneUnusedWith(unused, removeOne)
+	result := pruneImagesWith(unused, removeOne)
 
 	require.Equal(t, []string{
 		"sha256:race: " + containerConflict,
@@ -322,15 +294,11 @@ type fakeImagesClient struct {
 	imageListReturn     []image.Summary
 	containerListReturn []container.Summary
 
-	imageListFilters   []filters.Args
-	imagesPruneFilters []filters.Args
+	imageRemoveIDs     []string
 	imageRemoveOptions []image.RemoveOptions
-
-	imagesPruneReturn image.PruneReport
 }
 
-func (f *fakeImagesClient) ImageList(_ context.Context, options image.ListOptions) ([]image.Summary, error) {
-	f.imageListFilters = append(f.imageListFilters, options.Filters)
+func (f *fakeImagesClient) ImageList(_ context.Context, _ image.ListOptions) ([]image.Summary, error) {
 	return f.imageListReturn, nil
 }
 
@@ -338,32 +306,34 @@ func (f *fakeImagesClient) ContainerList(_ context.Context, _ container.ListOpti
 	return f.containerListReturn, nil
 }
 
-func (f *fakeImagesClient) ImageRemove(_ context.Context, _ string, options image.RemoveOptions) ([]image.DeleteResponse, error) {
+func (f *fakeImagesClient) ImageRemove(_ context.Context, imageID string, options image.RemoveOptions) ([]image.DeleteResponse, error) {
+	f.imageRemoveIDs = append(f.imageRemoveIDs, imageID)
 	f.imageRemoveOptions = append(f.imageRemoveOptions, options)
 	return nil, nil
 }
 
-func (f *fakeImagesClient) ImagesPrune(_ context.Context, pruneFilters filters.Args) (image.PruneReport, error) {
-	f.imagesPruneFilters = append(f.imagesPruneFilters, pruneFilters)
-	return f.imagesPruneReturn, nil
-}
-
-// TestPruneDanglingFiltersBothImageListAndImagesPruneByDanglingTrue pins
-// F5: pruneDangling's own doc says it hands the whole operation to the
-// daemon's dangling=true filter -- assert that's actually the filter
-// going out on BOTH calls it makes (the pre-fetch ImageList, and the
-// real ImagesPrune), not just trust the literal never drifts.
-func TestPruneDanglingFiltersBothImageListAndImagesPruneByDanglingTrue(t *testing.T) {
-	fc := &fakeImagesClient{}
+// TestPruneDanglingNeverPassesADigestPinnedUnusedImageToImageRemove pins
+// N1: a digest-pinned image (RepoDigests set, no RepoTags) classifies
+// "unused" under classifyImages, not "dangling" -- see classifyImages'
+// own doc. The daemon's own dangling=true filter disagrees about that
+// on Unraid's classic image store (prunes anything without a
+// NamedTagged ref, tags or no), which is exactly why pruneDangling must
+// remove by Gantry's own fresh classification instead of delegating:
+// only the true dangling image (neither RepoTags nor RepoDigests) may
+// ever reach ImageRemove.
+func TestPruneDanglingNeverPassesADigestPinnedUnusedImageToImageRemove(t *testing.T) {
+	digestPinned := image.Summary{ID: "sha256:" + fmt.Sprintf("%064x", 1), RepoDigests: []string{"redis@sha256:deadbeef"}, Size: 100}
+	trueDangling := image.Summary{ID: "sha256:" + fmt.Sprintf("%064x", 2), Size: 200}
+	fc := &fakeImagesClient{imageListReturn: []image.Summary{digestPinned, trueDangling}}
 	c := &Collector{imgCli: fc}
 
-	_, err := c.pruneDangling(context.Background())
+	result, err := c.pruneDangling(context.Background())
 
 	require.NoError(t, err)
-	require.Len(t, fc.imageListFilters, 1)
-	require.Equal(t, []string{"true"}, fc.imageListFilters[0].Get("dangling"))
-	require.Len(t, fc.imagesPruneFilters, 1)
-	require.Equal(t, []string{"true"}, fc.imagesPruneFilters[0].Get("dangling"))
+	require.Equal(t, []string{trueDangling.ID}, fc.imageRemoveIDs, "a digest-pinned image must never reach ImageRemove via prune dangling")
+	require.Equal(t, []image.RemoveOptions{{Force: false, PruneChildren: true}}, fc.imageRemoveOptions)
+	require.Equal(t, []DeletedImage{{ID: trueDangling.ID, SizeBytes: 200}}, result.Deleted)
+	require.Equal(t, int64(200), result.ReclaimedBytes)
 }
 
 // TestRemoveImagesCallsImageRemoveWithForceFalseAndPruneChildrenTrue pins

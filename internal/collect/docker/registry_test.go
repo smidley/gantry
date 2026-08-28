@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
@@ -682,6 +683,75 @@ func TestMetaFromInspectIconEmptyWhenLabelAbsent(t *testing.T) {
 	m := metaFromInspect(resp)
 
 	require.Equal(t, "", m.Icon)
+}
+
+// TestMetaFromInspectExtractsBindAndVolumeMounts pins the storage-panel
+// groundwork: bind and volume mounts both carry a real host-side path in
+// MountPoint.Source (for a volume, this is already docker's on-disk
+// location under /var/lib/docker/volumes/, not the volume's Name --
+// Source is the field the path->storage resolver needs), so both types
+// come through as MountInfo in inspect order.
+func TestMetaFromInspectExtractsBindAndVolumeMounts(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:    "abc123",
+			Name:  "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Mounts: []container.MountPoint{
+			{Type: mount.TypeBind, Source: "/mnt/user/appdata/jellyfin", Destination: "/config", RW: true},
+			{Type: mount.TypeVolume, Source: "/var/lib/docker/volumes/jellyfin_cache/_data", Destination: "/cache", RW: true},
+			{Type: mount.TypeBind, Source: "/mnt/user/media", Destination: "/media", RW: false},
+		},
+	}
+
+	m := metaFromInspect(resp)
+
+	require.Equal(t, []MountInfo{
+		{Source: "/mnt/user/appdata/jellyfin", Destination: "/config", RW: true},
+		{Source: "/var/lib/docker/volumes/jellyfin_cache/_data", Destination: "/cache", RW: true},
+		{Source: "/mnt/user/media", Destination: "/media", RW: false},
+	}, m.Mounts)
+}
+
+// TestMetaFromInspectSkipsNonBindVolumeMountTypes pins the filter half: a
+// tmpfs mount carries no meaningful host storage path (MountPoint.Source
+// is empty for tmpfs by contract) and must not show up as a bogus
+// MountInfo entry alongside the real bind mount in the same response.
+func TestMetaFromInspectSkipsNonBindVolumeMountTypes(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:    "abc123",
+			Name:  "/x",
+			State: &container.State{Status: "running"},
+		},
+		Mounts: []container.MountPoint{
+			{Type: mount.TypeTmpfs, Destination: "/tmp"},
+			{Type: mount.TypeBind, Source: "/mnt/user/data", Destination: "/data", RW: true},
+		},
+	}
+
+	m := metaFromInspect(resp)
+
+	require.Equal(t, []MountInfo{{Source: "/mnt/user/data", Destination: "/data", RW: true}}, m.Mounts)
+}
+
+// TestMetaFromInspectMountsNilWhenNoMounts pins the zero-mounts case (a
+// container inspected with an empty/nil Mounts slice, e.g. one with no
+// volumes or binds at all) to nil rather than an empty-but-non-nil
+// slice, matching every other zero-value Meta field's convention.
+func TestMetaFromInspectMountsNilWhenNoMounts(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:    "abc123",
+			Name:  "/x",
+			State: &container.State{Status: "running"},
+		},
+	}
+
+	m := metaFromInspect(resp)
+
+	require.Nil(t, m.Mounts)
 }
 
 // TestDrainReturnsImmediatelyWhenEventsNeverStarted pins I4's Drain()

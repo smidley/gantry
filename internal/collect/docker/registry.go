@@ -22,6 +22,21 @@ type Meta struct {
 	StartedAt                            time.Time
 	HostNet                              bool
 	RestartCount                         int
+	Mounts                               []MountInfo
+}
+
+// MountInfo is one container mount, as reported by docker inspect's
+// Mounts -- bind and volume types only (see mountsFromInspect); tmpfs/
+// npipe/cluster/image mounts carry no meaningful host storage path and
+// are dropped before they ever reach a Meta. Source is the host-side
+// path backing the mount: for a volume mount this is already docker's
+// real on-disk location under /var/lib/docker/volumes/, not the
+// volume's name, which is what the storage-panel path->storage resolver
+// (internal/collect/unraid) needs to map this mount onto an Unraid
+// storage system.
+type MountInfo struct {
+	Source, Destination string
+	RW                  bool
 }
 
 // EventSink is the narrow slice of store.Store the docker collector needs

@@ -2,12 +2,14 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/errdefs"
 	"github.com/stretchr/testify/require"
 )
 
@@ -263,6 +265,52 @@ func TestPruneUnusedWithSumsReclaimedBytesAndCollectsPerIDErrors(t *testing.T) {
 	require.Equal(t, []DeletedImage{{ID: "sha256:a", RepoTags: []string{"old:1"}, SizeBytes: 100}}, result.Deleted)
 	require.Equal(t, int64(100), result.ReclaimedBytes)
 	require.Equal(t, []string{"sha256:b: in use"}, result.Errors)
+}
+
+// TestPruneUnusedWithMapsMultiTagConflictToAClearerMessage pins F6: by-id
+// removal of a 2+-tag image permanently conflicts ("must be forced" --
+// moby only skips that specific soft conflict when removing by id AND
+// the image has at most one reference; see imageIDPattern's own doc for
+// the same by-id resolution moby does). pruneUnused never sets Force,
+// so this isn't transient -- map it to a clearer message, but keep the
+// raw daemon string so nothing's lost.
+func TestPruneUnusedWithMapsMultiTagConflictToAClearerMessage(t *testing.T) {
+	raw := "conflict: unable to delete deadbeefcafe (must be forced) - image is referenced in multiple repositories"
+	unused := []ImageInfo{{ID: "sha256:multi", RepoTags: []string{"app:v1", "app:v2"}, SizeBytes: 100}}
+	removeOne := func(string) error { return errdefs.Conflict(errors.New(raw)) }
+
+	result := pruneUnusedWith(unused, removeOne)
+
+	require.Empty(t, result.Deleted)
+	require.Len(t, result.Errors, 1)
+	require.Contains(t, result.Errors[0], "skipped: image has multiple tags (untag manually)")
+	require.Contains(t, result.Errors[0], raw, "the raw daemon string must still be present, not discarded")
+}
+
+// TestPruneUnusedWithLeavesOtherConflictsAloneAndNonConflictErrorsAlone
+// guards the mapping in the test above against over-firing: a
+// DIFFERENT conflict (e.g. a container started using the image between
+// classification and removal) and a plain non-conflict error must both
+// keep their own raw message verbatim, never the multi-tag wording.
+func TestPruneUnusedWithLeavesOtherConflictsAloneAndNonConflictErrorsAlone(t *testing.T) {
+	containerConflict := "conflict: unable to delete deadbeefcafe (cannot be forced) - image is being used by running container abc123"
+	unused := []ImageInfo{
+		{ID: "sha256:race", RepoTags: []string{"app:v1"}, SizeBytes: 100},
+		{ID: "sha256:plain", RepoTags: []string{"app:v2"}, SizeBytes: 200},
+	}
+	removeOne := func(id string) error {
+		if id == "sha256:race" {
+			return errdefs.Conflict(errors.New(containerConflict))
+		}
+		return fmt.Errorf("some other failure")
+	}
+
+	result := pruneUnusedWith(unused, removeOne)
+
+	require.Equal(t, []string{
+		"sha256:race: " + containerConflict,
+		"sha256:plain: some other failure",
+	}, result.Errors)
 }
 
 // fakeImagesClient is a hand-rolled imagesClient double -- injected via

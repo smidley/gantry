@@ -317,13 +317,21 @@ func (g *Generator) Tick(now time.Time) {
 		// mode too -- "sda"/"nvme0n1" are a plausible fixed pair of device
 		// names, not tied to fakeContainerMounts' share/disk/flash naming
 		// (real per-device IO and Unraid slot names are unrelated
-		// namespaces).
+		// namespaces). loop2 is the third: a small slice of every
+		// container's own IO landing against docker's own image-file-
+		// backed storage (a real box's docker.img, loop-mounted -- see
+		// DeviceLabels' own doc for why this needs a fake-only label
+		// override), scaled well below the other two since that's really
+		// just image-layer reads plus a thin writable layer, never the
+		// bulk of a container's data IO.
 		ioRead := a.netScale * (0.4 + 0.6*g.rng.Float64())
 		ioWrite := ioRead * 0.35 * (0.5 + g.rng.Float64())
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.sda.read_bps"}, ts, ioRead)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.sda.write_bps"}, ts, ioWrite)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.nvme0n1.read_bps"}, ts, ioRead*0.25)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.nvme0n1.write_bps"}, ts, ioWrite*0.15)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.loop2.read_bps"}, ts, ioRead*0.05)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.loop2.write_bps"}, ts, ioWrite*0.08)
 	}
 
 	// hostCPUPct is already a sum of host-share percentages (see the loop
@@ -577,6 +585,22 @@ func (g *Generator) DiskMetas() map[string]unraid.DiskMeta {
 		out[d.name] = unraid.DiskMeta{Device: d.device, Kind: unraid.DiskKind(d.name, d.device, d.rotational, true)}
 	}
 	return out
+}
+
+// DeviceLabels is DiskMetas' device-LABEL analogue, for the storage
+// panel's Live IO rows rather than Storage's disk cards: the container
+// IO loop above (Tick) writes a "loop2" device for every fake
+// container, standing in for docker's own image-file-backed storage on
+// a real Unraid box. unraid.ResolveDeviceLabel resolves a real loop
+// device's friendly label by reading its /sys/block/<dev>/loop/
+// backing_file -- a real host filesystem fake-data mode never has, so
+// this hands main wiring the SAME answer that read would produce on a
+// real box, as a small, fixed override keyed by device name (unlike
+// DiskMetas' slot-keyed join, which the real ResolveDeviceLabel path
+// already applies unchanged to this generator's own disks -- see
+// buildContainerStorage's own doc for how the two merge).
+func (g *Generator) DeviceLabels() map[string]unraid.DeviceLabel {
+	return map[string]unraid.DeviceLabel{"loop2": {Label: "docker.img"}}
 }
 
 // Run ticks until ctx is done. clock defaults to time.Now when nil.

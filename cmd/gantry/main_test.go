@@ -333,12 +333,14 @@ func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 	fakeMetas := func() []docker.Meta {
 		return []docker.Meta{{Name: "db", State: "running"}} // running unconditionally, per buildSnapshot's own entity-level contract
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -449,20 +451,89 @@ func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
 		}, true
 	}
 	poolSlots := func() []string { return []string{"cache"} }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
 
 	live := store.NewLive(8)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.read_bps"}, 1000, 123.5)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.write_bps"}, 1000, 45)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, 1000, 4.2) // must not leak into devices
 
-	dto, ok := containerStorage(lookupMeta, poolSlots, live, "jellyfin", 1000)
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, nil, "/unused", live, "jellyfin", 1000)
 	require.True(t, ok)
 
 	require.Equal(t, []server.MountDTO{
 		{Source: "/mnt/user/appdata/jellyfin", Destination: "/config", RW: true, Storage: server.StorageRefDTO{Kind: "share", Name: "appdata"}},
 		{Source: "/mnt/cache/transcode", Destination: "/tmp", RW: true, Storage: server.StorageRefDTO{Kind: "pool", Name: "cache"}},
 	}, dto.Mounts)
-	require.Equal(t, []server.DeviceIODTO{{Device: "sda", ReadBps: 123.5, WriteBps: 45}}, dto.Devices)
+	require.Equal(t, []server.DeviceIODTO{{Device: "sda", Label: "sda", ReadBps: 123.5, WriteBps: 45}}, dto.Devices)
+}
+
+// TestContainerStorageResolvesDeviceLabelsViaDiskMetaJoinAndFakeOverlay
+// pins the label-resolution wiring containerStorage adds on top of
+// deviceIOFromSamples' bare device rows: a device diskMeta places in a
+// known slot picks up that slot's name (the real-collector path, sysRoot
+// unused for it), a device fakeDiskMeta adds joins the SAME way (proving
+// the real+fake merge actually happens before the join, not after), and
+// a device fakeDeviceLabels names directly wins outright even though
+// diskMeta/sysRoot would have resolved (or failed to resolve) it some
+// other way -- the one override this collector's own DiskMeta join can
+// never produce on its own (see fake.Generator.DeviceLabels' own doc).
+func TestContainerStorageResolvesDeviceLabelsViaDiskMetaJoinAndFakeOverlay(t *testing.T) {
+	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "jellyfin"}, true }
+	poolSlots := func() []string { return nil }
+	diskMeta := func() map[string]unraid.DiskMeta {
+		return map[string]unraid.DiskMeta{"disk1": {Device: "sdc", Kind: "hdd"}}
+	}
+	fakeDiskMeta := func() map[string]unraid.DiskMeta {
+		return map[string]unraid.DiskMeta{"rocket_pool": {Device: "nvme0n1", Kind: "nvme"}}
+	}
+	fakeDeviceLabels := func() map[string]unraid.DeviceLabel {
+		return map[string]unraid.DeviceLabel{"loop2": {Label: "docker.img"}}
+	}
+
+	live := store.NewLive(8)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sdc.read_bps"}, 1000, 1)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.nvme0n1.read_bps"}, 1000, 2)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.loop2.read_bps"}, 1000, 3)
+
+	dto, ok := containerStorage(lookupMeta, poolSlots, diskMeta, fakeDiskMeta, fakeDeviceLabels, "/unused", live, "jellyfin", 1000)
+	require.True(t, ok)
+
+	byDevice := map[string]server.DeviceIODTO{}
+	for _, d := range dto.Devices {
+		byDevice[d.Device] = d
+	}
+	require.Equal(t, "disk1", byDevice["sdc"].Label, "the real collector's own diskMeta must still join")
+	require.Equal(t, "hdd", byDevice["sdc"].Kind)
+	require.Equal(t, "rocket_pool", byDevice["nvme0n1"].Label, "fakeDiskMeta must merge into the SAME join, not bypass it")
+	require.Equal(t, "nvme", byDevice["nvme0n1"].Kind)
+	require.Equal(t, "docker.img", byDevice["loop2"].Label, "fakeDeviceLabels overrides outright for a device the join can't cover")
+	require.Equal(t, "", byDevice["loop2"].Kind)
+}
+
+// TestContainerStorageThreadsSysRootIntoDeviceLabelResolution pins that
+// containerStorage's sysRoot parameter is the one ResolveDeviceLabel's
+// loop branch actually reads -- a real (non-fake) loop device resolves
+// its friendly label only when sysRoot points at the fixture tree
+// carrying its backing_file.
+func TestContainerStorageThreadsSysRootIntoDeviceLabelResolution(t *testing.T) {
+	sysRoot := t.TempDir()
+	// Mirrors a real /sys/block/loop0/loop/backing_file -- see unraid.
+	// ResolveDeviceLabel's own doc for the exact path this reads.
+	loopDir := filepath.Join(sysRoot, "block", "loop0", "loop")
+	require.NoError(t, os.MkdirAll(loopDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(loopDir, "backing_file"), []byte("/mnt/user/system/docker/docker.img\n"), 0o644))
+
+	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "jellyfin"}, true }
+	poolSlots := func() []string { return nil }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+
+	live := store.NewLive(8)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.loop0.read_bps"}, 1000, 1)
+
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, nil, sysRoot, live, "jellyfin", 1000)
+	require.True(t, ok)
+	require.Equal(t, "docker.img", dto.Devices[0].Label)
 }
 
 // TestContainerStorageUnknownContainerReturnsFalse pins the not-found
@@ -471,8 +542,9 @@ func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
 func TestContainerStorageUnknownContainerReturnsFalse(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
 	poolSlots := func() []string { return nil }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
 
-	_, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "ghost", 0)
+	_, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, nil, "/unused", store.NewLive(8), "ghost", 0)
 	require.False(t, ok)
 }
 
@@ -483,8 +555,9 @@ func TestContainerStorageUnknownContainerReturnsFalse(t *testing.T) {
 func TestContainerStorageEmptyMountsAndDevicesAreNonNilSlices(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "bare"}, true }
 	poolSlots := func() []string { return nil }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
 
-	dto, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "bare", 0)
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, nil, "/unused", store.NewLive(8), "bare", 0)
 	require.True(t, ok)
 	require.NotNil(t, dto.Mounts)
 	require.Empty(t, dto.Mounts)
@@ -555,7 +628,7 @@ func TestBuildContainerStorageUnknownReturnsFalse(t *testing.T) {
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 
-	_, ok := buildContainerStorage(dc, ur, st, nil)("ghost")
+	_, ok := buildContainerStorage(dc, ur, st, nil, nil, nil, "/unused")("ghost")
 	require.False(t, ok)
 }
 
@@ -578,7 +651,7 @@ func TestBuildContainerStorageMergesFakeMetas(t *testing.T) {
 		}}
 	}
 
-	dto, ok := buildContainerStorage(dc, ur, st, fakeMetas)("frigate")
+	dto, ok := buildContainerStorage(dc, ur, st, fakeMetas, nil, nil, "/unused")("frigate")
 
 	require.True(t, ok, "a fake-mode container must resolve via fakeMetas, not 404")
 	require.Equal(t, []server.MountDTO{
@@ -596,7 +669,7 @@ func TestBuildContainerStorageNilFakeMetasUnaffected(t *testing.T) {
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 
-	_, ok := buildContainerStorage(dc, ur, st, nil)("ghost")
+	_, ok := buildContainerStorage(dc, ur, st, nil, nil, nil, "/unused")("ghost")
 	require.False(t, ok)
 }
 

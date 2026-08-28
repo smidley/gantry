@@ -89,14 +89,19 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// the store, never touching dc's registry, and disks.go's own
 	// unraid.Collector similarly never sees a real disks.ini in fake
 	// mode). fakeDiskMeta mirrors fakeMetas' shape for disk device/type
-	// metadata (see fake.Generator.DiskMetas' own doc).
+	// metadata (see fake.Generator.DiskMetas' own doc); fakeDeviceLabels
+	// is buildContainerStorage's own analogue, for the one device kind
+	// fakeDiskMeta's join can't cover (see fake.Generator.DeviceLabels'
+	// own doc).
 	var fakeMetas func() []docker.Meta
 	var fakeDiskMeta func() map[string]unraid.DiskMeta
+	var fakeDeviceLabels func() map[string]unraid.DeviceLabel
 	if cfg.Bool("fake_data", false) {
 		log.Println("fake data mode: synthesizing a demo fleet")
 		fk := fake.New(st, st, time.Now().UnixNano())
 		fakeMetas = fk.Metas
 		fakeDiskMeta = fk.DiskMetas
+		fakeDeviceLabels = fk.DeviceLabels
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -223,7 +228,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Live:       live,
 		Current:    func() []byte { b, _ := json.Marshal(snapshotFn()); return b },
 		Logs:       dc.StreamLogs,
-		Storage:    buildContainerStorage(dc, ur, st, fakeMetas),
+		Storage:    buildContainerStorage(dc, ur, st, fakeMetas, fakeDiskMeta, fakeDeviceLabels, sysRoot),
 		Settings:   settingsAdapter{st: st, cfg: cfg},
 	}).ListenAndServe(runCtx)
 	cancel()
@@ -466,8 +471,25 @@ func buildContainersList(dc *docker.Collector, fakeMetas func() []docker.Meta) f
 // Storage -- like buildContainersList/buildSnapshot, dc.LookupByName
 // falls back to fakeMetas' synthetic fleet when GANTRY_FAKE_DATA=1, so a
 // fake container's storage panel resolves instead of 404ing (nil in
-// real mode).
-func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store.Store, fakeMetas func() []docker.Meta) func(name string) (server.StorageDTO, bool) {
+// real mode). fakeDiskMeta/fakeDeviceLabels are the same fake-data
+// overlay convention buildSnapshot's own DiskMeta merge uses (real
+// first, fake entries layered on top): fakeDiskMeta lets a fake
+// container's device rows join the demo fleet's own slot names (e.g.
+// nvme0n1 -> rocket_pool) through the exact same unraid.
+// ResolveDeviceLabel path a real box uses; fakeDeviceLabels covers the
+// one thing that path can't fake at all -- a loop device's backing_file
+// lives on a real host filesystem fake-data mode never has -- see fake.
+// Generator.DeviceLabels' own doc. sysRoot is threaded straight through
+// to ResolveDeviceLabel, unused by every other call in this function.
+func buildContainerStorage(
+	dc *docker.Collector,
+	ur *unraid.Collector,
+	st *store.Store,
+	fakeMetas func() []docker.Meta,
+	fakeDiskMeta func() map[string]unraid.DiskMeta,
+	fakeDeviceLabels func() map[string]unraid.DeviceLabel,
+	sysRoot string,
+) func(name string) (server.StorageDTO, bool) {
 	lookup := dc.LookupByName
 	if fakeMetas != nil {
 		lookup = func(name string) (docker.Meta, bool) {
@@ -483,11 +505,21 @@ func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store
 		}
 	}
 	return func(name string) (server.StorageDTO, bool) {
-		return containerStorage(lookup, ur.Slots, st.Live(), name, time.Now().Unix())
+		return containerStorage(lookup, ur.Slots, ur.DiskMeta, fakeDiskMeta, fakeDeviceLabels, sysRoot, st.Live(), name, time.Now().Unix())
 	}
 }
 
-func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots func() []string, live *store.Live, name string, now int64) (server.StorageDTO, bool) {
+func containerStorage(
+	lookupMeta func(string) (docker.Meta, bool),
+	poolSlots func() []string,
+	diskMeta func() map[string]unraid.DiskMeta,
+	fakeDiskMeta func() map[string]unraid.DiskMeta,
+	fakeDeviceLabels func() map[string]unraid.DeviceLabel,
+	sysRoot string,
+	live *store.Live,
+	name string,
+	now int64,
+) (server.StorageDTO, bool) {
 	meta, ok := lookupMeta(name)
 	if !ok {
 		return server.StorageDTO{}, false
@@ -505,7 +537,28 @@ func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots fun
 		})
 	}
 
+	// meta (real) first, fakeDiskMeta's overlay on top -- same merge
+	// order/rationale as buildSnapshot's own disk_meta assembly.
+	knownDevices := diskMeta()
+	if fakeDiskMeta != nil {
+		for slot, m := range fakeDiskMeta() {
+			knownDevices[slot] = m
+		}
+	}
+
 	devices := deviceIOFromSamples(live.LatestByMetricPrefix("container", name, "live:io."), now)
+	var fakeLabels map[string]unraid.DeviceLabel
+	if fakeDeviceLabels != nil {
+		fakeLabels = fakeDeviceLabels()
+	}
+	for i := range devices {
+		label := unraid.ResolveDeviceLabel(devices[i].Device, sysRoot, knownDevices)
+		if override, ok := fakeLabels[devices[i].Device]; ok {
+			label = override
+		}
+		devices[i].Label, devices[i].Kind = label.Label, label.Kind
+	}
+
 	return server.StorageDTO{Mounts: mounts, Devices: devices}, true
 }
 

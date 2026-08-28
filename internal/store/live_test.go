@@ -69,6 +69,45 @@ func TestLiveSnapshotLatestEmptyWhenNoSeries(t *testing.T) {
 	require.Empty(t, l.SnapshotLatest())
 }
 
+// TestLiveLatestByMetricPrefix pins the per-container storage endpoint's
+// per-device IO lookup: only rings matching kind+entity AND whose metric
+// starts with prefix come back, keyed by their full (unstripped) metric
+// name -- stripping the "live:io." prefix and the device name out of
+// that key is the handler's job (see api_storage.go), not this
+// accessor's.
+func TestLiveLatestByMetricPrefix(t *testing.T) {
+	l := NewLive(8)
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "live:io.sda.read_bps"}, 100, 10.0)
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "live:io.sda.read_bps"}, 102, 20.0) // latest wins
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "live:io.sda.write_bps"}, 100, 5.0)
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "cpu.pct"}, 100, 99.0)             // wrong prefix
+	l.Record(SeriesKey{Kind: "container", Entity: "other", Metric: "live:io.sda.read_bps"}, 100, 1) // wrong entity
+	l.Record(SeriesKey{Kind: "disk", Entity: "web", Metric: "live:io.sda.read_bps"}, 100, 1)        // wrong kind
+
+	got := l.LatestByMetricPrefix("container", "web", "live:io.")
+
+	require.Equal(t, map[string]Sample{
+		"live:io.sda.read_bps":  {TS: 102, Val: 20.0},
+		"live:io.sda.write_bps": {TS: 100, Val: 5.0},
+	}, got)
+}
+
+// TestLiveLatestByMetricPrefixEmptyWhenNoMatch pins the no-match shape:
+// an empty-but-non-nil map, matching SnapshotLatest's own convention,
+// rather than nil -- a caller that immediately ranges over the result
+// (as the storage handler does) needs no nil check either way, but
+// staying consistent with the rest of this type avoids a surprise for
+// any test that asserts NotNil.
+func TestLiveLatestByMetricPrefixEmptyWhenNoMatch(t *testing.T) {
+	l := NewLive(8)
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "cpu.pct"}, 100, 1.0)
+
+	got := l.LatestByMetricPrefix("container", "web", "live:io.")
+
+	require.NotNil(t, got)
+	require.Empty(t, got)
+}
+
 func TestLiveEvict(t *testing.T) {
 	l := NewLive(8)
 	k1 := SeriesKey{Kind: "container", Entity: "app1", Metric: "cpu"}

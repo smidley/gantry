@@ -89,10 +89,31 @@ func (c *Collector) tickDisks(now time.Time) {
 	}
 	sort.Strings(slots)
 
+	c.recordSlots(slots, kv)
+
 	ts := now.Unix()
 	for _, slot := range slots {
 		c.tickOneDisk(slot, kv[slot], ts)
 	}
+}
+
+// recordSlots classifies every slot by its "type" field ("Cache" -> pool;
+// anything else -- "Data", "Parity", "Flash", absent, or unrecognized --
+// is not a pool) and stores the list for Slots(). slots is already
+// sorted, so the output list stays sorted too. Runs regardless of a
+// slot's present/DISK_NP status: an empty bay is still a known part of
+// the fleet, unlike tickOneDisk's metrics (which have nothing
+// meaningful to report for a slot with no filesystem).
+func (c *Collector) recordSlots(slots []string, kv map[string]map[string]string) {
+	var pools []string
+	for _, slot := range slots {
+		if kv[slot]["type"] == "Cache" {
+			pools = append(pools, slot)
+		}
+	}
+	c.mu.Lock()
+	c.poolSlots = pools
+	c.mu.Unlock()
 }
 
 func (c *Collector) tickOneDisk(slot string, disk map[string]string, ts int64) {

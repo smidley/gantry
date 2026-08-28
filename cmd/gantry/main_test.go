@@ -421,6 +421,178 @@ func TestBuildContainersListNilFakeMetasUnaffected(t *testing.T) {
 // stand-in, without needing a real docker.Collector/daemon.
 func fakeMeta(name string) docker.Meta { return docker.Meta{Name: name} }
 
+// TestContainerStorageResolvesMountsAndDeviceIO pins containerStorage's
+// full happy path: a hand-built lookupMeta/poolSlots pair (no real
+// docker.Collector registry or daemon needed, the same reason
+// containerFrameEntities takes lookupByName as a parameter) plus a bare
+// *store.Live carrying this container's live:io.* samples -- proving the
+// mount->storage resolution and the per-device rate assembly both land
+// in the DTO correctly.
+func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
+	lookupMeta := func(name string) (docker.Meta, bool) {
+		if name != "jellyfin" {
+			return docker.Meta{}, false
+		}
+		return docker.Meta{
+			Name: "jellyfin",
+			Mounts: []docker.MountInfo{
+				{Source: "/mnt/user/appdata/jellyfin", Destination: "/config", RW: true},
+				{Source: "/mnt/cache/transcode", Destination: "/tmp", RW: true},
+			},
+		}, true
+	}
+	poolSlots := func() []string { return []string{"cache"} }
+
+	live := store.NewLive(8)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.read_bps"}, 1000, 123.5)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.write_bps"}, 1000, 45)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, 1000, 4.2) // must not leak into devices
+
+	dto, ok := containerStorage(lookupMeta, poolSlots, live, "jellyfin", 1000)
+	require.True(t, ok)
+
+	require.Equal(t, []server.MountDTO{
+		{Source: "/mnt/user/appdata/jellyfin", Destination: "/config", RW: true, Storage: server.StorageRefDTO{Kind: "share", Name: "appdata"}},
+		{Source: "/mnt/cache/transcode", Destination: "/tmp", RW: true, Storage: server.StorageRefDTO{Kind: "pool", Name: "cache"}},
+	}, dto.Mounts)
+	require.Equal(t, []server.DeviceIODTO{{Device: "sda", ReadBps: 123.5, WriteBps: 45}}, dto.Devices)
+}
+
+// TestContainerStorageUnknownContainerReturnsFalse pins the not-found
+// path: lookupMeta reporting false must surface as ok=false, exactly
+// docker.Collector.LookupByName's own shape.
+func TestContainerStorageUnknownContainerReturnsFalse(t *testing.T) {
+	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
+	poolSlots := func() []string { return nil }
+
+	_, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "ghost", 0)
+	require.False(t, ok)
+}
+
+// TestContainerStorageEmptyMountsAndDevicesAreNonNilSlices pins the
+// nil-vs-empty shape a bare container (no mounts, no live IO samples
+// yet) must produce: [] in the wire JSON, not null -- see
+// StorageDTO's own doc on why the server package cares about this.
+func TestContainerStorageEmptyMountsAndDevicesAreNonNilSlices(t *testing.T) {
+	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "bare"}, true }
+	poolSlots := func() []string { return nil }
+
+	dto, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "bare", 0)
+	require.True(t, ok)
+	require.NotNil(t, dto.Mounts)
+	require.Empty(t, dto.Mounts)
+	require.NotNil(t, dto.Devices)
+	require.Empty(t, dto.Devices)
+}
+
+// TestDeviceIOFromSamplesCombinesReadAndWriteZeroFillingTheMissingHalf
+// pins deviceIOFromSamples' per-device assembly directly: two devices,
+// one with both rates, one with only a write sample (its read RateTracker
+// key hasn't produced a second reading yet -- see cgroupv2.go) -- the
+// latter must still appear, with ReadBps left at its zero value rather
+// than being dropped, and results come back sorted by device name.
+func TestDeviceIOFromSamplesCombinesReadAndWriteZeroFillingTheMissingHalf(t *testing.T) {
+	samples := map[string]store.Sample{
+		"live:io.sdb.write_bps": {TS: 100, Val: 10},
+		"live:io.sda.read_bps":  {TS: 100, Val: 20},
+		"live:io.sda.write_bps": {TS: 100, Val: 30},
+	}
+
+	got := deviceIOFromSamples(samples, 100)
+
+	require.Equal(t, []server.DeviceIODTO{
+		{Device: "sda", ReadBps: 20, WriteBps: 30},
+		{Device: "sdb", ReadBps: 0, WriteBps: 10},
+	}, got)
+}
+
+func TestDeviceIOFromSamplesEmptyWhenNoSamples(t *testing.T) {
+	got := deviceIOFromSamples(map[string]store.Sample{}, 100)
+	require.NotNil(t, got)
+	require.Empty(t, got)
+}
+
+// TestDeviceIOFromSamplesExcludesStaleSamples pins the stale-sample age cutoff.
+func TestDeviceIOFromSamplesExcludesStaleSamples(t *testing.T) {
+	now := int64(1000)
+	samples := map[string]store.Sample{
+		"live:io.sda.read_bps": {TS: now - containerFrameMaxAge, Val: 999},
+	}
+
+	got := deviceIOFromSamples(samples, now)
+
+	require.Empty(t, got, "a sample containerFrameMaxAge seconds old or older must not surface as a live device row")
+}
+
+// TestDeviceIOFromSamplesUnknownSuffixProducesNoRow pins that an unknown suffix fabricates no row.
+func TestDeviceIOFromSamplesUnknownSuffixProducesNoRow(t *testing.T) {
+	samples := map[string]store.Sample{
+		"live:io.sda.iops": {TS: 100, Val: 42},
+	}
+
+	got := deviceIOFromSamples(samples, 100)
+
+	require.Empty(t, got, "an unrecognized suffix must not fabricate a device row")
+}
+
+// TestBuildContainerStorageUnknownReturnsFalse is a thin wiring check
+// for buildContainerStorage itself (as opposed to containerStorage's
+// pure logic, exercised above): a real, never-ticked docker.Collector's
+// registry knows no names at all, so this proves the closure is wired
+// to dc.LookupByName/ur.Slots/st.Live() correctly without needing a
+// live daemon to populate a Meta.
+func TestBuildContainerStorageUnknownReturnsFalse(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+
+	_, ok := buildContainerStorage(dc, ur, st, nil)("ghost")
+	require.False(t, ok)
+}
+
+// TestBuildContainerStorageMergesFakeMetas pins the fix-round fix
+// (finding 1): fake-data mode's synthetic containers never touch dc's
+// registry (same reason buildContainersList/buildSnapshot each merge
+// fakeMetas), so without merging it here too, every fake container's
+// /storage route 404s -- lookupMeta must fall back to fakeMetas' entries
+// when dc's registry doesn't know the name.
+func TestBuildContainerStorageMergesFakeMetas(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{
+			Name:   "frigate",
+			Mounts: []docker.MountInfo{{Source: "/mnt/user/appdata/frigate", Destination: "/config", RW: true}},
+		}}
+	}
+
+	dto, ok := buildContainerStorage(dc, ur, st, fakeMetas)("frigate")
+
+	require.True(t, ok, "a fake-mode container must resolve via fakeMetas, not 404")
+	require.Equal(t, []server.MountDTO{
+		{Source: "/mnt/user/appdata/frigate", Destination: "/config", RW: true, Storage: server.StorageRefDTO{Kind: "share", Name: "appdata"}},
+	}, dto.Mounts)
+}
+
+// TestBuildContainerStorageNilFakeMetasUnaffected pins real-mode
+// behavior (GANTRY_FAKE_DATA unset): a nil fakeMetas must not change
+// buildContainerStorage's existing dc.LookupByName-only contract.
+func TestBuildContainerStorageNilFakeMetasUnaffected(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+
+	_, ok := buildContainerStorage(dc, ur, st, nil)("ghost")
+	require.False(t, ok)
+}
+
 // TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup pins the OR's
 // first clause: a name in `running` is included unconditionally — the
 // lookup function must not even be consulted for it (a call for this name

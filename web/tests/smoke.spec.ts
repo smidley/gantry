@@ -502,6 +502,68 @@ test('storage: every disk type badge is classified correctly (hdd/ssd/nvme/usb)'
   await expect(diskRow('flash')).toContainText('Boot (flash)');
 });
 
+// Status-colored values (thresholds.ts): disk2 is fake.go's own fixture
+// with baseUsed 0.71 -- just over disk.capacity's 70% warn threshold --
+// so its capacity number must render banded, not plain ink; disk4
+// (baseUsed 0.40) stays comfortably in-band and must stay plain ink,
+// proving this isn't just "every disk gets tinted".
+test('storage: a disk over the capacity threshold renders its number banded, one under it stays plain ink', async ({
+  page,
+}) => {
+  await page.goto('#/storage');
+
+  const diskRow = (name: string) =>
+    page.locator('.storage-disk').filter({ has: page.locator('.storage-disk__name', { hasText: new RegExp(`^${name}$`) }) });
+
+  const inkColor = await page.locator('.storage-disk__name').first().evaluate((el) => getComputedStyle(el).color);
+
+  const overThreshold = diskRow('disk2').locator('.storage-disk__usage-pct');
+  await expect(overThreshold).toBeVisible();
+  await expect(overThreshold).toContainText(/^7\d\.\d%$/); // ~71%, drifts slowly upward but stays in the 70s for any test run
+  const overColor = await overThreshold.evaluate((el) => getComputedStyle(el).color);
+  expect(overColor).not.toBe(inkColor);
+
+  const underThreshold = diskRow('disk4').locator('.storage-disk__usage-pct');
+  await expect(underThreshold).toBeVisible();
+  const underColor = await underThreshold.evaluate((el) => getComputedStyle(el).color);
+  expect(underColor).toBe(inkColor);
+});
+
+// Clickable events (eventHref, lib/eventHref.ts): mocked rather than
+// waiting on the fake generator's own real-time schedule (its first
+// event fires 2 real minutes into uptime) -- deterministic and instant,
+// and exercises the exact same rendering path a real event would.
+test('events: container/storage events are clickable and navigate; image/unknown stay plain rows', async ({ page }) => {
+  const now = Math.floor(Date.now() / 1000);
+  await page.route('**/api/events*', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { ID: 1, TS: now, Kind: 'container.start', Entity: 'jellyfin', Severity: 'info', Detail: '' },
+        { ID: 2, TS: now - 5, Kind: 'disk.errors', Entity: 'disk2', Severity: 'alert', Detail: 'errors 0 → 1' },
+        { ID: 3, TS: now - 10, Kind: 'image.pull', Entity: 'demo/paperless:latest', Severity: 'info', Detail: '' },
+      ]),
+    }),
+  );
+
+  await page.goto('#/events');
+
+  const containerRow = page.locator('.event-feed-item', { hasText: 'jellyfin' });
+  await expect(containerRow).toHaveAttribute('href', '#/containers/jellyfin');
+
+  const diskRow = page.locator('.event-feed-item', { hasText: 'disk.errors' });
+  await expect(diskRow).toHaveAttribute('href', '#/storage');
+
+  const imageRow = page.locator('.event-feed-item', { hasText: 'image.pull' });
+  await expect(imageRow).not.toHaveAttribute('href');
+  expect(await imageRow.evaluate((el) => el.tagName)).toBe('DIV');
+
+  await containerRow.click();
+  await expect(page).toHaveURL(/#\/containers\/jellyfin$/);
+  await expect(page.locator('h1.page-title')).toHaveText('jellyfin');
+});
+
 test('theme toggle flips data-theme and persists across reload', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'light' });
   await page.goto('#/');

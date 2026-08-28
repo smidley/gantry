@@ -3,15 +3,16 @@
   memory, network, IO, GPU per-engine, PSI -- the last three only when
   present), event markers, a metadata card, and its log viewer.
 
-  "Unknown container" is handled compositionally, not as one hard gate:
-  if the container isn't currently in the live frame, the header/
-  metadata show a muted "not currently running" note instead of
-  fabricating values, but the range picker and charts still render --
-  each chart already shows its own "no data" empty state when it has
-  nothing to plot, which for a truly never-seen name means every chart
-  (and the header note) agree there's nothing here, composing into the
-  same friendly outcome the brief asks for without a separate
-  is-this-name-real? pre-check.
+  "Unknown container" (isGone, below) replaces the whole charts grid
+  with one plain "no longer present" line instead of composing it from
+  five separate per-chart empty states -- clickable events (eventHref)
+  made a name that's since been fully removed a real, no-longer-rare way
+  to land here, and five stacked "No CPU/memory/network/... data" lines
+  for something that fundamentally isn't here read as broken rather than
+  graceful. The header's own muted "not currently running" chip and the
+  metadata card's em-dash fallbacks are untouched -- still compositional,
+  and still correct for the item-1 "stopped but known" case, where c is
+  defined (just Metrics-empty), so isGone never fires for it.
 -->
 <script>
   import { untrack } from 'svelte';
@@ -293,6 +294,15 @@
   let diskFrame = $derived(live.frame?.disks ?? {});
 
   let c = $derived(live.frame?.containers?.[name]);
+  // isGone: a confirmed "the registry has never heard of this name"
+  // reading (not just "the very first frame hasn't landed yet" -- see
+  // live.frameCount's own gate on the header's "Not currently running"
+  // chip above) -- eventHref is a NEW way to land on a name that's since
+  // been fully removed (an old event linking to a container long gone),
+  // where the composed per-chart "No X data" empty states below would
+  // otherwise stack five deep for something that fundamentally isn't
+  // here, rather than saying so once.
+  let isGone = $derived(!c && live.frameCount > 0);
   let frameTs = $derived(live.frame?.ts ?? 0);
   let startedAt = $derived(c?.metrics?.['meta.started_at']);
   let restarts = $derived(c?.metrics?.['meta.restart_count']);
@@ -344,6 +354,9 @@
     <p class="microlabel container-detail__loading">Loading…</p>
   {/if}
 
+  {#if isGone}
+    <p class="microlabel container-detail__gone">This container is no longer present.</p>
+  {:else}
   <div class="container-detail__charts">
     <div class="card container-detail__chart-card">
       <div class="container-detail__chart-head">
@@ -405,6 +418,7 @@
       </div>
     {/if}
   </div>
+  {/if}
 
   {#if storageData}
     <div class="card container-detail__storage">
@@ -549,6 +563,10 @@
     font-size: 0.78rem;
   }
   .container-detail__empty {
+    margin: 2rem 0;
+    text-align: center;
+  }
+  .container-detail__gone {
     margin: 2rem 0;
     text-align: center;
   }

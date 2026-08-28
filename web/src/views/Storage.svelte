@@ -17,6 +17,7 @@
   import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtRelTime } from '../lib/format';
   import { etaFromProgress, parityIsRunning, seqStep, sharesFromMetrics } from '../lib/metrics';
   import { diskKind, diskRole, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
+  import { band, bandToken } from '../lib/thresholds';
   import HealthDot from '../components/HealthDot.svelte';
 
   const EVENTS_POLL_MS = 30_000;
@@ -241,6 +242,8 @@
           {@const temp = diskTempState(metrics)}
           {@const usagePct = diskUsagePct(metrics)}
           {@const errors = metrics['errors'] ?? 0}
+          {@const tempTint = temp.kind === 'reading' ? bandToken(band(mediaType === 'nvme' ? 'disk.temp.nvme' : 'disk.temp', temp.celsius)) : undefined}
+          {@const usageTint = usagePct !== null ? bandToken(band('disk.capacity', usagePct)) : undefined}
           <div class="storage-disk">
             <div class="storage-disk__head">
               <span class="microlabel storage-disk__eyebrow">
@@ -252,7 +255,9 @@
                 {/if}
               </span>
               {#if temp.kind === 'reading'}
-                <span class="tabular-nums storage-disk__temp">{temp.celsius.toFixed(1)}&deg;C</span>
+                <span class="tabular-nums storage-disk__temp" style={tempTint ? `color: ${tempTint}` : undefined}
+                  >{temp.celsius.toFixed(1)}&deg;C</span
+                >
               {:else}
                 <span class="storage-disk__chip">{temp.kind === 'spun-down' ? 'Spun down' : 'No sensor'}</span>
               {/if}
@@ -267,7 +272,9 @@
                     style="width: {usagePct}%; background: {seqStep(usagePct)}; transition-duration: 150ms, {glideMs}ms"
                   ></div>
                 </div>
-                <span class="tabular-nums storage-disk__usage-pct">{fmtPct(usagePct)}</span>
+                <span class="tabular-nums storage-disk__usage-pct" style={usageTint ? `color: ${usageTint}` : undefined}
+                  >{fmtPct(usagePct)}</span
+                >
                 <span class="tabular-nums storage-disk__bytes">
                   {fmtBytes(metrics['fs.used_bytes'])} / {fmtBytes(metrics['fs.used_bytes'] + metrics['fs.free_bytes'])}
                 </span>

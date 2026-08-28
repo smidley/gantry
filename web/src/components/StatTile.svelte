@@ -45,6 +45,13 @@
   tile/row is; it just renders its own metric's value at the bus's
   shared ts whenever one is published, same as every other owner.
 
+  bandFor (additive, optional -- status-colored values, Scott: "colors of
+  numbers for metrics should reflect their status") classifies whatever's
+  CURRENTLY DISPLAYED (numberTween.current -- live or scrub-pinned alike)
+  into a Band, tinting the hero number accordingly; see its own doc below
+  for why the classifier itself is the caller's business, not this
+  component's.
+
   bare (additive, optional -- D2 Overview) swaps the card-chrome
   presentation for a borderless instrument-rail row: microlabel on the
   left, the big value with its optional value2 stacked directly beneath
@@ -65,6 +72,7 @@
   import { prefersReducedMotion } from 'svelte/motion';
   import { untrack } from 'svelte';
   import { fmtRelTime } from '../lib/format';
+  import { bandToken } from '../lib/thresholds';
   import { nearestPointAt } from '../lib/scrub';
   import { scrubBus } from '../lib/scrubbus.svelte';
   import { live as liveStore } from '../lib/sse.svelte';
@@ -107,6 +115,18 @@
     // undefined (every non-Overview caller) renders the plain <div> this
     // always was.
     href = undefined,
+    // bandFor (additive, optional -- status-colored values): a (value) =>
+    // Band classifier for the (unpaired) hero number, e.g.
+    // `(v) => band('host.cpu', v)` -- called with whatever's CURRENTLY
+    // DISPLAYED (numberTween.current, below), so a scrub-pinned reading
+    // gets the same banding a live one does, not the raw liveValue prop.
+    // The family itself stays the caller's own business (thresholds.ts),
+    // not StatTile's -- this component only ever knows Band -> color
+    // (bandToken). undefined (every metric thresholds.ts leaves
+    // deliberately unbanded) keeps plain ink. Ignored when the tile is
+    // paired (liveValue2 set): a directional pair's own tint always
+    // wins, and net/io/gpu are themselves deliberately unbanded anyway.
+    bandFor = undefined,
   } = $props();
 
   // scrubHit is null while live; {ts, value} whenever the shared bus has
@@ -178,6 +198,18 @@
   function pairedTint(colorVar) {
     return `color: color-mix(in oklab, ${colorVar} 70%, var(--ink) 30%)`;
   }
+
+  // valueStyle: paired's own tint wins outright (a directional pair is
+  // never also a banded metric -- thresholds.ts's own doc); otherwise
+  // bandFor(numberTween.current), when given -- reading the TWEEN, not
+  // liveValue directly, is what makes a scrub-pinned number band the
+  // same way a live one does; otherwise plain ink, the original default.
+  let valueStyle = $derived.by(() => {
+    if (paired) return pairedTint(sparklineColor);
+    if (!bandFor) return undefined;
+    const token = bandToken(bandFor(numberTween.current));
+    return token ? `color: ${token}` : undefined;
+  });
 </script>
 
 {#snippet valueBlock()}
@@ -210,7 +242,8 @@
         <span
           class="stat-tile__value"
           class:stat-tile__value--paired={paired}
-          style={paired ? pairedTint(sparklineColor) : undefined}>{@render valueBlock()}</span
+          class:stat-tile__value--tinted={!paired && !!valueStyle}
+          style={valueStyle}>{@render valueBlock()}</span
         >
         {#if liveValue2 !== undefined}
           <span class="stat-tile__value2 stat-tile__value2--paired tabular-nums" style={pairedTint(sparklineColor2)}
@@ -234,7 +267,9 @@
       {#if status}<HealthDot {status} />{/if}
     </div>
     <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
-    <div class="stat-tile__value">{@render valueBlock()}</div>
+    <div class="stat-tile__value" class:stat-tile__value--tinted={!paired && !!valueStyle} style={valueStyle}>
+      {@render valueBlock()}
+    </div>
     {#if liveValue2 !== undefined}
       <div class="stat-tile__value2 tabular-nums">{@render value2Block()}</div>
     {/if}
@@ -337,6 +372,11 @@
      inline color (an element's own explicit color always beats an
      inherited one, regardless of the ancestor's specificity). */
   .stat-tile__value--paired .stat-tile__number {
+    color: inherit;
+  }
+  /* bandFor (status-colored values): same `inherit` override, same
+     reason -- .stat-tile__number's own hardcoded ink would otherwise win. */
+  .stat-tile__value--tinted .stat-tile__number {
     color: inherit;
   }
   /* Compound (.stat-tile__value2 AND .stat-tile__value2--paired), not

@@ -53,6 +53,7 @@
   import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
   import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, fleetSentence, worstSeverity } from '../lib/overviewStatus';
+  import { band } from '../lib/thresholds';
 
   import StatTile from '../components/StatTile.svelte';
   import FleetStrip from '../components/FleetStrip.svelte';
@@ -464,6 +465,7 @@
           liveValue={host['cpu.total'] ?? 0}
           formatValue={fmtPct}
           sparklinePoints={cpuRing.points}
+          bandFor={(v) => band('host.cpu', v)}
         />
         <StatTile
           bare
@@ -472,6 +474,7 @@
           liveValue={host['mem.used_pct'] ?? 0}
           formatValue={fmtPct}
           sparklinePoints={memRing.points}
+          bandFor={(v) => band('host.mem', v)}
         />
         <StatTile
           bare

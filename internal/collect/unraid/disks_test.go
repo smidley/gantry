@@ -206,6 +206,53 @@ func TestTickDisksRealCaptureFromLiveUnraidBox(t *testing.T) {
 	require.InDelta(t, 58987806720.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "fs.free_bytes"}], 1e-6)
 }
 
+// TestSlotsBeforeFirstTick pins the pre-tick default: mirroring
+// Version(), the pool/disk slot accessor reports nothing known before
+// disks.ini has ever been read successfully, rather than panicking on a
+// nil map/slice.
+func TestSlotsBeforeFirstTick(t *testing.T) {
+	c := New(newFakeSink(), &fakeEvents{}, t.TempDir(), t.TempDir())
+	pools, disks := c.Slots()
+	require.Nil(t, pools)
+	require.Nil(t, disks)
+}
+
+// TestSlotsClassifiesPoolAndDiskSlotsFromRealFixture pins the fleet
+// knowledge the path->storage resolver depends on: disks.ini's per-slot
+// "type" field is the source of truth ("Cache" -> pool, "Data" -> disk),
+// not the slot's name -- rocket_pool proves this isn't a hardcoded
+// literal-"cache" special case, and parity/flash (types "Parity"/
+// "Flash") must not show up in either list since neither is ever a
+// container mount target.
+func TestSlotsClassifiesPoolAndDiskSlotsFromRealFixture(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "testdata/disks_real.ini", filepath.Join(dir, "disks.ini"))
+	c := New(newFakeSink(), &fakeEvents{}, dir, t.TempDir())
+
+	c.tickDisks(time.Unix(1000, 0))
+
+	pools, disks := c.Slots()
+	require.Equal(t, []string{"cache", "rocket_pool"}, pools)
+	require.Equal(t, []string{"disk1", "disk6", "disk9"}, disks)
+}
+
+// TestSlotsIgnoresSlotsWithNoTypeField pins the simplified (non-real)
+// disks.ini fixture's degrade path: none of its slots carry a "type"
+// key at all, so nothing should be classified as a pool or a disk --
+// this must not panic on a missing key, and must not misclassify by
+// falling back to the slot's name.
+func TestSlotsIgnoresSlotsWithNoTypeField(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "testdata/disks.ini", filepath.Join(dir, "disks.ini"))
+	c := New(newFakeSink(), &fakeEvents{}, dir, t.TempDir())
+
+	c.tickDisks(time.Unix(1000, 0))
+
+	pools, disks := c.Slots()
+	require.Nil(t, pools)
+	require.Nil(t, disks)
+}
+
 func TestTickDisksMissingFileDegradesSilently(t *testing.T) {
 	dir := t.TempDir()
 	sink := newFakeSink()

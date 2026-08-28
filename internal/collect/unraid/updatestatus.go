@@ -27,11 +27,27 @@ func NewUpdateStatusReader(path string) *UpdateStatusReader {
 	return &UpdateStatusReader{path: path}
 }
 
+// maxUpdateStatusFileSize caps how large a file Statuses will ever read
+// into memory. dockerMan's own file is a handful of KB even on a
+// fifty-container box (one small JSON object per image); anything past
+// this is either corruption or hostile (the file is bind-mounted in
+// from outside the container Statuses' caller runs in), and a bare
+// os.ReadFile has no size limit of its own to protect against either.
+const maxUpdateStatusFileSize = 4 << 20 // 4MB
+
 // Statuses returns the current image->status snapshot, or nil when the
-// file is absent, unreadable, or not valid JSON -- callers treat nil the
-// same as "no reader wired at all" (docker.Collector.UpdateStatuses'
-// default), so an absent file is a quiet feature-off, not an error.
+// file is absent, unreadable, larger than maxUpdateStatusFileSize, or
+// not valid JSON -- callers treat nil the same as "no reader wired at
+// all" (docker.Collector.UpdateStatuses' default), so an absent file is
+// a quiet feature-off, not an error.
 func (r *UpdateStatusReader) Statuses() map[string]string {
+	fi, err := os.Stat(r.path)
+	if err != nil {
+		return nil
+	}
+	if fi.Size() > maxUpdateStatusFileSize {
+		return nil
+	}
 	data, err := os.ReadFile(r.path)
 	if err != nil {
 		return nil

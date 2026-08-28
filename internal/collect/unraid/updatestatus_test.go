@@ -53,6 +53,20 @@ func TestUpdateStatusReaderStatusesMissingFile(t *testing.T) {
 	require.Nil(t, r.Statuses())
 }
 
+// TestUpdateStatusReaderStatusesBailsOnOversizedFile pins the size
+// guard: a file above maxUpdateStatusFileSize is never read at all
+// (Stat alone decides), degrading to nil the same as a missing file --
+// dockerMan's own file is a handful of KB per image, so anything this
+// large is corruption or hostile, not a real box's own data.
+func TestUpdateStatusReaderStatusesBailsOnOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unraid-update-status.json")
+	oversized := make([]byte, maxUpdateStatusFileSize+1)
+	require.NoError(t, os.WriteFile(path, oversized, 0o644))
+
+	r := NewUpdateStatusReader(path)
+	require.Nil(t, r.Statuses(), "a file above the size cap must never be read, not just fail to parse")
+}
+
 // TestUpdateStatusReaderStatusesReadsRealFile pins the ordinary case:
 // a real file on disk, parsed the same way ParseUpdateStatus's own
 // tests pin.

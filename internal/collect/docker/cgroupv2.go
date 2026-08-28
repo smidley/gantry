@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -234,8 +235,11 @@ func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 // then divides cores by HostCores() for a HOST-share percentage instead
 // -- the two numbers read on the same "% of this machine" scale as
 // cpu.total, rather than docker stats' inflated per-core one that reads
-// as if it exceeded the whole host. Skipped (like mem.pct below) when
-// HostCores() isn't known yet. cpu.throttled_pct keeps the old /10,000
+// as if it exceeded the whole host. HostCores() (the /proc/stat-derived,
+// cpuset-immune count) stays the primary source; a zero/unset reading
+// (not yet ticked, or never wired) falls back to runtime.NumCPU() as a
+// last resort so cpu.pct doesn't go blank fleet-wide until the host
+// collector's first tick. cpu.throttled_pct keeps the old /10,000
 // (Δusec/Δwall_usec×100): throttling has no host-wide analog to
 // normalize against.
 func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time) {
@@ -247,7 +251,11 @@ func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time)
 	if usecPerSec, ok := c.rates.Rate(name+".cpu.usage", now, float64(cg.CPUUsageUsec)); ok {
 		cores := usecPerSec / 1_000_000
 		c.sink.Record(key("cpu.cores"), ts, cores)
-		if hostCores := c.HostCores(); hostCores > 0 {
+		hostCores := c.HostCores()
+		if hostCores <= 0 {
+			hostCores = runtime.NumCPU()
+		}
+		if hostCores > 0 {
 			c.sink.Record(key("cpu.pct"), ts, cores/float64(hostCores)*100)
 		}
 	}

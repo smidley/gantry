@@ -3,6 +3,7 @@ package docker
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -330,7 +331,11 @@ func TestRecordContainerStatsCPUHostShareTwoCoresOnEightCoreHost(t *testing.T) {
 	require.InDelta(t, 25.0, pct, 1e-9)
 }
 
-func TestRecordContainerStatsSkipsCPUPctWhenHostCoresZero(t *testing.T) {
+// TestRecordContainerStatsFallsBackToNumCPUWhenHostCoresZero pins the
+// last-resort fallback: a zero HostCores() (host collector hasn't ticked
+// yet, or was never wired) must not leave cpu.pct blank fleet-wide --
+// runtime.NumCPU() stands in as the denominator instead.
+func TestRecordContainerStatsFallsBackToNumCPUWhenHostCoresZero(t *testing.T) {
 	sink := newFakeSink()
 	c := newStatsCollector(sink)
 	c.HostCores = func() int { return 0 }
@@ -338,12 +343,13 @@ func TestRecordContainerStatsSkipsCPUPctWhenHostCoresZero(t *testing.T) {
 	c.recordContainerStats("web", cgStats{CPUUsageUsec: 1_000_000}, time.Unix(1000, 0))
 	c.recordContainerStats("web", cgStats{CPUUsageUsec: 3_000_000}, time.Unix(1002, 0))
 
-	_, ok := sink.value("web", "cpu.pct")
-	require.False(t, ok, "host-share has no denominator to divide by yet")
-
 	cores, ok := sink.value("web", "cpu.cores")
 	require.True(t, ok, "cpu.cores needs no host core count, so it must still be emitted")
 	require.InDelta(t, 1.0, cores, 1e-9)
+
+	pct, ok := sink.value("web", "cpu.pct")
+	require.True(t, ok, "cpu.pct must fall back to runtime.NumCPU() rather than go blank")
+	require.InDelta(t, cores/float64(runtime.NumCPU())*100, pct, 1e-9)
 }
 
 func TestRecordContainerStatsSkipsMemPctWhenMemTotalZero(t *testing.T) {

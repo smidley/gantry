@@ -33,7 +33,9 @@ const (
 // code overrides MemTotal/HostCores/DeviceName with the host collector's
 // own methods so mem.pct, cpu.pct's host-share conversion, and per-device
 // io attribution all work. Until overridden they degrade silently (mem.pct
-// and cpu.pct skipped, no device named) rather than error.
+// skipped, no device named) rather than error; cpu.pct is the exception --
+// it falls back to runtime.NumCPU() rather than go blank (see
+// recordContainerStats' own doc in cgroupv2.go).
 type Collector struct {
 	cli      *client.Client
 	sink     store.MetricSink

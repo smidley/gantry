@@ -25,6 +25,19 @@
   formatSecondary (additive, optional): passed straight through to every
   row -- see TopBarRow's own doc for what it renders and when.
 
+  metricKey (additive, optional, default '' -- fixes a real bug: switching
+  the Top Consumers resource tab left a row showing the PRIOR resource's
+  value, tweening oddly toward the new one instead of reading correctly):
+  folded into the {#each} block's own key alongside row.entity below.
+  Without it, an entity present on more than one resource's leaderboard
+  (a container that's simultaneously top-5 on CPU AND memory, say) keeps
+  the SAME TopBarRow instance -- and therefore the same Tween, mid-glide
+  toward the OLD metric's value -- across a resource switch, since the
+  key only ever recognized entity identity, never metric identity. Every
+  caller that can switch resource (TopConsumers, Overview's compact
+  module) passes its own current resource; a caller with a fixed,
+  never-switching resource can leave this at its default -- entity alone
+  is a perfectly stable key there.
   scaleMax (additive, optional): the denominator a bar's width reads
   against. Given (cpu/gpu's fixed 100, mem's derived host-total-bytes --
   see topFromFrame's resourceScaleMax), every row's bar reads as an
@@ -46,6 +59,7 @@
     emptyMessage = 'No data for this window yet.',
     live = false,
     scaleMax = undefined,
+    metricKey = '',
   } = $props();
 
   let maxValue = $derived(scaleMax ?? rows.reduce((m, r) => Math.max(m, r.value), 0));
@@ -55,7 +69,7 @@
   <p class="microlabel top-bar-list__empty">{emptyMessage}</p>
 {:else}
   <ol class="top-bar-list">
-    {#each rows as row (row.entity)}
+    {#each rows as row (`${row.entity}::${metricKey}`)}
       <TopBarRow {row} {maxValue} {formatValue} {formatSecondary} {linkFor} {live} />
     {/each}
   </ol>

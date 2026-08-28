@@ -176,6 +176,7 @@
         {emptyMessage}
         live={windowKey === 'now'}
         scaleMax={resourceScaleMax(resource, live.frame)}
+        metricKey={resource}
       />
     {/if}
   </div>

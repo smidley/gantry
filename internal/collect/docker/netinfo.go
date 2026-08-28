@@ -11,7 +11,10 @@ import (
 // name and (when the network assigns one) this container's own IP on
 // it. A macvlan (br0-style) network's own LAN IP comes through exactly
 // like any other network's -- inspect reports it the same way, so there
-// is nothing else to special-case.
+// is nothing else to special-case. IP prefers the endpoint's IPv4
+// address, falling back to its IPv6 one (GlobalIPv6Address) only when
+// no IPv4 address is assigned at all -- a v6-only network still gets a
+// usable address here instead of reading as unassigned.
 type NetworkInfo struct {
 	Name string
 	IP   string
@@ -47,6 +50,9 @@ func extractNetworks(hostNet bool, ns *container.NetworkSettings) []NetworkInfo 
 		n := NetworkInfo{Name: name}
 		if ep != nil {
 			n.IP = ep.IPAddress
+			if n.IP == "" {
+				n.IP = ep.GlobalIPv6Address
+			}
 		}
 		out = append(out, n)
 	}

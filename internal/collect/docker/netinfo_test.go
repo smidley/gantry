@@ -58,6 +58,33 @@ func TestExtractNetworksNilEndpoint(t *testing.T) {
 	require.Equal(t, []NetworkInfo{{Name: "bridge"}}, got)
 }
 
+// TestExtractNetworksIPv6OnlyFallsBackToGlobalIPv6Address pins the v6
+// fallback: a network that assigns this container no IPv4 address at
+// all (IPAddress "") but does assign a v6 one must still surface a
+// usable IP, rather than reading as unassigned the way it did before
+// GlobalIPv6Address was consulted at all.
+func TestExtractNetworksIPv6OnlyFallsBackToGlobalIPv6Address(t *testing.T) {
+	got := extractNetworks(false, &container.NetworkSettings{
+		Networks: map[string]*network.EndpointSettings{
+			"v6only": {GlobalIPv6Address: "2001:db8::1"},
+		},
+	})
+	require.Equal(t, []NetworkInfo{{Name: "v6only", IP: "2001:db8::1"}}, got)
+}
+
+// TestExtractNetworksDualStackPrefersIPv4 pins the priority half of the
+// same fallback: when an endpoint carries both, IPv4 wins and the v6
+// address is simply not surfaced (NetworkInfo has room for one IP, not
+// both).
+func TestExtractNetworksDualStackPrefersIPv4(t *testing.T) {
+	got := extractNetworks(false, &container.NetworkSettings{
+		Networks: map[string]*network.EndpointSettings{
+			"bridge": {IPAddress: "172.17.0.2", GlobalIPv6Address: "2001:db8::2"},
+		},
+	})
+	require.Equal(t, []NetworkInfo{{Name: "bridge", IP: "172.17.0.2"}}, got)
+}
+
 // TestExtractPortsNilSettings pins the defensive nil-NetworkSettings
 // case alongside "no ports at all".
 func TestExtractPortsNilSettings(t *testing.T) {

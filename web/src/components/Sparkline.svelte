@@ -1,14 +1,27 @@
 <!--
-  Sparkline: a minimal uPlot line, 1 series, no axes, fixed 28px height --
+  Sparkline: a minimal uPlot line, 1-2 series, no axes, fixed 28px height --
   used inline in StatTile/table cells, never as a standalone chart.
+
+  points2/color2 (additive, optional -- dual-line directional charts):
+  a second series for a directional pair (down/up, read/write) sharing
+  this one small chart, per dataviz's own "color follows entity" rule
+  generalized to a metric's own fixed direction -- down/read always
+  --series-1, up/write always --series-2, app-wide. Kept genuinely
+  lightweight: the single-series path (points2 absent, by far the common
+  case -- every table-cell/leaderboard sparkline in this app) pays none
+  of the second series' own alignment cost.
 -->
 <script>
   import uPlot from 'uplot';
   import { onDestroy, onMount } from 'svelte';
   import { theme, resolveToken, withAlpha } from '../lib/theme.svelte';
   import { needsRebuild } from '../lib/chartRebuild';
-  import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
+  import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC } from '../lib/streamdriver';
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
+  // Renamed to liveStore on import only because this component's own
+  // `live` prop (the animate-or-not flag) already owns that name -- same
+  // aliasing TopBarRow.svelte uses for the identical reason.
+  import { live as liveStore } from '../lib/sse.svelte';
   import { nearestPointAt, tsAtFraction } from '../lib/scrub';
   import { scrubBus } from '../lib/scrubbus.svelte';
   import { prefersReducedMotion } from 'svelte/motion';
@@ -18,7 +31,8 @@
   // no historical/fetched Sparkline usage today, unlike TimeChart, which
   // is why that component requires an explicit opt-in instead. See its
   // own doc for the full mechanism 1+2 rationale this mirrors.
-  let { points = [], color = 'var(--series-1)', live = true, height = 28 } = $props();
+  let { points = [], color = 'var(--series-1)', points2 = undefined, color2 = 'var(--series-2)', live = true, height = 28 } =
+    $props();
 
   let el;
   let chart = null;
@@ -26,33 +40,64 @@
 
   // prevShape is the last-built chart's structural shape -- see
   // lib/chartRebuild.ts and TimeChart's matching field for the full
-  // rationale. Sparkline's only structural input (besides theme) is its
-  // color prop, modeled as a single-series shape with a constant label so
-  // the same shared helper applies unchanged.
+  // rationale. Sparkline's own structural inputs (besides theme) are its
+  // color props and whether a second series is present at all -- a
+  // caller that starts passing/stops passing points2 (shouldn't happen
+  // in practice; every real call site's shape is fixed) still rebuilds
+  // correctly rather than silently keeping the old 1-series chart.
   let prevShape = null;
 
-  // alignedData/headState: Sparkline's single-series analogue of
-  // TimeChart's own pair (see that file's doc for the full rationale).
-  // alignedData stays the pristine last-real-points snapshot; headState
-  // is one {prevValue, targetValue, arrivalMs} record (or null before
-  // the first real point) rather than an array, since Sparkline only
-  // ever charts one series.
+  // alignedData/headState(2): Sparkline's own analogue of TimeChart's
+  // per-series array (see that file's doc for the full rationale), just
+  // two named slots instead of an array -- Sparkline never charts more
+  // than a directional pair. headState2 stays null whenever points2 is
+  // absent, the whole feature's normal (and by far most common) case.
   let alignedData = null;
   let headState = null;
+  let headState2 = null;
 
-  function toData(pts) {
-    return [pts.map((p) => p[0]), pts.map((p) => p[1])];
+  // toData builds uPlot's [xs, ys] (or [xs, ys, ys2]) shape. The 1-series
+  // path (points2 absent -- every table-cell/leaderboard sparkline in
+  // this app) stays the cheap direct map it always was; only a genuine
+  // second series pays for aligning two independently-pushed rings onto
+  // one shared x-axis (uPlot requires it), the same union-of-timestamps,
+  // null-fill-the-gaps approach TimeChart's own buildAlignedData uses --
+  // in practice the two rings tick in lockstep (same SSE frame, same ts,
+  // every push), so this almost always degenerates to a plain zip, but
+  // reads correctly even if one ring seeds with a slightly different
+  // span than the other during the brief startup window.
+  function toData(pts, pts2) {
+    if (!pts2) return [pts.map((p) => p[0]), pts.map((p) => p[1])];
+    const tsSet = new Set();
+    for (const [ts] of pts) tsSet.add(ts);
+    for (const [ts] of pts2) tsSet.add(ts);
+    const xs = Array.from(tsSet).sort((a, b) => a - b);
+    const idx = new Map(xs.map((ts, i) => [ts, i]));
+    const ys = new Array(xs.length).fill(null);
+    const ys2 = new Array(xs.length).fill(null);
+    for (const [ts, v] of pts) ys[idx.get(ts)] = v;
+    for (const [ts, v] of pts2) ys2[idx.get(ts)] = v;
+    return [xs, ys, ys2];
   }
 
-  // applyHeadState patches the tail of `data`'s y-array to its current
-  // eased value, MUTATING in place rather than returning a copy -- same
-  // "safe because alignedData is rebuilt wholesale before its next real
-  // read" contract as TimeChart's own version (see its doc), and the same
-  // per-tick array-clone this skips.
-  function applyHeadState(data, state, nowMs, durationMs = HEAD_EASE_MS) {
-    if (!state) return data;
-    const ys = data[1];
-    ys[ys.length - 1] = headValue(state.prevValue, state.targetValue, state.arrivalMs, nowMs, durationMs);
+  // applyHeadState patches the tail of `data`'s y-array (both series,
+  // when a second is present) to its current glided value, MUTATING in
+  // place rather than returning a copy -- same "safe because alignedData
+  // is rebuilt wholesale before its next real read" contract as
+  // TimeChart's own version (see its doc), and the same per-tick
+  // array-clone this skips. No durationMs parameter: each state's own
+  // durationMs (fixed at the instant advanceHeadState created that leg --
+  // see its doc) is what headValue must read, not whatever the driver's
+  // cadence estimate happens to be RIGHT NOW.
+  function applyHeadState(data, state, state2, nowMs) {
+    if (state) {
+      const ys = data[1];
+      ys[ys.length - 1] = headValue(state.prevValue, state.targetValue, state.arrivalMs, nowMs, state.durationMs);
+    }
+    if (state2 && data[2]) {
+      const ys2 = data[2];
+      ys2[ys2.length - 1] = headValue(state2.prevValue, state2.targetValue, state2.arrivalMs, nowMs, state2.durationMs);
+    }
     return data;
   }
 
@@ -60,10 +105,24 @@
     if (!el) return;
     chart?.destroy();
     // A rebuild (color/theme change) means the chart itself is brand
-    // new -- headState resetting to null makes the next tick treat the
-    // first post-rebuild value as a fresh, unanimated starting point.
+    // new -- headState(2) resetting to null makes the next tick treat
+    // the first post-rebuild value as a fresh, unanimated starting point.
     headState = null;
+    headState2 = null;
     const resolved = resolveToken(color);
+    const series = [
+      {},
+      {
+        stroke: resolved,
+        width: 2,
+        fill: withAlpha(resolved, 12),
+        points: { show: false },
+      },
+    ];
+    if (points2) {
+      const resolved2 = resolveToken(color2);
+      series.push({ stroke: resolved2, width: 2, points: { show: false } }); // no fill -- two overlapping fills read as noise, not signal
+    }
     chart = new uPlot(
       {
         width: el.clientWidth || 120,
@@ -73,17 +132,9 @@
         legend: { show: false },
         scales: { x: { time: false } },
         axes: [{ show: false }, { show: false }],
-        series: [
-          {},
-          {
-            stroke: resolved,
-            width: 2,
-            fill: withAlpha(resolved, 12),
-            points: { show: false },
-          },
-        ],
+        series,
       },
-      toData(points),
+      toData(points, points2),
       el,
     );
     // A rebuild's fresh uPlot instance has no idea where the bus's own
@@ -104,9 +155,13 @@
     // destroy+recreate-avoidance fix as TimeChart's matching effect.
     points;
     color;
+    points2;
+    color2;
     theme.resolved;
 
-    const shape = { series: [{ label: '', colorVar: color }], theme: theme.resolved, hasFormatValue: false };
+    const shapeSeries = [{ label: '', colorVar: color }];
+    if (points2) shapeSeries.push({ label: '', colorVar: color2 });
+    const shape = { series: shapeSeries, theme: theme.resolved, hasFormatValue: false };
     const rebuilding = !chart || needsRebuild(prevShape, shape);
     if (rebuilding) {
       build();
@@ -118,7 +173,12 @@
       // extra setData is a visual no-op there, and one code path stays
       // simpler than skipping it conditionally.
       const nowMs = Date.now();
-      const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
+      // durationMs is THIS arrival's own leg duration: the shared driver's
+      // freshly-measured cadence EMA (liveStore.glideMs), or 0 to snap
+      // under reduced motion -- see streamdriver.ts's "Cadence-driven
+      // glide" doc for why this varies per arrival instead of a fixed
+      // guess.
+      const durationMs = prefersReducedMotion.current ? 0 : liveStore.glideMs;
       // Always step the window here, not only under reduced motion: the
       // shared driver's own (far more frequent) tick is the ONLY other
       // place this gets set, and it's gated behind IntersectionObserver
@@ -134,11 +194,13 @@
       // beyond one extra identical assignment.
       const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
       chart.setScale('x', { min, max });
-      alignedData = toData(points);
+      alignedData = toData(points, points2);
       headState = points.length === 0 ? null : advanceHeadState(headState, points[points.length - 1][1], nowMs, durationMs);
-      chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
+      headState2 =
+        !points2 || points2.length === 0 ? null : advanceHeadState(headState2, points2[points2.length - 1][1], nowMs, durationMs);
+      chart.setData(applyHeadState(alignedData, headState, headState2, nowMs), false);
     } else if (!rebuilding) {
-      chart.setData(toData(points));
+      chart.setData(toData(points, points2));
     }
     prevShape = shape;
   });
@@ -154,9 +216,8 @@
         if (!chart || !alignedData) return;
         const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
         chart.setScale('x', { min, max });
-        if (headState) {
-          const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
-          chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
+        if (headState || headState2) {
+          chart.setData(applyHeadState(alignedData, headState, headState2, nowMs), false);
         }
       },
     );

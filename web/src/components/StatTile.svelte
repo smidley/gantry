@@ -7,10 +7,18 @@
   scrub-parity corrective pass) render a second, smaller readout line
   below the hero number: Overview's Net and Disk IO tiles each need "two
   rates in one tile" (down+up, read+write), which the original single
-  value/unit shape had no room for. The sparkline stays single-series
-  either way (charting the PRIMARY value's own direction) -- cramming
-  two lines into a 28px-tall inline chart would be noise, not signal, so
-  the second rate is text-only.
+  value/unit shape had no room for.
+
+  sparklineColor2 (additive, optional -- dual-line directional charts:
+  Scott's own ask, "for charts that show two different metrics... there
+  should be multiple lines with different colors for each metric") is
+  what makes the sparkline itself dual-series too, not just the text
+  line: whenever value2Points is given, it rides straight through to
+  Sparkline's own points2/color2 as a second line, --series-2 by
+  default -- down/read (sparklineColor's own default --series-1) and
+  up/write, one chart, two colors, matching the app-wide convention.
+  Degrades to the original single-series sparkline exactly as before
+  when a caller has no value2Points to give it.
 
   value2Points (optional) is what makes value2 scrub-aware: without it,
   value2 just live-ticks off liveValue2 same as before. WITH it, value2
@@ -53,16 +61,23 @@
 -->
 <script>
   import { Tween } from 'svelte/motion';
-  import { cubicOut } from 'svelte/easing';
+  import { cubicOut, linear } from 'svelte/easing';
   import { prefersReducedMotion } from 'svelte/motion';
   import { untrack } from 'svelte';
   import { fmtRelTime } from '../lib/format';
   import { nearestPointAt } from '../lib/scrub';
   import { scrubBus } from '../lib/scrubbus.svelte';
+  import { live as liveStore } from '../lib/sse.svelte';
   import HealthDot from './HealthDot.svelte';
   import Sparkline from './Sparkline.svelte';
 
-  const LIVE_TWEEN_MS = 400;
+  // The live glide's own duration comes from liveStore.glideMs (the
+  // shared driver's freshly-measured cadence EMA -- see streamdriver.ts's
+  // "Cadence-driven glide" doc), never a fixed guess; its curve is
+  // `linear`, not `cubicOut` -- a front-loaded curve settles well before
+  // the next real sample and sits frozen, which is what reads as a
+  // pulse. Scrub-follow (SCRUB_TWEEN_MS/cubicOut) is untouched: that's a
+  // pointer-driven interaction, not tied to arrival cadence at all.
   const SCRUB_TWEEN_MS = 120;
 
   let {
@@ -72,6 +87,7 @@
     unit = '',
     sparklinePoints = undefined,
     sparklineColor = 'var(--series-1)',
+    sparklineColor2 = 'var(--series-2)',
     status = undefined,
     liveValue2 = undefined,
     value2Points = undefined,
@@ -91,14 +107,14 @@
   // .current contract -- see streamdriver.ts's doc for the same point
   // made about svelte/motion's Tween generally).
   let scrubHit = $derived(scrubBus.ts === null || !sparklinePoints ? null : nearestPointAt(sparklinePoints, scrubBus.ts));
-  let numberTween = new Tween(untrack(() => liveValue ?? 0), { duration: LIVE_TWEEN_MS, easing: cubicOut });
+  let numberTween = new Tween(untrack(() => liveValue ?? 0), { duration: liveStore.glideMs, easing: linear });
 
   $effect(() => {
     const reduced = prefersReducedMotion.current;
     if (scrubHit) {
       numberTween.set(scrubHit.value, { duration: reduced ? 0 : SCRUB_TWEEN_MS, easing: cubicOut });
     } else {
-      numberTween.set(liveValue ?? 0, { duration: reduced ? 0 : LIVE_TWEEN_MS, easing: cubicOut });
+      numberTween.set(liveValue ?? 0, { duration: reduced ? 0 : liveStore.glideMs, easing: linear });
     }
   });
 
@@ -111,7 +127,7 @@
   // same "no sparklinePoints" degradation the primary value already
   // has.
   let scrubHit2 = $derived(scrubBus.ts === null || !value2Points ? null : nearestPointAt(value2Points, scrubBus.ts));
-  let number2Tween = new Tween(untrack(() => liveValue2 ?? 0), { duration: LIVE_TWEEN_MS, easing: cubicOut });
+  let number2Tween = new Tween(untrack(() => liveValue2 ?? 0), { duration: liveStore.glideMs, easing: linear });
 
   $effect(() => {
     if (liveValue2 === undefined) return;
@@ -119,7 +135,7 @@
     if (scrubHit2) {
       number2Tween.set(scrubHit2.value, { duration: reduced ? 0 : SCRUB_TWEEN_MS, easing: cubicOut });
     } else {
-      number2Tween.set(liveValue2, { duration: reduced ? 0 : LIVE_TWEEN_MS, easing: cubicOut });
+      number2Tween.set(liveValue2, { duration: reduced ? 0 : liveStore.glideMs, easing: linear });
     }
   });
 
@@ -160,7 +176,7 @@
       </div>
     </div>
     {#if sparklinePoints}
-      <Sparkline points={sparklinePoints} color={sparklineColor} />
+      <Sparkline points={sparklinePoints} color={sparklineColor} points2={value2Points} color2={sparklineColor2} />
     {/if}
   {:else}
     <div class="stat-tile__head">
@@ -173,7 +189,7 @@
       <div class="stat-tile__value2 tabular-nums">{@render value2Block()}</div>
     {/if}
     {#if sparklinePoints}
-      <Sparkline points={sparklinePoints} color={sparklineColor} />
+      <Sparkline points={sparklinePoints} color={sparklineColor} points2={value2Points} color2={sparklineColor2} />
     {/if}
   {/if}
 </div>

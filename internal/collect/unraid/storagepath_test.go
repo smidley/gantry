@@ -38,6 +38,7 @@ func TestResolveStoragePath(t *testing.T) {
 		{"default cache pool, bare root", "/mnt/cache", StorageRef{Kind: "pool", Name: "cache"}},
 		{"custom-named pool", "/mnt/rocket_pool/isos/ubuntu.iso", StorageRef{Kind: "pool", Name: "rocket_pool"}},
 		{"pool-shaped name not in known fleet", "/mnt/some_other_pool/x", StorageRef{Kind: "other"}},
+		{"slot name merely prefixed by a known pool's name", "/mnt/cache2/x", StorageRef{Kind: "other"}},
 
 		{"single-digit array disk", "/mnt/disk1/isos/ubuntu.iso", StorageRef{Kind: "disk", Name: "disk1"}},
 		{"double-digit array disk", "/mnt/disk23/backups", StorageRef{Kind: "disk", Name: "disk23"}},
@@ -47,9 +48,11 @@ func TestResolveStoragePath(t *testing.T) {
 		{"flash boot device, bare root", "/boot", StorageRef{Kind: "flash"}},
 
 		{"unassigned-devices style path", "/mnt/disks/sdx1/data", StorageRef{Kind: "other"}},
+		{"unassigned-devices remote (SMB/NFS) mount", "/mnt/remotes/server/share", StorageRef{Kind: "other"}},
 		{"bare mnt root", "/mnt", StorageRef{Kind: "other"}},
 		{"bare mnt root, trailing slash", "/mnt/", StorageRef{Kind: "other"}},
 		{"root", "/", StorageRef{Kind: "other"}},
+		{"boot-prefixed but not the boot device itself", "/boots", StorageRef{Kind: "other"}},
 		{"empty path", "", StorageRef{Kind: "other"}},
 		{"docker anonymous volume real location", "/var/lib/docker/volumes/jellyfin_cache/_data", StorageRef{Kind: "other"}},
 		{"arbitrary host bind mount", "/home/user/appdata", StorageRef{Kind: "other"}},

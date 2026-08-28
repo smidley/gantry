@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
 )
@@ -145,7 +146,7 @@ func TestTickEmitsDiskUnraidAndGPUKinds(t *testing.T) {
 			}
 		}
 	}
-	for _, want := range []string{"parity", "disk1", "disk2", "disk3", "disk4", "cache"} {
+	for _, want := range []string{"parity", "disk1", "disk2", "disk3", "disk4", "cache", "rocket_pool", "flash"} {
 		require.True(t, disks[want], "missing disk entity %q", want)
 	}
 	require.True(t, sawArray, "unraid entity \"array\" must be present")
@@ -206,6 +207,44 @@ func TestDiskRotationalDistinguishesCacheAsSolidState(t *testing.T) {
 	cacheSamples := sink.recs[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "rotational"}]
 	require.NotEmpty(t, cacheSamples, "cache must report rotational")
 	require.Equal(t, 0.0, cacheSamples[0].Val, "cache should read as solid-state")
+}
+
+// TestFlashDiskHasNoTempSensorRegardlessOfSpinState pins flash's noSensor
+// contract: temp.c must never appear for it (a USB stick has no SMART
+// temperature sensor at all -- a distinct reason from disk3's spunDown,
+// which omits temp.c for a different one), while spun_up still always
+// reads 1 -- flash is never actually "spun down", there's nothing to
+// spin. Regression coverage for Scott's own report: rotational=1 (real
+// hardware behavior, asserted below via DiskMetas' own test) must not
+// be confused with an ordinary spinning disk's temp behavior either.
+func TestFlashDiskHasNoTempSensorRegardlessOfSpinState(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	tickEvery(g, time.Unix(1_000_000, 0), 2*time.Second, 50)
+
+	_, hasTemp := sink.recs[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "temp.c"}]
+	require.False(t, hasTemp, "flash has no temp sensor and must never emit temp.c")
+
+	spunUp := sink.recs[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "spun_up"}]
+	require.NotEmpty(t, spunUp)
+	for _, s := range spunUp {
+		require.Equal(t, 1.0, s.Val, "flash is never spun down -- spun_up must always read 1")
+	}
+}
+
+// TestDiskMetasCoversAllFourKinds pins DiskMetas' own classification
+// output -- the whole point of growing the fake fleet past its original
+// 6 disks (Scott's own report: a live box misread its boot flash device
+// as HDD and its NVMe pools as generic SSD) is that dev/Playwright now
+// exercise every one of Storage's four type badges, not just HDD-vs-SSD.
+func TestDiskMetasCoversAllFourKinds(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	meta := g.DiskMetas()
+
+	require.Equal(t, unraid.DiskMeta{Device: "sdi", Kind: "usb"}, meta["flash"], "the boot device must classify usb despite rotational=1")
+	require.Equal(t, unraid.DiskMeta{Device: "nvme0n1", Kind: "nvme"}, meta["rocket_pool"])
+	require.Equal(t, unraid.DiskMeta{Device: "sdh", Kind: "ssd"}, meta["cache"], "a non-nvme solid-state pool must classify plain ssd, not nvme")
+	require.Equal(t, unraid.DiskMeta{Device: "sdc", Kind: "hdd"}, meta["disk1"])
 }
 
 // TestParityCheckStartsTwoMinutesAfterBootAndFinishesMonotonically

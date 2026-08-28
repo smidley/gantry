@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/smidley/gantry/internal/collect/docker"
+	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/store"
 )
 
@@ -57,34 +58,47 @@ var fleet = []archetype{
 	{"unifi-controller", 2, 1, 0.005, 900e6, 2e5},
 }
 
-// diskSpec describes one of the fake array's fixed 6 disks: parity
+// diskSpec describes one of the fake array's fixed 8 disks: parity
 // (false hasFS, matching real disks.ini's fsSize=0 for a parity slot --
-// it has no filesystem view) plus 4 data disks and one cache disk.
+// it has no filesystem view), 4 data disks, a plain SATA/SAS SSD pool,
+// an NVMe pool, and the boot flash device.
 type diskSpec struct {
 	name       string
+	device     string // disks.ini's own device key, e.g. "sdg", "nvme0n1" -- unraid.DiskKind's classification signal
 	hasFS      bool
 	sizeBytes  float64
 	baseUsed   float64 // fraction 0..1, before its slow drift
-	tempBase   float64 // °C baseline; meaningless when spunDown
+	tempBase   float64 // °C baseline; meaningless when spunDown or noSensor
 	spunDown   bool
+	noSensor   bool    // true for a device with no temp sensor at all (e.g. USB flash) -- distinct from spunDown; never emits temp.c regardless of spun state
 	rotational float64 // disks.ini's own rotational value: 1 spinning, 0 solid-state
 }
 
-// disks is Task 11's fixed 6-disk fake array. disk3 is permanently
-// spun down: real spun-down disks never report a temp (disks.ini's
-// temp key reads the literal "*"), but DO still report cached
-// filesystem usage -- fsSize/fsFree come from a mount-time stat, not a
-// live SMART query, so they're independent of spin state. cache is the
-// array's one solid-state member (rotational=0), a realistic NVMe/SSD
-// cache pool in front of spinning array/parity disks -- so dev/
-// Playwright exercise the same HDD-vs-SSD distinction a real box does.
+// disks is the fake array's fixed 8-disk fleet, covering all four of
+// Storage's own type badges (Scott's own report: a live box misread its
+// boot flash device as HDD and its NVMe cache pools as generic SSD, so
+// dev/Playwright need every kind on screen, not just HDD-vs-SSD).
+// disk3 is permanently spun down: real spun-down disks never report a
+// temp (disks.ini's temp key reads the literal "*"), but DO still report
+// cached filesystem usage -- fsSize/fsFree come from a mount-time stat,
+// not a live SMART query, so they're independent of spin state. cache is
+// a plain solid-state pool (rotational=0, a non-nvme device name) and
+// rocket_pool is an NVMe one (device "nvme0n1", matching disks_real.ini's
+// own fixture naming) -- both rotational=0, only the device name tells
+// them apart, same as a real box. flash is the boot device: like the
+// real fixture it reports rotational=1 (a USB stick isn't magically
+// exempt from that field) and a plain SCSI-style device name ("sdi") --
+// classifying it correctly depends entirely on unraid.DiskKind's
+// slot-name override, never on either of those two signals.
 var disks = []diskSpec{
-	{"parity", false, 12e12, 0, 38, false, 1},
-	{"disk1", true, 8e12, 0.62, 34, false, 1},
-	{"disk2", true, 8e12, 0.71, 35, false, 1},
-	{"disk3", true, 8e12, 0.55, 36, true, 1},
-	{"disk4", true, 4e12, 0.40, 37, false, 1},
-	{"cache", true, 1e12, 0.35, 41, false, 0},
+	{"parity", "sdb", false, 12e12, 0, 38, false, false, 1},
+	{"disk1", "sdc", true, 8e12, 0.62, 34, false, false, 1},
+	{"disk2", "sdd", true, 8e12, 0.71, 35, false, false, 1},
+	{"disk3", "sde", true, 8e12, 0.55, 36, true, false, 1},
+	{"disk4", "sdf", true, 4e12, 0.40, 37, false, false, 1},
+	{"cache", "sdh", true, 1e12, 0.35, 41, false, false, 0},
+	{"rocket_pool", "nvme0n1", true, 2e12, 0.28, 44, false, false, 0},
+	{"flash", "sdi", true, 32e9, 0.05, 0, false, true, 1},
 }
 
 const (
@@ -275,7 +289,7 @@ func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "spun_up"}, ts, spunUp)
 		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "rotational"}, ts, d.rotational)
 
-		if !d.spunDown {
+		if !d.spunDown && !d.noSensor {
 			temp := clamp(d.tempBase+2.5*math.Sin(phase+float64(i))+(g.rng.Float64()-0.5)*1.5, 32, 45)
 			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "temp.c"}, ts, temp)
 		}
@@ -449,6 +463,22 @@ func (g *Generator) Metas() []docker.Meta {
 	out := make([]docker.Meta, len(fleet))
 	for i, a := range fleet {
 		out[i] = docker.Meta{Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest"}
+	}
+	return out
+}
+
+// DiskMetas is Metas' disk-metadata analogue: one unraid.DiskMeta per
+// disks var member, classified through unraid.DiskKind -- the same pure
+// rule a real box's own unraid collector applies in tickOneDisk, so fake
+// mode can never drift from the real classification. main wiring passes
+// this to buildSnapshot (GANTRY_FAKE_DATA=1 only) so the fake fleet's
+// disk types populate the snapshot's disk_meta map exactly like a real
+// box's unraid.Collector.DiskMeta() would, since this generator writes
+// disk metrics straight to the store, bypassing that collector entirely.
+func (g *Generator) DiskMetas() map[string]unraid.DiskMeta {
+	out := make(map[string]unraid.DiskMeta, len(disks))
+	for _, d := range disks {
+		out[d.name] = unraid.DiskMeta{Device: d.device, Kind: unraid.DiskKind(d.name, d.device, d.rotational, true)}
 	}
 	return out
 }

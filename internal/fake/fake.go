@@ -351,6 +351,7 @@ func (g *Generator) Tick(now time.Time) {
 	// a plausible range now that the terms it's summing are host-share,
 	// not inflated per-core, percentages.
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "cpu.total"}, ts, clamp(hostCPUPct+5, 0, 100))
+	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "cpu.count"}, ts, float64(fakeHostCores))
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "mem.used_pct"}, ts, clamp(55+10*math.Sin(phase/3)+2*g.rng.Float64(), 0, 100))
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "net.rx_bps"}, ts, 20e6*(0.5+g.rng.Float64()))
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "net.tx_bps"}, ts, 5e6*(0.5+g.rng.Float64()))

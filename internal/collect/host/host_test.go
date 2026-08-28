@@ -218,6 +218,24 @@ func TestHostNumCPUCountsPerCoreLinesFromFirstTick(t *testing.T) {
 	require.Equal(t, 2, c.NumCPU(), "statA has two cpuN lines")
 }
 
+// TestHostTickEmitsCPUCountFromFirstTick pins cpu.count's own metric
+// analogue of NumCPU() above: the core-budget ribbon (Top Consumers' CPU
+// breakdown) reads it off the live frame, not the Go method, so it needs
+// the same "already right on tick 1" contract as a plain sample.
+func TestHostTickEmitsCPUCountFromFirstTick(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stat", statA)
+	writeFile(t, dir, "meminfo", meminfoA)
+
+	sink := newFakeSink()
+	c := New(sink, dir, t.TempDir())
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	count, ok := sink.value("cpu.count")
+	require.True(t, ok, "cpu.count must be recorded from the first tick, unlike cpu.total")
+	require.Equal(t, 2.0, count, "statA has two cpuN lines")
+}
+
 const netDevA = `Inter-|   Receive                                                |  Transmit
  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
   eth0: 1000000     900    0    0    0     0          0         5   200000      300    0    0    0     0       0          0

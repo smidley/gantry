@@ -102,9 +102,13 @@ func (c *Collector) tickCPU(now time.Time) error {
 		return fmt.Errorf("host: parse stat: %w", err)
 	}
 	c.numCPU.Store(int64(len(perCore)))
+	ts := now.Unix()
+	// cpu.count: the core-budget ribbon's own x-axis width (Top Consumers'
+	// CPU breakdown page) -- recorded every tick, unlike cpu.total/
+	// cpu.core.N below, since it needs no previous sample to diff against.
+	c.sink.Record(store.SeriesKey{Kind: "host", Metric: "cpu.count"}, ts, float64(len(perCore)))
 
 	if c.havePrevCPU {
-		ts := now.Unix()
 		if pct, ok := cpuBusyPct(c.prevTotal, total); ok {
 			c.sink.Record(store.SeriesKey{Kind: "host", Metric: "cpu.total"}, ts, pct)
 		}

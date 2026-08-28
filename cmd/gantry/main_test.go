@@ -452,6 +452,21 @@ func TestDeviceIOFromSamplesExcludesStaleSamples(t *testing.T) {
 	require.Empty(t, got, "a sample containerFrameMaxAge seconds old or older must not surface as a live device row")
 }
 
+// TestDeviceIOFromSamplesUnknownSuffixProducesNoRow pins the fix for
+// device fabrication ordering (fix round finding 8): a live:io.<dev>.*
+// sample whose suffix is neither read_bps nor write_bps must not
+// fabricate a zero-valued row for <dev> -- the byDevice entry has to be
+// created inside the suffix switch's two recognized arms, not before it.
+func TestDeviceIOFromSamplesUnknownSuffixProducesNoRow(t *testing.T) {
+	samples := map[string]store.Sample{
+		"live:io.sda.iops": {TS: 100, Val: 42},
+	}
+
+	got := deviceIOFromSamples(samples, 100)
+
+	require.Empty(t, got, "an unrecognized suffix must not fabricate a device row")
+}
+
 // TestBuildContainerStorageUnknownReturnsFalse is a thin wiring check
 // for buildContainerStorage itself (as opposed to containerStorage's
 // pure logic, exercised above): a real, never-ticked docker.Collector's

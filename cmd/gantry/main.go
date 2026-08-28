@@ -491,15 +491,20 @@ func deviceIOFromSamples(samples map[string]store.Sample, now int64) []server.De
 		if !ok {
 			continue
 		}
-		d, exists := byDevice[dev]
-		if !exists {
-			d = &server.DeviceIODTO{Device: dev}
-			byDevice[dev] = d
-		}
 		switch suffix {
 		case "read_bps":
+			d, exists := byDevice[dev]
+			if !exists {
+				d = &server.DeviceIODTO{Device: dev}
+				byDevice[dev] = d
+			}
 			d.ReadBps = sample.Val
 		case "write_bps":
+			d, exists := byDevice[dev]
+			if !exists {
+				d = &server.DeviceIODTO{Device: dev}
+				byDevice[dev] = d
+			}
 			d.WriteBps = sample.Val
 		}
 	}

@@ -41,7 +41,10 @@ func copyFixtures(t *testing.T, dir string, names ...string) {
 	}
 }
 
-var allCgroupFixtures = []string{"cpu.stat", "memory.current", "memory.stat", "pids.current", "io.stat"}
+var allCgroupFixtures = []string{
+	"cpu.stat", "memory.current", "memory.stat", "pids.current", "io.stat",
+	"memory.max", "cpu.max", "pids.max", "cpuset.cpus.effective",
+}
 
 func TestReadCgroupStatsParsesRealShapeFixtures(t *testing.T) {
 	dir := t.TempDir()
@@ -60,6 +63,45 @@ func TestReadCgroupStatsParsesRealShapeFixtures(t *testing.T) {
 		"8:0":  {RBytes: 1024000, WBytes: 2048000},
 		"8:16": {RBytes: 512000, WBytes: 256000},
 	}, cg.IO)
+
+	// memory.max=1073741824 (1GiB), cpu.max="400000 100000" (4.0 cores),
+	// pids.max=2048, cpuset.cpus.effective="0-15" (16 of 16 -- unpinned).
+	require.Equal(t, alloc{
+		MemLimitBytes: 1073741824, HasMemLimit: true,
+		CPUQuotaCores: 4.0, HasCPUQuota: true,
+		CPUSetCores: 16, HasCPUSet: true,
+		PidsLimit: 2048, HasPidsLimit: true,
+	}, cg.Alloc)
+}
+
+// TestReadCgroupStatsUnlimitedAllocFilesReadAsNoLimit pins the real-box
+// default shape (most containers): memory.max/pids.max hold the literal
+// "max", cpu.max is "max 100000", and cpuset.cpus.effective lists every
+// host core -- all four must come back Has*=false, not a zero-value
+// limit that would read as "capped at 0 bytes/cores/pids".
+func TestReadCgroupStatsUnlimitedAllocFilesReadAsNoLimit(t *testing.T) {
+	dir := t.TempDir()
+	copyFixtures(t, dir, "cpu.stat", "memory.current", "memory.stat", "pids.current", "io.stat")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "memory.max"), []byte("max\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cpu.max"), []byte("max 100000\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "pids.max"), []byte("max\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cpuset.cpus.effective"), []byte("0-15\n"), 0o644))
+
+	cg, err := readCgroupStats(dir)
+	require.NoError(t, err)
+	require.Equal(t, alloc{CPUSetCores: 16, HasCPUSet: true}, cg.Alloc,
+		"cpuset still parses (it lists every core, not \"max\"), but every Has* limit flag must be false")
+}
+
+// TestReadCgroupStatsMissingMemoryMaxErrors pins the new allocation files
+// into the same "any missing required file fails the whole read"
+// contract memory.current/cpu.stat/etc. already have (see readCgroupStats'
+// own doc) -- rather than mixing partial cgroup data with an API fallback.
+func TestReadCgroupStatsMissingMemoryMaxErrors(t *testing.T) {
+	dir := t.TempDir()
+	copyFixtures(t, dir, "cpu.stat", "memory.current", "memory.stat", "pids.current", "io.stat", "cpu.max", "pids.max", "cpuset.cpus.effective")
+	_, err := readCgroupStats(dir)
+	require.Error(t, err)
 }
 
 func TestReadCgroupStatsMissingDirErrors(t *testing.T) {
@@ -84,12 +126,46 @@ func TestReadCgroupStatsMissingMemoryStatInactiveFileErrors(t *testing.T) {
 
 func TestReadCgroupStatsEmptyIOStatYieldsEmptyMap(t *testing.T) {
 	dir := t.TempDir()
-	copyFixtures(t, dir, "cpu.stat", "memory.current", "memory.stat", "pids.current")
+	copyFixtures(t, dir, "cpu.stat", "memory.current", "memory.stat", "pids.current", "memory.max", "cpu.max", "pids.max", "cpuset.cpus.effective")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "io.stat"), []byte(""), 0o644))
 
 	cg, err := readCgroupStats(dir)
 	require.NoError(t, err)
 	require.Empty(t, cg.IO)
+}
+
+// TestParseCPUSetCount pins cpuset.cpus.effective's list-format parse
+// exactly (real-box fixture: "0,1,2,3,4,5,13,14,15" pinned to 9 of 16
+// threads) -- mixed ranges and singles, and the malformed/empty cases
+// FEATURE requires to read as "unrestricted" (ok=false) rather than a
+// hard error, since a garbled cpuset file must not block the rest of a
+// tick's allocation reporting.
+func TestParseCPUSetCount(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+		ok   bool
+	}{
+		{name: "mixed ranges and singles", in: "0-5,13-15", want: 9, ok: true},
+		{name: "single full-width range", in: "0-15", want: 16, ok: true},
+		{name: "one core, no range", in: "3", want: 1, ok: true},
+		{name: "all singles, no ranges", in: "0,1,2,3,4,5,13,14,15", want: 9, ok: true},
+		{name: "trailing newline from a raw file read", in: "0-5,13-15\n", want: 9, ok: true},
+		{name: "empty", in: "", want: 0, ok: false},
+		{name: "whitespace only", in: "   ", want: 0, ok: false},
+		{name: "malformed non-numeric", in: "abc", want: 0, ok: false},
+		{name: "malformed trailing comma", in: "0-5,", want: 0, ok: false},
+		{name: "malformed inverted range", in: "5-2", want: 0, ok: false},
+		{name: "malformed dangling dash", in: "0-5,-", want: 0, ok: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := parseCPUSetCount(c.in)
+			require.Equal(t, c.ok, ok)
+			require.Equal(t, c.want, got)
+		})
+	}
 }
 
 // recordContainerStats: the tick math, driven by two synthetic cgStats

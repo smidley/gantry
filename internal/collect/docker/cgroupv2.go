@@ -32,14 +32,42 @@ type cgStats struct {
 	MemCurrent, MemInactiveFile              uint64
 	Pids                                     uint64
 	IO                                       map[string]ioCounters // maj:min -> rbytes/wbytes
+	Alloc                                    alloc
+}
+
+// alloc is one container's configured resource allocation ceiling: the
+// cgroup v2 fast path's memory.max/cpu.max/cpuset.cpus.effective/
+// pids.max, or the API fallback's HostConfig equivalent (Meta.Alloc,
+// docker.go's allocFromHostConfig) — same shape either way, so
+// recordContainerStats' allocation math never forks by source. Each
+// resource's Has* flag is the only thing callers may trust: the paired
+// value is meaningless (not necessarily zero) when Has* is false, and a
+// false Has* is how "unlimited" propagates through to "emit nothing for
+// this pair" in recordContainerStats.
+type alloc struct {
+	MemLimitBytes uint64
+	HasMemLimit   bool
+
+	CPUQuotaCores float64 // quota/period; meaningful only when HasCPUQuota
+	HasCPUQuota   bool
+
+	CPUSetCores int // cpuset.cpus.effective's core count; meaningful only when HasCPUSet
+	HasCPUSet   bool
+
+	PidsLimit    uint64
+	HasPidsLimit bool
 }
 
 // readCgroupStats reads one container's cgroup v2 directory (e.g.
 // /host/sys/fs/cgroup/docker/<id>): cpu.stat, memory.current,
-// memory.stat, pids.current, io.stat. Any missing or malformed required
-// file fails the whole read — the caller (tickStats) treats that as "no
-// cgroup v2 here" and falls back to the docker stats API (apistats.go)
-// rather than mixing partial cgroup data with API data.
+// memory.stat, pids.current, io.stat, plus the allocation-ceiling files
+// memory.max, cpu.max, pids.max, and cpuset.cpus.effective. Any missing
+// or malformed required file fails the whole read — the caller
+// (tickStats) treats that as "no cgroup v2 here" and falls back to the
+// docker stats API (apistats.go) rather than mixing partial cgroup data
+// with API data. The allocation files are cheap reads in the same
+// directory as the usage counters, so a live `docker update` to a
+// container's limits shows up on this fast path's very next tick.
 func readCgroupStats(dir string) (cgStats, error) {
 	usageUsec, throttledUsec, nrThrottled, err := readCPUStat(filepath.Join(dir, "cpu.stat"))
 	if err != nil {
@@ -66,6 +94,33 @@ func readCgroupStats(dir string) (cgStats, error) {
 		return cgStats{}, fmt.Errorf("cgroup: %w", err)
 	}
 
+	memLimit, hasMemLimit, err := readMaxOrLimit(filepath.Join(dir, "memory.max"))
+	if err != nil {
+		return cgStats{}, fmt.Errorf("cgroup: %w", err)
+	}
+
+	quotaUsec, periodUsec, hasQuota, err := readCPUMax(filepath.Join(dir, "cpu.max"))
+	if err != nil {
+		return cgStats{}, fmt.Errorf("cgroup: %w", err)
+	}
+	var quotaCores float64
+	if hasQuota && periodUsec > 0 {
+		quotaCores = float64(quotaUsec) / float64(periodUsec)
+	} else {
+		hasQuota = false
+	}
+
+	pidsLimit, hasPidsLimit, err := readMaxOrLimit(filepath.Join(dir, "pids.max"))
+	if err != nil {
+		return cgStats{}, fmt.Errorf("cgroup: %w", err)
+	}
+
+	cpusetRaw, err := os.ReadFile(filepath.Join(dir, "cpuset.cpus.effective"))
+	if err != nil {
+		return cgStats{}, fmt.Errorf("cgroup: %w", err)
+	}
+	cpusetCores, hasCPUSet := parseCPUSetCount(string(cpusetRaw))
+
 	return cgStats{
 		CPUUsageUsec:    usageUsec,
 		ThrottledUsec:   throttledUsec,
@@ -74,6 +129,12 @@ func readCgroupStats(dir string) (cgStats, error) {
 		MemInactiveFile: inactiveFile,
 		Pids:            pids,
 		IO:              io,
+		Alloc: alloc{
+			MemLimitBytes: memLimit, HasMemLimit: hasMemLimit,
+			CPUQuotaCores: quotaCores, HasCPUQuota: hasQuota,
+			CPUSetCores: cpusetCores, HasCPUSet: hasCPUSet,
+			PidsLimit: pidsLimit, HasPidsLimit: hasPidsLimit,
+		},
 	}, nil
 }
 
@@ -193,6 +254,82 @@ func readIOStat(path string) (map[string]ioCounters, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// readMaxOrLimit reads a cgroup v2 control file holding either the
+// literal "max" (unlimited — ok=false) or a single non-negative integer
+// (memory.max, pids.max).
+func readMaxOrLimit(path string) (limit uint64, ok bool, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false, err
+	}
+	s := strings.TrimSpace(string(data))
+	if s == "max" {
+		return 0, false, nil
+	}
+	v, perr := strconv.ParseUint(s, 10, 64)
+	if perr != nil {
+		return 0, false, fmt.Errorf("%s: parse: %w", filepath.Base(path), perr)
+	}
+	return v, true, nil
+}
+
+// readCPUMax reads cpu.max's "<quota> <period>" pair; quota may be the
+// literal "max" (unlimited — hasQuota=false), in which case periodUsec
+// is still parsed but meaningless to the caller.
+func readCPUMax(path string) (quotaUsec, periodUsec uint64, hasQuota bool, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 2 {
+		return 0, 0, false, fmt.Errorf("cpu.max: want 2 fields, got %d", len(fields))
+	}
+	periodUsec, err = strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("cpu.max: parse period: %w", err)
+	}
+	if fields[0] == "max" {
+		return 0, periodUsec, false, nil
+	}
+	quotaUsec, err = strconv.ParseUint(fields[0], 10, 64)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("cpu.max: parse quota: %w", err)
+	}
+	return quotaUsec, periodUsec, true, nil
+}
+
+// parseCPUSetCount parses a cgroup cpuset core list ("0-5,13-15",
+// "0-15", "3") into the number of cores it names. Empty or malformed
+// input reports ok=false, which callers treat as "no pinning info" --
+// i.e. unrestricted -- rather than failing the whole stats read over a
+// garbled cpuset file. Shared verbatim by the cgroup v2 fast path
+// (cpuset.cpus.effective) and the API fallback (HostConfig.CpusetCpus,
+// docker.go's allocFromHostConfig).
+func parseCPUSetCount(s string) (count int, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	for _, part := range strings.Split(s, ",") {
+		lo, hi, isRange := strings.Cut(part, "-")
+		loN, err := strconv.Atoi(lo)
+		if err != nil || loN < 0 {
+			return 0, false
+		}
+		if !isRange {
+			count++
+			continue
+		}
+		hiN, err := strconv.Atoi(hi)
+		if err != nil || hiN < loN {
+			return 0, false
+		}
+		count += hiN - loN + 1
+	}
+	return count, true
 }
 
 // tickStats records per-container stats every tick: the cgroup v2 fast

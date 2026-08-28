@@ -217,11 +217,11 @@
   let memSeries = $derived([{ label: 'Memory', points: pointsFor('mem.bytes'), colorVar: '--series-1' }]);
   let netSeries = $derived([
     { label: 'Down', points: pointsFor('net.rx_bps'), colorVar: '--series-1' },
-    { label: 'Up', points: pointsFor('net.tx_bps'), colorVar: '--series-2' },
+    { label: 'Up', points: pointsFor('net.tx_bps'), colorVar: '--series-4' },
   ]);
   let ioSeries = $derived([
     { label: 'Read', points: pointsFor('io.read_bps'), colorVar: '--series-1' },
-    { label: 'Write', points: pointsFor('io.write_bps'), colorVar: '--series-2' },
+    { label: 'Write', points: pointsFor('io.write_bps'), colorVar: '--series-4' },
   ]);
   const GPU_SERIES_VAR = { render: '--series-1', video: '--series-2', 'video-enhance': '--series-3', copy: '--series-4' };
   let gpuSeries = $derived.by(() =>

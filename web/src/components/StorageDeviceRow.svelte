@@ -6,14 +6,12 @@
   tick (a Tween created inline in the parent's {#each} wouldn't persist
   across re-renders the same way).
 
-  Read/write colors: --series-1 (read) / --series-4 (write) -- NOT the
-  Disk IO chart's own --series-1/--series-2 pair directly above this in
-  the same view. Scott's own call: an upload/write direction shouldn't
-  read as alarm-adjacent, and --series-2's orange sits too close to
-  status-serious/critical's own reds for that. This row is born on the
-  new pair; the chart (and every other existing read/write surface)
-  swaps over in a separate, later pass -- until then the two legends
-  disagreeing on Write's color in this same view is expected, not a bug.
+  Read/write colors: --series-1 (read) / --series-4 (write) -- the same
+  pair the Disk IO chart directly above this in the same view now uses
+  too (the app-wide directional swap: Scott's own call, an upload/write
+  direction shouldn't read as alarm-adjacent, and --series-2's orange sat
+  too close to status-serious/critical's own reds for that). This row
+  was born on the new pair before that swap landed everywhere else.
 
   Row density/border: the "rail row" convention Storage.svelte's own
   disk list and Containers' mobile card list already use (a hairline

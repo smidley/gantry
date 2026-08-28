@@ -6,10 +6,12 @@
   a second series for a directional pair (down/up, read/write) sharing
   this one small chart, per dataviz's own "color follows entity" rule
   generalized to a metric's own fixed direction -- down/read always
-  --series-1, up/write always --series-2, app-wide. Kept genuinely
-  lightweight: the single-series path (points2 absent, by far the common
-  case -- every table-cell/leaderboard sparkline in this app) pays none
-  of the second series' own alignment cost.
+  --series-1, up/write always --series-4, app-wide (Scott: "we shouldn't
+  use red since that usually means something bad" -- --series-2 skews
+  orange/red-adjacent). Kept genuinely lightweight: the single-series
+  path (points2 absent, by far the common case -- every table-cell/
+  leaderboard sparkline in this app) pays none of the second series' own
+  alignment cost.
 -->
 <script>
   import uPlot from 'uplot';
@@ -31,7 +33,7 @@
   // no historical/fetched Sparkline usage today, unlike TimeChart, which
   // is why that component requires an explicit opt-in instead. See its
   // own doc for the full mechanism 1+2 rationale this mirrors.
-  let { points = [], color = 'var(--series-1)', points2 = undefined, color2 = 'var(--series-2)', live = true, height = 28 } =
+  let { points = [], color = 'var(--series-1)', points2 = undefined, color2 = 'var(--series-4)', live = true, height = 28 } =
     $props();
 
   let el;

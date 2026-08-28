@@ -14,7 +14,7 @@
   should be multiple lines with different colors for each metric") is
   what makes the sparkline itself dual-series too, not just the text
   line: whenever value2Points is given, it rides straight through to
-  Sparkline's own points2/color2 as a second line, --series-2 by
+  Sparkline's own points2/color2 as a second line, --series-4 by
   default -- down/read (sparklineColor's own default --series-1) and
   up/write, one chart, two colors, matching the app-wide convention.
   Degrades to the original single-series sparkline exactly as before
@@ -87,7 +87,7 @@
     unit = '',
     sparklinePoints = undefined,
     sparklineColor = 'var(--series-1)',
-    sparklineColor2 = 'var(--series-2)',
+    sparklineColor2 = 'var(--series-4)',
     status = undefined,
     liveValue2 = undefined,
     value2Points = undefined,

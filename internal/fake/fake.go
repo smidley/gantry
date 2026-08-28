@@ -41,6 +41,13 @@ type archetype struct {
 	// unlimited" brief.
 	memLimitBytes float64
 	cpuAllocCores float64
+
+	// stopped models a container the user turned off on purpose --
+	// Metas() reports it State "exited" (no Health), and Tick skips it
+	// outright (a stopped container has no live stats to synthesize),
+	// so fake mode's frame exercises the same stopped-but-known path a
+	// real box's registry gives one.
+	stopped bool
 }
 
 var fleet = []archetype{
@@ -48,7 +55,7 @@ var fleet = []archetype{
 	{name: "plex", cpuBase: 3, cpuAmp: 2, cpuSpike: 0.02, memBytes: 800e6, netScale: 3e6},
 	{name: "radarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 300e6, netScale: 2e5},
 	{name: "sonarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 320e6, netScale: 2e5},
-	{name: "prowlarr", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 150e6, netScale: 5e4},
+	{name: "prowlarr", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 150e6, netScale: 5e4, stopped: true},
 	{name: "qbittorrent", cpuBase: 6, cpuAmp: 4, cpuSpike: 0.01, memBytes: 500e6, netScale: 8e6},
 	{name: "sabnzbd", cpuBase: 2, cpuAmp: 6, cpuSpike: 0.01, memBytes: 400e6, netScale: 9e6},
 	// postgres: the memory-limited demo container, ~60-80% of its limit.
@@ -58,7 +65,7 @@ var fleet = []archetype{
 	{name: "grafana", cpuBase: 1, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 250e6, netScale: 6e4},
 	{name: "pihole", cpuBase: 0.5, cpuAmp: 0.3, cpuSpike: 0.001, memBytes: 120e6, netScale: 4e4},
 	{name: "nginx", cpuBase: 0.3, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 80e6, netScale: 5e5},
-	{name: "vaultwarden", cpuBase: 0.2, cpuAmp: 0.1, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4},
+	{name: "vaultwarden", cpuBase: 0.2, cpuAmp: 0.1, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4, stopped: true},
 	{name: "immich", cpuBase: 5, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.5e9, netScale: 1e6},
 	{name: "paperless", cpuBase: 1, cpuAmp: 2, cpuSpike: 0.01, memBytes: 400e6, netScale: 8e4},
 	{name: "gitea", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 300e6, netScale: 6e4},
@@ -248,6 +255,9 @@ func (g *Generator) Tick(now time.Time) {
 
 	hostCPUPct := 0.0
 	for i, a := range fleet {
+		if a.stopped {
+			continue // no live stats for a stopped container -- see archetype.stopped's own doc
+		}
 		// raw is on the old docker-stats 0-100 per-core scale; /100 turns
 		// it into cpu.cores (1.00 = one full core), and dividing THAT by
 		// fakeHostCores turns it into cpu.pct, a host-share percentage --
@@ -550,23 +560,29 @@ func fakeContainerMounts(name string) []docker.MountInfo {
 	return mounts
 }
 
-// Metas returns one synthetic docker.Meta per fleet archetype, always
-// reporting state "running"/health "healthy" (the fake fleet's own
-// identity never stops or restarts -- emitContainerEvents' periodic
-// events simulate that instead, without actually changing state here),
-// plus a plausible Mounts set (fakeContainerMounts) so the storage
-// panel has something to resolve. main wiring passes this to
-// buildSnapshot/buildContainersList/buildContainerStorage
-// (GANTRY_FAKE_DATA=1 only) so the fake fleet is treated exactly like
-// dc.Running()'s real entries: without it, Task 4's DTO-v2 container
-// filter (only dc.Running() OR a name with both a fresh live sample AND
-// a known Meta) would empty every fake-mode frame, since this
-// generator writes samples straight to the store, bypassing docker's
-// registry entirely.
+// Metas returns one synthetic docker.Meta per fleet archetype: state
+// "running"/health "healthy" for the fleet's own identity, except the
+// handful marked archetype.stopped, which report "exited"/"" instead
+// (the fleet's running/stopped split is otherwise fixed -- emitContainerEvents'
+// periodic events simulate restarts/OOMs on top of it, without actually
+// changing any member's own state here), plus a plausible Mounts set
+// (fakeContainerMounts) so the storage panel has something to resolve.
+// main wiring passes this to buildSnapshot/buildContainersList/
+// buildContainerStorage (GANTRY_FAKE_DATA=1 only) so the fake fleet is
+// treated exactly like a real registry's own entries: without it, every
+// fake-mode frame would come up empty, since this generator writes
+// samples straight to the store, bypassing docker's registry entirely.
+// buildContainersList/buildContainerStorage still only care about a
+// container being KNOWN, not which state it's in, so the stopped members
+// flow through those two unchanged.
 func (g *Generator) Metas() []docker.Meta {
 	out := make([]docker.Meta, len(fleet))
 	for i, a := range fleet {
-		out[i] = docker.Meta{Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest", Mounts: fakeContainerMounts(a.name)}
+		state, health := "running", "healthy"
+		if a.stopped {
+			state, health = "exited", ""
+		}
+		out[i] = docker.Meta{Name: a.name, State: state, Health: health, Image: "demo/" + a.name + ":latest", Mounts: fakeContainerMounts(a.name)}
 	}
 	return out
 }

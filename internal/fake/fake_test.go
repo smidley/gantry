@@ -424,22 +424,33 @@ func TestRareDiskErrorsEventFiresOnce(t *testing.T) {
 // TestMetasReturnsRunningHealthyDemoImagePerFleetMember pins Metas'
 // exact shape (Task 11's ledger-carried fake-mode DTO-v2 filter fix):
 // main wires this straight into buildSnapshot/buildContainersList as if
-// it were dc.Running()'s real output.
+// it were a real registry's own output. Every member gets Image; State/
+// Health follow its own archetype.stopped flag (the stopped-containers
+// demo coverage) rather than a blanket "running"/"healthy".
 func TestMetasReturnsRunningHealthyDemoImagePerFleetMember(t *testing.T) {
 	g := New(&capture{}, nil, 1)
 	metas := g.Metas()
 
 	require.Len(t, metas, len(fleet))
-	seen := map[string]bool{}
-	for _, m := range metas {
-		require.Equal(t, "running", m.State)
-		require.Equal(t, "healthy", m.Health)
-		require.Equal(t, "demo/"+m.Name+":latest", m.Image)
-		seen[m.Name] = true
+	byName := map[string]int{}
+	for i, m := range metas {
+		byName[m.Name] = i
 	}
-	require.True(t, seen["jellyfin"])
-	require.True(t, seen["frigate"])
-	require.Len(t, seen, len(fleet), "every fleet member must have a distinct name")
+	require.Len(t, byName, len(fleet), "every fleet member must have a distinct name")
+
+	for _, a := range fleet {
+		m := metas[byName[a.name]]
+		require.Equal(t, "demo/"+a.name+":latest", m.Image)
+		if a.stopped {
+			require.Equal(t, "exited", m.State, "%s is modeled stopped", a.name)
+			require.Equal(t, "", m.Health, "%s: a stopped container has no health status", a.name)
+		} else {
+			require.Equal(t, "running", m.State, "%s is modeled running", a.name)
+			require.Equal(t, "healthy", m.Health, "%s is modeled running", a.name)
+		}
+	}
+	require.Equal(t, "running", metas[byName["jellyfin"]].State)
+	require.Equal(t, "running", metas[byName["frigate"]].State)
 }
 
 // TestMetasIsPureAndStable pins that Metas needs no ticks at all (a
@@ -618,7 +629,7 @@ func TestFakePidsLimitOnEveryContainerWithLowUsage(t *testing.T) {
 	g := New(sink, nil, 3)
 	g.Tick(time.Unix(1_000_000, 0))
 
-	for _, name := range []string{"jellyfin", "postgres", "minecraft", "vaultwarden"} {
+	for _, name := range []string{"jellyfin", "postgres", "minecraft", "redis"} {
 		pids := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids"}]
 		limit := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids.limit"}]
 		pct := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids.pct"}]

@@ -266,27 +266,31 @@ const containerFrameMaxAge = 60
 // assembles the current SnapshotDTO from st.Live()'s latest sample per
 // series (grouped by SeriesKey Kind, then Entity where the DTO has an
 // entity dimension; live:-prefixed metrics are ring-only per flush.go and
-// never surfaced here), seeded with every currently-running container's
-// inventory metadata from dc.Running() (plus fakeMetas' synthetic fleet,
-// when GANTRY_FAKE_DATA=1 -- see fake.Generator.Metas' doc for why that's
-// needed at all) so a container with no metrics yet still appears, plus
-// ur.Version() and sources() (moved into the frame in v2 so an SSE client
-// sees a collector degrade live, not just on its next healthz poll).
+// never surfaced here), seeded with every container the registry
+// currently knows about, running or stopped, from dc.All() (plus
+// fakeMetas' synthetic fleet, when GANTRY_FAKE_DATA=1 -- see
+// fake.Generator.Metas' doc for why that's needed at all) so a container
+// with no metrics yet still appears, plus ur.Version() and sources()
+// (moved into the frame in v2 so an SSE client sees a collector degrade
+// live, not just on its next healthz poll).
 //
 // fakeMetas is nil outside fake-data mode; when non-nil its entries are
-// treated exactly like dc.Running()'s -- unconditionally seeded, not a
-// mere lookup fallback -- so the fake fleet survives the same filter a
-// real one does. fakeDiskMeta is its disk-metadata analogue: ur.DiskMeta()
+// treated exactly like dc.All()'s -- unconditionally seeded, not a mere
+// lookup fallback -- so the fake fleet survives the same filter a real
+// one does. fakeDiskMeta is its disk-metadata analogue: ur.DiskMeta()
 // (a real box's own unraid collector) is merged into dto.DiskMeta first,
 // then fakeDiskMeta's entries on top when wired -- see server.DiskMetaDTO's
 // own doc for why disk type/device strings ride their own map rather than
 // Disks' numeric one.
 //
-// Containers is filtered, not just seeded: an entity not in the merged
-// running set only stays in the frame while containerFrameEntities says
-// so (a live sample younger than containerFrameMaxAge AND a name
-// lookupByName still recognizes) — see containerFrameEntities' own doc
-// for why that's two different conditions, not one.
+// A container's METRICS are still filtered even though its identity/meta
+// isn't: a "container"-kind sample only lands in dto.Containers when its
+// entity is one buildSnapshot just seeded (dc.All() no longer knows the
+// name at all once it's actually removed, not merely stopped) AND the
+// sample itself is younger than containerFrameMaxAge -- a stopped
+// container's last-recorded cpu/mem/etc. reading must not go on reading
+// as "current" forever just because the container entry itself sticks
+// around.
 //
 // gp/nv's own GPUMeta() calls merge into dto.GPUMeta the same "each
 // source populates its own entities" way as DiskMeta above -- the DRM
@@ -330,13 +334,11 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 			}
 		}
 
-		metas := dc.Running()
+		metas := dc.All()
 		if fakeMetas != nil {
 			metas = append(metas, fakeMetas()...)
 		}
-		running := map[string]struct{}{}
 		for _, m := range metas {
-			running[m.Name] = struct{}{}
 			dto.Containers[m.Name] = server.ContainerDTO{
 				State:   m.State,
 				Health:  m.Health,
@@ -350,27 +352,6 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 		snap := live.SnapshotLatest()
 		nowUnix := dto.TS // same instant as the frame's own timestamp, one call
 
-		// Freshest observed age per non-running container entity: the
-		// entity qualifies for inclusion if ANY of its "container"-kind
-		// samples is young enough, so the minimum (freshest) age is what
-		// containerFrameEntities needs, not every individual sample's age.
-		sampleAge := map[string]int64{}
-		for key, sample := range snap {
-			if key.Kind != "container" {
-				continue
-			}
-			age := nowUnix - sample.TS
-			if cur, ok := sampleAge[key.Entity]; !ok || age < cur {
-				sampleAge[key.Entity] = age
-			}
-		}
-		include := containerFrameEntities(running, sampleAge, containerFrameMaxAge, dc.LookupByName)
-		for name := range include {
-			if _, ok := dto.Containers[name]; !ok {
-				dto.Containers[name] = server.ContainerDTO{Metrics: map[string]float64{}}
-			}
-		}
-
 		for key, sample := range snap {
 			if strings.HasPrefix(key.Metric, "live:") {
 				continue
@@ -379,8 +360,8 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 			case "host":
 				dto.Host[key.Metric] = sample.Val
 			case "container":
-				if _, ok := include[key.Entity]; !ok {
-					continue // filtered out: stopped, stale, or no longer known
+				if _, ok := dto.Containers[key.Entity]; !ok {
+					continue // not a container the registry (or fakeMetas) knows about at all -- fully removed, or never real
 				}
 				if nowUnix-sample.TS >= containerFrameMaxAge {
 					continue // this ONE sample is stale, even though its entity is still in the frame -- e.g. `docker update --memory 0` stops mem.limit_bytes without stopping the container, and the same gate covers container-attributed gpu.*.busy_pct going quiet
@@ -413,38 +394,6 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 		}
 		return dto
 	}
-}
-
-// containerFrameEntities decides which container entities belong in this
-// tick's frame: every name in running is always included; a name that's
-// merely referenced by a live sample gets one more chance, but only if
-// its freshest sample is younger than maxAge seconds AND lookupByName
-// still recognizes the name. Both conditions matter independently: age
-// alone would let a fully-removed container's still-fresh-but-orphaned
-// sample flicker back into view for up to maxAge seconds, and
-// lookupByName alone would let a long-stopped-but-not-removed
-// container's stale metrics linger for as long as its ring happens to
-// still hold data (~15 minutes) instead of the frame's own, much shorter
-// cutoff. Extracted as a pure function so it's testable without a real
-// docker daemon or *store.Store.
-func containerFrameEntities(running map[string]struct{}, sampleAge map[string]int64, maxAge int64, lookupByName func(string) (docker.Meta, bool)) map[string]struct{} {
-	out := make(map[string]struct{}, len(running))
-	for name := range running {
-		out[name] = struct{}{}
-	}
-	for name, age := range sampleAge {
-		if _, already := out[name]; already {
-			continue
-		}
-		if age >= maxAge {
-			continue
-		}
-		if _, known := lookupByName(name); !known {
-			continue
-		}
-		out[name] = struct{}{}
-	}
-	return out
 }
 
 // buildContainersList returns the closure wired to server.Options.

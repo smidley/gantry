@@ -160,6 +160,12 @@ func (c *Collector) evictContainer(kind, name string) {
 // container's Meta.
 func (c *Collector) Running() []Meta { return c.reg.running() }
 
+// All returns a name-sorted snapshot of every container the registry
+// currently knows about, running or stopped -- main's snapshot builder
+// seeds the live frame from this instead of Running() so a stopped-but-
+// known container still appears (state/identity/meta, no stale metrics).
+func (c *Collector) All() []Meta { return c.reg.all() }
+
 // Tick refreshes inventory every 10s, then records per-container stats
 // (cgroupv2.go, falling back to apistats.go) and network (net.go). The
 // event stream itself is started lazily from Probe, not here — see
@@ -213,11 +219,11 @@ func (c *Collector) refreshInventory(ctx context.Context, now time.Time) error {
 //
 // Deliberately restricted to State=="running": metas here includes every
 // container ContainerList(All) returns, including long-exited ones the
-// registry still remembers (see lookupByName's doc) -- recording a fresh
-// sample for one of those every 10s inventory poll would keep resetting
-// its sampleAge in buildSnapshot's stopped-container filter, which would
-// never let it age out of the live frame the way an exited container's
-// naturally-aging cgroup stats already do today.
+// registry still remembers (see lookupByName's doc) -- rewriting a fresh
+// meta.started_at sample for one of those every 10s poll would keep its
+// timestamp perpetually current even though the container itself hasn't
+// moved, which would read as an ever-climbing uptime for something that
+// isn't running at all.
 func (c *Collector) recordMeta(metas []Meta, now time.Time) {
 	ts := now.Unix()
 	for _, m := range metas {

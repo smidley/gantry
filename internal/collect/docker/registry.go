@@ -116,6 +116,23 @@ func (r *registry) running() []Meta {
 	return out
 }
 
+// all returns a name-sorted snapshot of every Meta the registry currently
+// knows about, running or not -- a stopped-but-not-yet-removed container
+// stays here (see applyInventory/applyEvent's own removal docs) until it's
+// actually gone. Used by the snapshot frame (Task: stopped containers)
+// so a container the fleet turned off on purpose still shows up with its
+// real state/identity, not just while running.
+func (r *registry) all() []Meta {
+	r.mu.Lock()
+	out := make([]Meta, 0, len(r.byID))
+	for _, m := range r.byID {
+		out = append(out, m)
+	}
+	r.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // normalizeName strips docker's leading "/" from a container name.
 func normalizeName(name string) string {
 	return strings.TrimPrefix(name, "/")

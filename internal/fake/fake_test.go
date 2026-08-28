@@ -527,3 +527,85 @@ func TestGantrySelfFootprintMetrics(t *testing.T) {
 		"gantry's own CPU footprint must read as this generator's host-share, not the old per-core-style ~0.6%%")
 	require.Greater(t, rss[0].Val, 0.0)
 }
+
+// TestFakeMemoryLimitedArchetypeExactPct pins postgres as the fleet's
+// memory-limited demo container: mem.limit_bytes is a fixed ceiling
+// (unlike mem.bytes, which jitters every tick), and mem.limit_pct must
+// equal 100*mem.bytes/mem.limit_bytes exactly on every tick -- the same
+// "derived from the very same usage number" contract the real collector's
+// recordContainerStats guarantees.
+func TestFakeMemoryLimitedArchetypeExactPct(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 3)
+	tickEvery(g, time.Unix(1_000_000, 0), 2*time.Second, 20)
+
+	memBytes := sink.recs[store.SeriesKey{Kind: "container", Entity: "postgres", Metric: "mem.bytes"}]
+	limitBytes := sink.recs[store.SeriesKey{Kind: "container", Entity: "postgres", Metric: "mem.limit_bytes"}]
+	limitPct := sink.recs[store.SeriesKey{Kind: "container", Entity: "postgres", Metric: "mem.limit_pct"}]
+	require.Len(t, limitBytes, 20, "postgres must get mem.limit_bytes every tick")
+	require.Len(t, limitPct, 20)
+
+	for i := range limitPct {
+		require.Equal(t, limitBytes[0].Val, limitBytes[i].Val, "the ceiling itself must not jitter tick to tick")
+		require.Equal(t, 100*memBytes[i].Val/limitBytes[i].Val, limitPct[i].Val)
+		require.GreaterOrEqual(t, limitPct[i].Val, 60.0, "postgres is modeled at roughly 60-80%% of its limit")
+		require.LessOrEqual(t, limitPct[i].Val, 85.0)
+	}
+}
+
+// TestFakeCPUSetPinnedArchetypeExactPct pins minecraft as the fleet's
+// cpuset-pinned demo container: cpu.alloc_cores is a fixed ceiling, and
+// cpu.alloc_pct must equal 100*cpu.cores/cpu.alloc_cores exactly.
+func TestFakeCPUSetPinnedArchetypeExactPct(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 3)
+	tickEvery(g, time.Unix(1_000_000, 0), 2*time.Second, 20)
+
+	cpuCores := sink.recs[store.SeriesKey{Kind: "container", Entity: "minecraft", Metric: "cpu.cores"}]
+	allocCores := sink.recs[store.SeriesKey{Kind: "container", Entity: "minecraft", Metric: "cpu.alloc_cores"}]
+	allocPct := sink.recs[store.SeriesKey{Kind: "container", Entity: "minecraft", Metric: "cpu.alloc_pct"}]
+	require.Len(t, allocCores, 20, "minecraft must get cpu.alloc_cores every tick")
+	require.Len(t, allocPct, 20)
+
+	for i := range allocPct {
+		require.Equal(t, allocCores[0].Val, allocCores[i].Val, "the ceiling itself must not jitter tick to tick")
+		require.Equal(t, 100*cpuCores[i].Val/allocCores[i].Val, allocPct[i].Val)
+	}
+}
+
+// TestFakePidsLimitOnEveryContainerWithLowUsage pins the real-box
+// default (pids.max=2048 on every container, docker default) onto every
+// fake fleet member, at a low percentage -- unlike the memory/cpu pairs,
+// this one is universal, not archetype-specific.
+func TestFakePidsLimitOnEveryContainerWithLowUsage(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 3)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	for _, name := range []string{"jellyfin", "postgres", "minecraft", "vaultwarden"} {
+		limit := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids.limit"}]
+		pct := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids.pct"}]
+		require.Len(t, limit, 1, "%s must get pids.limit", name)
+		require.Equal(t, 2048.0, limit[0].Val)
+		require.Len(t, pct, 1)
+		require.Greater(t, pct[0].Val, 0.0)
+		require.Less(t, pct[0].Val, 5.0, "%s: pids.pct must read as a low percentage, not near capacity", name)
+	}
+}
+
+// TestFakeUnlimitedArchetypesEmitNoMemOrCPUAllocMetrics pins "most
+// containers unlimited": jellyfin is neither the memory-limited nor the
+// cpuset-pinned demo archetype, so it must get neither pair, even though
+// it still gets pids.limit/pids.pct like everything else.
+func TestFakeUnlimitedArchetypesEmitNoMemOrCPUAllocMetrics(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 3)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	for _, metric := range []string{"mem.limit_bytes", "mem.limit_pct", "cpu.alloc_cores", "cpu.alloc_pct"} {
+		_, ok := sink.recs[store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: metric}]
+		require.False(t, ok, "jellyfin is an unlimited archetype; must not emit %s", metric)
+	}
+	_, ok := sink.recs[store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "pids.limit"}]
+	require.True(t, ok, "pids.limit is universal, unrelated to the mem/cpu archetype choice")
+}

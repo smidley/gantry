@@ -33,6 +33,35 @@ func cpuBusyPct(prev, cur cpuTimes) (float64, bool) {
 	return 100 * (1 - (deltaIdle+deltaIowait)/deltaTotal), true
 }
 
+// cpuIowaitPct returns the percentage of time spent waiting on IO
+// (iowait's own share of total CPU time, not folded into "busy" or
+// "idle") between two /proc/stat samples of the same CPU, or false if
+// the counters didn't advance (first sample, or a counter reset) --
+// same guard as cpuBusyPct, since both derive from the same total()
+// delta. cpuBusyPct's formula already subtracts iowait out of "busy"
+// (spec: 100*(1-(idle+iowait)/total)); this is that same excluded slice,
+// surfaced as its own host-impact signal (docs/superpowers/backlog.md's
+// "Container→system impact surfacing" design notes) rather than staying
+// invisible.
+//
+// deltaIowait gets a second guard beyond deltaTotal's: /proc/stat's
+// aggregate iowait counter isn't strictly monotonic across cores on SMP
+// (a core going idle can shift which core's ticks count as iowait), so
+// a negative delta is possible even when deltaTotal advanced normally --
+// that must report false, the same as a counter reset, not a negative
+// percentage.
+func cpuIowaitPct(prev, cur cpuTimes) (float64, bool) {
+	deltaTotal := float64(cur.total()) - float64(prev.total())
+	if deltaTotal <= 0 {
+		return 0, false
+	}
+	deltaIowait := float64(cur.iowait) - float64(prev.iowait)
+	if deltaIowait < 0 {
+		return 0, false
+	}
+	return 100 * deltaIowait / deltaTotal, true
+}
+
 func parseCPUFields(fields []string) (cpuTimes, error) {
 	if len(fields) < 9 { // label + user/nice/system/idle/iowait/irq/softirq/steal
 		return cpuTimes{}, fmt.Errorf("proc/stat: short cpu line %q", strings.Join(fields, " "))

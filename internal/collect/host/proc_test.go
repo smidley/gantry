@@ -85,3 +85,27 @@ func TestCPUBusyPctFirstSampleOrResetIsFalse(t *testing.T) {
 	_, ok = cpuBusyPct(older, newer)
 	require.False(t, ok, "counter reset must report false")
 }
+
+// TestCPUIowaitPct uses the same two snapshots TestCPUBusyPct does
+// (prev/cur here match its prev/cur exactly: delta-total=400,
+// delta-iowait=50) so the two metrics' shared fixture story stays
+// obviously consistent: cpu.total's 37.5% busy and cpu.iowait_pct's
+// 12.5% iowait are two views of the same underlying delta.
+func TestCPUIowaitPct(t *testing.T) {
+	prev := cpuTimes{user: 1000, system: 500, idle: 8000, iowait: 500}
+	cur := cpuTimes{user: 1100, system: 550, idle: 8200, iowait: 550}
+	pct, ok := cpuIowaitPct(prev, cur)
+	require.True(t, ok)
+	require.InDelta(t, 12.5, pct, 1e-9)
+}
+
+func TestCPUIowaitPctFirstSampleOrResetIsFalse(t *testing.T) {
+	same := cpuTimes{user: 1000, idle: 500, iowait: 100}
+	_, ok := cpuIowaitPct(same, same)
+	require.False(t, ok, "zero delta must not divide by zero")
+
+	newer := cpuTimes{user: 100, idle: 50, iowait: 10}
+	older := cpuTimes{user: 1000, idle: 500, iowait: 100}
+	_, ok = cpuIowaitPct(older, newer)
+	require.False(t, ok, "counter reset must report false")
+}

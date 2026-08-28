@@ -98,6 +98,8 @@ func TestHostTickFirstTickEmitsOnlyGauges(t *testing.T) {
 	require.False(t, ok, "first tick must not emit a CPU rate")
 	_, ok = sink.value("cpu.core.0")
 	require.False(t, ok, "first tick must not emit a per-core CPU rate")
+	_, ok = sink.value("cpu.iowait_pct")
+	require.False(t, ok, "first tick must not emit an iowait rate")
 
 	pct, ok := sink.value("mem.used_pct")
 	require.True(t, ok, "first tick must still emit gauges")
@@ -133,6 +135,11 @@ func TestHostTickComputesCPUAndMemDeltas(t *testing.T) {
 	core1, ok := sink.value("cpu.core.1")
 	require.True(t, ok)
 	require.InDelta(t, 37.5, core1, 1e-9)
+
+	// same two snapshots as cpu.total above: delta-iowait=50 delta-total=400 -> 100*50/400=12.5
+	iowait, ok := sink.value("cpu.iowait_pct")
+	require.True(t, ok)
+	require.InDelta(t, 12.5, iowait, 1e-9)
 
 	memPct, ok := sink.value("mem.used_pct")
 	require.True(t, ok)

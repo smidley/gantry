@@ -34,29 +34,39 @@ type archetype struct {
 	cpuSpike float64 // probability per tick of a hard spike
 	memBytes float64
 	netScale float64 // bytes/s magnitude
+
+	// memLimitBytes/cpuAllocCores are the allocation-side demo
+	// variety: 0 means unlimited (the real-box default, and most of this
+	// fleet) -- only postgres (a memory limit) and minecraft (a cpuset
+	// pin) get one, matching the "at least one of each, most containers
+	// unlimited" brief.
+	memLimitBytes float64
+	cpuAllocCores float64
 }
 
 var fleet = []archetype{
-	{"jellyfin", 4, 3, 0.02, 900e6, 4e6},
-	{"plex", 3, 2, 0.02, 800e6, 3e6},
-	{"radarr", 1, 1, 0.005, 300e6, 2e5},
-	{"sonarr", 1, 1, 0.005, 320e6, 2e5},
-	{"prowlarr", 0.5, 0.5, 0.002, 150e6, 5e4},
-	{"qbittorrent", 6, 4, 0.01, 500e6, 8e6},
-	{"sabnzbd", 2, 6, 0.01, 400e6, 9e6},
-	{"postgres", 2, 0.5, 0.001, 1.2e9, 1e5},
-	{"redis", 0.5, 0.2, 0.001, 200e6, 8e4},
-	{"homeassistant", 3, 1, 0.005, 700e6, 1e5},
-	{"grafana", 1, 0.5, 0.002, 250e6, 6e4},
-	{"pihole", 0.5, 0.3, 0.001, 120e6, 4e4},
-	{"nginx", 0.3, 0.2, 0.001, 80e6, 5e5},
-	{"vaultwarden", 0.2, 0.1, 0.001, 90e6, 1e4},
-	{"immich", 5, 4, 0.02, 1.5e9, 1e6},
-	{"paperless", 1, 2, 0.01, 400e6, 8e4},
-	{"gitea", 0.5, 0.5, 0.002, 300e6, 6e4},
-	{"minecraft", 8, 5, 0.01, 2.5e9, 3e5},
-	{"frigate", 12, 4, 0.02, 1.1e9, 5e6},
-	{"unifi-controller", 2, 1, 0.005, 900e6, 2e5},
+	{name: "jellyfin", cpuBase: 4, cpuAmp: 3, cpuSpike: 0.02, memBytes: 900e6, netScale: 4e6},
+	{name: "plex", cpuBase: 3, cpuAmp: 2, cpuSpike: 0.02, memBytes: 800e6, netScale: 3e6},
+	{name: "radarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 300e6, netScale: 2e5},
+	{name: "sonarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 320e6, netScale: 2e5},
+	{name: "prowlarr", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 150e6, netScale: 5e4},
+	{name: "qbittorrent", cpuBase: 6, cpuAmp: 4, cpuSpike: 0.01, memBytes: 500e6, netScale: 8e6},
+	{name: "sabnzbd", cpuBase: 2, cpuAmp: 6, cpuSpike: 0.01, memBytes: 400e6, netScale: 9e6},
+	// postgres: the memory-limited demo container, ~60-80% of its limit.
+	{name: "postgres", cpuBase: 2, cpuAmp: 0.5, cpuSpike: 0.001, memBytes: 1.2e9, netScale: 1e5, memLimitBytes: 1.7e9},
+	{name: "redis", cpuBase: 0.5, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 200e6, netScale: 8e4},
+	{name: "homeassistant", cpuBase: 3, cpuAmp: 1, cpuSpike: 0.005, memBytes: 700e6, netScale: 1e5},
+	{name: "grafana", cpuBase: 1, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 250e6, netScale: 6e4},
+	{name: "pihole", cpuBase: 0.5, cpuAmp: 0.3, cpuSpike: 0.001, memBytes: 120e6, netScale: 4e4},
+	{name: "nginx", cpuBase: 0.3, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 80e6, netScale: 5e5},
+	{name: "vaultwarden", cpuBase: 0.2, cpuAmp: 0.1, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4},
+	{name: "immich", cpuBase: 5, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.5e9, netScale: 1e6},
+	{name: "paperless", cpuBase: 1, cpuAmp: 2, cpuSpike: 0.01, memBytes: 400e6, netScale: 8e4},
+	{name: "gitea", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 300e6, netScale: 6e4},
+	// minecraft: the cpuset-pinned demo container (pinned to 2 of the fake host's 8 cores).
+	{name: "minecraft", cpuBase: 8, cpuAmp: 5, cpuSpike: 0.01, memBytes: 2.5e9, netScale: 3e5, cpuAllocCores: 2.0},
+	{name: "frigate", cpuBase: 12, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.1e9, netScale: 5e6},
+	{name: "unifi-controller", cpuBase: 2, cpuAmp: 1, cpuSpike: 0.005, memBytes: 900e6, netScale: 2e5},
 }
 
 // diskSpec describes one of the fake array's fixed 8 disks: parity
@@ -111,6 +121,12 @@ const (
 	// collector's cgroupv2.go doc for the same math against a real
 	// runtime.NumCPU()/proc-stat count.
 	fakeHostCores = 8
+
+	// fakePidsLimit is pids.max on every fake container, matching the
+	// real-box default (docker's own pids.max, seen on every container
+	// regardless of any other limit) -- unlike memLimitBytes/
+	// cpuAllocCores, this one is universal, not archetype-specific.
+	fakePidsLimit = 2048
 
 	// errorDiskEntity is the one disk (of the six above) that gets the
 	// brief's "one disk with a rare disk.errors event" -- an arbitrary
@@ -274,6 +290,23 @@ func (g *Generator) Tick(now time.Time) {
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "mem.bytes"}, ts, mem)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "net.rx_bps"}, ts, rx)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "net.tx_bps"}, ts, tx)
+
+		// Allocation-side pair: absence means unlimited, matching the real
+		// collector's own contract (cgroupv2.go) -- only postgres/minecraft
+		// (see the fleet var) have a non-zero ceiling here.
+		if a.memLimitBytes > 0 {
+			g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "mem.limit_bytes"}, ts, a.memLimitBytes)
+			g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "mem.limit_pct"}, ts, 100*mem/a.memLimitBytes)
+		}
+		if a.cpuAllocCores > 0 {
+			g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "cpu.alloc_cores"}, ts, a.cpuAllocCores)
+			g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "cpu.alloc_pct"}, ts, 100*cpuCores/a.cpuAllocCores)
+		}
+		pidsUsed := 6.0 + g.rng.Float64()*14 // low, ~0.3-1.0% of fakePidsLimit
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "pids"}, ts, pidsUsed)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "pids.limit"}, ts, fakePidsLimit)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "pids.pct"}, ts, 100*pidsUsed/fakePidsLimit)
+
 		// meta.started_at/meta.restart_count are the fake-mode counterpart
 		// of the real docker collector's own same-named metrics (see
 		// docker.go's refreshInventory) -- ContainerDTO carries no
@@ -295,6 +328,20 @@ func (g *Generator) Tick(now time.Time) {
 		// is called from other goroutines, so reading it here would race).
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "meta.started_at"}, ts, float64(fakeContainerStartedAt(g.boot, i).Unix()))
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "meta.restart_count"}, ts, 0)
+
+		// live:io.<dev>.read_bps/write_bps mirror cgroupv2.go's
+		// recordContainerStats shape (live-ring-only, per-device) so the
+		// storage panel's device rows have something to show in fake-data
+		// mode too -- "sda"/"nvme0n1" are a plausible fixed pair of device
+		// names, not tied to fakeContainerMounts' share/disk/flash naming
+		// (real per-device IO and Unraid slot names are unrelated
+		// namespaces).
+		ioRead := a.netScale * (0.4 + 0.6*g.rng.Float64())
+		ioWrite := ioRead * 0.35 * (0.5 + g.rng.Float64())
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.sda.read_bps"}, ts, ioRead)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.sda.write_bps"}, ts, ioWrite)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.nvme0n1.read_bps"}, ts, ioRead*0.25)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.nvme0n1.write_bps"}, ts, ioWrite*0.15)
 	}
 
 	// hostCPUPct is already a sum of host-share percentages (see the loop
@@ -491,11 +538,35 @@ func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
 	}
 }
 
+// fakeContainerMounts gives fleet member `name` a plausible Unraid mount
+// set for the storage panel to resolve in fake-data mode: every
+// container gets a config bind under the near-universal
+// /mnt/user/appdata/<name> share, and the two transcoding apps also
+// mount an array disk (/mnt/disk1/media) and the flash boot device
+// (/boot/config), so ResolveStoragePath's "share", "disk", and "flash"
+// kinds each have something to render. "pool" isn't covered here:
+// resolving it needs Collector.Slots() off a real disks.ini, which
+// fake-data mode never has, so that kind is only exercised on-box.
+func fakeContainerMounts(name string) []docker.MountInfo {
+	mounts := []docker.MountInfo{
+		{Source: "/mnt/user/appdata/" + name, Destination: "/config", RW: true},
+	}
+	if name == "jellyfin" || name == "plex" {
+		mounts = append(mounts,
+			docker.MountInfo{Source: "/mnt/disk1/media", Destination: "/media", RW: false},
+			docker.MountInfo{Source: "/boot/config", Destination: "/flash", RW: false},
+		)
+	}
+	return mounts
+}
+
 // Metas returns one synthetic docker.Meta per fleet archetype, always
 // reporting state "running"/health "healthy" (the fake fleet's own
 // identity never stops or restarts -- emitContainerEvents' periodic
-// events simulate that instead, without actually changing state here).
-// main wiring passes this to buildSnapshot/buildContainersList
+// events simulate that instead, without actually changing state here),
+// plus a plausible Mounts set (fakeContainerMounts) so the storage
+// panel has something to resolve. main wiring passes this to
+// buildSnapshot/buildContainersList/buildContainerStorage
 // (GANTRY_FAKE_DATA=1 only) so the fake fleet is treated exactly like
 // dc.Running()'s real entries: without it, Task 4's DTO-v2 container
 // filter (only dc.Running() OR a name with both a fresh live sample AND
@@ -505,7 +576,7 @@ func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
 func (g *Generator) Metas() []docker.Meta {
 	out := make([]docker.Meta, len(fleet))
 	for i, a := range fleet {
-		out[i] = docker.Meta{Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest"}
+		out[i] = docker.Meta{Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest", Mounts: fakeContainerMounts(a.name)}
 	}
 	return out
 }

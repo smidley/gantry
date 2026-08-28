@@ -15,13 +15,37 @@ import (
 // Meta is a snapshot of one container's inventory and health state,
 // refreshed on the collector's 10s poll. It's the id -> data every other
 // collector (cgroup/API stats, per-container net, GPU attribution)
-// consumes via Lookup/Running.
+// consumes via Lookup/Running. Metas are immutable once published --
+// never mutate a field in place, build a fresh Meta instead.
+//
+// Alloc carries the HostConfig resource ceiling (allocFromHostConfig) --
+// the API-fallback path's primary source of allocation data (of the
+// ceilings, only PidsStats.Limit rides along in the stats response
+// itself). Like the rest of Meta, it's only as fresh as the last 10s
+// inventory poll, unlike the cgroup v2 fast path's own allocation read
+// (cgroupv2.go), which is fresh every 2s tick.
 type Meta struct {
 	ID, Name, Image, Icon, State, Health string
 	Pid                                  int
 	StartedAt                            time.Time
 	HostNet                              bool
 	RestartCount                         int
+	Alloc                                alloc
+	Mounts                               []MountInfo
+}
+
+// MountInfo is one container mount, as reported by docker inspect's
+// Mounts -- bind and volume types only (see mountsFromInspect); tmpfs/
+// npipe/cluster/image mounts carry no meaningful host storage path and
+// are dropped before they ever reach a Meta. Source is the host-side
+// path backing the mount: for a volume mount this is already docker's
+// real on-disk location under /var/lib/docker/volumes/, not the
+// volume's name, which is what the storage-panel path->storage resolver
+// (internal/collect/unraid) needs to map this mount onto an Unraid
+// storage system.
+type MountInfo struct {
+	Source, Destination string
+	RW                  bool
 }
 
 // EventSink is the narrow slice of store.Store the docker collector needs

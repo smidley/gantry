@@ -56,6 +56,29 @@ func TestStatsFromAPIMissingInactiveFileDefaultsToZero(t *testing.T) {
 	require.Equal(t, uint64(0), cg.MemInactiveFile)
 }
 
+// TestStatsFromAPIPidsLimitPopulatesAlloc pins the one allocation field
+// the stats API DOES have room for: PidsStats.Limit. It has to land in
+// cg.Alloc here so tickStats' fallbackAlloc can prefer it over
+// HostConfig's own PidsLimit -- PidsStats.Limit is the only place a
+// daemon-level --default-pids-limit (which HostConfig never reflects at
+// all) shows up.
+func TestStatsFromAPIPidsLimitPopulatesAlloc(t *testing.T) {
+	resp := container.StatsResponse{PidsStats: container.PidsStats{Current: 7, Limit: 512}}
+	cg := statsFromAPI(resp)
+	require.True(t, cg.Alloc.HasPidsLimit)
+	require.Equal(t, uint64(512), cg.Alloc.PidsLimit)
+}
+
+// TestStatsFromAPIPidsLimitZeroMeansUnlimited pins the stats API's own
+// convention for this field (PidsStats.Limit's doc comment: "A Limit of
+// 0 means that there is no limit") -- it must read the same as every
+// other allocation ceiling's absence, not a real zero-pid cap.
+func TestStatsFromAPIPidsLimitZeroMeansUnlimited(t *testing.T) {
+	resp := container.StatsResponse{PidsStats: container.PidsStats{Current: 7, Limit: 0}}
+	cg := statsFromAPI(resp)
+	require.False(t, cg.Alloc.HasPidsLimit)
+}
+
 // TestStatsFromAPIThroughRecordContainerStatsComputesHostShareCPU pins the
 // fallback path's own math end to end: two API-shaped responses 2 seconds
 // apart, mapped via statsFromAPI, must feed recordContainerStats' CPU rate

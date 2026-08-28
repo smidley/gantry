@@ -1,6 +1,7 @@
 package fake
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -449,6 +450,38 @@ func TestMetasIsPureAndStable(t *testing.T) {
 	require.Equal(t, g.Metas(), g.Metas())
 }
 
+// TestMetasIncludesPlausibleMounts pins that fake containers carry plausible Mounts.
+func TestMetasIncludesPlausibleMounts(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	metas := g.Metas()
+
+	for _, m := range metas {
+		require.NotEmpty(t, m.Mounts, "%s must have at least one plausible mount", m.Name)
+		for _, mount := range m.Mounts {
+			isUnraidPath := strings.HasPrefix(mount.Source, "/mnt/") || strings.HasPrefix(mount.Source, "/boot/")
+			require.True(t, isUnraidPath, "%s mount source %q must look like a real Unraid path", m.Name, mount.Source)
+		}
+	}
+}
+
+// TestTickEmitsContainerDeviceIOSeries pins that fake containers also emit live:io.<dev>.* samples per tick.
+func TestTickEmitsContainerDeviceIOSeries(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	devices := map[string]bool{}
+	for k := range sink.recs {
+		if k.Kind != "container" || k.Entity != "jellyfin" || !strings.HasPrefix(k.Metric, "live:io.") {
+			continue
+		}
+		dev, _, ok := strings.Cut(strings.TrimPrefix(k.Metric, "live:io."), ".")
+		require.True(t, ok)
+		devices[dev] = true
+	}
+	require.GreaterOrEqual(t, len(devices), 2, "want a couple of fake device rows per container")
+}
+
 // TestNilEventSinkDoesNotPanic proves every event-emitting path
 // tolerates a nil EventSink (main only ever passes a real *store.Store,
 // but the type itself must stay nil-safe like every other optional
@@ -526,4 +559,92 @@ func TestGantrySelfFootprintMetrics(t *testing.T) {
 	require.InDelta(t, 0.6/fakeHostCores, cpu[0].Val, 0.15/fakeHostCores,
 		"gantry's own CPU footprint must read as this generator's host-share, not the old per-core-style ~0.6%%")
 	require.Greater(t, rss[0].Val, 0.0)
+}
+
+// TestFakeMemoryLimitedArchetypeExactPct pins postgres as the fleet's
+// memory-limited demo container: mem.limit_bytes is a fixed ceiling
+// (unlike mem.bytes, which jitters every tick), and mem.limit_pct must
+// equal 100*mem.bytes/mem.limit_bytes exactly on every tick -- the same
+// "derived from the very same usage number" contract the real collector's
+// recordContainerStats guarantees.
+func TestFakeMemoryLimitedArchetypeExactPct(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 3)
+	tickEvery(g, time.Unix(1_000_000, 0), 2*time.Second, 20)
+
+	memBytes := sink.recs[store.SeriesKey{Kind: "container", Entity: "postgres", Metric: "mem.bytes"}]
+	limitBytes := sink.recs[store.SeriesKey{Kind: "container", Entity: "postgres", Metric: "mem.limit_bytes"}]
+	limitPct := sink.recs[store.SeriesKey{Kind: "container", Entity: "postgres", Metric: "mem.limit_pct"}]
+	require.Len(t, limitBytes, 20, "postgres must get mem.limit_bytes every tick")
+	require.Len(t, limitPct, 20)
+
+	for i := range limitPct {
+		require.Equal(t, limitBytes[0].Val, limitBytes[i].Val, "the ceiling itself must not jitter tick to tick")
+		require.Equal(t, 100*memBytes[i].Val/limitBytes[i].Val, limitPct[i].Val)
+		require.GreaterOrEqual(t, limitPct[i].Val, 60.0, "postgres is modeled at roughly 60-80%% of its limit")
+		require.LessOrEqual(t, limitPct[i].Val, 85.0)
+	}
+}
+
+// TestFakeCPUSetPinnedArchetypeExactPct pins minecraft as the fleet's
+// cpuset-pinned demo container: cpu.alloc_cores is a fixed ceiling, and
+// cpu.alloc_pct must equal 100*cpu.cores/cpu.alloc_cores exactly.
+func TestFakeCPUSetPinnedArchetypeExactPct(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 3)
+	tickEvery(g, time.Unix(1_000_000, 0), 2*time.Second, 20)
+
+	cpuCores := sink.recs[store.SeriesKey{Kind: "container", Entity: "minecraft", Metric: "cpu.cores"}]
+	allocCores := sink.recs[store.SeriesKey{Kind: "container", Entity: "minecraft", Metric: "cpu.alloc_cores"}]
+	allocPct := sink.recs[store.SeriesKey{Kind: "container", Entity: "minecraft", Metric: "cpu.alloc_pct"}]
+	require.Len(t, allocCores, 20, "minecraft must get cpu.alloc_cores every tick")
+	require.Len(t, allocPct, 20)
+
+	for i := range allocPct {
+		require.Equal(t, allocCores[0].Val, allocCores[i].Val, "the ceiling itself must not jitter tick to tick")
+		require.Equal(t, 100*cpuCores[i].Val/allocCores[i].Val, allocPct[i].Val)
+	}
+}
+
+// TestFakePidsLimitOnEveryContainerWithLowUsage pins the real-box
+// default (pids.max=2048 on every container, docker default) onto every
+// fake fleet member, at a low percentage -- unlike the memory/cpu pairs,
+// this one is universal, not archetype-specific. The real collector
+// always emits a bare `pids` usage metric alongside pids.limit/pids.pct
+// (cgroupv2.go's recordContainerStats) -- demo mode must match, so a
+// UI's "142 / 2048" treatment has real numerator data in fake mode too.
+func TestFakePidsLimitOnEveryContainerWithLowUsage(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 3)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	for _, name := range []string{"jellyfin", "postgres", "minecraft", "vaultwarden"} {
+		pids := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids"}]
+		limit := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids.limit"}]
+		pct := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids.pct"}]
+		require.Len(t, pids, 1, "%s must get a bare pids sample too, matching the real collector's contract", name)
+		require.Len(t, limit, 1, "%s must get pids.limit", name)
+		require.Equal(t, 2048.0, limit[0].Val)
+		require.Len(t, pct, 1)
+		require.Equal(t, 100*pids[0].Val/limit[0].Val, pct[0].Val, "pids.pct must be derived from the same value pids reports")
+		require.Greater(t, pct[0].Val, 0.0)
+		require.Less(t, pct[0].Val, 5.0, "%s: pids.pct must read as a low percentage, not near capacity", name)
+	}
+}
+
+// TestFakeUnlimitedArchetypesEmitNoMemOrCPUAllocMetrics pins "most
+// containers unlimited": jellyfin is neither the memory-limited nor the
+// cpuset-pinned demo archetype, so it must get neither pair, even though
+// it still gets pids.limit/pids.pct like everything else.
+func TestFakeUnlimitedArchetypesEmitNoMemOrCPUAllocMetrics(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 3)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	for _, metric := range []string{"mem.limit_bytes", "mem.limit_pct", "cpu.alloc_cores", "cpu.alloc_pct"} {
+		_, ok := sink.recs[store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: metric}]
+		require.False(t, ok, "jellyfin is an unlimited archetype; must not emit %s", metric)
+	}
+	_, ok := sink.recs[store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "pids.limit"}]
+	require.True(t, ok, "pids.limit is universal, unrelated to the mem/cpu archetype choice")
 }

@@ -29,9 +29,10 @@ type Collector struct {
 	dir      string
 	procRoot string
 
-	mu       sync.Mutex
-	version  string              // guarded by mu; set on tickArray, read via Version()
-	diskMeta map[string]DiskMeta // guarded by mu; set on tickDisks, read via DiskMeta()
+	mu        sync.Mutex
+	version   string              // guarded by mu; set on tickArray, read via Version()
+	poolSlots []string            // guarded by mu; set on tickDisks, read via Slots()
+	diskMeta  map[string]DiskMeta // guarded by mu; set on tickDisks, read via DiskMeta()
 
 	havePrevArray bool
 	prevArray     ArrayState
@@ -67,6 +68,19 @@ func (c *Collector) Version() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.version
+}
+
+// Slots returns the most recently observed pool slot names -- disks.
+// ini's per-slot "type" field is the source of truth ("Cache" -> pool;
+// every other type, "Data" included, is not) -- or nil before disks.ini
+// has ever been read successfully. Safe for concurrent callers, same
+// convention as Version(); the storage-panel path resolver
+// (storagepath.go) uses this to recognize a mount source under a
+// custom-named cache pool.
+func (c *Collector) Slots() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.poolSlots
 }
 
 // DiskMeta returns a snapshot copy of every present disk's device name

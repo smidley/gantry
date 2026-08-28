@@ -53,6 +53,25 @@ func TestUpdateStatusReaderStatusesMissingFile(t *testing.T) {
 	require.Nil(t, r.Statuses())
 }
 
+// TestUpdateStatusReaderStatusesPermissionDenied pins that an unreadable
+// (present, right-sized, but permission-denied) file degrades to nil
+// the same as an absent one, rather than panicking or propagating an
+// error -- a plausible real-box misconfiguration of the ro bind mount,
+// distinct from both "doesn't exist" and "torn read". Skipped when
+// running as root: root ignores a file's permission bits entirely, so
+// this scenario can't be reproduced under it.
+func TestUpdateStatusReaderStatusesPermissionDenied(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: permission bits don't block root's own reads")
+	}
+	path := filepath.Join(t.TempDir(), "unraid-update-status.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"jellyfin/jellyfin:latest": {"status": "true"}}`), 0o644))
+	require.NoError(t, os.Chmod(path, 0o000))
+
+	r := NewUpdateStatusReader(path)
+	require.Nil(t, r.Statuses())
+}
+
 // TestUpdateStatusReaderStatusesBailsOnOversizedFile pins the size
 // guard: a file above maxUpdateStatusFileSize is never read at all
 // (Stat alone decides), degrading to nil the same as a missing file --

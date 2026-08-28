@@ -44,22 +44,52 @@ func changelogAndProjectURLs(labels map[string]string, image string) (changelogU
 
 // githubReleasesURL turns an org.opencontainers.image.source label into
 // its repo's releases page: ok is false when source isn't a github.com
-// URL at all (some other forge, a bare SSH remote, empty, malformed) or
-// names no repo path. Trailing slash and a ".git" suffix are both
-// stripped before appending "/releases" -- in either order, since
-// stripping the slash first is what exposes ".git" as a suffix at all
-// for "owner/repo.git/".
+// URL reached over plain http(s) (some other forge, a non-http(s)
+// scheme -- a bare SSH remote fails to parse as a URL at all, but an
+// explicit ssh:// one parses fine and still must be rejected -- empty,
+// malformed) or names fewer than two path segments (an owner with no
+// repo, or no path at all). The output is always rebuilt from scratch
+// as "https://github.com/<owner>/<repo>/releases" rather than reusing
+// source's own scheme/host/path verbatim: that normalizes an http://
+// source to https, and collapsing to exactly the first two non-empty
+// path segments both discards any deeper monorepo subpath (a source
+// pointing at a subdirectory still names the repo it lives in) and
+// tolerates doubled slashes anywhere in the path. A ".git" suffix on
+// the repo segment is stripped the same as before.
 func githubReleasesURL(source string) (releasesURL string, ok bool) {
 	u, err := url.Parse(strings.TrimSpace(source))
-	if err != nil || u.Scheme == "" || !strings.EqualFold(u.Host, "github.com") {
+	if err != nil {
 		return "", false
 	}
-	path := strings.TrimSuffix(u.Path, "/")
-	path = strings.TrimSuffix(path, ".git")
-	if path == "" || path == "/" {
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+	default:
 		return "", false
 	}
-	return u.Scheme + "://" + u.Host + path + "/releases", true
+	if !strings.EqualFold(u.Host, "github.com") {
+		return "", false
+	}
+
+	var segments [2]string
+	n := 0
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg == "" {
+			continue
+		}
+		segments[n] = seg
+		n++
+		if n == 2 {
+			break
+		}
+	}
+	if n < 2 {
+		return "", false
+	}
+	owner, repo := segments[0], strings.TrimSuffix(segments[1], ".git")
+	if repo == "" {
+		return "", false
+	}
+	return "https://github.com/" + owner + "/" + repo + "/releases", true
 }
 
 // ghcrReleasesURL turns a ghcr.io image ref's owner/repo into its

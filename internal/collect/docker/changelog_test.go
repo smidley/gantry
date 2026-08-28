@@ -94,6 +94,18 @@ func TestChangelogAndProjectURLs(t *testing.T) {
 			wantChangelogURL: "",
 			wantProjectURL:   "https://example.org",
 		},
+		{
+			name:             "real box: an lscr.io image (LinuxServer.io's own mirror, not ghcr.io) gets no changelog -- only ghcr.io is special-cased",
+			labels:           nil,
+			image:            "lscr.io/linuxserver/sonarr:latest",
+			wantChangelogURL: "",
+		},
+		{
+			name:             "source label names an owner with no repo segment falls back to the ghcr.io image ref, same as no source label at all",
+			labels:           map[string]string{ociSourceLabel: "https://github.com/someorg"},
+			image:            "ghcr.io/someorg/somerepo:latest",
+			wantChangelogURL: "https://github.com/someorg/somerepo/releases",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -120,6 +132,11 @@ func TestGithubReleasesURL(t *testing.T) {
 		{name: "empty", source: "", want: "", wantOK: false},
 		{name: "malformed url", source: "not a url at all ://", want: "", wantOK: false},
 		{name: "github host with no path names no repo", source: "https://github.com/", want: "", wantOK: false},
+		{name: "owner-only path has no repo segment", source: "https://github.com/someorg", want: "", wantOK: false},
+		{name: "deep monorepo path collapses to its first two segments", source: "https://github.com/org/monorepo/tree/main/docker/app", want: "https://github.com/org/monorepo/releases", wantOK: true},
+		{name: "ssh scheme is rejected, not just a bare ssh remote", source: "ssh://github.com/foo/bar", want: "", wantOK: false},
+		{name: "http scheme is normalized to https", source: "http://github.com/foo/bar", want: "https://github.com/foo/bar/releases", wantOK: true},
+		{name: "doubled trailing slash is cleaned up", source: "https://github.com/foo/bar//", want: "https://github.com/foo/bar/releases", wantOK: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

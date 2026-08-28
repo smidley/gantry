@@ -23,6 +23,7 @@
   import { fetchSeries, fetchSnapshot, fetchTop } from '../lib/api';
   import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
   import { keysByPattern, sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
+  import { buildCoreBudget } from '../lib/coreBudget';
   import {
     hostSeriesMetricKeys,
     hostTotalNow,
@@ -36,6 +37,7 @@
   } from '../lib/topFromFrame';
   import TopBarList from '../components/TopBarList.svelte';
   import TimeChart from '../components/TimeChart.svelte';
+  import CoreBudgetRibbon from '../components/CoreBudgetRibbon.svelte';
 
   // initialResource: App.svelte's route table passes $route.params.resource
   // straight through (the "#/top/:resource" pattern -- see router.ts),
@@ -297,6 +299,19 @@
     !hasHostTotal ? undefined : windowKey === 'now' ? hostTotalNow(live.frame, resource) : fetchedHostTotal,
   );
 
+  // --- Core-budget ribbon (CPU breakdown's own hero, Now only -- it's an
+  // instantaneous snapshot of cpu.cores, not something a fetched window's
+  // avg/peak aggregate can answer) --------------------------------------
+  let showRibbon = $derived(resource === 'cpu' && windowKey === 'now');
+  let hostCores = $derived(live.frame?.host?.['cpu.count'] ?? 0);
+  let coreBudgetContainers = $derived(
+    Object.entries(live.frame?.containers ?? {}).map(([name, c]) => ({ name, cores: c.metrics['cpu.cores'] ?? 0 })),
+  );
+  let coreBudget = $derived(buildCoreBudget(hostCores, hostTotal?.value ?? 0, coreBudgetContainers));
+  let coreBudgetIcons = $derived(
+    Object.fromEntries(Object.entries(live.frame?.containers ?? {}).map(([name, c]) => [name, c.icon])),
+  );
+
   let containerRows = $derived(windowKey === 'now' ? nowRows : fetchedRows);
 
   // unattributedRow: host total minus the COMPLETE container list's own
@@ -405,6 +420,9 @@
           <span class="top-consumers__header-value">{FORMATTERS[resource](hostTotal.value)}</span>
         {/if}
       </div>
+      {#if showRibbon}
+        <CoreBudgetRibbon {hostCores} segments={coreBudget.segments} freeCores={coreBudget.freeCores} icons={coreBudgetIcons} />
+      {/if}
       {#if headerChartSeries.length > 0}
         <TimeChart series={headerChartSeries} formatValue={FORMATTERS[resource]} live={windowKey === 'now'} height={260} />
       {/if}

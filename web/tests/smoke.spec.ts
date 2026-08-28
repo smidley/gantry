@@ -338,6 +338,41 @@ test('top consumers: gpu breakdown has no host-total header or unattributed row'
   await expect(page.locator('.top-bar-list__row', { hasText: 'Unattributed' })).toHaveCount(0);
 });
 
+// Core-budget ribbon: the CPU breakdown page's own hero, live only. Math
+// smoke test (the real segment math is unit-tested directly in lib/
+// coreBudget.test.ts) -- this just pins that the rendered widths actually
+// sum to the bar's own full width and that switching away from CPU (or
+// to a fetched window) removes it cleanly rather than leaving it stuck.
+test('top consumers: the CPU core-budget ribbon renders segments that sum to the bar width', async ({ page }) => {
+  await page.goto('#/top/cpu');
+
+  const bar = page.locator('.core-ribbon__bar');
+  await expect(bar).toBeVisible();
+  await expect(bar).toHaveAttribute('aria-label', /^CPU core budget, \d+ cores$/);
+
+  const { barWidth, partsWidth } = await bar.evaluate((el) => {
+    const barWidth = el.getBoundingClientRect().width;
+    const parts = [...el.querySelectorAll('.core-ribbon__segment, .core-ribbon__free')];
+    const partsWidth = parts.reduce((sum, p) => sum + p.getBoundingClientRect().width, 0);
+    return { barWidth, partsWidth };
+  });
+  // A point of slack absorbs sub-pixel rounding across however many
+  // segments happen to be present.
+  expect(Math.abs(barWidth - partsWidth)).toBeLessThan(2);
+
+  // Hovering a segment reveals its own name+cores label; leaving it
+  // hides it again.
+  const firstSegment = bar.locator('.core-ribbon__segment').first();
+  const label = page.locator('.core-ribbon__label');
+  await expect(label).not.toHaveClass(/core-ribbon__label--visible/);
+  await firstSegment.hover();
+  await expect(label).toHaveClass(/core-ribbon__label--visible/);
+
+  // Switching to a non-CPU resource removes the ribbon entirely.
+  await page.getByRole('tab', { name: 'Memory', exact: true }).click();
+  await expect(page.locator('.core-ribbon__bar')).toHaveCount(0);
+});
+
 // Regression coverage for the top-consumers host-share fix: a container
 // used to read docker-stats' own per-core percent (routinely near/at
 // 100%) right next to the host tile's much lower whole-machine total --

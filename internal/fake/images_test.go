@@ -12,6 +12,56 @@ func newTestGenerator() *Generator {
 	return New(&capture{}, &eventCapture{}, 1)
 }
 
+// TestFakeImageSeedShortIDsAreUnique pins the exact bug a real box's own
+// GET /api/images -> POST /api/images/remove round trip would hit: the
+// server layer only ever shows GET's own 12-character short id (see
+// server.shortImageID), so if two seed entries shared that prefix,
+// nothing a UI does with what it was shown could tell them apart.
+func TestFakeImageSeedShortIDsAreUnique(t *testing.T) {
+	seen := map[string]string{}
+	for _, im := range fakeImageSeed {
+		short := im.ID
+		if len(short) > 19 { // len("sha256:") + 12
+			short = short[:19]
+		}
+		require.NotContains(t, seen, short, "seed ids %s and %s share GET's 12-char short id", seen[short], im.ID)
+		seen[short] = im.ID
+	}
+}
+
+// TestGeneratorRemoveImagesResolvesUniqueShortID pins the same round
+// trip from RemoveImages' side: a real docker daemon resolves an
+// unambiguous short id prefix on its own (docker.Collector.RemoveImages
+// passes it straight through to the SDK, which forwards to the daemon),
+// so fake mode's own in-memory match must do the same, or a UI that
+// naively echoes GET's own id field back into a remove call would work
+// against a real box and silently fail in fake mode.
+func TestGeneratorRemoveImagesResolvesUniqueShortID(t *testing.T) {
+	g := newTestGenerator()
+	before, err := g.Images(context.Background())
+	require.NoError(t, err)
+	var full string
+	for _, im := range before.Images {
+		if im.State == "dangling" {
+			full = im.ID
+			break
+		}
+	}
+	require.NotEmpty(t, full, "seed must contain at least one dangling image")
+	short := full[7:19] // strip "sha256:", keep docker's own 12-char short form
+
+	results, err := g.RemoveImages(context.Background(), []string{short})
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.True(t, results[0].OK, "error: %s", results[0].Error)
+	require.Equal(t, short, results[0].ID, "the result must echo back exactly what the caller sent, not the resolved full id")
+
+	after, err := g.Images(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, len(before.Images)-1, len(after.Images))
+}
+
 func TestSummarizeImagesCountsStatesAndSumsReclaimableBytes(t *testing.T) {
 	images := []docker.ImageInfo{
 		{ID: "a", State: "in-use", SizeBytes: 900},

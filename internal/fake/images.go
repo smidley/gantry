@@ -14,9 +14,14 @@ import (
 const fakeImagesBaseCreated = 1_735_000_000
 
 // fakeImageID mints a plausible-looking, fixed-per-n sha256 digest
-// string -- distinct per seed entry, valid length, no real crypto/rand
-// needed for data that's entirely hand-authored anyway.
-func fakeImageID(n int64) string { return fmt.Sprintf("sha256:%064x", n) }
+// string -- no real crypto/rand needed for data that's entirely
+// hand-authored anyway. n is encoded into the FIRST two hex digits, not
+// the last (a plain "%064x" would leave every n<16 entry identical
+// across docker's own 12-char short-id convention, since they'd differ
+// only in the final digit): GET /api/images only ever shows that short
+// form (see server.shortImageID), so every seed entry's short id must
+// already be distinct here.
+func fakeImageID(n int64) string { return fmt.Sprintf("sha256:%02x%062x", n, 0) }
 
 // fakeImageSeed is the fake box's dozen-image inventory, mirroring the
 // SHAPE (not the exact count) of Scott's own real box's numbers: five
@@ -128,13 +133,36 @@ func (g *Generator) PruneImages(_ context.Context, mode string) (docker.ImagePru
 	return out, nil
 }
 
+// indexOfFakeImage finds id in images, first by an exact full-id match,
+// then falling back to unambiguous prefix resolution -- the same
+// short-id lookup a real docker daemon does on its own (docker.
+// Collector.RemoveImages/PruneImages never need this code at all: they
+// just forward whatever string the caller sent straight to the SDK, and
+// the real daemon resolves it there). Fake mode has no daemon to do
+// that for it, so it must do it itself, or GET /api/images' own
+// 12-char short id (see server.shortImageID) could never be fed back
+// into a remove call here even though the same round trip works fine
+// against a real box. A prefix matching more than one image (never
+// happens against this package's own seed -- see fakeImageID's doc --
+// but could in principle) is treated as not found, the same way a real
+// daemon refuses to guess rather than pick one.
 func indexOfFakeImage(images []docker.ImageInfo, id string) int {
 	for i, im := range images {
 		if im.ID == id {
 			return i
 		}
 	}
-	return -1
+	prefix := strings.TrimPrefix(id, "sha256:")
+	match := -1
+	for i, im := range images {
+		if strings.HasPrefix(strings.TrimPrefix(im.ID, "sha256:"), prefix) {
+			if match >= 0 {
+				return -1
+			}
+			match = i
+		}
+	}
+	return match
 }
 
 // firstOrID returns an image's first repo tag, falling back to its own

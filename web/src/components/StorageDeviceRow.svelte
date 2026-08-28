@@ -13,10 +13,11 @@
   too close to status-serious/critical's own reds for that). This row
   was born on the new pair before that swap landed everywhere else.
 
-  Row density/border: the "rail row" convention Storage.svelte's own
-  disk list and Containers' mobile card list already use (a hairline
-  between rows instead of a gap-separated stack) -- see this file's own
-  first/last-child rules below.
+  Grid row: display:contents lifts this row's 5 cells into the parent's
+  own grid (ContainerDetail.svelte's .container-detail__storage-devices)
+  so label/device/kind/read/write land in the same column as every other
+  row AND the header/Total rows above and below it -- see that class's
+  own doc.
 -->
 <script>
   import { untrack } from 'svelte';
@@ -26,6 +27,7 @@
   import { live as liveStore } from '../lib/sse.svelte';
   import { fmtRate } from '../lib/format';
   import { diskMetaKind } from '../lib/disks';
+  import { isUnraidOSLoopDevice } from '../lib/containerStorage';
 
   // entry: one DeviceIODTO ({device, label, kind, read_bps, write_bps})
   // -- see api.ts's StorageDeviceDTO. label/kind are unraid.
@@ -42,6 +44,12 @@
   // own name twice ("sda (sda)").
   let rawSecondary = $derived(entry.label !== entry.device ? entry.device : null);
   let kind = $derived(diskMetaKind(entry.kind));
+  // isOS: this row only renders at all when it's had recent IO (the
+  // parent's noise rule), so a bz*-labeled device showing up here is the
+  // rare case Scott actually asked about ("what is bzmodules?") -- the
+  // muted suffix answers that inline instead of leaving a cryptic
+  // filename to look up.
+  let isOS = $derived(isUnraidOSLoopDevice(entry.label));
 
   let readTween = new Tween(untrack(() => entry.read_bps), { duration: liveStore.glideMs, easing: linear });
   let writeTween = new Tween(untrack(() => entry.write_bps), { duration: liveStore.glideMs, easing: linear });
@@ -59,50 +67,53 @@
 </script>
 
 <div class="storage-device">
-  <span class="storage-device__name">
+  <span class="storage-device__label">
     {entry.label}
-    {#if rawSecondary}<span class="storage-device__raw">{rawSecondary}</span>{/if}
+    {#if isOS}<span class="storage-device__os-tag">(Unraid OS)</span>{/if}
+  </span>
+  <span class="storage-device__raw">{rawSecondary ?? ''}</span>
+  <span class="storage-device__kind-cell">
     {#if kind}<span class="storage-device__kind storage-device__kind--{kind}">{KIND_LABEL[kind]}</span>{/if}
   </span>
-  <span class="storage-device__rate">
+  <span class="storage-device__value tabular-nums" aria-label={`Read ${fmtRate(readTween.current)}`}>
     <span class="storage-device__swatch storage-device__swatch--read" aria-hidden="true"></span>
-    Read <span class="tabular-nums">{fmtRate(readTween.current)}</span>
+    {fmtRate(readTween.current)}
   </span>
-  <span class="storage-device__rate">
+  <span class="storage-device__value tabular-nums" aria-label={`Write ${fmtRate(writeTween.current)}`}>
     <span class="storage-device__swatch storage-device__swatch--write" aria-hidden="true"></span>
-    Write <span class="tabular-nums">{fmtRate(writeTween.current)}</span>
+    {fmtRate(writeTween.current)}
   </span>
 </div>
 
 <style>
   .storage-device {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.4rem 1rem;
+    display: contents;
+  }
+  .storage-device > * {
     padding: 0.5rem 0;
     border-bottom: 1px solid color-mix(in oklab, var(--ink) 6%, transparent);
     font-size: 0.8rem;
   }
-  .storage-device:first-child {
-    padding-top: 0;
-  }
-  /* No :last-child border removal here -- StorageTotalRow (ContainerDetail's
-     own Live IO section) always follows the last one of these when this
-     component renders at all, so every row's own hairline (including
-     the last device's) stays as the divider leading into that summary
-     row instead. */
-  .storage-device__name {
+  .storage-device__label {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
     font-family: var(--font-mono);
     color: var(--ink);
-    min-width: 5rem;
+    white-space: nowrap;
+  }
+  .storage-device__os-tag {
+    color: var(--ink-2);
+    font-size: 0.72rem;
   }
   .storage-device__raw {
     color: var(--ink-2);
     font-size: 0.72rem;
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+  .storage-device__kind-cell {
+    overflow: hidden;
   }
   /* Kind tint: same four-way vocabulary/palette as Storage.svelte's own
      storage-disk__media--<kind> badges (hdd deliberately gets no
@@ -132,8 +143,9 @@
     color: var(--series-4);
     background: color-mix(in oklab, var(--series-4) 14%, transparent);
   }
-  .storage-device__rate {
-    display: inline-flex;
+  .storage-device__value {
+    display: flex;
+    justify-content: flex-end;
     align-items: center;
     gap: 0.35rem;
     color: var(--ink-2);
@@ -151,5 +163,27 @@
   }
   .storage-device__swatch--write {
     background: var(--series-4);
+  }
+  /* Narrow phones: back to a plain wrapping flex row (this component's
+     own pre-grid shape) -- see ContainerDetail.svelte's own doc on why
+     the 5-column grid doesn't fit here at all. The row itself now
+     carries the padding/hairline instead of each cell. */
+  @media (max-width: 36rem) {
+    .storage-device {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.3rem 0.9rem;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid color-mix(in oklab, var(--ink) 6%, transparent);
+    }
+    .storage-device > * {
+      padding: 0;
+      border-bottom: none;
+    }
+    .storage-device__value {
+      flex: 0 0 auto;
+      justify-content: flex-start;
+    }
   }
 </style>

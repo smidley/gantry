@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { mountCapacitySlot, normalizeStorageKind, sortMounts } from './containerStorage';
+import {
+  isUnraidOSLoopDevice,
+  mountCapacitySlot,
+  normalizeStorageKind,
+  recentlyActiveDevices,
+  recordDeviceActivity,
+  RECENT_IO_WINDOW_MS,
+  sortMounts,
+} from './containerStorage';
 
 describe('normalizeStorageKind', () => {
   it('passes through every known kind unchanged', () => {
@@ -81,5 +89,61 @@ describe('mountCapacitySlot', () => {
 
   it('returns null for an unrecognized kind, same as "other"', () => {
     expect(mountCapacitySlot(mount('exotic'))).toBeNull();
+  });
+});
+
+describe('recordDeviceActivity / recentlyActiveDevices', () => {
+  const dev = (device: string, read_bps: number, write_bps: number) => ({ device, read_bps, write_bps });
+
+  it('a device active this poll is recorded and shows up as recently active', () => {
+    const lastActiveAt = new Map<string, number>();
+    recordDeviceActivity([dev('sda', 100, 0)], lastActiveAt, 1000);
+    expect(recentlyActiveDevices([dev('sda', 100, 0)], lastActiveAt, 1000)).toEqual([dev('sda', 100, 0)]);
+  });
+
+  it('a device never once recorded is excluded, even if it is in the current devices list at 0/0', () => {
+    const lastActiveAt = new Map<string, number>();
+    expect(recentlyActiveDevices([dev('sda', 0, 0)], lastActiveAt, 1000)).toEqual([]);
+  });
+
+  it('a device that went idle stays visible within the trailing window', () => {
+    const lastActiveAt = new Map<string, number>();
+    recordDeviceActivity([dev('sda', 100, 0)], lastActiveAt, 0);
+    // now idle, but still inside RECENT_IO_WINDOW_MS of its last active tick
+    const visible = recentlyActiveDevices([dev('sda', 0, 0)], lastActiveAt, RECENT_IO_WINDOW_MS);
+    expect(visible).toEqual([dev('sda', 0, 0)]);
+  });
+
+  it('a device drops out once it has been idle longer than the window', () => {
+    const lastActiveAt = new Map<string, number>();
+    recordDeviceActivity([dev('sda', 100, 0)], lastActiveAt, 0);
+    const visible = recentlyActiveDevices([dev('sda', 0, 0)], lastActiveAt, RECENT_IO_WINDOW_MS + 1);
+    expect(visible).toEqual([]);
+  });
+
+  it('write-only activity counts the same as read activity', () => {
+    const lastActiveAt = new Map<string, number>();
+    recordDeviceActivity([dev('nvme0n1', 0, 50)], lastActiveAt, 500);
+    expect(recentlyActiveDevices([dev('nvme0n1', 0, 0)], lastActiveAt, 500)).toEqual([dev('nvme0n1', 0, 0)]);
+  });
+
+  it('each device tracks its own activity independently', () => {
+    const lastActiveAt = new Map<string, number>();
+    recordDeviceActivity([dev('sda', 100, 0), dev('loop2', 0, 0)], lastActiveAt, 0);
+    const visible = recentlyActiveDevices([dev('sda', 0, 0), dev('loop2', 0, 0)], lastActiveAt, 0);
+    expect(visible.map((d) => d.device)).toEqual(['sda']);
+  });
+});
+
+describe('isUnraidOSLoopDevice', () => {
+  it('recognizes Unraid boot-image labels', () => {
+    expect(isUnraidOSLoopDevice('bzmodules')).toBe(true);
+    expect(isUnraidOSLoopDevice('bzroot')).toBe(true);
+    expect(isUnraidOSLoopDevice('bzimage')).toBe(true);
+  });
+
+  it('does not flag an ordinary label that merely contains "bz"', () => {
+    expect(isUnraidOSLoopDevice('docker.img')).toBe(false);
+    expect(isUnraidOSLoopDevice('rocket_pool')).toBe(false);
   });
 });

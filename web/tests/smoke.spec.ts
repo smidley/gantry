@@ -223,9 +223,8 @@ test('container detail: storage panel renders mounts with kind badges, capacity,
   page,
 }) => {
   // Wide enough that the mount list's 2-column layout (>=1200px) is
-  // active, and that the density regression check below (badge close to
-  // its own row's text, not flung to a far edge) has real edge-to-edge
-  // distance to measure.
+  // active, so the column-alignment checks below have two real groups
+  // to compare against each other, not just against themselves.
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/containers/jellyfin');
 
@@ -239,26 +238,42 @@ test('container detail: storage panel renders mounts with kind badges, capacity,
   await expect(mountRow('/config').locator('.storage-mount__ro')).toHaveCount(0); // rw is the default -- not labeled
   // A share spans however many disks it happens to land on -- Unraid
   // tracks no true per-share usage, so there's no single slot to show
-  // capacity for (mountCapacitySlot's own "don't fake it" rule).
-  await expect(mountRow('/config').locator('.storage-mount__capacity')).toHaveCount(0);
+  // capacity for (mountCapacitySlot's own "don't fake it" rule) -- the
+  // cell itself still renders (it's a fixed grid column), just empty.
+  await expect(mountRow('/config').locator('.storage-mount__capacity-cell')).toBeEmpty();
 
   await expect(mountRow('/media').locator('.storage-mount__badge')).toContainText('Disk · disk1');
   await expect(mountRow('/media').locator('.storage-mount__ro')).toBeVisible();
-  await expect(mountRow('/media').locator('.storage-mount__capacity')).toHaveText(CAPACITY_TEXT, { timeout: 10_000 });
+  await expect(mountRow('/media').locator('.storage-mount__capacity-cell')).toHaveText(CAPACITY_TEXT, {
+    timeout: 10_000,
+  });
 
   await expect(mountRow('/flash').locator('.storage-mount__badge')).toContainText('Flash');
   await expect(mountRow('/flash').locator('.storage-mount__ro')).toBeVisible();
-  await expect(mountRow('/flash').locator('.storage-mount__capacity')).toHaveText(CAPACITY_TEXT, { timeout: 10_000 });
+  await expect(mountRow('/flash').locator('.storage-mount__capacity-cell')).toHaveText(CAPACITY_TEXT, {
+    timeout: 10_000,
+  });
 
-  // Density regression coverage for Scott's own report ("a lot of wasted
-  // space... [the kind badge] flung to the far right edge"): the badge
-  // must sit close to the mount's own path text, not justified across
-  // the whole card.
-  const mediaPathsBox = await mountRow('/media').locator('.storage-mount__paths').boundingBox();
-  const mediaBadgeBox = await mountRow('/media').locator('.storage-mount__badge').boundingBox();
-  expect(mediaPathsBox).not.toBeNull();
-  expect(mediaBadgeBox).not.toBeNull();
-  expect(mediaBadgeBox.x - (mediaPathsBox.x + mediaPathsBox.width)).toBeLessThan(40);
+  // Column-alignment regression coverage for Scott's own report ("try to
+  // line things up a little better here"): every mount's dest/badge cell
+  // must start at the same x as every other mount's in the SAME CSS
+  // column group (/config and /flash both land in the left group at
+  // this width), and /media's own group (the right one) must start at a
+  // consistent offset from it -- one shared grid template guarantees
+  // this by construction (see ContainerDetail.svelte's own doc), unlike
+  // the masonry `columns: 2` layout this replaced, which could only
+  // ever align a mount with itself.
+  const destConfig = await mountRow('/config').locator('.storage-mount__dest').boundingBox();
+  const destFlash = await mountRow('/flash').locator('.storage-mount__dest').boundingBox();
+  const badgeConfig = await mountRow('/config').locator('.storage-mount__badge-cell').boundingBox();
+  const badgeFlash = await mountRow('/flash').locator('.storage-mount__badge-cell').boundingBox();
+  expect(destConfig).not.toBeNull();
+  expect(destFlash).not.toBeNull();
+  expect(destConfig.x).toBeCloseTo(destFlash.x, 0);
+  expect(badgeConfig.x).toBeCloseTo(badgeFlash.x, 0);
+
+  const destMedia = await mountRow('/media').locator('.storage-mount__dest').boundingBox();
+  expect(destMedia.x).toBeGreaterThan(destConfig.x + destConfig.width); // the right-hand CSS column, not stacked under the left
 
   // Devices sort by raw device name (deviceIOFromSamples) -- loop2,
   // nvme0n1, sda -- exercising all three of unraid.ResolveDeviceLabel's
@@ -266,32 +281,127 @@ test('container detail: storage panel renders mounts with kind badges, capacity,
   // fake mode's own override -- fake.go's DeviceLabels, since fake mode
   // has no real /sys to read), a DiskMeta slot join (nvme0n1 ->
   // rocket_pool, kind nvme), and raw passthrough (sda isn't any of the
-  // fake fleet's own disk devices).
+  // fake fleet's own disk devices). jellyfin's own devices always carry
+  // real (nonzero) IO in fake mode, so the noise rule (its own mocked
+  // tests below) never hides any of these three.
   await expect(page.locator('.storage-device').first()).toBeVisible({ timeout: 10_000 });
   await expect(page.locator('.storage-device')).toHaveCount(3);
 
   const loopRow = page.locator('.storage-device').nth(0);
-  await expect(loopRow.locator('.storage-device__name')).toContainText('docker.img');
+  await expect(loopRow.locator('.storage-device__label')).toContainText('docker.img');
   await expect(loopRow.locator('.storage-device__raw')).toHaveText('loop2');
   await expect(loopRow.locator('.storage-device__kind')).toHaveCount(0); // fake's override names a label but no kind
 
   const poolRow = page.locator('.storage-device').nth(1);
-  await expect(poolRow.locator('.storage-device__name')).toContainText('rocket_pool');
+  await expect(poolRow.locator('.storage-device__label')).toContainText('rocket_pool');
   await expect(poolRow.locator('.storage-device__raw')).toHaveText('nvme0n1');
   await expect(poolRow.locator('.storage-device__kind')).toContainText('NVMe');
-  await expect(poolRow).toContainText('Read');
-  await expect(poolRow).toContainText('Write');
+  // Read/Write are named once, in the header (checked below), not
+  // repeated as text on every row -- each value still carries its own
+  // identity via aria-label for anyone not reading the header visually.
+  await expect(poolRow.locator('.storage-device__value').nth(0)).toHaveAttribute('aria-label', /^Read /);
+  await expect(poolRow.locator('.storage-device__value').nth(1)).toHaveAttribute('aria-label', /^Write /);
 
   const rawRow = page.locator('.storage-device').nth(2);
-  await expect(rawRow.locator('.storage-device__name')).toContainText('sda');
-  await expect(rawRow.locator('.storage-device__raw')).toHaveCount(0); // sda isn't any known slot's device -- stays raw, no secondary
+  await expect(rawRow.locator('.storage-device__label')).toContainText('sda');
+  await expect(rawRow.locator('.storage-device__raw')).toBeEmpty(); // sda isn't any known slot's device -- stays raw, no secondary
   await expect(rawRow.locator('.storage-device__kind')).toHaveCount(0);
 
-  // Total: read+write summed across every device above -- "how much IO
-  // is this container doing" at a glance.
+  await expect(page.locator('.storage-device-header', { hasText: 'Read' })).toBeVisible();
+  await expect(page.locator('.storage-device-header', { hasText: 'Write' })).toBeVisible();
+
+  // Read/Write column alignment -- "so all rows and the Total row line
+  // up exactly": every .storage-device__value is a (read, write) pair in
+  // DOM order, one pair per device row plus one for the Total row, so
+  // every even index is a Read cell and every odd index a Write cell --
+  // each group must share exactly one x position.
   await expect(page.locator('.storage-total')).toContainText('Total');
-  await expect(page.locator('.storage-total')).toContainText('Read');
-  await expect(page.locator('.storage-total')).toContainText('Write');
+  const valueXs = await page
+    .locator('.storage-device__value')
+    .evaluateAll((els) => els.map((el) => Math.round(el.getBoundingClientRect().x)));
+  expect(valueXs).toHaveLength(8); // 3 devices + Total, x2 each
+  const readXs = valueXs.filter((_, i) => i % 2 === 0);
+  const writeXs = valueXs.filter((_, i) => i % 2 === 1);
+  expect(new Set(readXs).size).toBe(1);
+  expect(new Set(writeXs).size).toBe(1);
+});
+
+// Live IO noise rule (recentlyActiveDevices/recordDeviceActivity, lib/
+// containerStorage.ts): fake mode's own devices are always active
+// (fake.go's Tick never zeroes them), so exercising "never had any IO"
+// needs a mocked response. mounts: [] means the Mounts sub-section shows
+// its own "No mounts for this container." line -- same shared
+// .container-detail__storage-empty class the Live IO one below would
+// use if it were showing, so that check is scoped by text, not the bare
+// class, to tell the two apart.
+test('container detail: storage panel hides a device with no recent IO but still counts it in Total', async ({
+  page,
+}) => {
+  await page.route('**/api/containers/jellyfin/storage', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        mounts: [],
+        devices: [
+          { device: 'sda', label: 'sda', kind: '', read_bps: 120000, write_bps: 40000 },
+          { device: 'loop1', label: 'bzmodules', kind: '', read_bps: 0, write_bps: 0 },
+        ],
+      }),
+    }),
+  );
+  await page.goto('#/containers/jellyfin');
+
+  await expect(page.locator('.storage-device')).toHaveCount(1, { timeout: 10_000 });
+  await expect(page.locator('.storage-device__label')).toContainText('sda');
+  await expect(page.locator('.container-detail__storage-empty', { hasText: 'No recent disk IO.' })).toHaveCount(0);
+
+  // Total sums BOTH devices (120000+0 read bps = 120.0 KB/s), not just
+  // the one visible row -- truthful even though bzmodules never renders.
+  await expect(page.locator('.storage-total .storage-device__value').nth(0)).toHaveAttribute(
+    'aria-label',
+    'Read 120.0 KB/s',
+  );
+  await expect(page.locator('.storage-total .storage-device__value').nth(1)).toHaveAttribute(
+    'aria-label',
+    'Write 40.0 KB/s',
+  );
+});
+
+test('container detail: an active Unraid-OS loop device gets a muted suffix', async ({ page }) => {
+  await page.route('**/api/containers/jellyfin/storage', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        mounts: [],
+        devices: [{ device: 'loop1', label: 'bzmodules', kind: '', read_bps: 5000, write_bps: 0 }],
+      }),
+    }),
+  );
+  await page.goto('#/containers/jellyfin');
+
+  const row = page.locator('.storage-device').first();
+  await expect(row).toBeVisible({ timeout: 10_000 });
+  await expect(row.locator('.storage-device__label')).toContainText('bzmodules');
+  await expect(row.locator('.storage-device__os-tag')).toHaveText('(Unraid OS)');
+});
+
+test('container detail: storage panel shows a quiet message once every device has gone idle', async ({ page }) => {
+  await page.route('**/api/containers/jellyfin/storage', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ mounts: [], devices: [{ device: 'sda', label: 'sda', kind: '', read_bps: 0, write_bps: 0 }] }),
+    }),
+  );
+  await page.goto('#/containers/jellyfin');
+
+  await expect(page.locator('.container-detail__storage-empty', { hasText: 'No recent disk IO.' })).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.locator('.storage-device')).toHaveCount(0);
+  await expect(page.locator('.storage-total')).toHaveCount(0);
 });
 
 test('top consumers: switching window from Now to 1h renders without erroring', async ({ page }) => {

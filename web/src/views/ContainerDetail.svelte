@@ -24,7 +24,13 @@
   import { containerHealthStatus } from '../lib/containerStatus';
   import { GPU_ENGINE_ORDER } from '../lib/metrics';
   import { eventsToMarkers } from '../lib/eventMarkers';
-  import { mountCapacitySlot, normalizeStorageKind, sortMounts } from '../lib/containerStorage';
+  import {
+    mountCapacitySlot,
+    normalizeStorageKind,
+    recentlyActiveDevices,
+    recordDeviceActivity,
+    sortMounts,
+  } from '../lib/containerStorage';
   import { diskUsagePct } from '../lib/disks';
 
   import ContainerIcon from '../components/ContainerIcon.svelte';
@@ -268,11 +274,25 @@
   // failure before ever succeeding once) simply never gets a panel --
   // storageData stays null -- rather than an error card.
   let storageData = $state(null);
+
+  // deviceLastActiveAt backs the Live IO noise rule (Scott: containers
+  // touch Unraid's own bzmodules boot-image loop device once via module
+  // autoload, then it sits at 0 forever -- a device row that never has
+  // anything to say shouldn't stay in the list saying it, forever). A
+  // plain, non-reactive Map -- recordDeviceActivity is the only writer,
+  // called from the poll below, same "plain Map, not $state" convention
+  // Containers.svelte's own seedTargets uses for the identical reason
+  // (nothing here needs to be watched directly; only visibleDevices'
+  // own read of it, further down, needs to be reactive).
+  const deviceLastActiveAt = new Map();
+
   $effect(() => {
     const containerName = name;
     async function poll() {
       try {
-        storageData = await fetchContainerStorage(containerName);
+        const data = await fetchContainerStorage(containerName);
+        recordDeviceActivity(data.devices, deviceLastActiveAt, Date.now());
+        storageData = data;
       } catch {
         // leave storageData as it is -- see the doc above.
       }
@@ -282,6 +302,14 @@
     return () => clearInterval(interval);
   });
   let sortedMounts = $derived(storageData ? sortMounts(storageData.mounts) : []);
+  // visibleDevices is the Live IO noise rule's own output: only devices
+  // active this poll or within RECENT_IO_WINDOW_MS's trailing memory --
+  // recomputed whenever storageData changes (a new poll), which is
+  // exactly the granularity this needs (STORAGE_POLL_MS is 2s, the
+  // window is 60s -- no reason to re-derive between polls). The Total
+  // row below deliberately sums storageData.devices, not this -- see its
+  // own doc.
+  let visibleDevices = $derived(storageData ? recentlyActiveDevices(storageData.devices, deviceLastActiveAt, Date.now()) : []);
   // diskFrame backs each pool/disk/flash mount's own capacity line
   // ("N% full · X free") -- the live frame's per-slot fs.used_bytes/
   // fs.free_bytes (unraid's disks.go, same map Storage.svelte's own
@@ -429,28 +457,35 @@
         {#if sortedMounts.length === 0}
           <p class="microlabel container-detail__storage-empty">No mounts for this container.</p>
         {:else}
+          <!-- One grid, 4 fixed-width tracks (repeated at >=1200px -- see
+               this class's own style doc): a mount's paths/badge/capacity
+               used to be two flex rows that only ever aligned with
+               THEMSELVES, never with the mount above or below it, let
+               alone the other CSS column at wide widths. display:contents
+               on .storage-mount lifts its own children straight into this
+               grid so every field lands in the same column, every row. -->
           <div class="container-detail__storage-mounts">
             {#each sortedMounts as mount (mount.destination)}
               {@const kind = normalizeStorageKind(mount.storage.kind)}
               {@const capSlot = mountCapacitySlot(mount)}
               {@const usagePct = capSlot ? diskUsagePct(diskFrame[capSlot]) : null}
               <div class="storage-mount">
-                <div class="storage-mount__paths">
-                  <span class="storage-mount__dest" title={mount.destination}>{mount.destination}</span>
+                <span class="storage-mount__dest" title={mount.destination}>{mount.destination}</span>
+                <span class="storage-mount__source-cell">
                   <span class="storage-mount__arrow" aria-hidden="true">&larr;</span>
                   <span class="storage-mount__source" title={mount.source}>{mount.source}</span>
-                </div>
-                <div class="storage-mount__tags">
+                </span>
+                <span class="storage-mount__badge-cell">
                   <span class="storage-mount__badge storage-mount__badge--{kind}" title={STORAGE_KIND_TITLE[kind]}>
                     {STORAGE_KIND_LABEL[kind]}{mount.storage.name ? ` · ${mount.storage.name}` : ''}
                   </span>
                   {#if !mount.rw}<span class="storage-mount__ro">ro</span>{/if}
+                </span>
+                <span class="storage-mount__capacity-cell tabular-nums">
                   {#if usagePct !== null}
-                    <span class="storage-mount__capacity tabular-nums">
-                      {fmtPct(usagePct)} full &middot; {fmtBytes(diskFrame[capSlot]['fs.free_bytes'])} free
-                    </span>
+                    {fmtPct(usagePct)} full &middot; {fmtBytes(diskFrame[capSlot]['fs.free_bytes'])} free
                   {/if}
-                </div>
+                </span>
               </div>
             {/each}
           </div>
@@ -460,12 +495,39 @@
       {#if storageData.devices.length > 0}
         <div class="container-detail__storage-section">
           <span class="microlabel">Live IO</span>
-          <div class="container-detail__storage-devices">
-            {#each storageData.devices as d (d.device)}
-              <StorageDeviceRow entry={d} />
-            {/each}
-            <StorageTotalRow devices={storageData.devices} />
-          </div>
+          {#if visibleDevices.length === 0}
+            <!-- Every device this container touches has been idle for a
+                 full RECENT_IO_WINDOW_MS -- e.g. bzmodules, autoloaded
+                 once at container start then untouched forever (Scott:
+                 "what is bzmodules?"). The Total row would just read a
+                 permanent 0 B/s here, so it's skipped too rather than
+                 shown alongside a message that already says as much. -->
+            <p class="microlabel container-detail__storage-empty">No recent disk IO.</p>
+          {:else}
+            <!-- Same display:contents grid technique as the mounts list
+                 above, minus the 2-CSS-column split (a container rarely
+                 has more than a handful of backing devices, so there's
+                 no wide-viewport case to fill). The header row's own 5
+                 cells are the grid's first row, sharing its column
+                 tracks -- Read/Write name the two right-aligned value
+                 columns once instead of repeating the word on every row. -->
+            <div class="container-detail__storage-devices">
+              <span class="storage-device-header" aria-hidden="true"></span>
+              <span class="storage-device-header" aria-hidden="true"></span>
+              <span class="storage-device-header" aria-hidden="true"></span>
+              <span class="storage-device-header storage-device-header--value" aria-hidden="true">Read</span>
+              <span class="storage-device-header storage-device-header--value" aria-hidden="true">Write</span>
+              {#each visibleDevices as d (d.device)}
+                <StorageDeviceRow entry={d} />
+              {/each}
+              <!-- Sums ALL of storageData.devices, not just visibleDevices
+                   -- an idle-but-hidden device still contributed 0 to this
+                   container's real total, and staying truthful about that
+                   matters more here than staying visually in sync with
+                   whichever rows happen to be shown above it. -->
+              <StorageTotalRow devices={storageData.devices} />
+            </div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -586,56 +648,102 @@
   .container-detail__storage-empty {
     margin: 0;
   }
-  /* Multi-column (not a 2-track CSS grid) at wide widths: these rows
-     vary a little in height (a capacity line on some, not others), and
-     plain `columns` gives every row its OWN hairline-bottom divider
-     (below, matching the Containers table's own row rhythm) rather
-     than having to reconcile two side-by-side grid cells of different
-     heights into one straight line across both. break-inside keeps one
-     mount from splitting across the column gap. */
+  /* A real grid, 4 fixed-width tracks -- doubled at >=1200px (one shared
+     template, not two independent ones), so destination/source/badge/
+     capacity land in the same track for every mount, in EITHER CSS
+     column, not just within one. The previous `columns: 2` masonry
+     layout could only ever align a mount with itself: each visual
+     column there is its own independent flow with no shared row grid,
+     so nothing guaranteed the left and right groups' fields ever lined
+     up (Scott: "try to line things up a little better here"). Fixed
+     tracks beat `auto`/content-sized ones for the same reason -- a
+     content-sized column's width comes from ITS OWN group's widest
+     value, which can differ left vs. right. */
   .container-detail__storage-mounts {
-    columns: 1;
-    column-gap: 1.5rem;
+    display: grid;
+    grid-template-columns: minmax(4.5rem, 7rem) minmax(5rem, 1fr) minmax(6rem, 8.5rem) minmax(8rem, 11rem);
+    column-gap: 1.25rem;
+    align-items: baseline;
   }
+  /* Doubled at >=1200px -- see this class's own doc for why one shared
+     template, not two independent ones. Source's own minimum can't be 0
+     here the way a plain `1fr` would default it: reproduced at exactly
+     1200-1440px (this card's real available width once the sidebar and
+     card padding are subtracted), where dest+badge+capacity's OWN
+     minimums for both groups already consumed every pixel this card
+     had, leaving 1fr nothing to distribute and the whole source column
+     -- and every mount's own host path -- invisible. A real (if narrow)
+     minimum floor for source, and smaller minimums for the other three
+     (their own vocabulary is short and bounded -- "Share \xb7 appdata"-
+     length text -- unlike an arbitrary host path), leaves this workable
+     at the ask's own 1200px rather than needing a much wider one. */
   @media (min-width: 75rem) {
     .container-detail__storage-mounts {
-      columns: 2;
+      grid-template-columns: repeat(2, minmax(4.5rem, 7rem) minmax(5rem, 1fr) minmax(6rem, 8.5rem) minmax(8rem, 11rem));
+    }
+  }
+  /* Narrow phones: the 4-track row above needs ~27rem just for its 3
+     fixed-minimum columns (dest+badge+capacity) before source gets
+     anything at all -- reproduced at 375px, where source's own
+     minmax(0, ...) floor let it shrink straight to 0 and its whole path
+     silently vanished rather than visibly overflowing. Two tracks
+     instead, source paired under dest and capacity under badge (the
+     same two-line grouping this section used before the grid rewrite),
+     still column-aligned across mounts, just narrower. */
+  @media (max-width: 36rem) {
+    .container-detail__storage-mounts {
+      grid-template-columns: minmax(5rem, auto) minmax(0, 1fr);
+      row-gap: 0.15rem;
+    }
+    .storage-mount > :nth-child(1),
+    .storage-mount > :nth-child(2) {
+      padding-bottom: 0.15rem;
+      border-bottom: none;
+    }
+    .storage-mount > :nth-child(3),
+    .storage-mount > :nth-child(4) {
+      padding-top: 0.15rem;
+    }
+    .storage-mount__capacity-cell {
+      text-align: left;
     }
   }
   .container-detail__storage-devices {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: auto minmax(3rem, 1fr) auto auto auto;
+    column-gap: 0.75rem;
+    align-items: center;
   }
+  /* Narrow phones: 5 real columns of content (label/device/kind/read/
+     write) don't fit this card's own width even at auto sizing --
+     reproduced at 375px, where Write's own column ran past the card's
+     right edge. StorageDeviceRow/StorageTotalRow fall back to a plain
+     wrapping flex row at this same breakpoint (see their own docs); the
+     header row assumed 5 shared grid columns, so it's dropped rather
+     than shown misaligned -- each row still names Read/Write inline via
+     its own aria-label, same as always. */
+  @media (max-width: 36rem) {
+    .container-detail__storage-devices {
+      display: flex;
+      flex-direction: column;
+    }
+    .storage-device-header {
+      display: none;
+    }
+  }
+  /* display:contents lifts a mount's own 4 cells straight into the grid
+     above as its next row -- see that class's own doc for why this
+     replaced the old flex-row-per-mount layout. Every cell below (not
+     just .storage-mount itself) carries the row's padding/hairline,
+     since display:contents leaves .storage-mount generating no box of
+     its own to put either on. */
   .storage-mount {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.3rem 0.6rem;
+    display: contents;
+  }
+  .storage-mount > * {
     padding: 0.5rem 0;
     border-bottom: 1px solid color-mix(in oklab, var(--ink) 6%, transparent);
-    break-inside: avoid;
-  }
-  .storage-mount:first-child {
-    padding-top: 0;
-  }
-  .storage-mount:last-child {
-    border-bottom: none;
-    padding-bottom: 0;
-  }
-  .storage-mount__paths {
-    display: flex;
-    align-items: baseline;
-    gap: 0.4rem;
     min-width: 0;
-    /* No flex-grow -- Scott's own report on the first cut was the badge
-       getting flung to the card's far right edge with a dead middle in
-       between; that was this element flex-GROWING to fill the row
-       before the tags cluster came after it. Shrink-only (capped by the
-       row's own track width -- much narrower once the 2-column layout
-       above kicks in) keeps the badge sitting right after the text
-       instead of chasing the far edge. */
-    flex: 0 1 auto;
-    overflow: hidden;
   }
   .storage-mount__dest {
     font-size: 0.85rem;
@@ -643,6 +751,12 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .storage-mount__source-cell {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    overflow: hidden;
   }
   .storage-mount__arrow {
     color: var(--ink-2);
@@ -657,12 +771,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .storage-mount__tags {
+  .storage-mount__badge-cell {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    flex-shrink: 0;
     gap: 0.4rem;
+    overflow: hidden;
   }
   /* Storage-system badge: same tinted-pill recipe as Storage.svelte's
      own disk media badges (storage-disk__media) -- a neutral chip for
@@ -695,10 +809,13 @@
     color: var(--series-7);
     background: color-mix(in oklab, var(--series-7) 12%, transparent);
   }
-  .storage-mount__capacity {
+  .storage-mount__capacity-cell {
     color: var(--ink-2);
     font-size: 0.72rem;
+    text-align: right;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .storage-mount__ro {
     font-family: var(--font-mono);
@@ -710,6 +827,22 @@
     background: color-mix(in oklab, var(--ink) 7%, transparent);
     color: var(--ink-2);
     white-space: nowrap;
+  }
+  /* Live IO's own header row -- its 5 cells are this grid's first row
+     (see the template above), naming the two right-aligned value
+     columns once instead of every row repeating "Read"/"Write" as
+     inline text the way this section used to. */
+  .storage-device-header {
+    padding: 0 0 0.4rem;
+    border-bottom: 1px solid color-mix(in oklab, var(--ink) 12%, transparent);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ink-2);
+  }
+  .storage-device-header--value {
+    text-align: right;
   }
   .container-detail__meta-list {
     display: grid;

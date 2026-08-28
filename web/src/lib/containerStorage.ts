@@ -63,3 +63,61 @@ export function mountCapacitySlot(mount: MountLike): string | null {
   if (kind === 'pool' || kind === 'disk') return mount.storage.name;
   return null;
 }
+
+// RECENT_IO_WINDOW_MS is the Live IO device rows' own noise floor: a
+// device stays listed for this long after its last nonzero read/write
+// sample, then drops out once it's been genuinely idle the whole window
+// -- long enough that an ordinary bursty container's device doesn't
+// flicker in and out between polls, short enough that a device that
+// truly never does anything (Unraid's own bzmodules kernel-image loop
+// device is the case that prompted this -- containers touch it once via
+// module autoload, then it sits at 0 forever) actually disappears
+// instead of camping in the list at a permanent 0 B/s.
+export const RECENT_IO_WINDOW_MS = 60_000;
+
+export interface DeviceIOLike {
+  device: string;
+  read_bps: number;
+  write_bps: number;
+}
+
+// recordDeviceActivity updates `lastActiveAt` (device -> the ms
+// timestamp it was last seen with nonzero read/write) for every device
+// that's active THIS poll -- the one place this map is written. Callers
+// own the map (a plain, non-reactive one, not framework state -- there's
+// nothing to render off it directly, only off recentlyActiveDevices'
+// own read of it) and pass the same instance in on every poll so a
+// device's own "last seen active" survives across ticks even once it
+// goes idle.
+export function recordDeviceActivity(devices: DeviceIOLike[], lastActiveAt: Map<string, number>, nowMs: number): void {
+  for (const d of devices) {
+    if (d.read_bps > 0 || d.write_bps > 0) lastActiveAt.set(d.device, nowMs);
+  }
+}
+
+// recentlyActiveDevices filters `devices` down to the ones with an
+// activity timestamp inside RECENT_IO_WINDOW_MS of `nowMs` -- a device
+// recordDeviceActivity has never once recorded (never active since this
+// panel opened) is correctly excluded, same as one that fell silent too
+// long ago.
+export function recentlyActiveDevices<T extends { device: string }>(
+  devices: T[],
+  lastActiveAt: ReadonlyMap<string, number>,
+  nowMs: number,
+): T[] {
+  return devices.filter((d) => {
+    const seenAt = lastActiveAt.get(d.device);
+    return seenAt !== undefined && nowMs - seenAt <= RECENT_IO_WINDOW_MS;
+  });
+}
+
+// isUnraidOSLoopDevice recognizes Unraid's own boot-image loop devices
+// (bzimage/bzroot/bzmodules/bzfirmware -- ResolveDeviceLabel resolves a
+// loop device's label to its backing file's basename, and these are the
+// literal filenames Unraid boots from its flash drive) -- Scott's own
+// report, landing on one of these once it actually showed live IO:
+// "what is bzmodules?" with nothing in the row itself saying it's the OS
+// rather than a stray/misconfigured mount.
+export function isUnraidOSLoopDevice(label: string): boolean {
+  return label.startsWith('bz');
+}

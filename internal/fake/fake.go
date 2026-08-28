@@ -439,11 +439,13 @@ func (g *Generator) emitGPU(ts int64) {
 
 // emitSelf records Gantry's own footprint (kind "host", no entity,
 // mirroring internal/collect/selfstat's exact metric names) around the
-// real, observed-in-production figures (~0.6% CPU, ~30MB RSS) so the
-// Settings page's footprint receipt looks like the real thing even in
-// fake mode.
+// real, observed-in-production figures (~0.6% CPU on the old per-core
+// scale, ~30MB RSS) -- ÷fakeHostCores turns that into this generator's
+// own host-share number, the same conversion the container loop above
+// applies, so the Settings page's footprint receipt looks like the real
+// thing even in fake mode.
 func (g *Generator) emitSelf(ts int64) {
-	cpu := clamp(0.6+(g.rng.Float64()-0.5)*0.3, 0, 100)
+	cpu := clamp(0.6+(g.rng.Float64()-0.5)*0.3, 0, 100) / fakeHostCores
 	rss := 30e6 + g.rng.Float64()*4e6
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "gantry.cpu_pct"}, ts, cpu)
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "gantry.rss_bytes"}, ts, rss)

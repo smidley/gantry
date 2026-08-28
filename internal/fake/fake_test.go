@@ -510,6 +510,10 @@ func TestGPUBusyPctStaysInContainerAndGPUKinds(t *testing.T) {
 	}
 }
 
+// TestGantrySelfFootprintMetrics pins emitSelf's host-share conversion:
+// the pre-conversion figure is clamp(0.6±0.15, 0, 100) (never clamped in
+// practice), so ÷fakeHostCores must land in exactly [0.45/8, 0.75/8] --
+// centered on 0.075, not the old per-core-style ~0.6.
 func TestGantrySelfFootprintMetrics(t *testing.T) {
 	sink := &capture{}
 	g := New(sink, nil, 1)
@@ -519,7 +523,7 @@ func TestGantrySelfFootprintMetrics(t *testing.T) {
 	rss := sink.recs[store.SeriesKey{Kind: "host", Metric: "gantry.rss_bytes"}]
 	require.Len(t, cpu, 1)
 	require.Len(t, rss, 1)
-	require.GreaterOrEqual(t, cpu[0].Val, 0.0)
-	require.Less(t, cpu[0].Val, 5.0, "gantry's own CPU footprint should be small")
+	require.InDelta(t, 0.6/fakeHostCores, cpu[0].Val, 0.15/fakeHostCores,
+		"gantry's own CPU footprint must read as this generator's host-share, not the old per-core-style ~0.6%%")
 	require.Greater(t, rss[0].Val, 0.0)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -116,6 +117,7 @@ func TestSelfstatTickComputesCPUPctAcrossTwoTicks(t *testing.T) {
 
 	sink := newFakeSink()
 	c := New(sink, dir)
+	c.HostCores = func() int { return 8 }
 	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
 
 	writeFile(t, dir, "stat", statLine("gantry", 250, 150)) // 400 jiffies = 4.0s (+2.0s over 2s wall)
@@ -124,11 +126,31 @@ func TestSelfstatTickComputesCPUPctAcrossTwoTicks(t *testing.T) {
 
 	pct, ok := sink.value("gantry.cpu_pct")
 	require.True(t, ok)
-	require.InDelta(t, 100.0, pct, 1e-9) // 2.0s of CPU time over 2s of wall time
+	require.InDelta(t, 12.5, pct, 1e-9) // one full core (2.0s CPU / 2s wall) is 12.5% of an 8-core host
 
 	rss, ok := sink.value("gantry.rss_bytes")
 	require.True(t, ok)
 	require.Equal(t, 1200.0*4096, rss)
+}
+
+// TestSelfstatTickFallsBackToNumCPUWhenHostCoresZero mirrors the docker
+// collector's own fallback (cgroupv2.go's recordContainerStats): an unset
+// HostCores must not leave gantry.cpu_pct blank, since it's the one number
+// the Settings page's footprint receipt always needs.
+func TestSelfstatTickFallsBackToNumCPUWhenHostCoresZero(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stat", statLine("gantry", 100, 100)) // 200 jiffies = 2.0s
+
+	sink := newFakeSink()
+	c := New(sink, dir) // HostCores left at its default-0 stub
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	writeFile(t, dir, "stat", statLine("gantry", 250, 150)) // +2.0s over 2s wall = one full core
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1002, 0)))
+
+	pct, ok := sink.value("gantry.cpu_pct")
+	require.True(t, ok, "gantry.cpu_pct must fall back to runtime.NumCPU() rather than go blank")
+	require.InDelta(t, 100.0/float64(runtime.NumCPU()), pct, 1e-9)
 }
 
 func TestSelfstatTickErrorsWhenStatMissing(t *testing.T) {

@@ -132,6 +132,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	ur := unraid.New(st, st, envOnly(getenv, "GANTRY_UNRAID_DIR", "/unraid"), "/proc")
 	du := docker.NewDiskUsage(st, dockerSock)
 	ss := selfstat.New(st, "/proc")
+	ss.HostCores = host.NumCPU
 
 	registry := collect.NewRegistry()
 	registry.Add(host)

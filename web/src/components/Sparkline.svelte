@@ -18,7 +18,7 @@
   // no historical/fetched Sparkline usage today, unlike TimeChart, which
   // is why that component requires an explicit opt-in instead. See its
   // own doc for the full mechanism 1+2 rationale this mirrors.
-  let { points = [], color = 'var(--series-1)', live = true } = $props();
+  let { points = [], color = 'var(--series-1)', live = true, height = 28 } = $props();
 
   let el;
   let chart = null;
@@ -67,7 +67,7 @@
     chart = new uPlot(
       {
         width: el.clientWidth || 120,
-        height: 28,
+        height,
         padding: [1, 1, 1, 1],
         cursor: { show: false },
         legend: { show: false },
@@ -250,7 +250,7 @@
     // setSize -- the same ResizeObserver->setSize shape TimeChart already
     // uses.
     ro = new ResizeObserver(() => {
-      if (chart && el) chart.setSize({ width: el.clientWidth || 120, height: 28 });
+      if (chart && el) chart.setSize({ width: el.clientWidth || 120, height });
     });
     if (el) ro.observe(el);
   });
@@ -274,6 +274,7 @@
   bind:this={el}
   class="sparkline"
   role="presentation"
+  style="height: {height}px"
   onpointermove={handlePointerMove}
   onpointerleave={clearScrub}
   onpointercancel={clearScrub}

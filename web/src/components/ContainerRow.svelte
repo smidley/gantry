@@ -123,23 +123,27 @@
     </td>
     <td class="container-row__cpu-cell">
       <span class="tabular-nums">{fmtPct(cpuTween.current)}</span>
-      <Sparkline points={cpuRing.points} />
+      <Sparkline points={cpuRing.points} height={30} />
     </td>
-    <td class="tabular-nums container-row__nowrap">
+    <td class="tabular-nums container-row__nowrap container-row__num">
       {fmtBytes(memBytesTween.current)}
       {#if m['mem.pct'] !== undefined}<span class="container-row__muted">({fmtPct(memPctTween.current)})</span>{/if}
     </td>
-    <td class="tabular-nums container-row__nowrap container-row__stacked">
-      <span>&darr; {fmtRate(netRxTween.current)}</span>
-      <span class="container-row__muted">&uarr; {fmtRate(netTxTween.current)}</span>
+    <td class="tabular-nums container-row__nowrap container-row__num">
+      <div class="container-row__stacked">
+        <span>&darr; {fmtRate(netRxTween.current)}</span>
+        <span class="container-row__muted">&uarr; {fmtRate(netTxTween.current)}</span>
+      </div>
     </td>
-    <td class="tabular-nums container-row__nowrap container-row__stacked">
-      <span>r {fmtRate(ioReadTween.current)}</span>
-      <span class="container-row__muted">w {fmtRate(ioWriteTween.current)}</span>
+    <td class="tabular-nums container-row__nowrap container-row__num">
+      <div class="container-row__stacked">
+        <span>r {fmtRate(ioReadTween.current)}</span>
+        <span class="container-row__muted">w {fmtRate(ioWriteTween.current)}</span>
+      </div>
     </td>
-    <td class="tabular-nums">{gpuPct > 0 ? fmtPct(gpuPct) : ''}</td>
-    <td class="tabular-nums">{m['pids'] !== undefined ? Math.round(m['pids']) : ''}</td>
-    <td class="tabular-nums container-row__nowrap">
+    <td class="tabular-nums container-row__num">{gpuPct > 0 ? fmtPct(gpuPct) : ''}</td>
+    <td class="tabular-nums container-row__num">{m['pids'] !== undefined ? Math.round(m['pids']) : ''}</td>
+    <td class="tabular-nums container-row__nowrap container-row__num">
       {m['meta.started_at'] !== undefined ? fmtDuration(ts - m['meta.started_at']) : '—'}
     </td>
     <td class="container-row__image-cell" title={c.image}>{c.image}</td>
@@ -167,19 +171,24 @@
   .container-row__cpu-cell {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 0.5rem;
-    min-width: 7rem;
+    min-width: 14rem;
   }
   .container-row__cpu-cell :global(.sparkline) {
-    width: 60px;
+    width: 170px;
     flex-shrink: 0;
   }
   .container-row__nowrap {
     white-space: nowrap;
   }
+  .container-row__num {
+    text-align: right;
+  }
   .container-row__stacked {
     display: flex;
     flex-direction: column;
+    align-items: flex-end;
     line-height: 1.3;
   }
   .container-row__muted {

@@ -33,13 +33,13 @@
   const COLUMNS = [
     { key: 'health', label: '', ariaName: 'Health', sortable: true },
     { key: 'name', label: 'Name', sortable: true },
-    { key: 'cpu', label: 'CPU', sortable: true },
-    { key: 'mem', label: 'Mem', sortable: true },
-    { key: 'net', label: 'Net', sortable: true },
-    { key: 'io', label: 'IO', sortable: true },
-    { key: 'gpu', label: 'GPU', sortable: true },
-    { key: 'pids', label: 'PIDs', sortable: true },
-    { key: 'uptime', label: 'Uptime', sortable: true },
+    { key: 'cpu', label: 'CPU', sortable: true, numeric: true },
+    { key: 'mem', label: 'Mem', sortable: true, numeric: true },
+    { key: 'net', label: 'Net', sortable: true, numeric: true },
+    { key: 'io', label: 'IO', sortable: true, numeric: true },
+    { key: 'gpu', label: 'GPU', sortable: true, numeric: true },
+    { key: 'pids', label: 'PIDs', sortable: true, numeric: true },
+    { key: 'uptime', label: 'Uptime', sortable: true, numeric: true },
     { key: 'image', label: 'Image', sortable: true },
   ];
 
@@ -215,7 +215,7 @@
         <thead>
           <tr>
             {#each COLUMNS as col (col.key)}
-              <th>
+              <th class:containers-table__th--numeric={col.numeric}>
                 <button
                   type="button"
                   class="containers-table__sort-btn"
@@ -328,13 +328,16 @@
   .containers-table {
     width: 100%;
     border-collapse: collapse;
-    min-width: 62rem;
+    min-width: 72rem;
   }
   .containers-table thead th {
     padding: 0.5rem 0.6rem;
     text-align: left;
     border-bottom: 1px solid color-mix(in oklab, var(--ink) 12%, transparent);
     white-space: nowrap;
+  }
+  .containers-table__th--numeric {
+    text-align: right;
   }
   .containers-table__sort-btn {
     background: transparent;
@@ -344,6 +347,10 @@
     min-height: 40px;
     display: flex;
     align-items: center;
+  }
+  .containers-table__th--numeric .containers-table__sort-btn {
+    width: 100%;
+    justify-content: flex-end;
   }
   .containers-view__stopped-header {
     margin-top: 0.25rem;

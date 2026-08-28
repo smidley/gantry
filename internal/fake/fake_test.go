@@ -69,6 +69,36 @@ func TestTickEmitsHostAndContainerSeries(t *testing.T) {
 	}
 }
 
+// TestContainerCPUIsHostShareWithMatchingCores pins the top-consumers
+// host-share fix's fake-mode half: cpu.pct must read as this container's
+// share of the WHOLE host, not docker-stats' own per-core percent, so it
+// must stay well clear of 100 across many ticks (spikes included) --
+// unlike the old per-core-style number, which routinely approached it --
+// and cpu.cores/fakeHostCores*100 must always reproduce cpu.pct exactly,
+// the same relationship the real collector's cgroupv2.go now guarantees.
+func TestContainerCPUIsHostShareWithMatchingCores(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	tickEvery(g, time.Unix(1_000_000, 0), 2*time.Second, 300) // ~10 simulated minutes: several spike rolls per archetype
+
+	var maxPct float64
+	for k, samples := range sink.recs {
+		if k.Kind != "container" || k.Metric != "cpu.pct" {
+			continue
+		}
+		cores := sink.recs[store.SeriesKey{Kind: "container", Entity: k.Entity, Metric: "cpu.cores"}]
+		require.Len(t, cores, len(samples), "%s: cpu.cores must be emitted alongside every cpu.pct sample", k.Entity)
+		for i, s := range samples {
+			require.InDelta(t, cores[i].Val/fakeHostCores*100, s.Val, 1e-9, "%s: cpu.pct must equal cpu.cores' own host-share", k.Entity)
+			if s.Val > maxPct {
+				maxPct = s.Val
+			}
+		}
+	}
+	require.Greater(t, maxPct, 0.0, "want at least some CPU activity across the fleet")
+	require.Less(t, maxPct, 20.0, "host-share must stay far from 100%% even during a spike -- that was the whole bug")
+}
+
 func TestFakeContainerStartedAtIsPastAndVariesByIndex(t *testing.T) {
 	boot := time.Unix(5_000_000, 0)
 	first := fakeContainerStartedAt(boot, 0)

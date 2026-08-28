@@ -357,11 +357,7 @@ func TestMetasIsPureAndStable(t *testing.T) {
 	require.Equal(t, g.Metas(), g.Metas())
 }
 
-// TestMetasIncludesPlausibleMounts pins the fix-round fix (finding 1):
-// fake containers must carry plausible Mounts, the same as a real
-// docker.Collector's inventory poll would populate, so the storage
-// panel's /storage route has something to resolve in fake-data mode
-// instead of an always-empty mount list.
+// TestMetasIncludesPlausibleMounts pins that fake containers carry plausible Mounts.
 func TestMetasIncludesPlausibleMounts(t *testing.T) {
 	g := New(&capture{}, nil, 1)
 	metas := g.Metas()
@@ -369,7 +365,8 @@ func TestMetasIncludesPlausibleMounts(t *testing.T) {
 	for _, m := range metas {
 		require.NotEmpty(t, m.Mounts, "%s must have at least one plausible mount", m.Name)
 		for _, mount := range m.Mounts {
-			require.True(t, strings.HasPrefix(mount.Source, "/mnt/"), "%s mount source %q must look like a real Unraid path", m.Name, mount.Source)
+			isUnraidPath := strings.HasPrefix(mount.Source, "/mnt/") || strings.HasPrefix(mount.Source, "/boot/")
+			require.True(t, isUnraidPath, "%s mount source %q must look like a real Unraid path", m.Name, mount.Source)
 		}
 	}
 }

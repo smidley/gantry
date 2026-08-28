@@ -247,8 +247,9 @@ func (g *Generator) Tick(now time.Time) {
 		// recordContainerStats shape (live-ring-only, per-device) so the
 		// storage panel's device rows have something to show in fake-data
 		// mode too -- "sda"/"nvme0n1" are a plausible fixed pair of device
-		// names, not tied to fakeContainerMounts' share/pool naming (real
-		// per-device IO and Unraid slot names are unrelated namespaces).
+		// names, not tied to fakeContainerMounts' share/disk/flash naming
+		// (real per-device IO and Unraid slot names are unrelated
+		// namespaces).
 		ioRead := a.netScale * (0.4 + 0.6*g.rng.Float64())
 		ioWrite := ioRead * 0.35 * (0.5 + g.rng.Float64())
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.sda.read_bps"}, ts, ioRead)
@@ -446,14 +447,20 @@ func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
 // set for the storage panel to resolve in fake-data mode: every
 // container gets a config bind under the near-universal
 // /mnt/user/appdata/<name> share, and the two transcoding apps also
-// mount the cache pool's /mnt/cache/transcode, so ResolveStoragePath's
-// "share" and "pool" kinds both have something to render, not just one.
+// mount an array disk (/mnt/disk1/media) and the flash boot device
+// (/boot/config), so ResolveStoragePath's "share", "disk", and "flash"
+// kinds each have something to render. "pool" isn't covered here:
+// resolving it needs Collector.Slots() off a real disks.ini, which
+// fake-data mode never has, so that kind is only exercised on-box.
 func fakeContainerMounts(name string) []docker.MountInfo {
 	mounts := []docker.MountInfo{
 		{Source: "/mnt/user/appdata/" + name, Destination: "/config", RW: true},
 	}
 	if name == "jellyfin" || name == "plex" {
-		mounts = append(mounts, docker.MountInfo{Source: "/mnt/cache/transcode", Destination: "/transcode", RW: true})
+		mounts = append(mounts,
+			docker.MountInfo{Source: "/mnt/disk1/media", Destination: "/media", RW: false},
+			docker.MountInfo{Source: "/boot/config", Destination: "/flash", RW: false},
+		)
 	}
 	return mounts
 }

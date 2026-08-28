@@ -196,6 +196,17 @@ export function calloutTextBySlot(anomalies: OverviewAnomaly[]): Map<string, str
   return bySlot;
 }
 
+// fleetSentence is the headline's own fleet subline, right under the D2
+// status headline. total===runningCount keeps the original "all running"
+// phrasing; once the frame carries stopped-but-known containers too (not
+// just a brief post-stop grace window), that split is worth stating
+// plainly instead.
+export function fleetSentence(total: number, runningCount: number, stoppedCount: number): string {
+  if (stoppedCount > 0) return `${runningCount} running · ${stoppedCount} stopped.`;
+  const noun = total === 1 ? 'container' : 'containers';
+  return `${total} ${noun}, all running.`;
+}
+
 const SEVERITY_RANK: Record<HealthStatus, number> = { good: 0, warning: 1, serious: 2, critical: 3 };
 
 // worstSeverity picks the single most severe reading across every

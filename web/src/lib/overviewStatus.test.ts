@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, worstSeverity, type OverviewAnomaly } from './overviewStatus';
+import {
+  calloutTextBySlot,
+  deriveOverviewStatus,
+  describeAnomaly,
+  fleetSentence,
+  worstSeverity,
+  type OverviewAnomaly,
+} from './overviewStatus';
 
 const BASE = {
   unhealthyNames: [] as string[],
@@ -245,5 +252,23 @@ describe('worstSeverity', () => {
   it('does not let a later, less severe anomaly downgrade the result', () => {
     const anomalies: OverviewAnomaly[] = [{ kind: 'unhealthy', name: 'sonarr' }, { kind: 'stopped', count: 1 }];
     expect(worstSeverity(anomalies)).toBe('critical');
+  });
+});
+
+describe('fleetSentence', () => {
+  it('reads "all running" when nothing is stopped', () => {
+    expect(fleetSentence(20, 20, 0)).toBe('20 containers, all running.');
+  });
+
+  it('singularizes "container" for a lone, all-running fleet', () => {
+    expect(fleetSentence(1, 1, 0)).toBe('1 container, all running.');
+  });
+
+  it('switches to "N running · M stopped" once any container is stopped', () => {
+    expect(fleetSentence(20, 18, 2)).toBe('18 running · 2 stopped.');
+  });
+
+  it('the stopped phrasing does not depend on total at all', () => {
+    expect(fleetSentence(5, 0, 5)).toBe('0 running · 5 stopped.');
   });
 });

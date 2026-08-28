@@ -43,7 +43,7 @@
   import { diskKind, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
-  import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, worstSeverity } from '../lib/overviewStatus';
+  import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, fleetSentence, worstSeverity } from '../lib/overviewStatus';
 
   import StatTile from '../components/StatTile.svelte';
   import FleetStrip from '../components/FleetStrip.svelte';
@@ -159,11 +159,7 @@
   );
   let fleetContainers = $derived(containerEntries.map(([name, c]) => ({ name, state: c.state, health: c.health })));
 
-  let fleetSentence = $derived.by(() => {
-    const total = containerEntries.length;
-    const noun = total === 1 ? 'container' : 'containers';
-    return runningCount === total ? `${total} ${noun}, all running.` : `${total} ${noun}, ${runningCount} running.`;
-  });
+  let fleetLine = $derived(fleetSentence(containerEntries.length, runningCount, stoppedCount));
 
   let topRows = $derived(topFromFrame(live.frame, topResource, 5));
 
@@ -350,7 +346,7 @@
           <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
         </div>
         <div class="overview__headline-subs">
-          <p class="overview__sub-line">{fleetSentence}</p>
+          <p class="overview__sub-line">{fleetLine}</p>
           <FleetStrip containers={fleetContainers} />
           <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
           {#if hottestSentence}

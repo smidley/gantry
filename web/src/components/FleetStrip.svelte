@@ -32,13 +32,15 @@
 
 <ul class="fleet-strip" aria-label={`Container fleet, ${containers.length} total`}>
   {#each containers as c (c.name)}
+    {@const stopped = c.state !== 'running'}
     {@const status = containerHealthStatus(c.state, c.health)}
     <li>
       <a
         class="fleet-unit"
-        class:fleet-unit--warning={status === 'warning'}
-        class:fleet-unit--serious={status === 'serious'}
-        class:fleet-unit--critical={status === 'critical'}
+        class:fleet-unit--stopped={stopped}
+        class:fleet-unit--warning={!stopped && status === 'warning'}
+        class:fleet-unit--serious={!stopped && status === 'serious'}
+        class:fleet-unit--critical={!stopped && status === 'critical'}
         href={`#/containers/${encodeURIComponent(c.name)}`}
         aria-label={ariaLabel(c.name, c.state, c.health)}
       ></a>
@@ -77,6 +79,18 @@
   }
   .fleet-unit:hover {
     background: color-mix(in oklab, var(--ink) 32%, transparent);
+  }
+  /* Stopped: muted, NOT enlarged -- a container turned off on purpose is
+     common in a home-lab (see overviewStatus.ts's own doc), not a
+     problem to flag the same way warning/serious/critical do. A plain
+     darker-than-quiet ink tone, no hue, keeps it readably distinct from
+     "running clean" without reading as an alarm. Full rework (its own
+     shape/pattern, not just a color) is a later round. */
+  .fleet-unit--stopped {
+    background: color-mix(in oklab, var(--ink) 40%, transparent);
+  }
+  .fleet-unit--stopped:hover {
+    background: color-mix(in oklab, var(--ink) 55%, transparent);
   }
   /* Enlarged AND recolored -- two channels, not color alone, per the
      status-never-color-alone floor (the per-unit aria-label above is

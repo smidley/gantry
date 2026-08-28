@@ -429,7 +429,7 @@ func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store
 		}
 	}
 	return func(name string) (server.StorageDTO, bool) {
-		return containerStorage(lookup, ur.Slots, st.Live(), name)
+		return containerStorage(lookup, ur.Slots, st.Live(), name, time.Now().Unix())
 	}
 }
 
@@ -445,7 +445,7 @@ func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store
 // docker.Collector.LookupByName itself uses. Mounts/Devices are always
 // non-nil (even when empty) so the wire JSON is "[]", never "null" --
 // see server.StorageDTO's own doc.
-func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots func() (pools, disks []string), live *store.Live, name string) (server.StorageDTO, bool) {
+func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots func() (pools, disks []string), live *store.Live, name string, now int64) (server.StorageDTO, bool) {
 	meta, ok := lookupMeta(name)
 	if !ok {
 		return server.StorageDTO{}, false
@@ -463,20 +463,30 @@ func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots fun
 		})
 	}
 
-	devices := deviceIOFromSamples(live.LatestByMetricPrefix("container", name, "live:io."))
+	devices := deviceIOFromSamples(live.LatestByMetricPrefix("container", name, "live:io."), now)
 	return server.StorageDTO{Mounts: mounts, Devices: devices}, true
 }
 
 // deviceIOFromSamples turns store.Live's live:io.<dev>.read_bps/
 // write_bps samples (recorded by cgroupv2.go's recordContainerStats,
 // live-ring-only by design) into one DeviceIODTO per device, sorted by
-// device name for a stable response. A device with only one of the two
-// rates yet (its RateTracker key for the other direction hasn't produced
-// a second reading) still appears, with the missing half left at its
-// float64 zero value rather than being dropped.
-func deviceIOFromSamples(samples map[string]store.Sample) []server.DeviceIODTO {
+// device name for a stable response. A sample containerFrameMaxAge
+// seconds old or older is dropped entirely rather than surfaced as a
+// device row: its ring is evicted on container REMOVAL, not on stop
+// (registry.go's applyInventory/applyEvent), so without this gate a
+// long-stopped container's last-ever rates would keep reading as
+// current -- the same cutoff and boundary buildSnapshot's own stopped-
+// container filter already applies, just against one entity's samples
+// instead of every "container"-kind key. A device with only one of the
+// two rates yet (its RateTracker key for the other direction hasn't
+// produced a second reading) still appears, with the missing half left
+// at its float64 zero value rather than being dropped.
+func deviceIOFromSamples(samples map[string]store.Sample, now int64) []server.DeviceIODTO {
 	byDevice := make(map[string]*server.DeviceIODTO, len(samples))
 	for metric, sample := range samples {
+		if now-sample.TS >= containerFrameMaxAge {
+			continue
+		}
 		dev, suffix, ok := strings.Cut(strings.TrimPrefix(metric, "live:io."), ".")
 		if !ok {
 			continue

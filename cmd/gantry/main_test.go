@@ -367,7 +367,7 @@ func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.write_bps"}, 1000, 45)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, 1000, 4.2) // must not leak into devices
 
-	dto, ok := containerStorage(lookupMeta, poolSlots, live, "jellyfin")
+	dto, ok := containerStorage(lookupMeta, poolSlots, live, "jellyfin", 1000)
 	require.True(t, ok)
 
 	require.Equal(t, []server.MountDTO{
@@ -384,7 +384,7 @@ func TestContainerStorageUnknownContainerReturnsFalse(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
 	poolSlots := func() ([]string, []string) { return nil, nil }
 
-	_, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "ghost")
+	_, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "ghost", 0)
 	require.False(t, ok)
 }
 
@@ -396,7 +396,7 @@ func TestContainerStorageEmptyMountsAndDevicesAreNonNilSlices(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "bare"}, true }
 	poolSlots := func() ([]string, []string) { return nil, nil }
 
-	dto, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "bare")
+	dto, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "bare", 0)
 	require.True(t, ok)
 	require.NotNil(t, dto.Mounts)
 	require.Empty(t, dto.Mounts)
@@ -417,7 +417,7 @@ func TestDeviceIOFromSamplesCombinesReadAndWriteZeroFillingTheMissingHalf(t *tes
 		"live:io.sda.write_bps": {TS: 100, Val: 30},
 	}
 
-	got := deviceIOFromSamples(samples)
+	got := deviceIOFromSamples(samples, 100)
 
 	require.Equal(t, []server.DeviceIODTO{
 		{Device: "sda", ReadBps: 20, WriteBps: 30},
@@ -426,9 +426,30 @@ func TestDeviceIOFromSamplesCombinesReadAndWriteZeroFillingTheMissingHalf(t *tes
 }
 
 func TestDeviceIOFromSamplesEmptyWhenNoSamples(t *testing.T) {
-	got := deviceIOFromSamples(map[string]store.Sample{})
+	got := deviceIOFromSamples(map[string]store.Sample{}, 100)
 	require.NotNil(t, got)
 	require.Empty(t, got)
+}
+
+// TestDeviceIOFromSamplesExcludesStaleSamples pins the fix for stale IO
+// being reported as live (fix round finding 2): a container's ring is
+// evicted on REMOVAL, not on stop (registry.go's applyInventory/
+// applyEvent), so containerStorage's live:io.* lookup used to return a
+// long-stopped container's last-ever rates as if they were current.
+// Gated on the same containerFrameMaxAge cutoff buildSnapshot's own
+// stopped-container filter already uses, and the same ">=" boundary
+// (age >= maxAge excludes, not just age > maxAge) -- a sample exactly
+// that old must not surface as a device row at all, not a device row
+// with stale data.
+func TestDeviceIOFromSamplesExcludesStaleSamples(t *testing.T) {
+	now := int64(1000)
+	samples := map[string]store.Sample{
+		"live:io.sda.read_bps": {TS: now - containerFrameMaxAge, Val: 999},
+	}
+
+	got := deviceIOFromSamples(samples, now)
+
+	require.Empty(t, got, "a sample containerFrameMaxAge seconds old or older must not surface as a live device row")
 }
 
 // TestBuildContainerStorageUnknownReturnsFalse is a thin wiring check

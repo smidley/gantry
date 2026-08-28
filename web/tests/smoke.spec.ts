@@ -71,6 +71,31 @@ test('overview: status headline reflects fleet/array/disk state, the fleet strip
   await expect.poll(() => cpuNumber.textContent(), { timeout: 6_000 }).not.toBe(initial);
 });
 
+test('overview: the Top Consumers module metric switcher changes the module and deep-links "View all"', async ({
+  page,
+}) => {
+  await page.goto('#/');
+
+  const topModule = page.locator('.overview__top');
+  await expect(topModule).toBeVisible();
+
+  // Fresh context -> no stored preference yet -> CPU is the default.
+  await expect(topModule.getByRole('tab', { name: 'CPU', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(topModule.locator('.overview__top-link')).toHaveAttribute('href', '#/top/cpu');
+
+  const memTab = topModule.getByRole('tab', { name: 'Mem', exact: true });
+  await memTab.click();
+  await expect(memTab).toHaveAttribute('aria-selected', 'true');
+
+  // "View all" deep-links to the just-selected resource, and landing on
+  // the full #/top view pre-selects that same resource's own (fuller-
+  // labeled) tab there too.
+  await expect(topModule.locator('.overview__top-link')).toHaveAttribute('href', '#/top/mem');
+  await topModule.locator('.overview__top-link').click();
+  await expect(page).toHaveURL(/#\/top\/mem$/);
+  await expect(page.getByRole('tab', { name: 'Memory', exact: true })).toHaveAttribute('aria-selected', 'true');
+});
+
 test('containers: clicking a header sorts the table', async ({ page }) => {
   await page.goto('#/containers');
 

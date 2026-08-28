@@ -35,7 +35,7 @@ var diskSlotPattern = regexp.MustCompile(`^disk[0-9]+$`)
 //	anything else          -> {other, ""}
 //
 // pools is the current set of known pool slot names (Collector.Slots()'s
-// first return value -- "cache" included when it exists on this fleet,
+// return value -- "cache" included when it exists on this fleet,
 // same as any custom-named pool; there is no hardcoded literal-"cache"
 // special case). A nil/empty pools (e.g. disks.ini never successfully
 // read yet) simply means no path resolves as a pool until it's known,

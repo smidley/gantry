@@ -445,13 +445,13 @@ func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store
 // docker.Collector.LookupByName itself uses. Mounts/Devices are always
 // non-nil (even when empty) so the wire JSON is "[]", never "null" --
 // see server.StorageDTO's own doc.
-func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots func() (pools, disks []string), live *store.Live, name string, now int64) (server.StorageDTO, bool) {
+func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots func() []string, live *store.Live, name string, now int64) (server.StorageDTO, bool) {
 	meta, ok := lookupMeta(name)
 	if !ok {
 		return server.StorageDTO{}, false
 	}
 
-	pools, _ := poolSlots()
+	pools := poolSlots()
 	mounts := make([]server.MountDTO, 0, len(meta.Mounts))
 	for _, m := range meta.Mounts {
 		ref := unraid.ResolveStoragePath(m.Source, pools)

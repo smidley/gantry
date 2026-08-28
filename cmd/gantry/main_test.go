@@ -360,7 +360,7 @@ func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
 			},
 		}, true
 	}
-	poolSlots := func() ([]string, []string) { return []string{"cache"}, []string{"disk1"} }
+	poolSlots := func() []string { return []string{"cache"} }
 
 	live := store.NewLive(8)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.read_bps"}, 1000, 123.5)
@@ -382,7 +382,7 @@ func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
 // docker.Collector.LookupByName's own shape.
 func TestContainerStorageUnknownContainerReturnsFalse(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
-	poolSlots := func() ([]string, []string) { return nil, nil }
+	poolSlots := func() []string { return nil }
 
 	_, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "ghost", 0)
 	require.False(t, ok)
@@ -394,7 +394,7 @@ func TestContainerStorageUnknownContainerReturnsFalse(t *testing.T) {
 // StorageDTO's own doc on why the server package cares about this.
 func TestContainerStorageEmptyMountsAndDevicesAreNonNilSlices(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "bare"}, true }
-	poolSlots := func() ([]string, []string) { return nil, nil }
+	poolSlots := func() []string { return nil }
 
 	dto, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "bare", 0)
 	require.True(t, ok)

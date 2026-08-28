@@ -32,7 +32,6 @@ type Collector struct {
 	mu        sync.Mutex
 	version   string   // guarded by mu; set on tickArray, read via Version()
 	poolSlots []string // guarded by mu; set on tickDisks, read via Slots()
-	diskSlots []string // guarded by mu; set on tickDisks, read via Slots()
 
 	havePrevArray bool
 	prevArray     ArrayState
@@ -69,18 +68,17 @@ func (c *Collector) Version() string {
 	return c.version
 }
 
-// Slots returns the most recently observed pool and disk slot names --
-// disks.ini's per-slot "type" field is the source of truth ("Cache" ->
-// pool, "Data" -> disk; parity/flash slots appear in neither, since
-// they're never a container mount target) -- or (nil, nil) before
-// disks.ini has ever been read successfully. Safe for concurrent
-// callers, same convention as Version(); the storage-panel path
-// resolver (storagepath.go) uses the pool list to recognize a mount
-// source under a custom-named cache pool.
-func (c *Collector) Slots() (pools, disks []string) {
+// Slots returns the most recently observed pool slot names -- disks.
+// ini's per-slot "type" field is the source of truth ("Cache" -> pool;
+// every other type, "Data" included, is not) -- or nil before disks.ini
+// has ever been read successfully. Safe for concurrent callers, same
+// convention as Version(); the storage-panel path resolver
+// (storagepath.go) uses this to recognize a mount source under a
+// custom-named cache pool.
+func (c *Collector) Slots() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.poolSlots, c.diskSlots
+	return c.poolSlots
 }
 
 // Tick's only hard requirement is var.ini, matching Probe's contract

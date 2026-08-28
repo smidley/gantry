@@ -53,6 +53,17 @@ test('overview: hovering one stat-tile sparkline scrubs and pins every tile in s
   await expect(chip1).toHaveCount(0);
   await expect(chip2).toHaveCount(0);
 
+  // tile2 (Memory) is fed a single fresh U[0,2) random draw per tick
+  // (fake.go's own Tick) riding a near-flat slow sinusoid, rounded to
+  // this tile's own 1-decimal display -- two independent instants land
+  // on the identical rendered string a real (~5%) fraction of the time,
+  // which made comparing the scrubbed reading against ONLY before2
+  // flake. A second, later live read (before2b, a fresh independent
+  // draw ~2.5s on) gives the scrub check below two readings to differ
+  // from instead of one, cutting that residual coincidence to ~5%^2.
+  await page.waitForTimeout(2_500);
+  const before2b = await number2.textContent();
+
   // page.mouse.move below is a raw viewport-coordinate API (unlike a
   // locator action) and does NOT auto-scroll -- this sandbox's own
   // SourcesBanner routinely stacks several real degraded-source cards
@@ -78,7 +89,12 @@ test('overview: hovering one stat-tile sparkline scrubs and pins every tile in s
   // its own number must pin to ITS metric's value at the same shared
   // instant, purely because tile 1 is being scrubbed.
   await expect(chip2).toHaveCount(1);
-  await expect.poll(() => number2.textContent()).not.toBe(before2);
+  await expect
+    .poll(async () => {
+      const v = await number2.textContent();
+      return v !== before2 && v !== before2b;
+    })
+    .toBe(true);
 
   // The two polls above resolve as soon as each number ticks AWAY from
   // its pre-hover text -- which can be the instant the fast (120ms)

@@ -159,30 +159,83 @@ test('container detail: charts render and the log viewer shows its empty state',
 // "jellyfin" is the only fake-fleet archetype whose mounts cover three
 // different storage kinds at once (fakeContainerMounts: a share, an
 // array disk, and the flash boot device -- "pool" only resolves on a
-// real box, since it needs a real disks.ini). Devices are ring-only
-// samples that take the fake generator a couple of ticks to populate
-// after the server starts, hence the generous timeout on the first one.
-test('container detail: storage panel renders mounts with kind badges and live device IO', async ({ page }) => {
+// real box, since it needs a real disks.ini). Devices/capacity are
+// ring-only/live-frame samples that take the fake generator a couple of
+// ticks to populate after the server starts, hence the generous
+// timeouts on the first reads of each.
+test('container detail: storage panel renders mounts with kind badges, capacity, and labeled live device IO', async ({
+  page,
+}) => {
+  // Wide enough that the mount list's 2-column layout (>=1200px) is
+  // active, and that the density regression check below (badge close to
+  // its own row's text, not flung to a far edge) has real edge-to-edge
+  // distance to measure.
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/containers/jellyfin');
 
   const mountRow = (destination: string) =>
     page
       .locator('.storage-mount')
       .filter({ has: page.locator('.storage-mount__dest', { hasText: new RegExp(`^${destination}$`) }) });
+  const CAPACITY_TEXT = /^\d+\.\d% full · \d+\.\d (B|KiB|MiB|GiB|TiB|PiB) free$/;
 
   await expect(mountRow('/config').locator('.storage-mount__badge')).toContainText('Share · appdata');
   await expect(mountRow('/config').locator('.storage-mount__ro')).toHaveCount(0); // rw is the default -- not labeled
+  // A share spans however many disks it happens to land on -- Unraid
+  // tracks no true per-share usage, so there's no single slot to show
+  // capacity for (mountCapacitySlot's own "don't fake it" rule).
+  await expect(mountRow('/config').locator('.storage-mount__capacity')).toHaveCount(0);
 
   await expect(mountRow('/media').locator('.storage-mount__badge')).toContainText('Disk · disk1');
   await expect(mountRow('/media').locator('.storage-mount__ro')).toBeVisible();
+  await expect(mountRow('/media').locator('.storage-mount__capacity')).toHaveText(CAPACITY_TEXT, { timeout: 10_000 });
 
   await expect(mountRow('/flash').locator('.storage-mount__badge')).toContainText('Flash');
   await expect(mountRow('/flash').locator('.storage-mount__ro')).toBeVisible();
+  await expect(mountRow('/flash').locator('.storage-mount__capacity')).toHaveText(CAPACITY_TEXT, { timeout: 10_000 });
 
+  // Density regression coverage for Scott's own report ("a lot of wasted
+  // space... [the kind badge] flung to the far right edge"): the badge
+  // must sit close to the mount's own path text, not justified across
+  // the whole card.
+  const mediaPathsBox = await mountRow('/media').locator('.storage-mount__paths').boundingBox();
+  const mediaBadgeBox = await mountRow('/media').locator('.storage-mount__badge').boundingBox();
+  expect(mediaPathsBox).not.toBeNull();
+  expect(mediaBadgeBox).not.toBeNull();
+  expect(mediaBadgeBox.x - (mediaPathsBox.x + mediaPathsBox.width)).toBeLessThan(40);
+
+  // Devices sort by raw device name (deviceIOFromSamples) -- loop2,
+  // nvme0n1, sda -- exercising all three of unraid.ResolveDeviceLabel's
+  // own paths at once: a loop device's backing_file (docker.img, via
+  // fake mode's own override -- fake.go's DeviceLabels, since fake mode
+  // has no real /sys to read), a DiskMeta slot join (nvme0n1 ->
+  // rocket_pool, kind nvme), and raw passthrough (sda isn't any of the
+  // fake fleet's own disk devices).
   await expect(page.locator('.storage-device').first()).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator('.storage-device')).toHaveCount(2); // sda, nvme0n1
-  await expect(page.locator('.storage-device', { hasText: 'nvme0n1' })).toContainText('Read');
-  await expect(page.locator('.storage-device', { hasText: 'nvme0n1' })).toContainText('Write');
+  await expect(page.locator('.storage-device')).toHaveCount(3);
+
+  const loopRow = page.locator('.storage-device').nth(0);
+  await expect(loopRow.locator('.storage-device__name')).toContainText('docker.img');
+  await expect(loopRow.locator('.storage-device__raw')).toHaveText('loop2');
+  await expect(loopRow.locator('.storage-device__kind')).toHaveCount(0); // fake's override names a label but no kind
+
+  const poolRow = page.locator('.storage-device').nth(1);
+  await expect(poolRow.locator('.storage-device__name')).toContainText('rocket_pool');
+  await expect(poolRow.locator('.storage-device__raw')).toHaveText('nvme0n1');
+  await expect(poolRow.locator('.storage-device__kind')).toContainText('NVMe');
+  await expect(poolRow).toContainText('Read');
+  await expect(poolRow).toContainText('Write');
+
+  const rawRow = page.locator('.storage-device').nth(2);
+  await expect(rawRow.locator('.storage-device__name')).toContainText('sda');
+  await expect(rawRow.locator('.storage-device__raw')).toHaveCount(0); // sda isn't any known slot's device -- stays raw, no secondary
+  await expect(rawRow.locator('.storage-device__kind')).toHaveCount(0);
+
+  // Total: read+write summed across every device above -- "how much IO
+  // is this container doing" at a glance.
+  await expect(page.locator('.storage-total')).toContainText('Total');
+  await expect(page.locator('.storage-total')).toContainText('Read');
+  await expect(page.locator('.storage-total')).toContainText('Write');
 });
 
 test('top consumers: switching window from Now to 1h renders without erroring', async ({ page }) => {

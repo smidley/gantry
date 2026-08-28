@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeStorageKind, sortMounts } from './containerStorage';
+import { mountCapacitySlot, normalizeStorageKind, sortMounts } from './containerStorage';
 
 describe('normalizeStorageKind', () => {
   it('passes through every known kind unchanged', () => {
@@ -53,5 +53,33 @@ describe('sortMounts', () => {
     const mounts = [mount('/z', 'flash'), mount('/a', 'share', 'appdata')];
     sortMounts(mounts);
     expect(mounts.map((m) => m.destination)).toEqual(['/z', '/a']);
+  });
+});
+
+describe('mountCapacitySlot', () => {
+  const mount = (kind: string, name = '') => ({ destination: '/x', storage: { kind, name } });
+
+  it('resolves a pool mount to its own pool slot name', () => {
+    expect(mountCapacitySlot(mount('pool', 'rocket_pool'))).toBe('rocket_pool');
+  });
+
+  it('resolves a disk mount to its own disk slot name', () => {
+    expect(mountCapacitySlot(mount('disk', 'disk1'))).toBe('disk1');
+  });
+
+  it('resolves a flash mount to the fixed "flash" slot, even though the mount itself carries no name', () => {
+    expect(mountCapacitySlot(mount('flash'))).toBe('flash');
+  });
+
+  it('returns null for a share mount -- a share spans disks, no single slot to show', () => {
+    expect(mountCapacitySlot(mount('share', 'appdata'))).toBeNull();
+  });
+
+  it('returns null for an unresolved ("other") mount', () => {
+    expect(mountCapacitySlot(mount('other'))).toBeNull();
+  });
+
+  it('returns null for an unrecognized kind, same as "other"', () => {
+    expect(mountCapacitySlot(mount('exotic'))).toBeNull();
   });
 });

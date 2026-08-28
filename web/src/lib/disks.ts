@@ -77,8 +77,11 @@ const DISK_KINDS: ReadonlySet<string> = new Set<DiskKind>(['hdd', 'ssd', 'nvme',
 // diskMetaKind narrows an arbitrary string (straight off the wire, never
 // typechecked at its source) to DiskKind -- same "don't trust the network"
 // convention topFromFrame.ts's isTopResource already uses for a route
-// param.
-function diskMetaKind(value: string | undefined): DiskKind | null {
+// param. Exported: containerStorage's own device rows reuse this exact
+// narrowing for DeviceIODTO's Kind (unraid.ResolveDeviceLabel's own
+// hdd/ssd/nvme/usb vocabulary, straight off the same disk_meta-derived
+// source) rather than re-declaring the DISK_KINDS set a second time.
+export function diskMetaKind(value: string | undefined): DiskKind | null {
   return value !== undefined && DISK_KINDS.has(value) ? (value as DiskKind) : null;
 }
 

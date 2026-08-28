@@ -23,13 +23,15 @@
   import { containerHealthStatus } from '../lib/containerStatus';
   import { GPU_ENGINE_ORDER } from '../lib/metrics';
   import { eventsToMarkers } from '../lib/eventMarkers';
-  import { normalizeStorageKind, sortMounts } from '../lib/containerStorage';
+  import { mountCapacitySlot, normalizeStorageKind, sortMounts } from '../lib/containerStorage';
+  import { diskUsagePct } from '../lib/disks';
 
   import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
   import TimeChart from '../components/TimeChart.svelte';
   import LogViewer from '../components/LogViewer.svelte';
   import StorageDeviceRow from '../components/StorageDeviceRow.svelte';
+  import StorageTotalRow from '../components/StorageTotalRow.svelte';
 
   let { name } = $props();
 
@@ -279,6 +281,16 @@
     return () => clearInterval(interval);
   });
   let sortedMounts = $derived(storageData ? sortMounts(storageData.mounts) : []);
+  // diskFrame backs each pool/disk/flash mount's own capacity line
+  // ("N% full · X free") -- the live frame's per-slot fs.used_bytes/
+  // fs.free_bytes (unraid's disks.go, same map Storage.svelte's own
+  // disk cards read), joined client-side via mountCapacitySlot rather
+  // than fetched separately: this data is already flowing on every SSE
+  // tick, no new endpoint needed. A share mount (spans disks, no single
+  // slot) or a slot the frame hasn't reported on yet both fall out as
+  // "no capacity line" for free -- mountCapacitySlot/diskUsagePct both
+  // return null rather than a wrong number, see their own docs.
+  let diskFrame = $derived(live.frame?.disks ?? {});
 
   let c = $derived(live.frame?.containers?.[name]);
   let frameTs = $derived(live.frame?.ts ?? 0);
@@ -406,6 +418,8 @@
           <div class="container-detail__storage-mounts">
             {#each sortedMounts as mount (mount.destination)}
               {@const kind = normalizeStorageKind(mount.storage.kind)}
+              {@const capSlot = mountCapacitySlot(mount)}
+              {@const usagePct = capSlot ? diskUsagePct(diskFrame[capSlot]) : null}
               <div class="storage-mount">
                 <div class="storage-mount__paths">
                   <span class="storage-mount__dest" title={mount.destination}>{mount.destination}</span>
@@ -417,6 +431,11 @@
                     {STORAGE_KIND_LABEL[kind]}{mount.storage.name ? ` · ${mount.storage.name}` : ''}
                   </span>
                   {#if !mount.rw}<span class="storage-mount__ro">ro</span>{/if}
+                  {#if usagePct !== null}
+                    <span class="storage-mount__capacity tabular-nums">
+                      {fmtPct(usagePct)} full &middot; {fmtBytes(diskFrame[capSlot]['fs.free_bytes'])} free
+                    </span>
+                  {/if}
                 </div>
               </div>
             {/each}
@@ -431,6 +450,7 @@
             {#each storageData.devices as d (d.device)}
               <StorageDeviceRow entry={d} />
             {/each}
+            <StorageTotalRow devices={storageData.devices} />
           </div>
         </div>
       {/if}
@@ -548,25 +568,55 @@
   .container-detail__storage-empty {
     margin: 0;
   }
-  .container-detail__storage-mounts,
+  /* Multi-column (not a 2-track CSS grid) at wide widths: these rows
+     vary a little in height (a capacity line on some, not others), and
+     plain `columns` gives every row its OWN hairline-bottom divider
+     (below, matching the Containers table's own row rhythm) rather
+     than having to reconcile two side-by-side grid cells of different
+     heights into one straight line across both. break-inside keeps one
+     mount from splitting across the column gap. */
+  .container-detail__storage-mounts {
+    columns: 1;
+    column-gap: 1.5rem;
+  }
+  @media (min-width: 75rem) {
+    .container-detail__storage-mounts {
+      columns: 2;
+    }
+  }
   .container-detail__storage-devices {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
   }
   .storage-mount {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
-    justify-content: space-between;
-    gap: 0.3rem 0.75rem;
+    gap: 0.3rem 0.6rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid color-mix(in oklab, var(--ink) 6%, transparent);
+    break-inside: avoid;
+  }
+  .storage-mount:first-child {
+    padding-top: 0;
+  }
+  .storage-mount:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
   }
   .storage-mount__paths {
     display: flex;
     align-items: baseline;
     gap: 0.4rem;
     min-width: 0;
-    flex: 1 1 12rem;
+    /* No flex-grow -- Scott's own report on the first cut was the badge
+       getting flung to the card's far right edge with a dead middle in
+       between; that was this element flex-GROWING to fill the row
+       before the tags cluster came after it. Shrink-only (capped by the
+       row's own track width -- much narrower once the 2-column layout
+       above kicks in) keeps the badge sitting right after the text
+       instead of chasing the far edge. */
+    flex: 0 1 auto;
     overflow: hidden;
   }
   .storage-mount__dest {
@@ -626,6 +676,11 @@
   .storage-mount__badge--other {
     color: var(--series-7);
     background: color-mix(in oklab, var(--series-7) 12%, transparent);
+  }
+  .storage-mount__capacity {
+    color: var(--ink-2);
+    font-size: 0.72rem;
+    white-space: nowrap;
   }
   .storage-mount__ro {
     font-family: var(--font-mono);

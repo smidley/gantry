@@ -79,6 +79,8 @@ export interface StorageMountDTO {
 
 export interface StorageDeviceDTO {
   device: string;
+  label: string;
+  kind: string;
   read_bps: number;
   write_bps: number;
 }

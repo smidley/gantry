@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/store"
@@ -262,7 +263,26 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 			m.StartedAt = t
 		}
 	}
+	m.Mounts = mountsFromInspect(resp.Mounts)
 	return m
+}
+
+// mountsFromInspect filters an inspect response's Mounts down to bind and
+// volume types -- the only two whose Source is a real host-side path
+// (tmpfs's is contractually empty; npipe/cluster/image aren't meaningful
+// on an Unraid/Linux host) -- and copies each into a MountInfo, in the
+// same order docker reported them. Returns nil, not an empty slice, when
+// nothing qualifies (including the empty/nil-Mounts case), matching
+// every other zero-value Meta field's convention.
+func mountsFromInspect(mps []container.MountPoint) []MountInfo {
+	var out []MountInfo
+	for _, mp := range mps {
+		if mp.Type != mount.TypeBind && mp.Type != mount.TypeVolume {
+			continue
+		}
+		out = append(out, MountInfo{Source: mp.Source, Destination: mp.Destination, RW: mp.RW})
+	}
+	return out
 }
 
 // runEvents streams docker events for the collector's run lifetime (see

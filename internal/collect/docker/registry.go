@@ -16,12 +16,20 @@ import (
 // refreshed on the collector's 10s poll. It's the id -> data every other
 // collector (cgroup/API stats, per-container net, GPU attribution)
 // consumes via Lookup/Running.
+//
+// Alloc carries the HostConfig resource ceiling (allocFromHostConfig) --
+// the API-fallback path's only source of allocation data, since the
+// docker stats API response has no room for it. Like the rest of Meta,
+// it's only as fresh as the last 10s inventory poll, unlike the cgroup
+// v2 fast path's own allocation read (cgroupv2.go), which is fresh every
+// 2s tick.
 type Meta struct {
 	ID, Name, Image, Icon, State, Health string
 	Pid                                  int
 	StartedAt                            time.Time
 	HostNet                              bool
 	RestartCount                         int
+	Alloc                                alloc
 }
 
 // EventSink is the narrow slice of store.Store the docker collector needs

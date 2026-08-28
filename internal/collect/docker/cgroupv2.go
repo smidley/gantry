@@ -341,6 +341,13 @@ func parseCPUSetCount(s string) (count int, ok bool) {
 // name — the stable identity across recreations, spec §5, and what
 // evictContainer prunes on removal) so a whole-fleet v1 box doesn't spam
 // the log every 2s.
+//
+// statsViaAPI's response has no room for allocation data (it's a
+// HostConfig field, not part of the stats endpoint), so a fallback tick
+// borrows m.Alloc -- captured at inspect time, refreshed on the 10s
+// inventory poll rather than fresh every 2s like the fast path's own
+// read. recordContainerStats runs the exact same allocation math either
+// way; only how current the ceiling is can differ by source.
 func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 	for _, m := range c.reg.running() {
 		dir := filepath.Join(c.CgroupRoot, "docker", m.ID)
@@ -350,6 +357,7 @@ func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 			if err != nil {
 				continue
 			}
+			cg.Alloc = m.Alloc
 			if _, alreadyLogged := c.loggedFallback.LoadOrStore(m.Name, struct{}{}); !alreadyLogged {
 				log.Printf("docker: %s: cgroup v2 stats unavailable, using stats API fallback", m.Name)
 			}

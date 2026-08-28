@@ -684,6 +684,116 @@ func TestMetaFromInspectIconEmptyWhenLabelAbsent(t *testing.T) {
 	require.Equal(t, "", m.Icon)
 }
 
+// TestAllocFromHostConfigNanoCPUsToCores pins docker's own units:
+// NanoCPUs is in units of 10^-9 CPUs, so 4e9 is 4.0 cores exactly (the
+// --cpus=4 CLI flag's own compiled-down form).
+func TestAllocFromHostConfigNanoCPUsToCores(t *testing.T) {
+	a := allocFromHostConfig(container.Resources{NanoCPUs: 4_000_000_000})
+	require.True(t, a.HasCPUQuota)
+	require.Equal(t, 4.0, a.CPUQuotaCores)
+}
+
+// TestAllocFromHostConfigFallsBackToCPUQuotaAndPeriod pins the older
+// --cpu-quota/--cpu-period pair, used when NanoCPUs (the newer --cpus
+// flag) is unset.
+func TestAllocFromHostConfigFallsBackToCPUQuotaAndPeriod(t *testing.T) {
+	a := allocFromHostConfig(container.Resources{CPUQuota: 200_000, CPUPeriod: 100_000})
+	require.True(t, a.HasCPUQuota)
+	require.Equal(t, 2.0, a.CPUQuotaCores)
+}
+
+// TestAllocFromHostConfigNanoCPUsTakesPriorityOverQuotaPeriod pins the
+// precedence when a caller (unusually) sets both: NanoCPUs wins, matching
+// the docker CLI's own --cpus flag, which compiles down to NanoCPUs in
+// the first place.
+func TestAllocFromHostConfigNanoCPUsTakesPriorityOverQuotaPeriod(t *testing.T) {
+	a := allocFromHostConfig(container.Resources{NanoCPUs: 4_000_000_000, CPUQuota: 200_000, CPUPeriod: 100_000})
+	require.True(t, a.HasCPUQuota)
+	require.Equal(t, 4.0, a.CPUQuotaCores)
+}
+
+// TestAllocFromHostConfigCpusetCpusReusesSharedParser pins that
+// HostConfig.CpusetCpus goes through the exact same parseCPUSetCount
+// cgroupv2.go's cpuset.cpus.effective read uses -- one parser, so the two
+// paths can never disagree on the same string.
+func TestAllocFromHostConfigCpusetCpusReusesSharedParser(t *testing.T) {
+	a := allocFromHostConfig(container.Resources{CpusetCpus: "0-5,13-15"})
+	require.True(t, a.HasCPUSet)
+	require.Equal(t, 9, a.CPUSetCores)
+}
+
+func TestAllocFromHostConfigMemoryAndPidsLimit(t *testing.T) {
+	limit := int64(2048)
+	a := allocFromHostConfig(container.Resources{Memory: 1_073_741_824, PidsLimit: &limit})
+	require.True(t, a.HasMemLimit)
+	require.Equal(t, uint64(1_073_741_824), a.MemLimitBytes)
+	require.True(t, a.HasPidsLimit)
+	require.Equal(t, uint64(2048), a.PidsLimit)
+}
+
+// TestAllocFromHostConfigPidsLimitZeroOrNegativeMeansUnlimited pins
+// docker's own PidsLimit convention (HostConfig's own doc comment: "Set
+// `0` or `-1` for unlimited, or `null` to not change") -- neither value
+// may read as a real limit.
+func TestAllocFromHostConfigPidsLimitZeroOrNegativeMeansUnlimited(t *testing.T) {
+	for _, v := range []int64{0, -1} {
+		a := allocFromHostConfig(container.Resources{PidsLimit: &v})
+		require.False(t, a.HasPidsLimit, "PidsLimit=%d must mean unlimited", v)
+	}
+}
+
+func TestAllocFromHostConfigZeroValueMeansUnlimited(t *testing.T) {
+	require.Equal(t, alloc{}, allocFromHostConfig(container.Resources{}))
+}
+
+// TestMetaFromInspectPopulatesAllocFromHostConfig pins the API
+// fallback's only source of allocation data: HostConfig, captured once
+// at inspect time (this Meta flow) rather than read fresh from the
+// docker stats API response every tick -- see cgroupv2.go's tickStats
+// for how the two are merged for a fallback container.
+func TestMetaFromInspectPopulatesAllocFromHostConfig(t *testing.T) {
+	limit := int64(512)
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:    "abc123",
+			Name:  "/postgres",
+			State: &container.State{Status: "running"},
+			HostConfig: &container.HostConfig{
+				Resources: container.Resources{
+					Memory: 1_073_741_824, NanoCPUs: 2_000_000_000, PidsLimit: &limit,
+				},
+			},
+		},
+		Config: &container.Config{Image: "postgres:16"},
+	}
+
+	m := metaFromInspect(resp)
+
+	require.True(t, m.Alloc.HasMemLimit)
+	require.Equal(t, uint64(1_073_741_824), m.Alloc.MemLimitBytes)
+	require.True(t, m.Alloc.HasCPUQuota)
+	require.Equal(t, 2.0, m.Alloc.CPUQuotaCores)
+	require.True(t, m.Alloc.HasPidsLimit)
+	require.Equal(t, uint64(512), m.Alloc.PidsLimit)
+}
+
+// TestMetaFromInspectAllocZeroValueWhenHostConfigNil mirrors HostNet's
+// own existing nil-guard: a response with no HostConfig at all must not
+// panic, and must leave Alloc at its unlimited zero value.
+func TestMetaFromInspectAllocZeroValueWhenHostConfigNil(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{Image: "jellyfin/jellyfin:latest"},
+	}
+
+	m := metaFromInspect(resp)
+
+	require.Equal(t, alloc{}, m.Alloc)
+}
+
 // TestDrainReturnsImmediatelyWhenEventsNeverStarted pins I4's Drain()
 // against the case where the daemon was never reachable: Probe never got
 // past Ping, so startEvents never fired and eventsWG's counter is still

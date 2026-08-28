@@ -251,6 +251,7 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 	}
 	if resp.HostConfig != nil {
 		m.HostNet = resp.HostConfig.NetworkMode.IsHost()
+		m.Alloc = allocFromHostConfig(resp.HostConfig.Resources)
 	}
 	if resp.State != nil {
 		m.State = resp.State.Status
@@ -263,6 +264,36 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 		}
 	}
 	return m
+}
+
+// allocFromHostConfig maps one docker inspect response's HostConfig
+// resource fields into the same alloc shape the cgroup v2 fast path
+// produces from memory.max/cpu.max/cpuset.cpus.effective/pids.max
+// (cgroupv2.go) -- the API fallback's only source of allocation data,
+// since none of it rides along in the stats-API response statsFromAPI
+// consumes. NanoCPUs takes priority over CPUQuota/CPUPeriod when a
+// caller (unusually) sets both, matching the docker CLI's own --cpus
+// flag, which compiles down to NanoCPUs in the first place. PidsLimit
+// follows docker's own convention for that field (HostConfig's doc
+// comment): 0 or -1 both mean unlimited, not "a limit of that value".
+func allocFromHostConfig(r container.Resources) alloc {
+	var a alloc
+	if r.Memory > 0 {
+		a.MemLimitBytes, a.HasMemLimit = uint64(r.Memory), true
+	}
+	switch {
+	case r.NanoCPUs > 0:
+		a.CPUQuotaCores, a.HasCPUQuota = float64(r.NanoCPUs)/1e9, true
+	case r.CPUQuota > 0 && r.CPUPeriod > 0:
+		a.CPUQuotaCores, a.HasCPUQuota = float64(r.CPUQuota)/float64(r.CPUPeriod), true
+	}
+	if n, ok := parseCPUSetCount(r.CpusetCpus); ok {
+		a.CPUSetCores, a.HasCPUSet = n, true
+	}
+	if r.PidsLimit != nil && *r.PidsLimit > 0 {
+		a.PidsLimit, a.HasPidsLimit = uint64(*r.PidsLimit), true
+	}
+	return a
 }
 
 // runEvents streams docker events for the collector's run lifetime (see

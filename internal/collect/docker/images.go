@@ -14,16 +14,17 @@ import (
 // GET /api/images' per-image data (see server.ImageInfo for the wire DTO
 // main wiring adapts this into). State is one of "in-use" (Containers
 // lists every referencing container, running or stopped), "unused"
-// (tagged, but no container currently references it), or "dangling" (no
-// RepoTags at all) -- see classifyImages' own doc for the join rule that
-// assigns these.
+// (tagged, or digest-pinned, but no container currently references it),
+// or "dangling" (neither RepoTags nor RepoDigests -- truly nameless) --
+// see classifyImages' own doc for the join rule that assigns these.
 type ImageInfo struct {
-	ID         string
-	RepoTags   []string
-	SizeBytes  int64
-	Created    int64
-	State      string
-	Containers []string
+	ID          string
+	RepoTags    []string
+	RepoDigests []string
+	SizeBytes   int64
+	Created     int64
+	State       string
+	Containers  []string
 }
 
 // ImagesSummary is GET /api/images' aggregate counts, keyed by the same
@@ -91,9 +92,14 @@ type ImagePruneResult struct {
 // is simply not attributed to any image -- not an error.
 //
 // An image with any attributing container is "in-use". Otherwise it's
-// "dangling" if it has no RepoTags at all, or "unused" if it does.
-// ReclaimableBytes sums every unused+dangling image's size (see
-// ImagesSummary's own doc on why that's an upper bound).
+// "dangling" only if it has neither RepoTags nor RepoDigests -- a
+// digest-pinned image (pulled by "repo@sha256:...", so RepoTags is
+// empty) is not garbage just because it was never tagged, and must
+// classify "unused" like any other named-but-unreferenced image, not
+// "dangling" (which the daemon's own dangling=true filter, used by
+// pruneDangling, would never delete either). ReclaimableBytes sums every
+// unused+dangling image's size (see ImagesSummary's own doc on why
+// that's an upper bound).
 func classifyImages(imgs []image.Summary, containers []container.Summary) ImagesReport {
 	byID := make(map[string]image.Summary, len(imgs))
 	tagToID := make(map[string]string)
@@ -125,13 +131,13 @@ func classifyImages(imgs []image.Summary, containers []container.Summary) Images
 
 	out := ImagesReport{Images: make([]ImageInfo, 0, len(imgs))}
 	for _, im := range imgs {
-		info := ImageInfo{ID: im.ID, RepoTags: im.RepoTags, SizeBytes: im.Size, Created: im.Created}
+		info := ImageInfo{ID: im.ID, RepoTags: im.RepoTags, RepoDigests: im.RepoDigests, SizeBytes: im.Size, Created: im.Created}
 		switch {
 		case len(referencedBy[im.ID]) > 0:
 			info.State = "in-use"
 			info.Containers = referencedBy[im.ID]
 			out.Summary.InUse++
-		case len(im.RepoTags) == 0:
+		case len(im.RepoTags) == 0 && len(im.RepoDigests) == 0:
 			info.State = "dangling"
 			out.Summary.Dangling++
 			out.Summary.ReclaimableBytes += im.Size

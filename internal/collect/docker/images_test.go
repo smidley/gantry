@@ -61,6 +61,51 @@ func TestClassifyImagesUntaggedImageIsDangling(t *testing.T) {
 	require.Equal(t, int64(500), report.Summary.ReclaimableBytes)
 }
 
+// TestClassifyImagesDigestOnlyUnreferencedImageIsUnusedNotDangling pins
+// F2: a digest-pinned image (pulled by "repo@sha256:...", so RepoTags is
+// empty but RepoDigests isn't) is not garbage just because it has no
+// tags -- it must classify the same way a tagged-but-unreferenced image
+// does, not as dangling.
+func TestClassifyImagesDigestOnlyUnreferencedImageIsUnusedNotDangling(t *testing.T) {
+	imgs := []image.Summary{{ID: "sha256:abc", RepoDigests: []string{"redis@sha256:deadbeef"}, Size: 300}}
+
+	report := classifyImages(imgs, nil)
+
+	require.Len(t, report.Images, 1)
+	require.Equal(t, "unused", report.Images[0].State)
+	require.Equal(t, []string{"redis@sha256:deadbeef"}, report.Images[0].RepoDigests)
+	require.Equal(t, 1, report.Summary.Unused)
+	require.Zero(t, report.Summary.Dangling)
+	require.Equal(t, int64(300), report.Summary.ReclaimableBytes)
+}
+
+// TestClassifyImagesDigestOnlyReferencedImageIsInUse pins the other half
+// of F2: a digest-pinned image a container actually references is
+// in-use, the same as any tagged image -- RepoDigests doesn't change
+// the container-join rule at all, only the dangling fallback.
+func TestClassifyImagesDigestOnlyReferencedImageIsInUse(t *testing.T) {
+	imgs := []image.Summary{{ID: "sha256:abc", RepoDigests: []string{"redis@sha256:deadbeef"}, Size: 300}}
+	containers := []container.Summary{ctrOf("cache", "redis@sha256:deadbeef", "sha256:abc")}
+
+	report := classifyImages(imgs, containers)
+
+	require.Equal(t, "in-use", report.Images[0].State)
+	require.Equal(t, 1, report.Summary.InUse)
+	require.Zero(t, report.Summary.ReclaimableBytes)
+}
+
+// TestClassifyImagesTrueDanglingRequiresBothTagsAndDigestsEmpty is the
+// converse of the two tests above: an image with NEITHER tags nor
+// digests is the only case that's actually dangling.
+func TestClassifyImagesTrueDanglingRequiresBothTagsAndDigestsEmpty(t *testing.T) {
+	imgs := []image.Summary{{ID: "sha256:abc", Size: 500}}
+
+	report := classifyImages(imgs, nil)
+
+	require.Equal(t, "dangling", report.Images[0].State)
+	require.Equal(t, 1, report.Summary.Dangling)
+}
+
 func TestClassifyImagesTaggedUnreferencedImageIsUnused(t *testing.T) {
 	imgs := []image.Summary{summaryOf("sha256:abc", []string{"orphan:old"}, 300)}
 

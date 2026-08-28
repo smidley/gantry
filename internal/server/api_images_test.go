@@ -83,6 +83,31 @@ func TestImagesGetShortensIDAndDefaultsRepoTagsForDangling(t *testing.T) {
 	require.Equal(t, []string{"<none>"}, dto.Images[0].RepoTags)
 }
 
+// TestImagesGetShowsDigestRefInsteadOfNoneWhenTagsEmptyButDigestsArent
+// pins F2's display half: a digest-pinned image (no RepoTags) is not
+// "<none>" the way a truly dangling image is -- it must show its own
+// digest reference instead, truncated the same 12-char way a short id
+// is, so a user can't mistake it for garbage in the UI either.
+func TestImagesGetShowsDigestRefInsteadOfNoneWhenTagsEmptyButDigestsArent(t *testing.T) {
+	full := "sha256:" + fmt.Sprintf("%064x", 1)
+	digest := "redis@sha256:" + fmt.Sprintf("%064x", 2)
+	s := New(Options{Version: "test-1", Started: time.Now(), Images: func(context.Context) (ImagesDTO, error) {
+		return ImagesDTO{Images: []ImageInfo{{ID: full, RepoDigests: []string{digest}, SizeBytes: 100, State: "unused"}}}, nil
+	}})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/images")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	var dto ImagesDTO
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&dto))
+	require.Len(t, dto.Images, 1)
+	require.Equal(t, []string{"redis@sha256:" + fmt.Sprintf("%064x", 2)[:12]}, dto.Images[0].RepoTags,
+		"a digest-pinned image must show its (truncated) digest ref, not the untagged sentinel")
+}
+
 func TestImagesGetCarriesFullIDAlongsideShortID(t *testing.T) {
 	full := "sha256:" + fmt.Sprintf("%064x", 1)
 	s := New(Options{Version: "test-1", Started: time.Now(), Images: func(context.Context) (ImagesDTO, error) {

@@ -18,13 +18,14 @@ import (
 // never ID (see imageIDPattern's own doc for why the short form can
 // never be accepted there).
 type ImageInfo struct {
-	ID         string   `json:"id"`
-	FullID     string   `json:"full_id"`
-	RepoTags   []string `json:"repo_tags"`
-	SizeBytes  int64    `json:"size_bytes"`
-	Created    int64    `json:"created"`
-	State      string   `json:"state"`
-	Containers []string `json:"containers,omitempty"`
+	ID          string   `json:"id"`
+	FullID      string   `json:"full_id"`
+	RepoTags    []string `json:"repo_tags"`
+	RepoDigests []string `json:"repo_digests,omitempty"`
+	SizeBytes   int64    `json:"size_bytes"`
+	Created     int64    `json:"created"`
+	State       string   `json:"state"`
+	Containers  []string `json:"containers,omitempty"`
 }
 
 // ImagesSummary is GET /api/images' aggregate counts plus a reclaimable-
@@ -91,6 +92,38 @@ func shortImageID(id string) string {
 		id = id[:12]
 	}
 	return id
+}
+
+// digestRefsOrNone is handleImagesList's RepoTags fallback for an image
+// with no tags: "<none>" only when it's truly nameless (no RepoDigests
+// either -- see classifyImages' own doc on why that's the only actual
+// dangling case). A digest-pinned image instead shows its own digest
+// ref(s) as "repo@algo:<12-hex>" -- the same 12-char truncation
+// shortImageID uses for a bare id, but keeping the "algo:" label here
+// since, unlike the id column, there's no other field naming the
+// algorithm.
+func digestRefsOrNone(digests []string) []string {
+	if len(digests) == 0 {
+		return []string{"<none>"}
+	}
+	refs := make([]string, len(digests))
+	for i, d := range digests {
+		repo, dig, ok := strings.Cut(d, "@")
+		if !ok {
+			refs[i] = d
+			continue
+		}
+		algo, hex, ok := strings.Cut(dig, ":")
+		if !ok {
+			refs[i] = repo + "@" + dig
+			continue
+		}
+		if len(hex) > 12 {
+			hex = hex[:12]
+		}
+		refs[i] = repo + "@" + algo + ":" + hex
+	}
+	return refs
 }
 
 // gantryConfirmHeader/gantryConfirmValue are the write-path guardrail
@@ -163,7 +196,7 @@ func (s *Server) handleImagesList(w http.ResponseWriter, r *http.Request) {
 		dto.Images[i].FullID = im.ID
 		dto.Images[i].ID = shortImageID(im.ID)
 		if len(im.RepoTags) == 0 {
-			dto.Images[i].RepoTags = []string{"<none>"}
+			dto.Images[i].RepoTags = digestRefsOrNone(im.RepoDigests)
 		}
 	}
 	dto.Summary.Note = reclaimableBytesNote

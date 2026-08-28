@@ -512,7 +512,7 @@ func buildImages(src func(ctx context.Context) (docker.ImagesReport, error)) fun
 		}
 		for i, im := range report.Images {
 			out.Images[i] = server.ImageInfo{
-				ID: im.ID, RepoTags: im.RepoTags, SizeBytes: im.SizeBytes,
+				ID: im.ID, RepoTags: im.RepoTags, RepoDigests: im.RepoDigests, SizeBytes: im.SizeBytes,
 				Created: im.Created, State: im.State, Containers: im.Containers,
 			}
 		}

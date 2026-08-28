@@ -103,6 +103,68 @@ func TestGPUProbeUnavailableWhenProcRootMissing(t *testing.T) {
 	require.NotEmpty(t, status.Detail)
 }
 
+// TestGPUMetaResolvesVendorAndDriverPerEntity pins the card-title fix
+// (item 4): a full scan (Tick's own first pass) must resolve each newly
+// -seen pdev's vendor from SysRoot and carry the already-known driver
+// (i915FDInfo's own "i915") up from the client to the entity level.
+func TestGPUMetaResolvesVendorAndDriverPerEntity(t *testing.T) {
+	procRoot := t.TempDir()
+	writeFile(t, fdinfoPath(procRoot, "100", "0"), i915FDInfo("10", "0000:00:02.0", 1_000_000_000))
+
+	sysRoot := t.TempDir()
+	writePCIVendorFile(t, sysRoot, "0000:00:02.0", "0x8086\n")
+
+	c := New(newFakeSink(), procRoot, func(string) (string, bool) { return "", false })
+	c.SysRoot = sysRoot
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	require.Equal(t, map[string]EntityMeta{"0000:00:02.0": {Vendor: "Intel", Driver: "i915"}}, c.GPUMeta())
+}
+
+// TestGPUMetaFallsBackToGpu0EntityWhenClientHasNoPdev mirrors
+// tickClients' own "gpu0" fallback (used when a client's fdinfo carries
+// no drm-pdev field at all) -- GPUMeta must key by that same fallback id,
+// and vendorNameForPdev's own missing-file fallback ("GPU") applies
+// since "gpu0" is never a real sysfs path.
+func TestGPUMetaFallsBackToGpu0EntityWhenClientHasNoPdev(t *testing.T) {
+	procRoot := t.TempDir()
+	// Deliberately no "drm-pdev:" line -- ParseFDInfo only requires
+	// drm-driver/drm-client-id.
+	writeFile(t, fdinfoPath(procRoot, "100", "0"), "drm-driver:\tamdgpu\ndrm-client-id:\t10\ndrm-engine-gfx:\t1000000000 ns\n")
+
+	c := New(newFakeSink(), procRoot, func(string) (string, bool) { return "", false })
+	c.SysRoot = t.TempDir() // empty -- no vendor file for "gpu0" either way
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	require.Equal(t, map[string]EntityMeta{"gpu0": {Vendor: "GPU", Driver: "amdgpu"}}, c.GPUMeta())
+}
+
+// TestGPUMetaRemembersEntityAcrossFullScans pins fullScan/noteEntityMeta's
+// own "resolved once, never re-resolved" contract: a second full scan
+// (simulated here by calling Tick again past fullScanInterval) must not
+// forget an entity whose only client has since gone idle/exited -- real
+// hardware doesn't change identity just because nothing is using it
+// this instant.
+func TestGPUMetaRemembersEntityAcrossFullScans(t *testing.T) {
+	procRoot := t.TempDir()
+	fdPath := fdinfoPath(procRoot, "100", "0")
+	writeFile(t, fdPath, i915FDInfo("10", "0000:00:02.0", 1_000_000_000))
+	sysRoot := t.TempDir()
+	writePCIVendorFile(t, sysRoot, "0000:00:02.0", "0x8086\n")
+
+	c := New(newFakeSink(), procRoot, func(string) (string, bool) { return "", false })
+	c.SysRoot = sysRoot
+	t0 := time.Unix(1000, 0)
+	require.NoError(t, c.Tick(context.Background(), t0))
+	require.NoError(t, os.Remove(fdPath)) // the client goes away entirely
+
+	// Force a second full scan (fullScanInterval is 30s).
+	t1 := t0.Add(31 * time.Second)
+	require.NoError(t, c.Tick(context.Background(), t1))
+	require.Empty(t, c.clients, "the client itself is gone")
+	require.Equal(t, map[string]EntityMeta{"0000:00:02.0": {Vendor: "Intel", Driver: "i915"}}, c.GPUMeta(), "the entity's own meta must survive its last client disappearing")
+}
+
 // Dedupe: the same drm-client-id reachable via two different fds (two fds
 // of the same open DRM file, or two pids sharing it) must count once.
 func TestScanClientsDedupesSameClientIDAcrossTwoFDs(t *testing.T) {

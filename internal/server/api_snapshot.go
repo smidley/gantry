@@ -23,7 +23,17 @@ type SnapshotDTO struct {
 	DiskMeta      map[string]DiskMetaDTO        `json:"disk_meta"` // slot -> device+type meta (strings can't ride Disks' float64 map)
 	Unraid        map[string]map[string]float64 `json:"unraid"`    // entity ("array"|"docker") -> metric -> value
 	GPU           map[string]map[string]float64 `json:"gpu"`
-	Sources       map[string]string             `json:"sources"` // collector name -> "ok" | unavailability detail
+	GPUMeta       map[string]GPUMetaDTO         `json:"gpu_meta"` // pdev (or "gpu0"/"nvidia0") -> vendor+driver meta (strings can't ride GPU's float64 map)
+	Sources       map[string]string             `json:"sources"`  // collector name -> "ok" | unavailability detail
+}
+
+// GPUMetaDTO is one GPU entity's vendor + driver -- the frontend's card
+// title source of truth (previously just the raw pdev address, e.g.
+// "0000:00:02.0" -- see gpu.EntityMeta's own doc for where this comes
+// from).
+type GPUMetaDTO struct {
+	Vendor string `json:"vendor"`
+	Driver string `json:"driver"`
 }
 
 // DiskMetaDTO is one disk slot's device name and classified type

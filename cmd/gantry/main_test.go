@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/smidley/gantry/internal/collect/docker"
+	"github.com/smidley/gantry/internal/collect/gpu"
 	"github.com/smidley/gantry/internal/collect/host"
 	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/server"
@@ -240,9 +241,11 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
@@ -291,12 +294,14 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 	fakeMetas := func() []docker.Meta {
 		return []docker.Meta{{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil)()
 
 	require.Empty(t, dc.Running(), "dc's own registry never saw this container -- the fix must not depend on it")
 	c, ok := snap.Containers["jellyfin"]
@@ -339,12 +344,14 @@ rotational="1"
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, unraidDir, "/proc")
 	require.NoError(t, ur.Tick(context.Background(), time.Unix(1000, 0)))
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 	fakeDiskMeta := func() map[string]unraid.DiskMeta {
 		return map[string]unraid.DiskMeta{"flash": {Device: "sdi", Kind: "usb"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, fakeDiskMeta)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, fakeDiskMeta)()
 
 	require.Equal(t, server.DiskMetaDTO{Device: "sdc", Kind: "hdd"}, snap.DiskMeta["disk1"], "the real unraid collector's own DiskMeta must survive into the DTO")
 	require.Equal(t, server.DiskMetaDTO{Device: "sdi", Kind: "usb"}, snap.DiskMeta["flash"], "fake mode's own DiskMeta overlay must land alongside it, not replace it")

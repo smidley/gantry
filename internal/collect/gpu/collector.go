@@ -19,6 +19,19 @@ const (
 	engineKeyPrefix  = "drm-engine-"
 )
 
+// EntityMeta is one GPU entity's (pdev, or the "gpu0" fallback -- see
+// tickClients' own doc) vendor + driver, for the frontend's card title
+// (GPUStrip/GPUEntityCard, previously just the raw pdev address, e.g.
+// "0000:00:02.0" -- Scott's own question: "what does this mean?").
+// Vendor comes from sysRoot's own PCI vendor file (vendorNameForPdev);
+// Driver is already known per DRM client (client.Driver, from fdinfo's
+// own drm-driver line) -- this just carries it one level up, from
+// per-client to per-entity.
+type EntityMeta struct {
+	Vendor string
+	Driver string
+}
+
 // Collector discovers DRM (GPU) clients via /proc/<pid>/fdinfo and turns
 // their cumulative per-engine busy-time counters into per-container and
 // per-GPU busy_pct series (spec §4.4, spike S1). Name "gpu", Interval 2s.
@@ -28,8 +41,18 @@ type Collector struct {
 	lookup   func(id string) (name string, ok bool)
 	rates    *collect.RateTracker
 
+	// SysRoot is where the host's /sys is mounted (default "/host/sys",
+	// matching every other collector's own convention -- see main.go's
+	// wiring) -- read for each newly-discovered entity's own PCI vendor
+	// file (see fullScan's own doc). Same "public field, overridden by
+	// main wiring after New" pattern as docker.Collector's CgroupRoot.
+	SysRoot string
+
 	clients  map[string]client // client-id -> known client; refreshed every 30s
 	lastScan time.Time
+
+	mu         sync.Mutex
+	entityMeta map[string]EntityMeta // guarded by mu; set on fullScan, read via GPUMeta()
 
 	warnNonNS sync.Once // one log line total for unsupported (non-ns) engine units
 }
@@ -41,12 +64,33 @@ var _ collect.Collector = (*Collector)(nil)
 // client as host.
 func New(sink store.MetricSink, procRoot string, lookup func(string) (string, bool)) *Collector {
 	return &Collector{
-		sink:     sink,
-		procRoot: procRoot,
-		lookup:   lookup,
-		rates:    collect.NewRateTracker(),
-		clients:  make(map[string]client),
+		sink:       sink,
+		procRoot:   procRoot,
+		lookup:     lookup,
+		rates:      collect.NewRateTracker(),
+		clients:    make(map[string]client),
+		SysRoot:    "/host/sys",
+		entityMeta: make(map[string]EntityMeta),
 	}
+}
+
+// GPUMeta returns a snapshot copy of every currently-known GPU entity's
+// vendor+driver, keyed the same way GPU-kind series entities are (pdev,
+// or "gpu0") -- a copy, not the live map, so a concurrent snapshot-
+// building caller can range over the result without contending with (or
+// racing) the next tick's own writes, same convention as unraid.
+// Collector.DiskMeta(). Once seen, an entity's meta is remembered for
+// the collector's whole lifetime (hardware identity doesn't change),
+// even through a window where every one of its clients has since gone
+// idle/exited.
+func (c *Collector) GPUMeta() map[string]EntityMeta {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]EntityMeta, len(c.entityMeta))
+	for pdev, m := range c.entityMeta {
+		out[pdev] = m
+	}
+	return out
 }
 
 func (c *Collector) Name() string            { return "gpu" }
@@ -95,14 +139,38 @@ func (c *Collector) evictGoneClients(next map[string]client) {
 
 // fullScan rediscovers every live DRM client and resolves its container
 // attribution once, right here — the 2s tickClients re-reads never touch
-// /proc/<pid>/cgroup again for a client already in the cache.
+// /proc/<pid>/cgroup again for a client already in the cache. Also
+// resolves each newly-seen ENTITY's own vendor+driver into c.entityMeta
+// (GPUMeta's own doc) -- a one-time sysfs read per pdev (vendorNameForPdev
+// itself is cheap, but there's no reason to re-read a device's own
+// hardware identity every 30s once it's known), guarded by mu since
+// GPUMeta() can be called concurrently from the snapshot-building
+// goroutine.
 func (c *Collector) fullScan() map[string]client {
 	found := scanClients(c.procRoot)
 	for id, cl := range found {
 		cl.Owner = resolveOwner(c.procRoot, cl.PID, c.lookup)
 		found[id] = cl
+		c.noteEntityMeta(cl)
 	}
 	return found
+}
+
+// noteEntityMeta records cl's own entity (pdev, or the "gpu0" fallback --
+// see tickClients' own doc for why that fallback exists) into
+// c.entityMeta the first time it's seen; a pdev already known is left
+// alone rather than re-resolved, per fullScan's own doc.
+func (c *Collector) noteEntityMeta(cl client) {
+	pdev := cl.Pdev
+	if pdev == "" {
+		pdev = "gpu0"
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, known := c.entityMeta[pdev]; known {
+		return
+	}
+	c.entityMeta[pdev] = EntityMeta{Vendor: vendorNameForPdev(c.SysRoot, pdev), Driver: cl.Driver}
 }
 
 // tickClients re-reads every known client's current fdinfo, converts each

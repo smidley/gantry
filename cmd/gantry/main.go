@@ -128,7 +128,9 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	}
 
 	gp := gpu.New(st, "/proc", gpuLookup)
+	gp.SysRoot = sysRoot
 	nv := gpu.NewNvidia(st, "/proc", gpuLookup)
+	nv.SysRoot = sysRoot
 	pr := pressure.New(st, "/proc", cgroupRoot, dc.Running)
 	ur := unraid.New(st, st, envOnly(getenv, "GANTRY_UNRAID_DIR", "/unraid"), "/proc")
 	du := docker.NewDiskUsage(st, dockerSock)
@@ -179,7 +181,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// snapshot (Options.Snapshot), /api/live's connect frame (Options.
 	// Current), and the publish loop below -- all three read the exact
 	// same assembly, just on different triggers (poll, connect, tick).
-	snapshotFn := buildSnapshot(st, dc, ur, registry.Sources, fakeMetas, fakeDiskMeta)
+	snapshotFn := buildSnapshot(st, dc, ur, gp, nv, registry.Sources, fakeMetas, fakeDiskMeta)
 	live := server.NewBroadcaster()
 
 	// SSE publish loop: every 2s, marshal the current snapshot and fan it
@@ -280,7 +282,13 @@ const containerFrameMaxAge = 60
 // so (a live sample younger than containerFrameMaxAge AND a name
 // lookupByName still recognizes) — see containerFrameEntities' own doc
 // for why that's two different conditions, not one.
-func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta) func() server.SnapshotDTO {
+//
+// gp/nv's own GPUMeta() calls merge into dto.GPUMeta the same "each
+// source populates its own entities" way as DiskMeta above -- the DRM
+// path (gp, pdev-keyed) and the nvidia-smi path (nv, fixed "nvidia0")
+// never share an entity id, so there's no real first/overlay ordering
+// concern the way fakeDiskMeta has, just two independent merges.
+func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, gp *gpu.Collector, nv *gpu.NvidiaCollector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta) func() server.SnapshotDTO {
 	return func() server.SnapshotDTO {
 		dto := server.SnapshotDTO{
 			TS:            time.Now().Unix(),
@@ -291,7 +299,14 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 			DiskMeta:      map[string]server.DiskMetaDTO{},
 			Unraid:        map[string]map[string]float64{},
 			GPU:           map[string]map[string]float64{},
+			GPUMeta:       map[string]server.GPUMetaDTO{},
 			Sources:       map[string]string{},
+		}
+		for pdev, m := range gp.GPUMeta() {
+			dto.GPUMeta[pdev] = server.GPUMetaDTO{Vendor: m.Vendor, Driver: m.Driver}
+		}
+		for entity, m := range nv.GPUMeta() {
+			dto.GPUMeta[entity] = server.GPUMetaDTO{Vendor: m.Vendor, Driver: m.Driver}
 		}
 		if sources != nil {
 			dto.Sources = sources()

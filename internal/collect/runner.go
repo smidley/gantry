@@ -39,16 +39,30 @@ func (r *Registry) Add(c Collector) {
 	r.mu.Unlock()
 }
 
-// Sources reports name -> "ok" | detail for every registered collector.
+// NotApplicableSentinel is the fixed wire value Sources() reports for a
+// collector whose Status carries NotApplicable -- a THIRD state,
+// distinct from both "ok" and a plain Detail string, so the frontend can
+// render it quietly (SourcesBanner stays silent; Settings' own sources
+// list shows an ok-styled row with its own copy for the name) without
+// parsing Detail's free text to guess which case it is. Never itself
+// used as a Detail value by any collector -- Status.NotApplicable is
+// the one place this gets set.
+const NotApplicableSentinel = "not-applicable"
+
+// Sources reports name -> "ok" | NotApplicableSentinel | detail for
+// every registered collector.
 func (r *Registry) Sources() map[string]string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make(map[string]string, len(r.entries))
 	for _, e := range r.entries {
 		e.mu.Lock()
-		if e.status.Available {
+		switch {
+		case e.status.NotApplicable:
+			out[e.c.Name()] = NotApplicableSentinel
+		case e.status.Available:
 			out[e.c.Name()] = "ok"
-		} else {
+		default:
 			out[e.c.Name()] = e.status.Detail
 		}
 		e.mu.Unlock()

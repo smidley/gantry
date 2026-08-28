@@ -93,15 +93,43 @@ func TestReadCgroupStatsUnlimitedAllocFilesReadAsNoLimit(t *testing.T) {
 		"cpuset still parses (it lists every core, not \"max\"), but every Has* limit flag must be false")
 }
 
-// TestReadCgroupStatsMissingMemoryMaxErrors pins the new allocation files
-// into the same "any missing required file fails the whole read"
-// contract memory.current/cpu.stat/etc. already have (see readCgroupStats'
-// own doc) -- rather than mixing partial cgroup data with an API fallback.
-func TestReadCgroupStatsMissingMemoryMaxErrors(t *testing.T) {
+// TestReadCgroupStatsMissingMemoryMaxReadsAsUnlimited pins that a missing
+// allocation file is NOT the same failure as a missing usage file: a
+// restricted-delegation environment (rootless docker, LXC) can legitimately
+// lack any one of the four allocation files, and that absence must read as
+// "unlimited" (Has*=false) on the fast path itself, rather than discarding
+// every usage counter this read also has in hand by falling back to the
+// API.
+func TestReadCgroupStatsMissingMemoryMaxReadsAsUnlimited(t *testing.T) {
 	dir := t.TempDir()
 	copyFixtures(t, dir, "cpu.stat", "memory.current", "memory.stat", "pids.current", "io.stat", "cpu.max", "pids.max", "cpuset.cpus.effective")
-	_, err := readCgroupStats(dir)
-	require.Error(t, err)
+	cg, err := readCgroupStats(dir)
+	require.NoError(t, err)
+	require.False(t, cg.Alloc.HasMemLimit)
+}
+
+// TestReadCgroupStatsMissingCPUSetEffectiveFastPathsAsUnrestricted is the
+// same contract's most realistic trigger: a restricted-delegation
+// container legitimately has no cpuset.cpus.effective file at all. Its
+// absence must demote only that one ceiling to "no pinning info"
+// (HasCPUSet=false), not the whole read to the API fallback -- every
+// other allocation ceiling and every usage counter this fixture set
+// carries stays intact.
+func TestReadCgroupStatsMissingCPUSetEffectiveFastPathsAsUnrestricted(t *testing.T) {
+	dir := t.TempDir()
+	copyFixtures(t, dir, "cpu.stat", "memory.current", "memory.stat", "pids.current", "io.stat", "memory.max", "cpu.max", "pids.max")
+
+	cg, err := readCgroupStats(dir)
+	require.NoError(t, err)
+	require.False(t, cg.Alloc.HasCPUSet, "a missing cpuset.cpus.effective must read as unrestricted, not fail the whole read")
+
+	require.True(t, cg.Alloc.HasMemLimit)
+	require.Equal(t, uint64(1073741824), cg.Alloc.MemLimitBytes)
+	require.True(t, cg.Alloc.HasCPUQuota)
+	require.Equal(t, 4.0, cg.Alloc.CPUQuotaCores)
+	require.True(t, cg.Alloc.HasPidsLimit)
+	require.Equal(t, uint64(2048), cg.Alloc.PidsLimit)
+	require.Equal(t, uint64(46000000), cg.CPUUsageUsec)
 }
 
 func TestReadCgroupStatsMissingDirErrors(t *testing.T) {

@@ -3,7 +3,9 @@ package docker
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"math"
 	"os"
@@ -63,12 +65,18 @@ type alloc struct {
 // /host/sys/fs/cgroup/docker/<id>): cpu.stat, memory.current,
 // memory.stat, pids.current, io.stat, plus the allocation-ceiling files
 // memory.max, cpu.max, pids.max, and cpuset.cpus.effective. Any missing
-// or malformed required file fails the whole read — the caller
-// (tickStats) treats that as "no cgroup v2 here" and falls back to the
-// docker stats API (apistats.go) rather than mixing partial cgroup data
-// with API data. The allocation files are cheap reads in the same
-// directory as the usage counters, so a live `docker update` to a
-// container's limits shows up on this fast path's very next tick.
+// or malformed usage file fails the whole read — the caller (tickStats)
+// treats that as "no cgroup v2 here" and falls back to the docker stats
+// API (apistats.go) rather than mixing partial cgroup data with API
+// data. The four allocation files are different: a restricted-delegation
+// environment (rootless docker, LXC) can legitimately lack any one of
+// them, so a missing (not merely malformed) allocation file only demotes
+// that one ceiling to unlimited (Has*=false) rather than the whole
+// container to the API fallback, which would throw away every usage
+// counter this read already has in hand over one absent limit. The
+// allocation files are cheap reads in the same directory as the usage
+// counters, so a live `docker update` to a container's limits shows up
+// on this fast path's very next tick.
 func readCgroupStats(dir string) (cgStats, error) {
 	usageUsec, throttledUsec, nrThrottled, err := readCPUStat(filepath.Join(dir, "cpu.stat"))
 	if err != nil {
@@ -96,12 +104,12 @@ func readCgroupStats(dir string) (cgStats, error) {
 	}
 
 	memLimit, hasMemLimit, err := readMaxOrLimit(filepath.Join(dir, "memory.max"))
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return cgStats{}, fmt.Errorf("cgroup: %w", err)
 	}
 
 	quotaUsec, periodUsec, hasQuota, err := readCPUMax(filepath.Join(dir, "cpu.max"))
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return cgStats{}, fmt.Errorf("cgroup: %w", err)
 	}
 	var quotaCores float64
@@ -112,12 +120,12 @@ func readCgroupStats(dir string) (cgStats, error) {
 	}
 
 	pidsLimit, hasPidsLimit, err := readMaxOrLimit(filepath.Join(dir, "pids.max"))
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return cgStats{}, fmt.Errorf("cgroup: %w", err)
 	}
 
 	cpusetRaw, err := os.ReadFile(filepath.Join(dir, "cpuset.cpus.effective"))
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return cgStats{}, fmt.Errorf("cgroup: %w", err)
 	}
 	cpusetCores, hasCPUSet := parseCPUSetCount(string(cpusetRaw))

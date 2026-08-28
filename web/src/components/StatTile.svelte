@@ -3,14 +3,25 @@
   status dot -- the basic building block for Overview's top row and
   similar summary strips in later views.
 
-  value2/unit2/label2 (additive, optional -- Task 14) render a second,
-  smaller readout line below the hero number: Overview's Net and Disk IO
-  tiles each need "two rates in one tile" (down+up, read+write), which
-  the original single value/unit shape had no room for. The sparkline
-  stays single-series either way (charting value's own direction) --
-  cramming two lines into a 28px-tall inline chart would be noise, not
-  signal, so the second rate is text-only. value2 is never touched by
-  hover-scrub below -- it has no sparkline of its own to scrub against.
+  liveValue2/formatValue2/unit2/label2 (additive, optional -- Task 14;
+  scrub-parity corrective pass) render a second, smaller readout line
+  below the hero number: Overview's Net and Disk IO tiles each need "two
+  rates in one tile" (down+up, read+write), which the original single
+  value/unit shape had no room for. The sparkline stays single-series
+  either way (charting the PRIMARY value's own direction) -- cramming
+  two lines into a 28px-tall inline chart would be noise, not signal, so
+  the second rate is text-only.
+
+  value2Points (optional) is what makes value2 scrub-aware: without it,
+  value2 just live-ticks off liveValue2 same as before. WITH it, value2
+  gets its own numberTween/scrubHit pair, an exact mirror of the primary
+  value's own mechanism below, reading the SAME bus.ts -- Scott's own
+  correction: the hero number used to pin correctly while scrubbing but
+  the secondary rate kept live-ticking, since it had no ring of its own
+  to look a past instant up in. Every caller that has one (Overview's
+  Network/Disk IO rows) passes it; a caller with no natural ring for its
+  second value (none exist today) can still pass liveValue2 alone and
+  get a plain live-only reading, same as the pre-fix behavior.
 
   liveValue/formatValue (additive -- hover-scrub) replace what used to be
   a single pre-formatted `value` string: StatTile now owns the hero
@@ -62,7 +73,9 @@
     sparklinePoints = undefined,
     sparklineColor = 'var(--series-1)',
     status = undefined,
-    value2 = undefined,
+    liveValue2 = undefined,
+    value2Points = undefined,
+    formatValue2 = (v) => String(v),
     unit2 = '',
     label2 = '',
     bare = false,
@@ -89,6 +102,27 @@
     }
   });
 
+  // value2's own scrub-aware tween -- an exact mirror of the primary
+  // value's pair above, reading the same shared bus.ts against ITS OWN
+  // ring (value2Points) rather than sparklinePoints, so scrubbing pins
+  // EVERY number on the tile at once, not just the hero one. Degrades
+  // to a plain live-only reading (no scrub pin) when a caller has no
+  // ring to pass -- scrubHit2 is simply always null in that case, the
+  // same "no sparklinePoints" degradation the primary value already
+  // has.
+  let scrubHit2 = $derived(scrubBus.ts === null || !value2Points ? null : nearestPointAt(value2Points, scrubBus.ts));
+  let number2Tween = new Tween(untrack(() => liveValue2 ?? 0), { duration: LIVE_TWEEN_MS, easing: cubicOut });
+
+  $effect(() => {
+    if (liveValue2 === undefined) return;
+    const reduced = prefersReducedMotion.current;
+    if (scrubHit2) {
+      number2Tween.set(scrubHit2.value, { duration: reduced ? 0 : SCRUB_TWEEN_MS, easing: cubicOut });
+    } else {
+      number2Tween.set(liveValue2, { duration: reduced ? 0 : LIVE_TWEEN_MS, easing: cubicOut });
+    }
+  });
+
   // chipText retains its last real value across scrubHit going back to
   // null (rather than blanking instantly) so the corner chip's own CSS
   // fade-out (below) fades out its last real reading in place, matching
@@ -106,7 +140,7 @@
 
 {#snippet value2Block()}
   {#if label2}<span class="stat-tile__value2-label">{label2}</span>{/if}
-  {value2}
+  {formatValue2(number2Tween.current)}
   {#if unit2}<span class="stat-tile__unit">{unit2}</span>{/if}
 {/snippet}
 
@@ -120,7 +154,7 @@
       </span>
       <div class="stat-tile__row-value-stack">
         <span class="stat-tile__value">{@render valueBlock()}</span>
-        {#if value2 !== undefined}
+        {#if liveValue2 !== undefined}
           <span class="stat-tile__value2 tabular-nums">{@render value2Block()}</span>
         {/if}
       </div>
@@ -135,7 +169,7 @@
     </div>
     <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
     <div class="stat-tile__value">{@render valueBlock()}</div>
-    {#if value2 !== undefined}
+    {#if liveValue2 !== undefined}
       <div class="stat-tile__value2 tabular-nums">{@render value2Block()}</div>
     {/if}
     {#if sparklinePoints}
@@ -218,7 +252,7 @@
     right: 0;
   }
   .stat-tile--bare .stat-tile__number {
-    font-size: 1.45rem;
+    font-size: 1.6rem;
   }
   /* Sparklines are a real instrument here, not a decorative crumb --
      floored at 120px regardless of how uPlot's own initial-width read
@@ -258,7 +292,7 @@
     align-items: baseline;
     gap: 0.3rem;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: 0.9rem;
     color: var(--ink-2);
     margin-top: -0.25rem;
   }

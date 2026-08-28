@@ -44,22 +44,45 @@ type archetype struct {
 
 	// updateStatus/changelogURL/projectURL are the update-badge demo
 	// variety: "" (most of the fleet, the real-box default) means no
-	// update data at all. jellyfin and paperless are the two given an
+	// update data at all. jellyfin and paperless are given an
 	// "available" update, matching real-box label/image shapes Scott
 	// found on his own box (jellyfin: a github source label plus a
 	// project url; paperless: changelog derived from its ghcr.io image
-	// ref alone, no labels).
+	// ref alone, no labels); sonarr demos the OTHER non-empty state,
+	// "current" (already up to date, still worth badging).
 	updateStatus string
 	changelogURL string
 	projectURL   string
+
+	// webUIURL/hostNet/networks/ports are the container-detail demo
+	// variety (network/port/webui-launch surfaces): "" / false / nil /
+	// nil (most of the fleet, the real-box default for a plain bridge
+	// container with no CA webui label) means nothing to show. jellyfin
+	// gets a Community-Applications-style webui template placeholder
+	// plus a published dual-stack port pair and one unpublished port,
+	// mirroring a real box's own jellyfin container; pihole is the
+	// fleet's one host-network demo container (a common real-box choice
+	// for DNS).
+	webUIURL string
+	hostNet  bool
+	networks []docker.NetworkInfo
+	ports    []docker.PortInfo
 }
 
 var fleet = []archetype{
 	{name: "jellyfin", cpuBase: 4, cpuAmp: 3, cpuSpike: 0.02, memBytes: 900e6, netScale: 4e6,
-		updateStatus: "available", changelogURL: "https://github.com/jellyfin/jellyfin-packaging/releases", projectURL: "https://jellyfin.org"},
+		updateStatus: "available", changelogURL: "https://github.com/jellyfin/jellyfin-packaging/releases", projectURL: "https://jellyfin.org",
+		webUIURL: "http://[IP]:[PORT:8096]/",
+		networks: []docker.NetworkInfo{{Name: "bridge", IP: "172.17.0.2"}},
+		ports: []docker.PortInfo{
+			{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096},
+			{ContainerPort: 8096, Proto: "tcp", HostIP: "::", HostPort: 8096},
+			{ContainerPort: 8920, Proto: "tcp"}, // EXPOSEd HTTPS port, unpublished -- the real template's own default
+		}},
 	{name: "plex", cpuBase: 3, cpuAmp: 2, cpuSpike: 0.02, memBytes: 800e6, netScale: 3e6},
 	{name: "radarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 300e6, netScale: 2e5},
-	{name: "sonarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 320e6, netScale: 2e5},
+	// sonarr: the "already up to date" update-status demo container.
+	{name: "sonarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 320e6, netScale: 2e5, updateStatus: "current"},
 	{name: "prowlarr", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 150e6, netScale: 5e4},
 	{name: "qbittorrent", cpuBase: 6, cpuAmp: 4, cpuSpike: 0.01, memBytes: 500e6, netScale: 8e6},
 	{name: "sabnzbd", cpuBase: 2, cpuAmp: 6, cpuSpike: 0.01, memBytes: 400e6, netScale: 9e6},
@@ -68,7 +91,10 @@ var fleet = []archetype{
 	{name: "redis", cpuBase: 0.5, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 200e6, netScale: 8e4},
 	{name: "homeassistant", cpuBase: 3, cpuAmp: 1, cpuSpike: 0.005, memBytes: 700e6, netScale: 1e5},
 	{name: "grafana", cpuBase: 1, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 250e6, netScale: 6e4},
-	{name: "pihole", cpuBase: 0.5, cpuAmp: 0.3, cpuSpike: 0.001, memBytes: 120e6, netScale: 4e4},
+	// pihole: the host-network demo container (--net=host, a common
+	// real-box choice for DNS).
+	{name: "pihole", cpuBase: 0.5, cpuAmp: 0.3, cpuSpike: 0.001, memBytes: 120e6, netScale: 4e4,
+		hostNet: true, networks: []docker.NetworkInfo{{Name: "host"}}},
 	{name: "nginx", cpuBase: 0.3, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 80e6, netScale: 5e5},
 	{name: "vaultwarden", cpuBase: 0.2, cpuAmp: 0.1, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4},
 	{name: "immich", cpuBase: 5, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.5e9, netScale: 1e6},
@@ -523,19 +549,25 @@ func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
 // reporting state "running"/health "healthy" (the fake fleet's own
 // identity never stops or restarts -- emitContainerEvents' periodic
 // events simulate that instead, without actually changing state here).
-// main wiring passes this to buildSnapshot/buildContainersList
-// (GANTRY_FAKE_DATA=1 only) so the fake fleet is treated exactly like
-// dc.Running()'s real entries: without it, Task 4's DTO-v2 container
-// filter (only dc.Running() OR a name with both a fresh live sample AND
-// a known Meta) would empty every fake-mode frame, since this
-// generator writes samples straight to the store, bypassing docker's
-// registry entirely.
+// Created reuses fakeContainerStartedAt's own instant rather than a
+// separate offset: this fleet's identity never restarts, so "created"
+// and "started" are the same moment, exactly like a real container
+// that's run continuously since it was first created. main wiring
+// passes this to buildSnapshot/buildContainersList (GANTRY_FAKE_DATA=1
+// only) so the fake fleet is treated exactly like dc.Running()'s real
+// entries: without it, Task 4's DTO-v2 container filter (only
+// dc.Running() OR a name with both a fresh live sample AND a known
+// Meta) would empty every fake-mode frame, since this generator writes
+// samples straight to the store, bypassing docker's registry entirely.
 func (g *Generator) Metas() []docker.Meta {
 	out := make([]docker.Meta, len(fleet))
 	for i, a := range fleet {
 		out[i] = docker.Meta{
 			Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest",
+			Created:      fakeContainerStartedAt(g.boot, i),
+			HostNet:      a.hostNet,
 			UpdateStatus: a.updateStatus, ChangelogURL: a.changelogURL, ProjectURL: a.projectURL,
+			WebUIURL: a.webUIURL, Networks: a.networks, Ports: a.ports,
 		}
 	}
 	return out

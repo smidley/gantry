@@ -31,7 +31,10 @@
   real regions or encodes real data, or it doesn't exist.
 -->
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { Tween } from 'svelte/motion';
+  import { linear } from 'svelte/easing';
+  import { prefersReducedMotion } from 'svelte/motion';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
@@ -172,6 +175,18 @@
   let unraidArray = $derived(live.frame?.unraid?.array ?? {});
   let started = $derived(unraidArray['array.started']);
   let parityPct = $derived(unraidArray['parity.progress_pct']);
+  // parityPctTween glides the percentage arrayStateSentence displays
+  // (perpetual-glide motion pass -- previously a bare fmtPct(parityPct),
+  // the "ArrayCard subline" the pass's own inventory found snapping
+  // every ~2s tick with no easing at all). Plain live-only glide, same
+  // duration/curve contract as every other live surface
+  // (live.glideMs/linear, see streamdriver.ts's own doc) -- there's no
+  // scrub mechanism for this sentence to mirror.
+  let parityPctTween = new Tween(untrack(() => parityPct ?? 0), { duration: live.glideMs, easing: linear });
+  $effect(() => {
+    const reduced = prefersReducedMotion.current;
+    parityPctTween.set(parityPct ?? 0, { duration: reduced ? 0 : live.glideMs, easing: linear });
+  });
   // parityIsRunning treats an explicit 0 (the wire value var.go/fake.go
   // both write on finish) as idle, not merely "key present" -- see its
   // own doc.
@@ -201,7 +216,7 @@
     if (started === 0) return 'Array is stopped.';
     if (started === undefined) return 'Array state unknown.';
     if (parityRunning) {
-      return `Parity check running · ${fmtPct(parityPct)}${parityEta !== null ? `, ETA ${fmtDuration(parityEta)}` : ''}.`;
+      return `Parity check running · ${fmtPct(parityPctTween.current)}${parityEta !== null ? `, ETA ${fmtDuration(parityEta)}` : ''}.`;
     }
     return `Array started · mover ${moverRunning ? 'running' : 'idle'}.`;
   });
@@ -402,6 +417,7 @@
           formatSecondary={TOP_SECONDARY_FORMATTERS[topResource]}
           live={true}
           scaleMax={resourceScaleMax(topResource, live.frame)}
+          metricKey={topResource}
         />
       </div>
     </div>
@@ -457,7 +473,7 @@
     </div>
   </div>
 
-  <GPUStrip gpu={live.frame?.gpu ?? {}} />
+  <GPUStrip gpu={live.frame?.gpu ?? {}} gpuMeta={live.frame?.gpu_meta ?? {}} />
 </div>
 
 <style>

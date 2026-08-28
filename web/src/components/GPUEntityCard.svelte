@@ -13,13 +13,20 @@
   non-live fetch itself is still per-entity (kind=gpu, entity=<this
   one>), so it lives here, one AbortController-guarded effect per card,
   mirroring ContainerDetail's exact stale-response-race handling.
+
+  meta (additive, optional -- GPU card title fix: the entity id IS a raw
+  PCI address for the DRM path, e.g. "0000:00:02.0" -- Scott's own
+  question, "what does this mean?") backs the card's own title via
+  gpuTitle (metrics.ts): "Intel GPU (i915)" instead of the bare address,
+  with the address itself demoted to a small secondary line. Absent meta
+  falls back to today's exact behavior -- just the bare entity id.
 -->
 <script>
   import { fetchSeries } from '../lib/api';
   import { fmtPct } from '../lib/format';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
-  import { GPU_ENTITY_ENGINE_ORDER } from '../lib/metrics';
+  import { GPU_ENTITY_ENGINE_ORDER, gpuTitle } from '../lib/metrics';
   import TimeChart from './TimeChart.svelte';
 
   const LIVE_WINDOW_SEC = 900;
@@ -33,7 +40,7 @@
   };
   const METRIC_FOR = (engine) => `engine.${engine}.busy_pct`;
 
-  let { entity, activeRange, syncKey } = $props();
+  let { entity, meta = undefined, activeRange, syncKey } = $props();
 
   // Live rings: one per fixed engine slot, unconditionally -- same
   // rationale as ContainerDetail's ALL_METRICS rings: which ones end up
@@ -169,7 +176,8 @@
 <div class="card gpu-entity-card">
   <div class="gpu-entity-card__head">
     <span class="microlabel">GPU entity</span>
-    <span class="gpu-entity-card__name">{entity}</span>
+    <span class="gpu-entity-card__name">{gpuTitle(entity, meta)}</span>
+    {#if meta}<span class="microlabel gpu-entity-card__id">{entity}</span>{/if}
   </div>
   {#if fetchFailed}
     <p class="microlabel gpu-entity-card__error">Couldn't load history for this range. Try again shortly.</p>
@@ -204,6 +212,11 @@
     font-weight: 600;
     font-size: 0.95rem;
     color: var(--ink);
+  }
+  /* The raw PCI address, demoted -- see the module doc's own meta
+     paragraph. */
+  .gpu-entity-card__id {
+    font-size: 0.7rem;
   }
   .gpu-entity-card__error {
     color: var(--status-warning);

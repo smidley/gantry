@@ -27,6 +27,19 @@ export type GPUEngine = (typeof GPU_ENGINE_ORDER)[number];
 // site that uses it, stays unchanged.
 export const GPU_ENTITY_ENGINE_ORDER = [...GPU_ENGINE_ORDER, 'gpu'] as const;
 
+// gpuTitle builds a GPU entity's card title from its vendor+driver meta
+// (server.GPUMetaDTO, threaded through the live frame's gpu_meta map) --
+// "Intel GPU (i915)" -- rather than the bare entity id, which for the
+// DRM fdinfo path IS a raw PCI address (e.g. "0000:00:02.0": Scott's own
+// question, "what does this mean?"). Falls back to the bare entity id
+// when no meta is known for it (a snapshot that hasn't caught up yet, or
+// a caller with none at all) -- the same fallback the backend's own
+// vendor lookup uses for a missing/unreadable vendor file.
+export function gpuTitle(entity: string, meta: { vendor: string; driver: string } | undefined): string {
+  if (!meta) return entity;
+  return `${meta.vendor} GPU (${meta.driver})`;
+}
+
 // sumMetricsByPattern sums every value in `metrics` whose key starts with
 // `prefix` and ends with `suffix`. This covers both a flat key (prefix
 // and suffix directly adjacent, e.g. "diskio.read_bps") and a key with a

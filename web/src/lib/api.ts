@@ -13,6 +13,14 @@ export interface ContainerDTO {
   metrics: Record<string, number>;
 }
 
+// GPUMetaDTO mirrors server.GPUMetaDTO -- one GPU entity's vendor +
+// driver, the card title's own source of truth (see GPUStrip/
+// GPUEntityCard's own doc for why the raw pdev address alone isn't).
+export interface GPUMetaDTO {
+  vendor: string;
+  driver: string;
+}
+
 export interface SnapshotDTO {
   ts: number;
   unraid_version: string;
@@ -21,6 +29,7 @@ export interface SnapshotDTO {
   disks: Record<string, Record<string, number>>;
   unraid: Record<string, Record<string, number>>; // entity ("array"|"docker") -> metric -> value
   gpu: Record<string, Record<string, number>>;
+  gpu_meta: Record<string, GPUMetaDTO>; // pdev (or "gpu0"/"nvidia0") -> vendor+driver meta
   sources: Record<string, string>;
 }
 

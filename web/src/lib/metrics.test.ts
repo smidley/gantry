@@ -4,6 +4,7 @@ import {
   etaFromProgress,
   GPU_ENGINE_ORDER,
   GPU_ENTITY_ENGINE_ORDER,
+  gpuTitle,
   keysByPattern,
   parityIsRunning,
   seqStep,
@@ -11,6 +12,17 @@ import {
   sumMetricsByPattern,
   sumSeriesPoints,
 } from './metrics';
+
+describe('gpuTitle', () => {
+  it('builds "Vendor GPU (driver)" from a known entity meta', () => {
+    expect(gpuTitle('0000:00:02.0', { vendor: 'Intel', driver: 'i915' })).toBe('Intel GPU (i915)');
+    expect(gpuTitle('nvidia0', { vendor: 'NVIDIA', driver: 'nvidia' })).toBe('NVIDIA GPU (nvidia)');
+  });
+
+  it('falls back to the bare entity id when no meta is known for it', () => {
+    expect(gpuTitle('0000:00:02.0', undefined)).toBe('0000:00:02.0');
+  });
+});
 
 describe('sumMetricsByPattern', () => {
   it('sums a flat key with no dynamic middle segment (fake-mode shape)', () => {

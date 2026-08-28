@@ -108,6 +108,9 @@ func (c *Collector) tickCPU(now time.Time) error {
 		if pct, ok := cpuBusyPct(c.prevTotal, total); ok {
 			c.sink.Record(store.SeriesKey{Kind: "host", Metric: "cpu.total"}, ts, pct)
 		}
+		if pct, ok := cpuIowaitPct(c.prevTotal, total); ok {
+			c.sink.Record(store.SeriesKey{Kind: "host", Metric: "cpu.iowait_pct"}, ts, pct)
+		}
 		n := len(perCore)
 		if len(c.prevPerCore) < n {
 			n = len(c.prevPerCore)

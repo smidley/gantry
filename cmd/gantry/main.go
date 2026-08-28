@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -222,6 +223,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Live:       live,
 		Current:    func() []byte { b, _ := json.Marshal(snapshotFn()); return b },
 		Logs:       dc.StreamLogs,
+		Storage:    buildContainerStorage(dc, ur, st, fakeMetas),
 		Settings:   settingsAdapter{st: st, cfg: cfg},
 	}).ListenAndServe(runCtx)
 	cancel()
@@ -493,6 +495,108 @@ func buildContainersList(dc *docker.Collector, fakeMetas func() []docker.Meta) f
 		}
 		return out
 	}
+}
+
+// buildContainerStorage returns the closure wired to server.Options.
+// Storage -- like buildContainersList/buildSnapshot, dc.LookupByName
+// falls back to fakeMetas' synthetic fleet when GANTRY_FAKE_DATA=1, so a
+// fake container's storage panel resolves instead of 404ing (nil in
+// real mode).
+func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store.Store, fakeMetas func() []docker.Meta) func(name string) (server.StorageDTO, bool) {
+	lookup := dc.LookupByName
+	if fakeMetas != nil {
+		lookup = func(name string) (docker.Meta, bool) {
+			if m, ok := dc.LookupByName(name); ok {
+				return m, true
+			}
+			for _, m := range fakeMetas() {
+				if m.Name == name {
+					return m, true
+				}
+			}
+			return docker.Meta{}, false
+		}
+	}
+	return func(name string) (server.StorageDTO, bool) {
+		return containerStorage(lookup, ur.Slots, st.Live(), name, time.Now().Unix())
+	}
+}
+
+func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots func() []string, live *store.Live, name string, now int64) (server.StorageDTO, bool) {
+	meta, ok := lookupMeta(name)
+	if !ok {
+		return server.StorageDTO{}, false
+	}
+
+	pools := poolSlots()
+	mounts := make([]server.MountDTO, 0, len(meta.Mounts))
+	for _, m := range meta.Mounts {
+		ref := unraid.ResolveStoragePath(m.Source, pools)
+		mounts = append(mounts, server.MountDTO{
+			Source:      m.Source,
+			Destination: m.Destination,
+			RW:          m.RW,
+			Storage:     server.StorageRefDTO{Kind: ref.Kind, Name: ref.Name},
+		})
+	}
+
+	devices := deviceIOFromSamples(live.LatestByMetricPrefix("container", name, "live:io."), now)
+	return server.StorageDTO{Mounts: mounts, Devices: devices}, true
+}
+
+// deviceIOFromSamples turns store.Live's live:io.<dev>.read_bps/
+// write_bps samples (recorded by cgroupv2.go's recordContainerStats,
+// live-ring-only by design) into one DeviceIODTO per device, sorted by
+// device name for a stable response. A sample containerFrameMaxAge
+// seconds old or older is dropped entirely rather than surfaced as a
+// device row: its ring is evicted on container REMOVAL, not on stop
+// (registry.go's applyInventory/applyEvent), so without this gate a
+// long-stopped container's last-ever rates would keep reading as
+// current -- the same cutoff and boundary buildSnapshot's own stopped-
+// container filter already applies, just against one entity's samples
+// instead of every "container"-kind key. A device with only one of the
+// two rates yet (its RateTracker key for the other direction hasn't
+// produced a second reading) still appears, with the missing half left
+// at its float64 zero value rather than being dropped.
+func deviceIOFromSamples(samples map[string]store.Sample, now int64) []server.DeviceIODTO {
+	byDevice := make(map[string]*server.DeviceIODTO, len(samples))
+	for metric, sample := range samples {
+		if now-sample.TS >= containerFrameMaxAge {
+			continue
+		}
+		dev, suffix, ok := strings.Cut(strings.TrimPrefix(metric, "live:io."), ".")
+		if !ok {
+			continue
+		}
+		switch suffix {
+		case "read_bps":
+			d, exists := byDevice[dev]
+			if !exists {
+				d = &server.DeviceIODTO{Device: dev}
+				byDevice[dev] = d
+			}
+			d.ReadBps = sample.Val
+		case "write_bps":
+			d, exists := byDevice[dev]
+			if !exists {
+				d = &server.DeviceIODTO{Device: dev}
+				byDevice[dev] = d
+			}
+			d.WriteBps = sample.Val
+		}
+	}
+
+	names := make([]string, 0, len(byDevice))
+	for dev := range byDevice {
+		names = append(names, dev)
+	}
+	sort.Strings(names)
+
+	out := make([]server.DeviceIODTO, 0, len(names))
+	for _, dev := range names {
+		out = append(out, *byDevice[dev])
+	}
+	return out
 }
 
 // buildTop adapts store.TopEntities' anonymous-struct return type to

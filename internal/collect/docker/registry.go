@@ -15,27 +15,27 @@ import (
 // Meta is a snapshot of one container's inventory and health state,
 // refreshed on the collector's 10s poll. It's the id -> data every other
 // collector (cgroup/API stats, per-container net, GPU attribution)
-// consumes via Lookup/Running.
+// consumes via Lookup/Running. Metas are immutable once published --
+// never mutate a field in place, build a fresh Meta instead: Networks/
+// Ports/Mounts in particular are always freshly built slices, one
+// metaFromInspect call at a time, never retained (let alone mutated in
+// place) from a previous poll and never shared with another container's
+// Meta, so a caller holding onto an older Meta value (or a slice sliced
+// out of it) is never surprised by a later poll's or another
+// container's data changing it out from under them.
 //
 // Alloc carries the HostConfig resource ceiling (allocFromHostConfig) --
-// the API-fallback path's only source of allocation data, since the
-// docker stats API response has no room for it. Like the rest of Meta,
-// it's only as fresh as the last 10s inventory poll, unlike the cgroup
-// v2 fast path's own allocation read (cgroupv2.go), which is fresh every
-// 2s tick.
+// the API-fallback path's primary source of allocation data (of the
+// ceilings, only PidsStats.Limit rides along in the stats response
+// itself). Like the rest of Meta, it's only as fresh as the last 10s
+// inventory poll, unlike the cgroup v2 fast path's own allocation read
+// (cgroupv2.go), which is fresh every 2s tick.
 //
 // UpdateStatus/ChangelogURL/ProjectURL/WebUIURL/Created feed the update-
 // badge/changelog-link UI: UpdateStatus joins Image against the unraid-
 // update-status.json reader's snapshot (updatestatus.go); the other four
 // come straight from metaFromInspect's own resp fields and labels
 // (changelog.go).
-//
-// Networks/Ports are always freshly built slices, one metaFromInspect
-// call at a time -- never a slice retained (let alone mutated in place)
-// from a previous poll, and never shared with another container's Meta.
-// A caller holding onto an older Meta value (or a slice sliced out of
-// it) is therefore never surprised by a later poll's or another
-// container's data changing it out from under them.
 type Meta struct {
 	ID, Name, Image, Icon, State, Health string
 	Pid                                  int
@@ -43,10 +43,25 @@ type Meta struct {
 	HostNet                              bool
 	RestartCount                         int
 	Alloc                                alloc
+	Mounts                               []MountInfo
 	UpdateStatus                         string // "available" | "current" | "" (unknown: no match, no reader, unreadable file)
 	ChangelogURL, ProjectURL, WebUIURL   string
 	Networks                             []NetworkInfo
 	Ports                                []PortInfo
+}
+
+// MountInfo is one container mount, as reported by docker inspect's
+// Mounts -- bind and volume types only (see mountsFromInspect); tmpfs/
+// npipe/cluster/image mounts carry no meaningful host storage path and
+// are dropped before they ever reach a Meta. Source is the host-side
+// path backing the mount: for a volume mount this is already docker's
+// real on-disk location under /var/lib/docker/volumes/, not the
+// volume's name, which is what the storage-panel path->storage resolver
+// (internal/collect/unraid) needs to map this mount onto an Unraid
+// storage system.
+type MountInfo struct {
+	Source, Destination string
+	RW                  bool
 }
 
 // EventSink is the narrow slice of store.Store the docker collector needs

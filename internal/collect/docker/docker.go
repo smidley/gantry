@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/store"
@@ -263,8 +264,8 @@ const unraidWebUILabel = "net.unraid.docker.webui"
 // current image->status snapshot (nil when no reader is wired, or the
 // file was unreadable this poll -- see joinUpdateStatus). Everything
 // else is derived purely from resp itself: labels (Icon, WebUIURL,
-// ChangelogURL/ProjectURL via changelog.go) and NetworkSettings
-// (Networks/Ports via netinfo.go).
+// ChangelogURL/ProjectURL via changelog.go), Mounts (mountsFromInspect),
+// and NetworkSettings (Networks/Ports via netinfo.go).
 func metaFromInspect(resp container.InspectResponse, updateStatuses map[string]string) Meta {
 	m := Meta{
 		ID:           resp.ID,
@@ -295,6 +296,7 @@ func metaFromInspect(resp container.InspectResponse, updateStatuses map[string]s
 			m.StartedAt = t
 		}
 	}
+	m.Mounts = mountsFromInspect(resp.Mounts)
 	m.Networks = extractNetworks(m.HostNet, resp.NetworkSettings)
 	m.Ports = extractPorts(resp.NetworkSettings)
 	return m
@@ -309,9 +311,9 @@ const defaultCPUPeriodUsec = 100_000
 // allocFromHostConfig maps one docker inspect response's HostConfig
 // resource fields into the same alloc shape the cgroup v2 fast path
 // produces from memory.max/cpu.max/cpuset.cpus.effective/pids.max
-// (cgroupv2.go) -- the API fallback's only source of allocation data,
-// since none of it rides along in the stats-API response statsFromAPI
-// consumes. NanoCPUs takes priority over CPUQuota/CPUPeriod when a
+// (cgroupv2.go) -- the API fallback's HostConfig-side source of
+// allocation data (of the ceilings, only PidsStats.Limit rides along in
+// the stats response; see fallbackAlloc). NanoCPUs takes priority over CPUQuota/CPUPeriod when a
 // caller (unusually) sets both, matching the docker CLI's own --cpus
 // flag, which compiles down to NanoCPUs in the first place. PidsLimit
 // follows docker's own convention for that field (HostConfig's doc
@@ -338,6 +340,24 @@ func allocFromHostConfig(r container.Resources) alloc {
 		a.PidsLimit, a.HasPidsLimit = uint64(*r.PidsLimit), true
 	}
 	return a
+}
+
+// mountsFromInspect filters an inspect response's Mounts down to bind and
+// volume types -- the only two whose Source is a real host-side path
+// (tmpfs's is contractually empty; npipe/cluster/image aren't meaningful
+// on an Unraid/Linux host) -- and copies each into a MountInfo, in the
+// same order docker reported them. Returns nil, not an empty slice, when
+// nothing qualifies (including the empty/nil-Mounts case), matching
+// every other zero-value Meta field's convention.
+func mountsFromInspect(mps []container.MountPoint) []MountInfo {
+	var out []MountInfo
+	for _, mp := range mps {
+		if mp.Type != mount.TypeBind && mp.Type != mount.TypeVolume {
+			continue
+		}
+		out = append(out, MountInfo{Source: mp.Source, Destination: mp.Destination, RW: mp.RW})
+	}
+	return out
 }
 
 // runEvents streams docker events for the collector's run lifetime (see

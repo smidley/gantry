@@ -1,6 +1,7 @@
 package fake
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -553,6 +554,38 @@ func TestMetasCreatedIsPopulatedForEveryFleetMember(t *testing.T) {
 		require.False(t, m.Created.IsZero(), "%s must have a non-zero Created timestamp", m.Name)
 		require.Equal(t, fakeContainerStartedAt(now, i), m.Created)
 	}
+}
+
+// TestMetasIncludesPlausibleMounts pins that fake containers carry plausible Mounts.
+func TestMetasIncludesPlausibleMounts(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	metas := g.Metas()
+
+	for _, m := range metas {
+		require.NotEmpty(t, m.Mounts, "%s must have at least one plausible mount", m.Name)
+		for _, mount := range m.Mounts {
+			isUnraidPath := strings.HasPrefix(mount.Source, "/mnt/") || strings.HasPrefix(mount.Source, "/boot/")
+			require.True(t, isUnraidPath, "%s mount source %q must look like a real Unraid path", m.Name, mount.Source)
+		}
+	}
+}
+
+// TestTickEmitsContainerDeviceIOSeries pins that fake containers also emit live:io.<dev>.* samples per tick.
+func TestTickEmitsContainerDeviceIOSeries(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	devices := map[string]bool{}
+	for k := range sink.recs {
+		if k.Kind != "container" || k.Entity != "jellyfin" || !strings.HasPrefix(k.Metric, "live:io.") {
+			continue
+		}
+		dev, _, ok := strings.Cut(strings.TrimPrefix(k.Metric, "live:io."), ".")
+		require.True(t, ok)
+		devices[dev] = true
+	}
+	require.GreaterOrEqual(t, len(devices), 2, "want a couple of fake device rows per container")
 }
 
 // TestNilEventSinkDoesNotPanic proves every event-emitting path

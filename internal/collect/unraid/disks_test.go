@@ -265,6 +265,46 @@ func TestTickDisksRealCaptureFromLiveUnraidBox(t *testing.T) {
 	require.False(t, hasDisk9, "DISK_NP slot disk9 must have no DiskMeta entry either")
 }
 
+// TestSlotsBeforeFirstTick pins the pre-tick default: mirroring
+// Version(), the pool slot accessor reports nothing known before
+// disks.ini has ever been read successfully, rather than panicking on a
+// nil slice.
+func TestSlotsBeforeFirstTick(t *testing.T) {
+	c := New(newFakeSink(), &fakeEvents{}, t.TempDir(), t.TempDir())
+	require.Nil(t, c.Slots())
+}
+
+// TestSlotsClassifiesPoolSlotsFromRealFixture pins the fleet knowledge
+// the path->storage resolver depends on: disks.ini's per-slot "type"
+// field is the source of truth ("Cache" -> pool, everything else --
+// "Data", "Parity", "Flash" included -- is not), not the slot's name --
+// rocket_pool proves this isn't a hardcoded literal-"cache" special
+// case.
+func TestSlotsClassifiesPoolSlotsFromRealFixture(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "testdata/disks_real.ini", filepath.Join(dir, "disks.ini"))
+	c := New(newFakeSink(), &fakeEvents{}, dir, t.TempDir())
+
+	c.tickDisks(time.Unix(1000, 0))
+
+	require.Equal(t, []string{"cache", "rocket_pool"}, c.Slots())
+}
+
+// TestSlotsIgnoresSlotsWithNoTypeField pins the simplified (non-real)
+// disks.ini fixture's degrade path: none of its slots carry a "type"
+// key at all, so nothing should be classified as a pool -- this must
+// not panic on a missing key, and must not misclassify by falling back
+// to the slot's name.
+func TestSlotsIgnoresSlotsWithNoTypeField(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "testdata/disks.ini", filepath.Join(dir, "disks.ini"))
+	c := New(newFakeSink(), &fakeEvents{}, dir, t.TempDir())
+
+	c.tickDisks(time.Unix(1000, 0))
+
+	require.Nil(t, c.Slots())
+}
+
 func TestTickDisksMissingFileDegradesSilently(t *testing.T) {
 	dir := t.TempDir()
 	sink := newFakeSink()

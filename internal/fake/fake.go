@@ -41,10 +41,22 @@ type archetype struct {
 	// unlimited" brief.
 	memLimitBytes float64
 	cpuAllocCores float64
+
+	// updateStatus/changelogURL/projectURL are the update-badge demo
+	// variety: "" (most of the fleet, the real-box default) means no
+	// update data at all. jellyfin and paperless are the two given an
+	// "available" update, matching real-box label/image shapes Scott
+	// found on his own box (jellyfin: a github source label plus a
+	// project url; paperless: changelog derived from its ghcr.io image
+	// ref alone, no labels).
+	updateStatus string
+	changelogURL string
+	projectURL   string
 }
 
 var fleet = []archetype{
-	{name: "jellyfin", cpuBase: 4, cpuAmp: 3, cpuSpike: 0.02, memBytes: 900e6, netScale: 4e6},
+	{name: "jellyfin", cpuBase: 4, cpuAmp: 3, cpuSpike: 0.02, memBytes: 900e6, netScale: 4e6,
+		updateStatus: "available", changelogURL: "https://github.com/jellyfin/jellyfin-packaging/releases", projectURL: "https://jellyfin.org"},
 	{name: "plex", cpuBase: 3, cpuAmp: 2, cpuSpike: 0.02, memBytes: 800e6, netScale: 3e6},
 	{name: "radarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 300e6, netScale: 2e5},
 	{name: "sonarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 320e6, netScale: 2e5},
@@ -60,7 +72,8 @@ var fleet = []archetype{
 	{name: "nginx", cpuBase: 0.3, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 80e6, netScale: 5e5},
 	{name: "vaultwarden", cpuBase: 0.2, cpuAmp: 0.1, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4},
 	{name: "immich", cpuBase: 5, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.5e9, netScale: 1e6},
-	{name: "paperless", cpuBase: 1, cpuAmp: 2, cpuSpike: 0.01, memBytes: 400e6, netScale: 8e4},
+	{name: "paperless", cpuBase: 1, cpuAmp: 2, cpuSpike: 0.01, memBytes: 400e6, netScale: 8e4,
+		updateStatus: "available", changelogURL: "https://github.com/paperless-ngx/paperless-ngx/releases"},
 	{name: "gitea", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 300e6, netScale: 6e4},
 	// minecraft: the cpuset-pinned demo container (pinned to 2 of the fake host's 8 cores).
 	{name: "minecraft", cpuBase: 8, cpuAmp: 5, cpuSpike: 0.01, memBytes: 2.5e9, netScale: 3e5, cpuAllocCores: 2.0},
@@ -520,7 +533,10 @@ func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
 func (g *Generator) Metas() []docker.Meta {
 	out := make([]docker.Meta, len(fleet))
 	for i, a := range fleet {
-		out[i] = docker.Meta{Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest"}
+		out[i] = docker.Meta{
+			Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest",
+			UpdateStatus: a.updateStatus, ChangelogURL: a.changelogURL, ProjectURL: a.projectURL,
+		}
 	}
 	return out
 }

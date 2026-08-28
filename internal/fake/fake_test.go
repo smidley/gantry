@@ -441,6 +441,29 @@ func TestMetasReturnsRunningHealthyDemoImagePerFleetMember(t *testing.T) {
 	require.Len(t, seen, len(fleet), "every fleet member must have a distinct name")
 }
 
+// TestMetasGivesAFewContainersUpdateAvailableWithChangelogURL pins the
+// update-badge demo variety Scott's brief asked for: at least one (but
+// not most -- the real-box default is "up to date" or unknown) fake
+// container reports UpdateStatus "available" with a ChangelogURL, so the
+// UI's badge/changelog-link feature has something to show in fake mode
+// without needing a real box.
+func TestMetasGivesAFewContainersUpdateAvailableWithChangelogURL(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	metas := g.Metas()
+
+	available := 0
+	for _, m := range metas {
+		if m.UpdateStatus == "" {
+			continue
+		}
+		require.Equal(t, "available", m.UpdateStatus, "the fake fleet's own demo containers are all pending updates, not already-current ones")
+		require.NotEmpty(t, m.ChangelogURL, "%s reports an update available but has no changelog link", m.Name)
+		available++
+	}
+	require.Greater(t, available, 0, "at least one fake container must demo the update-available badge")
+	require.Less(t, available, len(fleet), "most of the fake fleet must stay unlimited/no-update-data, matching the real-box default")
+}
+
 // TestMetasIsPureAndStable pins that Metas needs no ticks at all (a
 // freshly constructed Generator answers it immediately) and returns
 // the same content every call.

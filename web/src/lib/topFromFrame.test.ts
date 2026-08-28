@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isTopResource, resourceMetricKeys, TOP_RESOURCES, topFromFrame } from './topFromFrame';
+import { isTopResource, resourceMetricKeys, resourceSecondaryMetricKey, TOP_RESOURCES, topFromFrame } from './topFromFrame';
 import type { SnapshotDTO } from './api';
 
 describe('TOP_RESOURCES', () => {
@@ -53,6 +53,16 @@ describe('resourceMetricKeys', () => {
 
   it('excludes gpu.nvidia.mem_mib from the gpu resource (VRAM, not a busy percentage)', () => {
     expect(resourceMetricKeys('gpu')).not.toContain('gpu.nvidia.mem_mib');
+  });
+});
+
+describe('resourceSecondaryMetricKey', () => {
+  it('names cpu.cores for cpu and nothing for every other resource', () => {
+    expect(resourceSecondaryMetricKey('cpu')).toBe('cpu.cores');
+    expect(resourceSecondaryMetricKey('mem')).toBeUndefined();
+    expect(resourceSecondaryMetricKey('net')).toBeUndefined();
+    expect(resourceSecondaryMetricKey('io')).toBeUndefined();
+    expect(resourceSecondaryMetricKey('gpu')).toBeUndefined();
   });
 });
 
@@ -112,5 +122,28 @@ describe('topFromFrame', () => {
   it('returns an empty list for a null/undefined frame', () => {
     expect(topFromFrame(null, 'cpu')).toEqual([]);
     expect(topFromFrame(undefined, 'cpu')).toEqual([]);
+  });
+
+  it('attaches cpu.cores as each cpu row\'s secondary value', () => {
+    const frame = frameWith({
+      a: { state: 'running', health: '', image: '', metrics: { 'cpu.pct': 25, 'cpu.cores': 2 } },
+    });
+    expect(topFromFrame(frame, 'cpu')).toEqual([{ entity: 'a', value: 25, secondary: 2 }]);
+  });
+
+  it('omits secondary when cpu.cores has no sample yet, without inventing a 0', () => {
+    const frame = frameWith({
+      a: { state: 'running', health: '', image: '', metrics: { 'cpu.pct': 25 } },
+    });
+    const [row] = topFromFrame(frame, 'cpu');
+    expect(row.secondary).toBeUndefined();
+  });
+
+  it('never attaches a secondary for a resource other than cpu', () => {
+    const frame = frameWith({
+      a: { state: 'running', health: '', image: '', metrics: { 'mem.bytes': 100, 'cpu.cores': 2 } },
+    });
+    const [row] = topFromFrame(frame, 'mem');
+    expect(row.secondary).toBeUndefined();
   });
 });

@@ -35,7 +35,7 @@
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
-  import { fmtBytes, fmtDuration, fmtPct, fmtRate } from '../lib/format';
+  import { fmtBytes, fmtCores, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { keysByPattern, sumMetricsByPattern, sumSeriesPoints, parityIsRunning, etaFromProgress } from '../lib/metrics';
   import { diskKind, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import { isTopResource, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
@@ -58,6 +58,11 @@
   // (a formatting concern, not a derivation one -- TOP_RESOURCES itself,
   // the shared part, lives in topFromFrame.ts).
   const TOP_FORMATTERS = { cpu: fmtPct, mem: fmtBytes, net: fmtRate, io: fmtRate, gpu: fmtPct };
+  // TOP_SECONDARY_FORMATTERS mirrors TOP_FORMATTERS but is deliberately
+  // partial -- only cpu rows carry a secondary value (topFromFrame's own
+  // resourceSecondaryMetricKey), so every other key is simply absent
+  // rather than mapped to a no-op formatter.
+  const TOP_SECONDARY_FORMATTERS = { cpu: fmtCores };
 
   // topResource persists across reloads (ask: switchable, remembered) the
   // same way theme.svelte.ts's own preference does -- read once at
@@ -394,7 +399,12 @@
             </button>
           {/each}
         </div>
-        <TopBarList rows={topRows} formatValue={TOP_FORMATTERS[topResource]} live={true} />
+        <TopBarList
+          rows={topRows}
+          formatValue={TOP_FORMATTERS[topResource]}
+          formatSecondary={TOP_SECONDARY_FORMATTERS[topResource]}
+          live={true}
+        />
       </div>
     </div>
 

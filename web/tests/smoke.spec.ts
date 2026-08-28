@@ -145,6 +145,44 @@ test('top consumers: switching window from Now to 1h renders without erroring', 
   await expect(page.locator('.top-bar-list__row, .top-bar-list__empty').first()).toBeVisible();
 });
 
+// Regression coverage for the top-consumers host-share fix: a container
+// used to read docker-stats' own per-core percent (routinely near/at
+// 100%) right next to the host tile's much lower whole-machine total --
+// confusing, and the bug this branch exists to fix. Both surfaces (the
+// full page here, and Overview's compact module below) must show every
+// CPU row on the SAME host-share scale as the host CPU tile, with a
+// quiet "≈N.N cores" secondary giving back the docker-stats-style number
+// for anyone who wants it.
+test('top consumers: CPU rows read as a host-share percentage with a quiet cores secondary', async ({ page }) => {
+  await page.goto('#/top/cpu');
+
+  const rows = page.locator('.top-bar-list__row');
+  await expect(rows.first()).toBeVisible();
+
+  // fake.go's fleet never uses more than one full core (fakeHostCores'
+  // own doc), so every row must read comfortably under 100% -- nothing
+  // pegged at the old per-core ceiling.
+  const values = await rows.locator('.top-bar-list__value').allTextContents();
+  expect(values.length).toBeGreaterThan(0);
+  for (const text of values) {
+    const value = Number(text.replace('%', ''));
+    expect(value).toBeGreaterThanOrEqual(0);
+    expect(value).toBeLessThan(20);
+  }
+
+  // At least one row's secondary renders (a container using well under
+  // 0.05 cores hides it entirely -- see format.ts's fmtCores).
+  await expect(page.locator('.top-bar-list__secondary').first()).toHaveText(/^≈\d+\.\d cores$/);
+});
+
+test('overview: the Top Consumers module shows the same host-share cores secondary on CPU rows', async ({ page }) => {
+  await page.goto('#/');
+
+  const topModule = page.locator('.overview__top');
+  await expect(topModule.locator('.top-bar-list__row').first()).toBeVisible();
+  await expect(topModule.locator('.top-bar-list__secondary').first()).toHaveText(/^≈\d+\.\d cores$/);
+});
+
 // Regression coverage for Scott's own report: a live box misread its
 // boot flash device as HDD and its NVMe pools as generic SSD (rotational
 // alone can't tell either apart -- see disks.go's DiskKind doc). Fake

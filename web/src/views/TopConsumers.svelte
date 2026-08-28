@@ -12,7 +12,7 @@
   import { untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { fetchTop } from '../lib/api';
-  import { fmtBytes, fmtPct, fmtRate } from '../lib/format';
+  import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
   import { isTopResource, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import TopBarList from '../components/TopBarList.svelte';
 
@@ -35,6 +35,12 @@
   // -- the peak-of-a-sum caption below only applies to these.
   const SUMMED_RESOURCES = new Set(['net', 'io', 'gpu']);
   const FORMATTERS = { cpu: fmtPct, mem: fmtBytes, net: fmtRate, io: fmtRate, gpu: fmtPct };
+  // SECONDARY_FORMATTERS mirrors FORMATTERS but is deliberately partial --
+  // only cpu rows carry a secondary value (topFromFrame's own
+  // resourceSecondaryMetricKey; a fetched, non-"now" window's rows never
+  // have one either way, see fetchTop's TopRow shape), so every other key
+  // is simply absent rather than mapped to a no-op formatter.
+  const SECONDARY_FORMATTERS = { cpu: fmtCores };
   const WINDOW_LABEL = { '1h': 'the last hour', '24h': 'the last 24 hours', '7d': 'the last 7 days' };
 
   let resource = $state(untrack(() => (isTopResource(initialResource) ? initialResource : 'cpu')));
@@ -163,7 +169,13 @@
     {:else if loading}
       <p class="microlabel top-consumers__loading">Loading…</p>
     {:else}
-      <TopBarList {rows} formatValue={FORMATTERS[resource]} {emptyMessage} live={windowKey === 'now'} />
+      <TopBarList
+        {rows}
+        formatValue={FORMATTERS[resource]}
+        formatSecondary={SECONDARY_FORMATTERS[resource]}
+        {emptyMessage}
+        live={windowKey === 'now'}
+      />
     {/if}
   </div>
 </div>

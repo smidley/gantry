@@ -19,7 +19,7 @@
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
   import { fetchEvents, fetchSeries } from '../lib/api';
-  import { fmtBytes, fmtDuration, fmtPct, fmtRate } from '../lib/format';
+  import { fmtBytes, fmtCores, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { containerHealthStatus } from '../lib/containerStatus';
   import { GPU_ENGINE_ORDER } from '../lib/metrics';
   import { eventsToMarkers } from '../lib/eventMarkers';
@@ -239,6 +239,11 @@
   let frameTs = $derived(live.frame?.ts ?? 0);
   let startedAt = $derived(c?.metrics?.['meta.started_at']);
   let restarts = $derived(c?.metrics?.['meta.restart_count']);
+  // cpuCoresNow: a quiet "right now" annotation next to the CPU chart's
+  // own label -- the chart below plots cpu.pct's host-share history, but
+  // leaves its docker-stats-style core count implicit; this reads that
+  // straight off the live frame the same way the header facts above do.
+  let cpuCoresNow = $derived(fmtCores(c?.metrics?.['cpu.cores'] ?? 0));
 </script>
 
 <div class="container-detail">
@@ -284,7 +289,10 @@
 
   <div class="container-detail__charts">
     <div class="card container-detail__chart-card">
-      <span class="microlabel">CPU</span>
+      <div class="container-detail__chart-head">
+        <span class="microlabel">CPU</span>
+        {#if cpuCoresNow}<span class="container-detail__chart-now">{cpuCoresNow}</span>{/if}
+      </div>
       {#if hasPoints('cpu.pct')}
         <TimeChart series={cpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
       {:else if activeRange === 'live' && liveSeedPending}
@@ -421,6 +429,16 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+  }
+  .container-detail__chart-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .container-detail__chart-now {
+    color: var(--ink-2);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
   }
   .container-detail__empty {
     margin: 2rem 0;

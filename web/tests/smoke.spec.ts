@@ -240,6 +240,28 @@ test('375px viewport: no route scrolls horizontally', async ({ page }) => {
   }
 });
 
+// Regression coverage for a 375px-only wrap: "Disk IO" is the one
+// two-word label among the resource tabs and used to break onto a
+// second line ("Disk" / "IO") once the row got squeezed this narrow --
+// the button's own box stays a fixed min-height either way (2 lines of
+// this text still fits under it), so this checks the label's own text
+// layout directly instead: getClientRects() on a text range reports one
+// rect per visual line, so more than one means it wrapped.
+test('top consumers: the "Disk IO" resource tab stays one line at 375px', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  await page.goto('#/top');
+
+  const diskIoTab = page.getByRole('tab', { name: 'Disk IO', exact: true });
+  await expect(diskIoTab).toBeVisible();
+
+  const lineCount = await diskIoTab.evaluate((el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    return range.getClientRects().length;
+  });
+  expect(lineCount).toBe(1);
+});
+
 test('LivePulse shows live state while frames flow', async ({ page }) => {
   await page.goto('#/');
   await expect(page.locator('.live-pulse__ring')).toBeVisible({ timeout: 5_000 });

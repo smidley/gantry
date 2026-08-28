@@ -155,10 +155,16 @@ body {
   background: transparent;
   color: var(--ink-2);
   font-size: 0.82rem;
+  white-space: nowrap;
   cursor: pointer;
 }
 .segmented__btn:last-child {
   border-right: none;
+}
+@media (max-width: 47.9375rem) {
+  .segmented__btn {
+    padding: 0 0.6rem;
+  }
 }
 .segmented__btn--active {
   background: color-mix(in oklab, var(--series-1) 15%, transparent);

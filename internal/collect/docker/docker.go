@@ -292,7 +292,7 @@ func allocFromHostConfig(r container.Resources) alloc {
 		a.CPUQuotaCores, a.HasCPUQuota = float64(r.NanoCPUs)/1e9, true
 	case r.CPUQuota > 0:
 		period := r.CPUPeriod
-		if period == 0 {
+		if period <= 0 {
 			period = defaultCPUPeriodUsec
 		}
 		a.CPUQuotaCores, a.HasCPUQuota = float64(r.CPUQuota)/float64(period), true

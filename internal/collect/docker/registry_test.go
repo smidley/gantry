@@ -714,6 +714,18 @@ func TestAllocFromHostConfigCPUQuotaWithoutPeriodDefaultsTo100000(t *testing.T) 
 	require.Equal(t, 2.0, a.CPUQuotaCores)
 }
 
+// TestAllocFromHostConfigCPUQuotaWithNegativePeriodDefaultsTo100000 pins
+// the same runc default for a negative period, not just zero: dockerd
+// itself never writes a negative CPUPeriod, but a non-dockerd writer of
+// this same HostConfig shape (a bespoke tool poking the container's
+// config) could, and the guard must treat it the same as "absent"
+// rather than flowing a negative number into the quota/period division.
+func TestAllocFromHostConfigCPUQuotaWithNegativePeriodDefaultsTo100000(t *testing.T) {
+	a := allocFromHostConfig(container.Resources{CPUQuota: 200_000, CPUPeriod: -1})
+	require.True(t, a.HasCPUQuota)
+	require.Equal(t, 2.0, a.CPUQuotaCores)
+}
+
 // TestAllocFromHostConfigNanoCPUsTakesPriorityOverQuotaPeriod pins the
 // precedence when a caller (unusually) sets both: NanoCPUs wins, matching
 // the docker CLI's own --cpus flag, which compiles down to NanoCPUs in

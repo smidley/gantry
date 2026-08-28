@@ -282,12 +282,12 @@
         <input type="text" placeholder="Entity name (exact match)…" bind:value={entityFilter} />
       </label>
 
-      <div class="events-view__presets" role="group" aria-label="Time range">
+      <div class="segmented" role="group" aria-label="Time range">
         {#each TIME_PRESETS as p (p.key)}
           <button
             type="button"
-            class="events-view__preset-btn"
-            class:events-view__preset-btn--active={timePreset === p.key}
+            class="segmented__btn"
+            class:segmented__btn--active={timePreset === p.key}
             onclick={() => (timePreset = p.key)}
           >
             {p.label}
@@ -375,30 +375,6 @@
     color: var(--ink);
     font-size: 0.9rem;
     min-width: 14rem;
-  }
-  .events-view__presets {
-    display: inline-flex;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .events-view__preset-btn {
-    min-height: 40px;
-    padding: 0 0.85rem;
-    border: none;
-    border-right: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    background: transparent;
-    color: var(--ink-2);
-    font-size: 0.82rem;
-    cursor: pointer;
-  }
-  .events-view__preset-btn:last-child {
-    border-right: none;
-  }
-  .events-view__preset-btn--active {
-    background: color-mix(in oklab, var(--series-1) 15%, transparent);
-    color: var(--series-1);
-    font-weight: 500;
   }
   .events-view__list {
     padding: 1rem;

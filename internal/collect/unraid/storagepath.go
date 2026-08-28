@@ -22,7 +22,7 @@ type StorageRef struct {
 // no fleet lookup is needed to tell a disk slot apart from a pool one
 // (contrast poolSlot membership below, which does need the fleet: pool
 // names are arbitrary).
-var diskSlotPattern = regexp.MustCompile(`^disk[0-9]+$`)
+var diskSlotPattern = regexp.MustCompile(`^disk[1-9][0-9]*$`)
 
 // ResolveStoragePath maps a container mount's host source path to the
 // Unraid storage system that backs it, per the design in

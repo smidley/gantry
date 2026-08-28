@@ -43,6 +43,7 @@ func TestResolveStoragePath(t *testing.T) {
 		{"single-digit array disk", "/mnt/disk1/isos/ubuntu.iso", StorageRef{Kind: "disk", Name: "disk1"}},
 		{"double-digit array disk", "/mnt/disk23/backups", StorageRef{Kind: "disk", Name: "disk23"}},
 		{"array disk, bare root", "/mnt/disk9", StorageRef{Kind: "disk", Name: "disk9"}},
+		{"disk0 is never a real Unraid slot", "/mnt/disk0/x", StorageRef{Kind: "other"}},
 
 		{"flash boot device", "/boot/config/plugins/x.plg", StorageRef{Kind: "flash"}},
 		{"flash boot device, bare root", "/boot", StorageRef{Kind: "flash"}},

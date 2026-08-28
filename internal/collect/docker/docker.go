@@ -266,6 +266,12 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 	return m
 }
 
+// defaultCPUPeriodUsec is runc's own default cpu.max period (100ms),
+// used below when a caller sets --cpu-quota without --cpu-period:
+// dockerd leaves HostConfig.CPUPeriod at 0 in that case rather than
+// filling in the default itself, so allocFromHostConfig has to.
+const defaultCPUPeriodUsec = 100_000
+
 // allocFromHostConfig maps one docker inspect response's HostConfig
 // resource fields into the same alloc shape the cgroup v2 fast path
 // produces from memory.max/cpu.max/cpuset.cpus.effective/pids.max
@@ -284,8 +290,12 @@ func allocFromHostConfig(r container.Resources) alloc {
 	switch {
 	case r.NanoCPUs > 0:
 		a.CPUQuotaCores, a.HasCPUQuota = float64(r.NanoCPUs)/1e9, true
-	case r.CPUQuota > 0 && r.CPUPeriod > 0:
-		a.CPUQuotaCores, a.HasCPUQuota = float64(r.CPUQuota)/float64(r.CPUPeriod), true
+	case r.CPUQuota > 0:
+		period := r.CPUPeriod
+		if period == 0 {
+			period = defaultCPUPeriodUsec
+		}
+		a.CPUQuotaCores, a.HasCPUQuota = float64(r.CPUQuota)/float64(period), true
 	}
 	if n, ok := parseCPUSetCount(r.CpusetCpus); ok {
 		a.CPUSetCores, a.HasCPUSet = n, true

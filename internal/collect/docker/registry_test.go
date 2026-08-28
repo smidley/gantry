@@ -702,6 +702,18 @@ func TestAllocFromHostConfigFallsBackToCPUQuotaAndPeriod(t *testing.T) {
 	require.Equal(t, 2.0, a.CPUQuotaCores)
 }
 
+// TestAllocFromHostConfigCPUQuotaWithoutPeriodDefaultsTo100000 pins that
+// dockerd leaves HostConfig.CPUPeriod at 0 when a caller sets only
+// --cpu-quota (no --cpu-period) -- runc's own default period, 100000us,
+// applies in that case, so this must still resolve to a real
+// allocation rather than silently dropping it for want of an explicit
+// period.
+func TestAllocFromHostConfigCPUQuotaWithoutPeriodDefaultsTo100000(t *testing.T) {
+	a := allocFromHostConfig(container.Resources{CPUQuota: 200_000, CPUPeriod: 0})
+	require.True(t, a.HasCPUQuota)
+	require.Equal(t, 2.0, a.CPUQuotaCores)
+}
+
 // TestAllocFromHostConfigNanoCPUsTakesPriorityOverQuotaPeriod pins the
 // precedence when a caller (unusually) sets both: NanoCPUs wins, matching
 // the docker CLI's own --cpus flag, which compiles down to NanoCPUs in

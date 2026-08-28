@@ -405,15 +405,17 @@
   }
   .storage-disk__head {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: 0.3rem 0.5rem;
   }
   .storage-disk__eyebrow {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.4rem;
     min-width: 0;
+    white-space: nowrap;
   }
   .storage-disk__media {
     display: inline-flex;

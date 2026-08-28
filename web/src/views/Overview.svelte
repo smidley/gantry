@@ -25,10 +25,10 @@
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
-  import { fmtDuration, fmtPct, fmtRate } from '../lib/format';
+  import { fmtBytes, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { keysByPattern, sumMetricsByPattern, sumSeriesPoints, parityIsRunning, etaFromProgress } from '../lib/metrics';
-  import { diskUsagePct, sortDiskEntities } from '../lib/disks';
-  import { topFromFrame } from '../lib/topFromFrame';
+  import { diskMediaType, diskUsagePct, sortDiskEntities } from '../lib/disks';
+  import { isTopResource, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
   import { deriveOverviewStatus, describeAnomaly, worstSeverity } from '../lib/overviewStatus';
 
@@ -42,6 +42,27 @@
 
   const EVENTS_POLL_MS = 30_000;
   const LIVE_WINDOW_SEC = 900;
+
+  // Top consumers module: same formatter-per-resource mapping
+  // TopConsumers.svelte's own full page uses, kept local to each view
+  // (a formatting concern, not a derivation one -- TOP_RESOURCES itself,
+  // the shared part, lives in topFromFrame.ts).
+  const TOP_FORMATTERS = { cpu: fmtPct, mem: fmtBytes, net: fmtRate, io: fmtRate, gpu: fmtPct };
+
+  // topResource persists across reloads (ask: switchable, remembered) the
+  // same way theme.svelte.ts's own preference does -- read once at
+  // module-init time, guarded for the same SSR/no-localStorage cases.
+  const TOP_RESOURCE_STORAGE_KEY = 'gantry.topResource';
+  function loadStoredTopResource() {
+    if (typeof localStorage === 'undefined') return 'cpu';
+    const stored = localStorage.getItem(TOP_RESOURCE_STORAGE_KEY);
+    return isTopResource(stored) ? stored : 'cpu';
+  }
+  let topResource = $state(loadStoredTopResource());
+  function selectTopResource(key) {
+    topResource = key;
+    if (typeof localStorage !== 'undefined') localStorage.setItem(TOP_RESOURCE_STORAGE_KEY, key);
+  }
 
   let cpuRing = liveRing((f) => f.host?.['cpu.total']);
   let memRing = liveRing((f) => f.host?.['mem.used_pct']);
@@ -126,7 +147,7 @@
     return runningCount === total ? `${total} ${noun}, all running.` : `${total} ${noun}, ${runningCount} running.`;
   });
 
-  let topCPU = $derived(topFromFrame(live.frame, 'cpu', 5));
+  let topRows = $derived(topFromFrame(live.frame, topResource, 5));
 
   // --- Array/disks (moved in from the old ArrayCard, which D2 folds into
   // a quiet headline subline instead of a dedicated card -- see
@@ -193,7 +214,7 @@
     const out = [];
     for (const slot of names) {
       const pct = diskUsagePct(disks[slot]);
-      if (pct !== null) out.push({ slot, pct });
+      if (pct !== null) out.push({ slot, pct, solidState: diskMediaType(disks[slot]) === 'ssd' });
     }
     return out;
   });
@@ -233,6 +254,7 @@
       pct: d.pct,
       flagged: calloutBySlot.has(d.slot),
       calloutText: calloutBySlot.get(d.slot),
+      solidState: d.solidState,
     }));
   });
 
@@ -378,10 +400,24 @@
   <div class="overview__grid">
     <div class="card overview__top">
       <div class="overview__top-head">
-        <span class="microlabel">Top consumers &middot; CPU</span>
-        <a href="#/top" class="overview__top-link">View all &rarr;</a>
+        <span class="microlabel">Top consumers</span>
+        <a href={`#/top/${topResource}`} class="overview__top-link">View all &rarr;</a>
       </div>
-      <TopBarList rows={topCPU} formatValue={fmtPct} live={true} />
+      <div class="overview__top-switcher" role="tablist" aria-label="Top consumers metric">
+        {#each TOP_RESOURCES as r (r.key)}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={topResource === r.key}
+            class="overview__top-switch"
+            class:overview__top-switch--active={topResource === r.key}
+            onclick={() => selectTopResource(r.key)}
+          >
+            {r.shortLabel}
+          </button>
+        {/each}
+      </div>
+      <TopBarList rows={topRows} formatValue={TOP_FORMATTERS[topResource]} live={true} />
     </div>
 
     <div class="card overview__events">
@@ -590,6 +626,34 @@
     font-size: 0.78rem;
     color: var(--series-1);
     text-decoration: none;
+  }
+  .overview__top-switcher {
+    display: inline-flex;
+    align-self: flex-start;
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .overview__top-switch {
+    min-height: 28px;
+    padding: 0 0.6rem;
+    border: none;
+    border-right: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    background: transparent;
+    color: var(--ink-2);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+  }
+  .overview__top-switch:last-child {
+    border-right: none;
+  }
+  .overview__top-switch--active {
+    background: color-mix(in oklab, var(--series-1) 15%, transparent);
+    color: var(--series-1);
+    font-weight: 600;
   }
   .overview__events-empty {
     margin: 0;

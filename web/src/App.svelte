@@ -45,7 +45,7 @@
       <ContainerDetail name={$route.params.name} />
     {/key}
   {:else if $route.name === 'top'}
-    <TopConsumers />
+    <TopConsumers initialResource={$route.params.resource} />
   {:else if $route.name === 'storage'}
     <Storage />
   {:else if $route.name === 'gpu'}

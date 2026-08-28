@@ -35,6 +35,12 @@ const routeDefs: RouteDef[] = [
   { name: 'containers', pattern: ['containers'] },
   { name: 'container-detail', pattern: ['containers', ':name'] },
   { name: 'top', pattern: ['top'] },
+  // Overview's compact Top Consumers switcher deep-links "View all" to
+  // the SAME resource, e.g. "#/top/mem" -- a second pattern for the same
+  // route name, same shape as container-detail's own :name capture,
+  // rather than a query string (this router has no query-string support,
+  // and every other param anywhere in this table is already a segment).
+  { name: 'top', pattern: ['top', ':resource'] },
   { name: 'storage', pattern: ['storage'] },
   { name: 'gpu', pattern: ['gpu'] },
   { name: 'events', pattern: ['events'] },

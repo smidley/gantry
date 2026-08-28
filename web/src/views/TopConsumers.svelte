@@ -9,19 +9,21 @@
   change.
 -->
 <script>
+  import { untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { fetchTop } from '../lib/api';
   import { fmtBytes, fmtPct, fmtRate } from '../lib/format';
-  import { topFromFrame } from '../lib/topFromFrame';
+  import { isTopResource, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import TopBarList from '../components/TopBarList.svelte';
 
-  const RESOURCES = [
-    { key: 'cpu', label: 'CPU' },
-    { key: 'mem', label: 'Memory' },
-    { key: 'net', label: 'Network' },
-    { key: 'io', label: 'Disk IO' },
-    { key: 'gpu', label: 'GPU' },
-  ];
+  // initialResource: App.svelte's route table passes $route.params.resource
+  // straight through (the "#/top/:resource" pattern -- see router.ts),
+  // same convention as ContainerDetail's own name prop. Read ONCE to seed
+  // `resource` below, not kept live-bound -- once this view has mounted,
+  // its own tab clicks own the selection, the same "seed once" contract
+  // TopBarRow's Tween already uses for row.value.
+  let { initialResource = undefined } = $props();
+
   const WINDOWS = [
     { key: 'now', label: 'Now' },
     { key: '1h', label: '1h' },
@@ -35,7 +37,7 @@
   const FORMATTERS = { cpu: fmtPct, mem: fmtBytes, net: fmtRate, io: fmtRate, gpu: fmtPct };
   const WINDOW_LABEL = { '1h': 'the last hour', '24h': 'the last 24 hours', '7d': 'the last 7 days' };
 
-  let resource = $state('cpu');
+  let resource = $state(untrack(() => (isTopResource(initialResource) ? initialResource : 'cpu')));
   let windowKey = $state('now');
   let agg = $state('avg');
 
@@ -98,7 +100,7 @@
 
   <div class="top-consumers__controls">
     <div class="top-consumers__tabs" role="tablist" aria-label="Resource">
-      {#each RESOURCES as r (r.key)}
+      {#each TOP_RESOURCES as r (r.key)}
         <button
           type="button"
           role="tab"

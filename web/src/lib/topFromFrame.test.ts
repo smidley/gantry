@@ -1,6 +1,28 @@
 import { describe, expect, it } from 'vitest';
-import { resourceMetricKeys, topFromFrame } from './topFromFrame';
+import { isTopResource, resourceMetricKeys, TOP_RESOURCES, topFromFrame } from './topFromFrame';
 import type { SnapshotDTO } from './api';
+
+describe('TOP_RESOURCES', () => {
+  it('lists every resource resourceMetricKeys knows about, in the fixed CPU/Mem/Net/IO/GPU order', () => {
+    expect(TOP_RESOURCES.map((r) => r.key)).toEqual(['cpu', 'mem', 'net', 'io', 'gpu']);
+    for (const r of TOP_RESOURCES) {
+      expect(resourceMetricKeys(r.key).length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('isTopResource', () => {
+  it('accepts every real resource key', () => {
+    for (const r of TOP_RESOURCES) expect(isTopResource(r.key)).toBe(true);
+  });
+
+  it('rejects an invalid, missing, or null value', () => {
+    expect(isTopResource('bogus')).toBe(false);
+    expect(isTopResource(undefined)).toBe(false);
+    expect(isTopResource(null)).toBe(false);
+    expect(isTopResource('')).toBe(false);
+  });
+});
 
 function frameWith(containers: SnapshotDTO['containers']): SnapshotDTO {
   return {

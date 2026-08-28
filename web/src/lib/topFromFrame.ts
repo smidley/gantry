@@ -10,6 +10,29 @@ export interface TopFrameRow {
   value: number;
 }
 
+// TOP_RESOURCES is the one fixed list/order of "top consumers" resources --
+// shared by the full Top Consumers view's own tabs (label) and Overview's
+// compact module-header switcher (shortLabel, the CPU/Mem/Net/IO/GPU
+// abbreviations Scott's own ask spelled out), so both surfaces stay in
+// lockstep with resourceMetricKeys below and never drift into two
+// independently-maintained resource lists.
+export const TOP_RESOURCES: { key: TopResource; label: string; shortLabel: string }[] = [
+  { key: 'cpu', label: 'CPU', shortLabel: 'CPU' },
+  { key: 'mem', label: 'Memory', shortLabel: 'Mem' },
+  { key: 'net', label: 'Network', shortLabel: 'Net' },
+  { key: 'io', label: 'Disk IO', shortLabel: 'IO' },
+  { key: 'gpu', label: 'GPU', shortLabel: 'GPU' },
+];
+
+// isTopResource narrows an arbitrary string (a route param, a localStorage
+// read -- neither typechecked at their source) to TopResource, so a
+// malformed deep link or a stale/hand-edited storage value falls back to
+// the caller's own default instead of silently propagating an invalid
+// resource key into resourceMetricKeys' switch.
+export function isTopResource(value: string | null | undefined): value is TopResource {
+  return TOP_RESOURCES.some((r) => r.key === value);
+}
+
 // resourceMetricKeys mirrors the server's resourceMetrics (api_history.go)
 // exactly -- the metric name(s) /api/top sums per entity for each
 // resource. gpu deliberately excludes gpu.nvidia.mem_mib (VRAM, not a

@@ -307,6 +307,71 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 	require.Equal(t, 4.2, c.Metrics["cpu.pct"])
 }
 
+// TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO pins
+// buildSnapshot's own field-by-field copy of Meta's badge/changelog/
+// network/port fields into ContainerDTO -- the same copy State/Health/
+// Image/Icon already get, just for this round's additions. Each of
+// docker.Meta's own producer functions (metaFromInspect, extractNetworks/
+// extractPorts, changelogAndProjectURLs, joinUpdateStatus) has its own
+// tests pinning the values themselves; this pins that buildSnapshot
+// actually wires them through to the DTO once Meta carries them.
+func TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	created := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{
+			Name: "jellyfin", State: "running", Health: "healthy", Image: "jellyfin/jellyfin:latest",
+			Created:      created,
+			UpdateStatus: "available",
+			ChangelogURL: "https://github.com/jellyfin/jellyfin-packaging/releases",
+			ProjectURL:   "https://jellyfin.org",
+			WebUIURL:     "http://[IP]:[PORT:8096]/",
+			Networks:     []docker.NetworkInfo{{Name: "bridge", IP: "172.17.0.2"}},
+			Ports:        []docker.PortInfo{{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096}},
+		}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+
+	c, ok := snap.Containers["jellyfin"]
+	require.True(t, ok)
+	require.Equal(t, created.Unix(), c.Created)
+	require.Equal(t, "available", c.UpdateStatus)
+	require.Equal(t, "https://github.com/jellyfin/jellyfin-packaging/releases", c.ChangelogURL)
+	require.Equal(t, "https://jellyfin.org", c.ProjectURL)
+	require.Equal(t, "http://[IP]:[PORT:8096]/", c.WebUIURL)
+	require.Equal(t, []server.NetworkInfoDTO{{Name: "bridge", IP: "172.17.0.2"}}, c.Networks)
+	require.Equal(t, []server.PortInfoDTO{{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096}}, c.Ports)
+}
+
+// TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage pins the zero-time
+// guard: Go's zero time.Time.Unix() is a large negative number (year 1),
+// not 0 -- a container Meta never populated Created (metaFromInspect
+// couldn't parse it, or fake mode doesn't set it) must map to
+// ContainerDTO.Created == 0, not that garbage value.
+func TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "jellyfin", State: "running"}} // Created left at its zero value
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+
+	require.Equal(t, int64(0), snap.Containers["jellyfin"].Created)
+}
+
 // TestBuildSnapshotDropsStaleSampleFromRunningContainer pins the
 // per-sample freshness gate a running container's metrics still need:
 // containerFrameEntities/include only decide whether the ENTITY belongs

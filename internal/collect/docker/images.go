@@ -156,7 +156,7 @@ func classifyImages(imgs []image.Summary, containers []container.Summary) Images
 
 // removeImagesWith is RemoveImages' pure orchestration, with the actual
 // per-id removal call injected as removeOne (the real
-// c.cli.ImageRemove in production; a fake in tests) so the interesting
+// c.imgCli.ImageRemove in production; a fake in tests) so the interesting
 // behavior -- one id's failure doesn't abort the rest, and a success is
 // enriched from pre -- is fully unit-testable without a daemon. pre is
 // best-effort tag/size enrichment (see ImageRemoveResult's own doc for

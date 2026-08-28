@@ -184,6 +184,30 @@ func TestSpunDownDiskEmitsNoTemp(t *testing.T) {
 	}
 }
 
+// TestDiskRotationalDistinguishesCacheAsSolidState pins the fake array's
+// rotational contract: every spinning array/parity disk reads 1, while
+// cache (an NVMe/SSD pool in a realistic Unraid layout) reads 0 -- so
+// dev/Playwright exercise the same HDD-vs-SSD distinction a real box's
+// disks.ini rotational key drives (see disks.go's tickOneDisk).
+// rotational is a static hardware property, recorded every tick
+// regardless of spin state -- unlike temp.c, it must be present even for
+// the permanently-spun-down disk3.
+func TestDiskRotationalDistinguishesCacheAsSolidState(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	for _, spinning := range []string{"parity", "disk1", "disk2", "disk3", "disk4"} {
+		samples := sink.recs[store.SeriesKey{Kind: "disk", Entity: spinning, Metric: "rotational"}]
+		require.NotEmpty(t, samples, "%s must report rotational", spinning)
+		require.Equal(t, 1.0, samples[0].Val, "%s should read as spinning", spinning)
+	}
+
+	cacheSamples := sink.recs[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "rotational"}]
+	require.NotEmpty(t, cacheSamples, "cache must report rotational")
+	require.Equal(t, 0.0, cacheSamples[0].Val, "cache should read as solid-state")
+}
+
 // TestParityCheckStartsTwoMinutesAfterBootAndFinishesMonotonically
 // simulates the fake array's one-shot parity check end to end: no
 // progress before elapsed 2min, a parity.start event on the first tick

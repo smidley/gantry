@@ -59,6 +59,10 @@ func (c *Collector) tickOneDisk(slot string, disk map[string]string, ts int64) {
 		c.sink.Record(store.SeriesKey{Kind: "disk", Entity: slot, Metric: "spun_up"}, ts, 1-spundown)
 	}
 
+	if rotational, ok := parseFloatOK(disk["rotational"]); ok {
+		c.sink.Record(store.SeriesKey{Kind: "disk", Entity: slot, Metric: "rotational"}, ts, rotational)
+	}
+
 	// temp is a number, or the literal "*" when the disk is spun down or
 	// its temp is otherwise unknown; parseFloatOK's failure on "*" is
 	// exactly the signal we want — omit the sample entirely rather than

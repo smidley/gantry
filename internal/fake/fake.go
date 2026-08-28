@@ -61,26 +61,30 @@ var fleet = []archetype{
 // (false hasFS, matching real disks.ini's fsSize=0 for a parity slot --
 // it has no filesystem view) plus 4 data disks and one cache disk.
 type diskSpec struct {
-	name      string
-	hasFS     bool
-	sizeBytes float64
-	baseUsed  float64 // fraction 0..1, before its slow drift
-	tempBase  float64 // °C baseline; meaningless when spunDown
-	spunDown  bool
+	name       string
+	hasFS      bool
+	sizeBytes  float64
+	baseUsed   float64 // fraction 0..1, before its slow drift
+	tempBase   float64 // °C baseline; meaningless when spunDown
+	spunDown   bool
+	rotational float64 // disks.ini's own rotational value: 1 spinning, 0 solid-state
 }
 
 // disks is Task 11's fixed 6-disk fake array. disk3 is permanently
 // spun down: real spun-down disks never report a temp (disks.ini's
 // temp key reads the literal "*"), but DO still report cached
 // filesystem usage -- fsSize/fsFree come from a mount-time stat, not a
-// live SMART query, so they're independent of spin state.
+// live SMART query, so they're independent of spin state. cache is the
+// array's one solid-state member (rotational=0), a realistic NVMe/SSD
+// cache pool in front of spinning array/parity disks -- so dev/
+// Playwright exercise the same HDD-vs-SSD distinction a real box does.
 var disks = []diskSpec{
-	{"parity", false, 12e12, 0, 38, false},
-	{"disk1", true, 8e12, 0.62, 34, false},
-	{"disk2", true, 8e12, 0.71, 35, false},
-	{"disk3", true, 8e12, 0.55, 36, true},
-	{"disk4", true, 4e12, 0.40, 37, false},
-	{"cache", true, 1e12, 0.35, 41, false},
+	{"parity", false, 12e12, 0, 38, false, 1},
+	{"disk1", true, 8e12, 0.62, 34, false, 1},
+	{"disk2", true, 8e12, 0.71, 35, false, 1},
+	{"disk3", true, 8e12, 0.55, 36, true, 1},
+	{"disk4", true, 4e12, 0.40, 37, false, 1},
+	{"cache", true, 1e12, 0.35, 41, false, 0},
 }
 
 const (
@@ -269,6 +273,7 @@ func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 			spunUp = 0
 		}
 		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "spun_up"}, ts, spunUp)
+		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "rotational"}, ts, d.rotational)
 
 		if !d.spunDown {
 			temp := clamp(d.tempBase+2.5*math.Sin(phase+float64(i))+(g.rng.Float64()-0.5)*1.5, 32, 45)

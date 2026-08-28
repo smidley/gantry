@@ -518,6 +518,11 @@ func TestEffectiveCPUAllocCores(t *testing.T) {
 			hostCores: 16, wantCores: 0, wantOK: false,
 		},
 		{
+			name:      "quota wider than host is clamped to host cores",
+			a:         alloc{CPUQuotaCores: 32.0, HasCPUQuota: true},
+			hostCores: 16, wantCores: 16.0, wantOK: true,
+		},
+		{
 			name:      "quota tighter than cpuset: quota wins",
 			a:         alloc{CPUQuotaCores: 4.0, HasCPUQuota: true, CPUSetCores: 9, HasCPUSet: true},
 			hostCores: 16, wantCores: 4.0, wantOK: true,

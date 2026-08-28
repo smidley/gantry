@@ -413,19 +413,27 @@ func (c *Collector) hostCoresOrNumCPU() int {
 // host core when nothing is pinned, which must read as unlimited rather
 // than "restricted to N cores" -- and hostCores itself unknown, <= 0,
 // must not be treated as a restriction either); when both are set, the
-// tighter of the two wins.
+// tighter of the two wins. The result is then clamped to hostCores:
+// dockerd doesn't validate --cpu-quota against the host's own core
+// count, and a ceiling above the machine is unusable headroom -- left
+// unclamped, alloc_pct would stay permanently capped below 100 even for
+// a container using every cycle the host can give it.
 func effectiveCPUAllocCores(a alloc, hostCores int) (cores float64, ok bool) {
 	cpusetRestricts := a.HasCPUSet && hostCores > 0 && a.CPUSetCores < hostCores
 	switch {
 	case a.HasCPUQuota && cpusetRestricts:
-		return math.Min(a.CPUQuotaCores, float64(a.CPUSetCores)), true
+		cores, ok = math.Min(a.CPUQuotaCores, float64(a.CPUSetCores)), true
 	case a.HasCPUQuota:
-		return a.CPUQuotaCores, true
+		cores, ok = a.CPUQuotaCores, true
 	case cpusetRestricts:
-		return float64(a.CPUSetCores), true
+		cores, ok = float64(a.CPUSetCores), true
 	default:
 		return 0, false
 	}
+	if hostCores > 0 && cores > float64(hostCores) {
+		cores = float64(hostCores)
+	}
+	return cores, ok
 }
 
 // recordContainerStats turns one point-in-time cgStats reading into

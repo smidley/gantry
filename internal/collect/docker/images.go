@@ -1,9 +1,12 @@
 package docker
 
 import (
+	"context"
+	"fmt"
 	"sort"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 )
 
@@ -42,6 +45,36 @@ type ImagesSummary struct {
 type ImagesReport struct {
 	Images  []ImageInfo
 	Summary ImagesSummary
+}
+
+// ImageRemoveResult is one requested id's outcome from
+// Collector.RemoveImages/fake.Generator.RemoveImages. RepoTags/SizeBytes
+// are only populated when OK -- they exist purely so a caller can log a
+// tag/size-detailed event for the removal: once an image is gone,
+// nothing can inspect it again to recover that detail.
+type ImageRemoveResult struct {
+	ID        string
+	OK        bool
+	Error     string
+	RepoTags  []string
+	SizeBytes int64
+}
+
+// DeletedImage is one image a prune actually deleted -- RepoTags/
+// SizeBytes ride along for the same event-logging reason
+// ImageRemoveResult's own doc gives.
+type DeletedImage struct {
+	ID        string
+	RepoTags  []string
+	SizeBytes int64
+}
+
+// ImagePruneResult is Collector.PruneImages'/fake.Generator.PruneImages'
+// shared return shape.
+type ImagePruneResult struct {
+	Deleted        []DeletedImage
+	ReclaimedBytes int64
+	Errors         []string
 }
 
 // classifyImages joins every image against every container to decide
@@ -111,4 +144,166 @@ func classifyImages(imgs []image.Summary, containers []container.Summary) Images
 	}
 	sort.Slice(out.Images, func(i, j int) bool { return out.Images[i].ID < out.Images[j].ID })
 	return out
+}
+
+// removeImagesWith is RemoveImages' pure orchestration, with the actual
+// per-id removal call injected as removeOne (the real
+// c.cli.ImageRemove in production; a fake in tests) so the interesting
+// behavior -- one id's failure doesn't abort the rest, and a success is
+// enriched from pre -- is fully unit-testable without a daemon. pre is
+// best-effort tag/size enrichment (see ImageRemoveResult's own doc for
+// why): a missing entry still succeeds, just without RepoTags/SizeBytes.
+func removeImagesWith(ids []string, pre map[string]image.Summary, removeOne func(id string) error) []ImageRemoveResult {
+	out := make([]ImageRemoveResult, 0, len(ids))
+	for _, id := range ids {
+		res := ImageRemoveResult{ID: id}
+		if err := removeOne(id); err != nil {
+			res.Error = err.Error()
+		} else {
+			res.OK = true
+			if im, ok := pre[id]; ok {
+				res.RepoTags = im.RepoTags
+				res.SizeBytes = im.Size
+			}
+		}
+		out = append(out, res)
+	}
+	return out
+}
+
+// mergeDanglingPrune builds pruneDangling's result from the daemon's own
+// PruneReport plus a same-filter pre-fetch's id->size map (fetched
+// before pruning, for the same reason removeImagesWith's pre is). A
+// moby prune response names a removed image via Deleted (the content
+// itself removed) or, if only its last tag was removed, Untagged --
+// either way it's the id this entry is about.
+func mergeDanglingPrune(report image.PruneReport, sizeByID map[string]int64) ImagePruneResult {
+	out := ImagePruneResult{ReclaimedBytes: int64(report.SpaceReclaimed)}
+	for _, d := range report.ImagesDeleted {
+		id := d.Deleted
+		if id == "" {
+			id = d.Untagged
+		}
+		if id == "" {
+			continue
+		}
+		out.Deleted = append(out.Deleted, DeletedImage{ID: id, SizeBytes: sizeByID[id]})
+	}
+	return out
+}
+
+// pruneUnusedWith is pruneUnused's pure orchestration -- see
+// removeImagesWith for why the removal call is injected rather than
+// called directly.
+func pruneUnusedWith(unused []ImageInfo, removeOne func(id string) error) ImagePruneResult {
+	var out ImagePruneResult
+	for _, im := range unused {
+		if err := removeOne(im.ID); err != nil {
+			out.Errors = append(out.Errors, im.ID+": "+err.Error())
+			continue
+		}
+		out.Deleted = append(out.Deleted, DeletedImage{ID: im.ID, RepoTags: im.RepoTags, SizeBytes: im.SizeBytes})
+		out.ReclaimedBytes += im.SizeBytes
+	}
+	return out
+}
+
+// Images lists every image on the daemon (ImageList All:true) joined
+// against every container (ContainerList All:true) -- see
+// classifyImages for the join/classification rule itself, kept as a
+// pure function so it's unit-testable without a real daemon.
+func (c *Collector) Images(ctx context.Context) (ImagesReport, error) {
+	if c.cli == nil {
+		return ImagesReport{}, fmt.Errorf("docker client: invalid socket path %s", c.sockPath)
+	}
+	imgs, err := c.cli.ImageList(ctx, image.ListOptions{All: true})
+	if err != nil {
+		return ImagesReport{}, fmt.Errorf("list images: %w", err)
+	}
+	cts, err := c.cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return ImagesReport{}, fmt.Errorf("list containers: %w", err)
+	}
+	return classifyImages(imgs, cts), nil
+}
+
+// RemoveImages deletes each of ids (Force:false -- an in-use image's own
+// conflict error passes through per-item, via removeImagesWith, never
+// forced past). PruneChildren:true also removes any now-unreferenced
+// parent layers, the same default `docker rmi` uses.
+func (c *Collector) RemoveImages(ctx context.Context, ids []string) ([]ImageRemoveResult, error) {
+	if c.cli == nil {
+		return nil, fmt.Errorf("docker client: invalid socket path %s", c.sockPath)
+	}
+	// Fetched BEFORE removing anything -- see ImageRemoveResult's own doc
+	// for why: once an id is gone, no second call could recover this.
+	pre := map[string]image.Summary{}
+	if imgs, err := c.cli.ImageList(ctx, image.ListOptions{All: true}); err == nil {
+		for _, im := range imgs {
+			pre[im.ID] = im
+		}
+	}
+	return removeImagesWith(ids, pre, func(id string) error {
+		_, err := c.cli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
+		return err
+	}), nil
+}
+
+// PruneImages deletes either every dangling image (mode "dangling") or
+// every image this same package's own classifyImages currently calls
+// "unused" (mode "unused") -- any other mode is a caller bug, not a
+// runtime condition (the HTTP handler already whitelists these two
+// values before ever reaching here).
+func (c *Collector) PruneImages(ctx context.Context, mode string) (ImagePruneResult, error) {
+	switch mode {
+	case "dangling":
+		return c.pruneDangling(ctx)
+	case "unused":
+		return c.pruneUnused(ctx)
+	default:
+		return ImagePruneResult{}, fmt.Errorf("unknown prune mode %q", mode)
+	}
+}
+
+// pruneDangling delegates to the daemon's own ImagesPrune(dangling=true)
+// rather than looping ImageRemove -- unlike "unused" (this package's own
+// container-join concept), "dangling" (no RepoTags at all) is an
+// unambiguous, daemon-agreed definition, so handing the whole operation
+// to the daemon is safe and lets it be atomic.
+func (c *Collector) pruneDangling(ctx context.Context) (ImagePruneResult, error) {
+	danglingFilter := filters.NewArgs(filters.Arg("dangling", "true"))
+	pre, _ := c.cli.ImageList(ctx, image.ListOptions{Filters: danglingFilter}) // best-effort size enrichment; see mergeDanglingPrune's own doc
+	sizeByID := make(map[string]int64, len(pre))
+	for _, im := range pre {
+		sizeByID[im.ID] = im.Size
+	}
+
+	report, err := c.cli.ImagesPrune(ctx, danglingFilter)
+	if err != nil {
+		return ImagePruneResult{}, fmt.Errorf("prune dangling images: %w", err)
+	}
+	return mergeDanglingPrune(report, sizeByID), nil
+}
+
+// pruneUnused deletes this package's own computed "unused" set via
+// per-image ImageRemove -- deliberately NOT ImagesPrune with
+// dangling=false (docker's own `-a`/all-unused prune), which has subtly
+// different semantics than classifyImages' container-join rule. Running
+// both would give two different answers to "what's unused"; this keeps
+// one source of truth.
+func (c *Collector) pruneUnused(ctx context.Context) (ImagePruneResult, error) {
+	report, err := c.Images(ctx)
+	if err != nil {
+		return ImagePruneResult{}, err
+	}
+	var unused []ImageInfo
+	for _, im := range report.Images {
+		if im.State == "unused" {
+			unused = append(unused, im)
+		}
+	}
+	return pruneUnusedWith(unused, func(id string) error {
+		_, err := c.cli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
+		return err
+	}), nil
 }

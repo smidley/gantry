@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
@@ -132,4 +133,87 @@ func TestClassifyImagesEmptyInputsReturnEmptyReport(t *testing.T) {
 	require.NotNil(t, report.Images)
 	require.Empty(t, report.Images)
 	require.Zero(t, report.Summary)
+}
+
+func TestRemoveImagesWithOneFailureDoesNotAbortTheRest(t *testing.T) {
+	removeOne := func(id string) error {
+		if id == "sha256:bad" {
+			return fmt.Errorf("conflict: image is being used by a container")
+		}
+		return nil
+	}
+
+	results := removeImagesWith([]string{"sha256:good", "sha256:bad"}, nil, removeOne)
+
+	require.Equal(t, []ImageRemoveResult{
+		{ID: "sha256:good", OK: true},
+		{ID: "sha256:bad", OK: false, Error: "conflict: image is being used by a container"},
+	}, results)
+}
+
+func TestRemoveImagesWithEnrichesSuccessFromPreFetchedMap(t *testing.T) {
+	pre := map[string]image.Summary{
+		"sha256:good": {ID: "sha256:good", RepoTags: []string{"app:old"}, Size: 42},
+	}
+	removeOne := func(string) error { return nil }
+
+	results := removeImagesWith([]string{"sha256:good"}, pre, removeOne)
+
+	require.Equal(t, []ImageRemoveResult{
+		{ID: "sha256:good", OK: true, RepoTags: []string{"app:old"}, SizeBytes: 42},
+	}, results)
+}
+
+func TestRemoveImagesWithSucceedsWithoutEnrichmentWhenIDMissingFromPre(t *testing.T) {
+	removeOne := func(string) error { return nil }
+
+	results := removeImagesWith([]string{"sha256:unknown"}, nil, removeOne)
+
+	require.Equal(t, []ImageRemoveResult{{ID: "sha256:unknown", OK: true}}, results)
+}
+
+func TestMergeDanglingPruneUsesDeletedIDAndPreFetchedSize(t *testing.T) {
+	report := image.PruneReport{
+		ImagesDeleted:  []image.DeleteResponse{{Deleted: "sha256:abc"}},
+		SpaceReclaimed: 1234,
+	}
+	sizeByID := map[string]int64{"sha256:abc": 999}
+
+	result := mergeDanglingPrune(report, sizeByID)
+
+	require.Equal(t, ImagePruneResult{
+		Deleted:        []DeletedImage{{ID: "sha256:abc", SizeBytes: 999}},
+		ReclaimedBytes: 1234,
+	}, result)
+}
+
+func TestMergeDanglingPruneFallsBackToUntaggedIDWhenDeletedIsEmpty(t *testing.T) {
+	// A moby prune response can report an image solely as "Untagged"
+	// (its last tag removed) rather than "Deleted" (the content itself
+	// removed) -- either way it's gone from `docker images`, so either
+	// field names the id this result is about.
+	report := image.PruneReport{ImagesDeleted: []image.DeleteResponse{{Untagged: "sha256:abc"}}}
+
+	result := mergeDanglingPrune(report, nil)
+
+	require.Equal(t, []DeletedImage{{ID: "sha256:abc"}}, result.Deleted)
+}
+
+func TestPruneUnusedWithSumsReclaimedBytesAndCollectsPerIDErrors(t *testing.T) {
+	unused := []ImageInfo{
+		{ID: "sha256:a", RepoTags: []string{"old:1"}, SizeBytes: 100},
+		{ID: "sha256:b", RepoTags: []string{"old:2"}, SizeBytes: 200},
+	}
+	removeOne := func(id string) error {
+		if id == "sha256:b" {
+			return fmt.Errorf("in use")
+		}
+		return nil
+	}
+
+	result := pruneUnusedWith(unused, removeOne)
+
+	require.Equal(t, []DeletedImage{{ID: "sha256:a", RepoTags: []string{"old:1"}, SizeBytes: 100}}, result.Deleted)
+	require.Equal(t, int64(100), result.ReclaimedBytes)
+	require.Equal(t, []string{"sha256:b: in use"}, result.Errors)
 }

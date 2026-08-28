@@ -145,6 +145,30 @@ test('top consumers: switching window from Now to 1h renders without erroring', 
   await expect(page.locator('.top-bar-list__row, .top-bar-list__empty').first()).toBeVisible();
 });
 
+// Regression coverage for Scott's own report: a live box misread its
+// boot flash device as HDD and its NVMe pools as generic SSD (rotational
+// alone can't tell either apart -- see disks.go's DiskKind doc). Fake
+// mode's 8-disk fleet (internal/fake/fake.go) covers all four of
+// Storage's own type badges. diskRow anchors on the bare disk name
+// (.storage-disk__name's own exact text) rather than matching the whole
+// row's text, since two different disks can share the same ROLE label
+// text ("Cache / pool", for both "cache" and "rocket_pool").
+test('storage: every disk type badge is classified correctly (hdd/ssd/nvme/usb)', async ({ page }) => {
+  await page.goto('#/storage');
+
+  const diskRow = (name: string) =>
+    page.locator('.storage-disk').filter({ has: page.locator('.storage-disk__name', { hasText: new RegExp(`^${name}$`) }) });
+
+  await expect(diskRow('disk1').locator('.storage-disk__media')).toContainText('HDD');
+  await expect(diskRow('cache').locator('.storage-disk__media')).toContainText('SSD');
+  await expect(diskRow('rocket_pool').locator('.storage-disk__media')).toContainText('NVMe');
+  await expect(diskRow('flash').locator('.storage-disk__media')).toContainText('USB');
+
+  // The boot device's own role label is distinct from a plain pool's --
+  // proves ROLE_LABEL and MEDIA_LABEL aren't accidentally conflated.
+  await expect(diskRow('flash')).toContainText('Boot (flash)');
+});
+
 test('theme toggle flips data-theme and persists across reload', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'light' });
   await page.goto('#/');

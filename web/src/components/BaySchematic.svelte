@@ -28,17 +28,23 @@
   import { seqStep } from '../lib/metrics';
 
   // entries: [{ slot, pct, flagged?: boolean, calloutText?: string,
-  // solidState?: boolean }] -- pct is a plain 0-100 number (diskUsagePct's
-  // own range); flagged/calloutText are the caller's own anomaly
-  // decision, not derived here. calloutText (when given) folds into this
-  // bar's own title/aria-label rather than rendering as visible text.
-  // solidState (ask: "nvme storage vs spinning disk should stand out")
-  // draws a distinct top-cap stroke, independent of the flagged outline
-  // and the usage-proportional fill -- a type signal, not a health one.
+  // kind?: DiskKind }] -- pct is a plain 0-100 number (diskUsagePct's own
+  // range); flagged/calloutText are the caller's own anomaly decision,
+  // not derived here. calloutText (when given) folds into this bar's own
+  // title/aria-label rather than rendering as visible text. kind (ask:
+  // "nvme storage vs spinning disk should stand out", later extended to
+  // all four of Storage's own type badges: "these should be color coded
+  // or highlighted differently") draws a distinct, per-kind-colored
+  // top-cap stroke, independent of the flagged outline and the usage-
+  // proportional fill -- a type signal, not a health one. Absent/"hdd"
+  // (the ordinary/majority case) draws no cap at all, same as before
+  // this kind ever existed.
   let { entries = [] } = $props();
 
+  const KIND_LABEL = { ssd: ', solid state', nvme: ', NVMe', usb: ', USB flash' };
+
   function labelFor(d) {
-    const media = d.solidState ? ', solid state' : '';
+    const media = KIND_LABEL[d.kind] ?? '';
     const base = `${d.slot}: ${fmtPct(d.pct)} used${media}`;
     return d.calloutText ? `${base} — ${d.calloutText}` : base;
   }
@@ -52,7 +58,9 @@
         <div
           class="bay-schematic__bar"
           class:bay-schematic__bar--flag={!!d.flagged}
-          class:bay-schematic__bar--solid-state={!!d.solidState}
+          class:bay-schematic__bar--ssd={d.kind === 'ssd'}
+          class:bay-schematic__bar--nvme={d.kind === 'nvme'}
+          class:bay-schematic__bar--usb={d.kind === 'usb'}
           role="img"
           title={labelFor(d)}
           aria-label={labelFor(d)}
@@ -92,12 +100,20 @@
     outline: 1.5px solid var(--status-warning);
     outline-offset: 1px;
   }
-  /* Type signal, not a health one -- a plain ink-derived cap (never a
-     --status-* token) so it reads as "different kind of member," not as
+  /* Type signal, not a health one -- a --series-* token (never a
+     --status-* one) so it reads as "different kind of member," not as
      another severity color, and stays legible alongside a flagged bar's
-     own outline (border-box sizing keeps this inset from the outline). */
-  .bay-schematic__bar--solid-state {
-    border-top: 2px solid color-mix(in oklab, var(--ink) 50%, transparent);
+     own outline. One color per kind, matching Storage's own type-badge
+     mapping exactly so the same disk reads the same identity on both
+     views; hdd (the ordinary/majority case) gets no cap at all. */
+  .bay-schematic__bar--ssd {
+    border-top: 2px solid var(--series-3);
+  }
+  .bay-schematic__bar--nvme {
+    border-top: 2px solid var(--series-1);
+  }
+  .bay-schematic__bar--usb {
+    border-top: 2px solid var(--series-4);
   }
   .bay-schematic__fill {
     position: absolute;

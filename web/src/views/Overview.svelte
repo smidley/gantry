@@ -37,7 +37,7 @@
   import { seriesPointsToRing } from '../lib/livering';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { keysByPattern, sumMetricsByPattern, sumSeriesPoints, parityIsRunning, etaFromProgress } from '../lib/metrics';
-  import { diskMediaType, diskUsagePct, sortDiskEntities } from '../lib/disks';
+  import { diskKind, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import { isTopResource, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
   import { deriveOverviewStatus, describeAnomaly, worstSeverity } from '../lib/overviewStatus';
@@ -202,6 +202,7 @@
   });
 
   let disks = $derived(live.frame?.disks ?? {});
+  let diskMeta = $derived(live.frame?.disk_meta ?? {});
 
   let hottestDisk = $derived.by(() => {
     let best = null;
@@ -224,7 +225,7 @@
     const out = [];
     for (const slot of names) {
       const pct = diskUsagePct(disks[slot]);
-      if (pct !== null) out.push({ slot, pct, solidState: diskMediaType(disks[slot]) === 'ssd' });
+      if (pct !== null) out.push({ slot, pct, kind: diskKind(diskMeta[slot], disks[slot]) });
     }
     return out;
   });
@@ -264,7 +265,7 @@
       pct: d.pct,
       flagged: calloutBySlot.has(d.slot),
       calloutText: calloutBySlot.get(d.slot),
-      solidState: d.solidState,
+      kind: d.kind,
     }));
   });
 

@@ -13,15 +13,22 @@
   import { fetchEvents } from '../lib/api';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtRelTime } from '../lib/format';
   import { etaFromProgress, parityIsRunning, seqStep, sharesFromMetrics } from '../lib/metrics';
-  import { diskMediaType, diskRole, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
+  import { diskKind, diskRole, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import HealthDot from '../components/HealthDot.svelte';
 
   const EVENTS_POLL_MS = 30_000;
   const ROLE_LABEL = { parity: 'Parity', data: 'Data disk', pool: 'Cache / pool', flash: 'Boot (flash)' };
-  const MEDIA_LABEL = { hdd: 'HDD', ssd: 'SSD' };
-  const MEDIA_TITLE = { hdd: 'Spinning disk', ssd: 'Solid state' };
+  // Four-way type badge (Scott's own report: a real box's boot flash
+  // device was misread as HDD and its NVMe pools as generic SSD --
+  // rotational alone can't tell either apart, see disks.ts's diskKind
+  // doc). Color identity lives in storage-disk__media--<kind> below, one
+  // per kind except hdd (deliberately left the plain neutral chip
+  // color -- the ordinary/majority case, not one that needs to stand out).
+  const MEDIA_LABEL = { hdd: 'HDD', ssd: 'SSD', nvme: 'NVMe', usb: 'USB' };
+  const MEDIA_TITLE = { hdd: 'Spinning disk', ssd: 'Solid state', nvme: 'NVMe solid state', usb: 'USB flash drive' };
 
   let disks = $derived(live.frame?.disks ?? {});
+  let diskMeta = $derived(live.frame?.disk_meta ?? {});
   let diskNames = $derived(sortDiskEntities(Object.keys(disks)));
   let array = $derived(live.frame?.unraid?.array ?? {});
   let dockerStorage = $derived(live.frame?.unraid?.docker ?? {});
@@ -104,10 +111,16 @@
 </script>
 
 <!-- Type-at-a-glance glyphs (ask: "different types of things in the same
-     category should stand out -- nvme storage vs spinning disk"): a
-     platter+spindle for HDD, a chip-with-pins for SSD/NVMe (echoing
-     router.ts's own GPU nav icon, same "chip" visual language), always
-     paired with the HDD/SSD text right next to it -- never color alone. -->
+     category should stand out -- nvme storage vs spinning disk", later
+     extended to all four kinds: "the boot flash drive is not HDD, it's
+     USB... the cache drives are NVMe... color coded or highlighted
+     differently"): a platter+spindle for HDD, a chip-with-pins for SSD,
+     a slim ticked stick for NVMe (an M.2 module's own silhouette, wider
+     and shorter than SSD's square chip), a body+connector for USB
+     (echoing router.ts's own GPU nav icon's "chip" visual language for
+     the solid-state pair) -- every glyph always paired with its own text
+     label AND a tinted badge background (storage-disk__media--<kind>
+     below), never color alone. -->
 {#snippet diskMediaGlyph(type)}
   {#if type === 'ssd'}
     <svg class="storage-disk__media-icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -115,6 +128,17 @@
       <path
         d="M5.5 3v2M8 3v2M10.5 3v2M5.5 11v2M8 11v2M10.5 11v2M3 5.5h2M3 8h2M3 10.5h2M11 5.5h2M11 8h2M11 10.5h2"
       />
+    </svg>
+  {:else if type === 'nvme'}
+    <svg class="storage-disk__media-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="1.5" y="6.25" width="13" height="3.5" rx="1" />
+      <path d="M4.5 6.25v3.5M7.5 6.25v3.5M10.5 6.25v3.5" />
+    </svg>
+  {:else if type === 'usb'}
+    <svg class="storage-disk__media-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="3.5" y="6" width="9" height="8" rx="1.5" />
+      <rect x="6.5" y="2" width="3" height="4" />
+      <path d="M6.5 3.6h3" />
     </svg>
   {:else}
     <svg class="storage-disk__media-icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -192,7 +216,7 @@
         {#each diskNames as name (name)}
           {@const metrics = disks[name]}
           {@const role = diskRole(name)}
-          {@const mediaType = diskMediaType(metrics)}
+          {@const mediaType = diskKind(diskMeta[name], metrics)}
           {@const temp = diskTempState(metrics)}
           {@const usagePct = diskUsagePct(metrics)}
           {@const errors = metrics['errors'] ?? 0}
@@ -201,8 +225,8 @@
               <span class="microlabel storage-disk__eyebrow">
                 <span>{ROLE_LABEL[role]}</span>
                 {#if mediaType}
-                  <span class="storage-disk__media" title={MEDIA_TITLE[mediaType]}>
-                    {@render diskMediaGlyph(mediaType)}{MEDIA_LABEL[mediaType]}
+                  <span class="storage-disk__media storage-disk__media--{mediaType}" title={MEDIA_TITLE[mediaType]}>
+                    {@render diskMediaGlyph(mediaType)}<span class="storage-disk__media-label">{MEDIA_LABEL[mediaType]}</span>
                   </span>
                 {/if}
               </span>
@@ -438,11 +462,38 @@
     min-width: 0;
     white-space: nowrap;
   }
+  /* Type badge: a tinted pill (Scott's own ask -- "these should be color
+     coded or highlighted differently"), matching storage-disk__chip's
+     own pill shape below. color set here is the KIND's accent, picked up
+     by the glyph's stroke via currentColor -- but never by the text,
+     which storage-disk__media-label pins back to ink-2 explicitly, so
+     color is reinforcement on top of shape+text, never the only channel.
+     hdd (the ordinary/majority case, not one that needs to stand out)
+     deliberately gets no override here -- the plain neutral chip tint
+     below is its own "color". */
   .storage-disk__media {
     display: inline-flex;
     align-items: center;
-    gap: 0.2rem;
+    gap: 0.25rem;
+    padding: 0.15rem 0.5rem 0.15rem 0.4rem;
+    border-radius: 999px;
     color: var(--ink-2);
+    background: color-mix(in oklab, var(--ink) 7%, transparent);
+  }
+  .storage-disk__media-label {
+    color: var(--ink-2);
+  }
+  .storage-disk__media--ssd {
+    color: var(--series-3);
+    background: color-mix(in oklab, var(--series-3) 12%, transparent);
+  }
+  .storage-disk__media--nvme {
+    color: var(--series-1);
+    background: color-mix(in oklab, var(--series-1) 12%, transparent);
+  }
+  .storage-disk__media--usb {
+    color: var(--series-4);
+    background: color-mix(in oklab, var(--series-4) 14%, transparent);
   }
   .storage-disk__media-icon {
     width: 11px;

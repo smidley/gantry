@@ -37,12 +37,50 @@ type DiskMetaDTO struct {
 
 // ContainerDTO is one container's inventory metadata plus its latest
 // metric values, keyed by container name in SnapshotDTO.Containers.
+//
+// UpdateStatus is "available" | "current" | "" (unknown: no unraid-
+// update-status.json reader wired, the file was unreadable this poll,
+// or this image has no entry in it). ChangelogURL/ProjectURL are each
+// independently "" when nothing could be derived for that one field —
+// see docker.changelogAndProjectURLs' own doc for the derivation rules.
+//
+// WebUIURL is the net.unraid.docker.webui label's RAW value, completely
+// unresolved -- a template placeholder like "http://[IP]:[PORT:8096]/",
+// not a usable URL. There's no backend resolution: the frontend is
+// responsible for substituting [IP] -> window.location.hostname and
+// [PORT:x] -> x itself, the same way Unraid's own WebUI does, since only
+// the browser making the request knows the right host.
 type ContainerDTO struct {
-	State   string             `json:"state"`
-	Health  string             `json:"health"`
-	Image   string             `json:"image"`
-	Icon    string             `json:"icon"`
-	Metrics map[string]float64 `json:"metrics"`
+	State        string             `json:"state"`
+	Health       string             `json:"health"`
+	Image        string             `json:"image"`
+	Icon         string             `json:"icon"`
+	Created      int64              `json:"created,omitempty"`
+	UpdateStatus string             `json:"update_status,omitempty"`
+	ChangelogURL string             `json:"changelog_url,omitempty"`
+	ProjectURL   string             `json:"project_url,omitempty"`
+	WebUIURL     string             `json:"webui_url,omitempty"`
+	Networks     []NetworkInfoDTO   `json:"networks,omitempty"`
+	Ports        []PortInfoDTO      `json:"ports,omitempty"`
+	Metrics      map[string]float64 `json:"metrics"`
+}
+
+// NetworkInfoDTO is one docker network a container is attached to. IP
+// is "" for a network that assigns none to this container and for the
+// synthetic {Name: "host"} entry host-network containers report.
+type NetworkInfoDTO struct {
+	Name string `json:"name"`
+	IP   string `json:"ip,omitempty"`
+}
+
+// PortInfoDTO is one container-port binding. HostIP/HostPort are both
+// their zero value for an exposed-but-unpublished port (EXPOSE with no
+// -p) -- itself useful information, not an absence to filter out.
+type PortInfoDTO struct {
+	ContainerPort int    `json:"container_port"`
+	Proto         string `json:"proto"`
+	HostIP        string `json:"host_ip,omitempty"`
+	HostPort      int    `json:"host_port,omitempty"`
 }
 
 // ContainerInfo is the /api/containers response shape: inventory facts

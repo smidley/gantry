@@ -27,9 +27,16 @@ func handBuiltSnapshot() func() SnapshotDTO {
 			},
 			Containers: map[string]ContainerDTO{
 				"jellyfin": {
-					State:  "running",
-					Health: "healthy",
-					Image:  "jellyfin/jellyfin:latest",
+					State:        "running",
+					Health:       "healthy",
+					Image:        "jellyfin/jellyfin:latest",
+					Created:      1735600000,
+					UpdateStatus: "available",
+					ChangelogURL: "https://github.com/jellyfin/jellyfin-packaging/releases",
+					ProjectURL:   "https://jellyfin.org",
+					WebUIURL:     "http://[IP]:[PORT:8096]/",
+					Networks:     []NetworkInfoDTO{{Name: "bridge", IP: "172.17.0.2"}},
+					Ports:        []PortInfoDTO{{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096}},
 					Metrics: map[string]float64{
 						"cpu.pct":   4.2,
 						"mem.bytes": 900e6,
@@ -99,7 +106,15 @@ func TestSnapshotEndpointReturnsAssembledDTO(t *testing.T) {
 	require.Equal(t, "healthy", got.Containers["jellyfin"].Health)
 	require.Equal(t, "jellyfin/jellyfin:latest", got.Containers["jellyfin"].Image)
 	require.Equal(t, 4.2, got.Containers["jellyfin"].Metrics["cpu.pct"])
+	require.Equal(t, int64(1735600000), got.Containers["jellyfin"].Created)
+	require.Equal(t, "available", got.Containers["jellyfin"].UpdateStatus)
+	require.Equal(t, "https://github.com/jellyfin/jellyfin-packaging/releases", got.Containers["jellyfin"].ChangelogURL)
+	require.Equal(t, "https://jellyfin.org", got.Containers["jellyfin"].ProjectURL)
+	require.Equal(t, "http://[IP]:[PORT:8096]/", got.Containers["jellyfin"].WebUIURL)
+	require.Equal(t, []NetworkInfoDTO{{Name: "bridge", IP: "172.17.0.2"}}, got.Containers["jellyfin"].Networks)
+	require.Equal(t, []PortInfoDTO{{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096}}, got.Containers["jellyfin"].Ports)
 	require.Equal(t, "exited", got.Containers["radarr"].State)
+	require.Empty(t, got.Containers["radarr"].Networks, "a container with no wired network info must round-trip as empty, not a null-vs-omitted surprise")
 	require.Equal(t, 42.0, got.Disks["sda"]["used_pct"])
 	require.Equal(t, "6.12.10", got.UnraidVersion)
 	require.Equal(t, 5.5, got.GPU["gpu0"]["engine.render.busy_pct"])

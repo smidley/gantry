@@ -35,7 +35,13 @@
   // scale. Optional/absent in the collapsed Stopped section, which never
   // registers a target (this row's sparkline just builds up live-only
   // there, same as before this feature).
-  let { name, registerSeedTarget = undefined } = $props();
+  //
+  // showState (additive, optional): the collapsed "Not running" section
+  // now mixes stopped (exited/dead) and created (never-started)
+  // containers together -- their health dots alone differ only by color
+  // (serious vs. warning), so that section passes this to also print the
+  // real state word, same text the mobile card list already shows.
+  let { name, registerSeedTarget = undefined, showState = false } = $props();
 
   let cpuRing = liveRing((f) => f.containers[name]?.metrics['cpu.pct']);
 
@@ -114,7 +120,7 @@
 
 {#if c}
   <tr class="container-row">
-    <td><HealthDot status={containerHealthStatus(c.state, c.health)} /></td>
+    <td><HealthDot status={containerHealthStatus(c.state, c.health)} label={showState ? c.state : undefined} /></td>
     <td class="container-row__name-cell">
       <a href={`#/containers/${encodeURIComponent(name)}`}>
         <ContainerIcon {name} icon={c.icon} size={20} />

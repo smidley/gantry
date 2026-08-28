@@ -50,6 +50,7 @@
     niceCeiling,
   } from '../lib/metrics';
   import { diskKind, diskUsagePct, sortDiskEntities } from '../lib/disks';
+  import { containerRunState } from '../lib/containerStatus';
   import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
   import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, fleetSentence, worstSeverity } from '../lib/overviewStatus';
@@ -165,18 +166,33 @@
 
   // --- Fleet -------------------------------------------------------------
 
+  // created (never-started) containers -- ephemeral CI-runner spawns are
+  // the live example that prompted this -- are excluded from the fleet
+  // headline/strip entirely: nothing to monitor, and a churny burst of
+  // them would otherwise flood both. runningCount/stoppedCount both read
+  // containerRunState rather than the raw state string, so "stopped"
+  // here means exited/dead/etc., never created; the Containers view
+  // lists created containers separately (see its own partition).
   let containerEntries = $derived(Object.entries(live.frame?.containers ?? {}));
-  let runningCount = $derived(containerEntries.filter(([, c]) => c.state === 'running').length);
-  let stoppedCount = $derived(containerEntries.filter(([, c]) => c.state !== 'running').length);
+  let runningCount = $derived(containerEntries.filter(([, c]) => containerRunState(c.state) === 'running').length);
+  let stoppedCount = $derived(containerEntries.filter(([, c]) => containerRunState(c.state) === 'stopped').length);
   let unhealthyNames = $derived(
     containerEntries
       .filter(([, c]) => c.health === 'unhealthy')
       .map(([name]) => name)
       .sort(),
   );
-  let fleetContainers = $derived(containerEntries.map(([name, c]) => ({ name, state: c.state, health: c.health })));
+  let fleetContainers = $derived(
+    containerEntries
+      .filter(([, c]) => containerRunState(c.state) !== 'created')
+      .map(([name, c]) => ({ name, state: c.state, health: c.health })),
+  );
 
-  let fleetLine = $derived(fleetSentence(containerEntries.length, runningCount, stoppedCount));
+  // total excludes created containers too (runningCount+stoppedCount,
+  // not containerEntries.length) -- fleetSentence's own "all running"
+  // phrasing must not count a never-started container as part of the
+  // fleet it's describing.
+  let fleetLine = $derived(fleetSentence(runningCount + stoppedCount, runningCount, stoppedCount));
 
   let topRows = $derived(topFromFrame(live.frame, topResource, 5));
 

@@ -425,8 +425,9 @@ func TestRareDiskErrorsEventFiresOnce(t *testing.T) {
 // exact shape (Task 11's ledger-carried fake-mode DTO-v2 filter fix):
 // main wires this straight into buildSnapshot/buildContainersList as if
 // it were a real registry's own output. Every member gets Image; State/
-// Health follow its own archetype.stopped flag (the stopped-containers
-// demo coverage) rather than a blanket "running"/"healthy".
+// Health follow its own archetype.stopped/archetype.created flag (the
+// stopped/created-containers demo coverage) rather than a blanket
+// "running"/"healthy".
 func TestMetasReturnsRunningHealthyDemoImagePerFleetMember(t *testing.T) {
 	g := New(&capture{}, nil, 1)
 	metas := g.Metas()
@@ -441,10 +442,14 @@ func TestMetasReturnsRunningHealthyDemoImagePerFleetMember(t *testing.T) {
 	for _, a := range fleet {
 		m := metas[byName[a.name]]
 		require.Equal(t, "demo/"+a.name+":latest", m.Image)
-		if a.stopped {
+		switch {
+		case a.stopped:
 			require.Equal(t, "exited", m.State, "%s is modeled stopped", a.name)
 			require.Equal(t, "", m.Health, "%s: a stopped container has no health status", a.name)
-		} else {
+		case a.created:
+			require.Equal(t, "created", m.State, "%s is modeled created (never started)", a.name)
+			require.Equal(t, "", m.Health, "%s: a created container has no health status", a.name)
+		default:
 			require.Equal(t, "running", m.State, "%s is modeled running", a.name)
 			require.Equal(t, "healthy", m.Health, "%s is modeled running", a.name)
 		}

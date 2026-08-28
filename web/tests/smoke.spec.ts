@@ -127,6 +127,50 @@ test('containers: clicking a header sorts the table', async ({ page }) => {
   expect(after).toEqual([...after].sort((a, b) => a.localeCompare(b)));
 });
 
+// Never-started ("created") containers: fake.go's fleet always includes
+// two (duplicati, watchtower) precisely to exercise this -- Scott's own
+// live example was a burst of ephemeral CI-runner spawns entering the
+// frame once stopped containers started showing up there too. They must
+// stay out of the Overview fleet/headline entirely (nothing to monitor,
+// high churn) but still be findable in the Containers view.
+test('containers: never-started containers are excluded from the Overview fleet but listed here with their own state', async ({
+  page,
+}) => {
+  await page.goto('#/containers');
+
+  // Not among the running table's rows.
+  await expect(page.locator('table.containers-table:has(thead) tr.container-row', { hasText: 'duplicati' })).toHaveCount(
+    0,
+  );
+
+  const notRunningToggle = page.getByRole('button', { name: /Not running/ });
+  await expect(notRunningToggle).toBeVisible();
+  await notRunningToggle.click();
+
+  const duplicatiRow = page.locator('tr.container-row', { hasText: 'duplicati' });
+  await expect(duplicatiRow).toBeVisible();
+  await expect(duplicatiRow).toContainText('created'); // its own state, not just a health-dot color
+
+  const watchtowerRow = page.locator('tr.container-row', { hasText: 'watchtower' });
+  await expect(watchtowerRow).toContainText('created');
+
+  // Overview: excluded from the fleet strip's own units and (since the
+  // fake fleet always has a real stopped archetype too) the "N running ·
+  // M stopped" sentence's M, which counts exited only.
+  await page.goto('#/');
+  const stripHrefs = await page
+    .locator('.fleet-strip .fleet-unit')
+    .evaluateAll((els) => els.map((el) => el.getAttribute('href')));
+  expect(stripHrefs).not.toContain('#/containers/duplicati');
+  expect(stripHrefs).not.toContain('#/containers/watchtower');
+
+  const sentenceText = (await page.locator('.overview__sub-line').first().textContent()) ?? '';
+  const stoppedMatch = sentenceText.match(/^(\d+) running · (\d+) stopped\.$/);
+  expect(stoppedMatch, `unexpected fleet sentence shape: ${sentenceText}`).not.toBeNull();
+  const statedTotal = Number(stoppedMatch[1]) + Number(stoppedMatch[2]);
+  await expect.poll(() => page.locator('.fleet-strip .fleet-unit').count()).toBe(statedTotal);
+});
+
 // Regression coverage for Scott's own report: "when values change, the
 // width of the columns change size. this happens constantly and is not
 // good looking." table-layout:fixed + the <colgroup> (Containers.svelte)

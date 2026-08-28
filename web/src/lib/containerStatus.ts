@@ -15,3 +15,43 @@ export function containerHealthStatus(state: string, health: string): HealthStat
   // state -- worth a second look, but not yet a confirmed problem.
   return 'warning';
 }
+
+// ContainerRunState is the coarser, three-way split Overview's fleet
+// headline/strip and the Containers view's collapsed section both need:
+// "created" (docker's own state for a container that's been provisioned
+// but never started -- e.g. an ephemeral CI-runner spawn) is its own
+// bucket, distinct from "stopped" (was running, isn't now), since a
+// never-started container has nothing to monitor and floods both
+// surfaces during a churny burst (Scott's own report: 17 created
+// GitHub-runner containers showing up as "stopped"). Anything that isn't
+// "running" or "created" -- exited, dead, paused, restarting, or an
+// unrecognized future state -- reads as "stopped".
+export type ContainerRunState = 'running' | 'created' | 'stopped';
+
+export function containerRunState(state: string): ContainerRunState {
+  if (state === 'running') return 'running';
+  if (state === 'created') return 'created';
+  return 'stopped';
+}
+
+export interface ContainerNamePartition {
+  running: string[];
+  stopped: string[];
+  created: string[];
+}
+
+// partitionContainerNames buckets `names` by containerRunState, reading
+// each one's state off `containers` -- same (names, containers-map) shape
+// as containersSort.ts's sortContainerNames, so both views can feed it
+// straight off live.frame.containers. A name absent from `containers`
+// (defensive, shouldn't happen) reads as stopped rather than throwing.
+export function partitionContainerNames(
+  names: string[],
+  containers: Record<string, { state: string }>,
+): ContainerNamePartition {
+  const out: ContainerNamePartition = { running: [], stopped: [], created: [] };
+  for (const name of names) {
+    out[containerRunState(containers[name]?.state ?? '')].push(name);
+  }
+  return out;
+}

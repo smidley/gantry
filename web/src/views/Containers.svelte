@@ -8,7 +8,7 @@
   import { onMount, untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { matchesContainerFilter, sortContainerNames } from '../lib/containersSort';
-  import { containerHealthStatus } from '../lib/containerStatus';
+  import { containerHealthStatus, partitionContainerNames } from '../lib/containerStatus';
   import { fmtBytes, fmtPct, fmtRate } from '../lib/format';
   import { seriesPointsToRing } from '../lib/livering';
   import { fetchContainers, fetchSeries } from '../lib/api';
@@ -59,6 +59,12 @@
     { key: 'uptime', label: 'Uptime', sortable: true, numeric: true, width: '6rem' }, // e.g. "365d 23h"
     { key: 'image', label: 'Image', sortable: true },
   ];
+
+  // NOT_RUNNING_COLUMNS mirrors COLUMNS but widens the health column
+  // enough for showState's own state-word label ("restarting" is the
+  // longest realistic one) -- the running table never passes showState,
+  // so it keeps the tighter icon-only width.
+  const NOT_RUNNING_COLUMNS = COLUMNS.map((col) => (col.key === 'health' ? { ...col, width: '5rem' } : col));
 
   // seedContainerCpuRings fetches each running container's own last-15-
   // minutes cpu.pct history and hands it to that row via onSeeded(name,
@@ -204,8 +210,17 @@
       return c ? matchesContainerFilter(name, c.image ?? '', filterText) : false;
     }),
   );
-  let runningNames = $derived(filteredNames.filter((name) => live.frame?.containers?.[name]?.state === 'running'));
-  let stoppedNames = $derived(filteredNames.filter((name) => live.frame?.containers?.[name]?.state !== 'running'));
+  // Never-started ("created") containers -- ephemeral CI-runner spawns
+  // are the live example that prompted this split -- get their own
+  // bucket rather than folding into "stopped": both land in the same
+  // collapsed "Not running" section below (still high-churn, still
+  // nothing live to show), but keeping them distinct lets each row say
+  // which it actually is.
+  let containerPartition = $derived(partitionContainerNames(filteredNames, live.frame?.containers ?? {}));
+  let runningNames = $derived(containerPartition.running);
+  let stoppedNames = $derived(containerPartition.stopped);
+  let createdNames = $derived(containerPartition.created);
+  let notRunningNames = $derived([...stoppedNames, ...createdNames]);
 </script>
 
 <div class="containers-view">
@@ -219,7 +234,7 @@
     aria-label="Filter containers by name or image"
   />
 
-  {#if runningNames.length === 0 && stoppedNames.length === 0}
+  {#if runningNames.length === 0 && notRunningNames.length === 0}
     <p class="microlabel containers-view__empty">
       {filterText ? 'No containers match that filter.' : 'No containers yet.'}
     </p>
@@ -284,31 +299,36 @@
       {/each}
     </div>
 
-    {#if stoppedNames.length > 0}
+    {#if notRunningNames.length > 0}
       <div class="containers-view__stopped-header">
         <button type="button" class="containers-view__stopped-toggle" onclick={() => (stoppedExpanded = !stoppedExpanded)}>
           <span class="microlabel">
-            {stoppedExpanded ? '▼' : '▶'} Stopped ({stoppedNames.length})
+            {stoppedExpanded ? '▼' : '▶'} Not running ({notRunningNames.length})
           </span>
         </button>
       </div>
       {#if stoppedExpanded}
+        <!-- Stopped (exited/dead/etc.) and created (never-started) share
+             this one collapsed section -- both are "nothing live to show"
+             -- but each row still names its own real state (showState
+             below), since a health dot's color alone isn't enough to
+             tell the two apart (see HealthDot's own doc). -->
         <div class="card containers-view__table-wrap hidden md:block">
           <table class="containers-table">
             <colgroup>
-              {#each COLUMNS as col (col.key)}
+              {#each NOT_RUNNING_COLUMNS as col (col.key)}
                 <col style={col.width ? `width: ${col.width}` : undefined} />
               {/each}
             </colgroup>
             <tbody>
-              {#each stoppedNames as name (name)}
-                <ContainerRow {name} {registerSeedTarget} />
+              {#each notRunningNames as name (name)}
+                <ContainerRow {name} {registerSeedTarget} showState />
               {/each}
             </tbody>
           </table>
         </div>
         <div class="card containers-view__cards flex md:hidden">
-          {#each stoppedNames as name (name)}
+          {#each notRunningNames as name (name)}
             {@const c = live.frame?.containers?.[name]}
             {#if c}
               <a class="containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>

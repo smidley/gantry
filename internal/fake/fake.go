@@ -48,6 +48,14 @@ type archetype struct {
 	// so fake mode's frame exercises the same stopped-but-known path a
 	// real box's registry gives one.
 	stopped bool
+
+	// created models a container that's been provisioned but never
+	// started (docker's own "created" state) -- Scott's own live example
+	// was a burst of ephemeral CI-runner spawns. Metas() reports it State
+	// "created" (no Health, same as stopped -- nothing to check), and
+	// Tick skips it outright, same reason as stopped: nothing has ever
+	// run, so there's nothing to synthesize.
+	created bool
 }
 
 var fleet = []archetype{
@@ -73,6 +81,11 @@ var fleet = []archetype{
 	{name: "minecraft", cpuBase: 8, cpuAmp: 5, cpuSpike: 0.01, memBytes: 2.5e9, netScale: 3e5, cpuAllocCores: 2.0},
 	{name: "frigate", cpuBase: 12, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.1e9, netScale: 5e6},
 	{name: "unifi-controller", cpuBase: 2, cpuAmp: 1, cpuSpike: 0.005, memBytes: 900e6, netScale: 2e5},
+	// duplicati/watchtower: the fleet's two never-started demo containers
+	// (created via Community Apps, not yet started) -- see archetype.
+	// created's own doc.
+	{name: "duplicati", created: true},
+	{name: "watchtower", created: true},
 }
 
 // diskSpec describes one of the fake array's fixed 8 disks: parity
@@ -255,8 +268,8 @@ func (g *Generator) Tick(now time.Time) {
 
 	hostCPUPct := 0.0
 	for i, a := range fleet {
-		if a.stopped {
-			continue // no live stats for a stopped container -- see archetype.stopped's own doc
+		if a.stopped || a.created {
+			continue // no live stats for a stopped or never-started container -- see archetype's own docs
 		}
 		// raw is on the old docker-stats 0-100 per-core scale; /100 turns
 		// it into cpu.cores (1.00 = one full core), and dividing THAT by
@@ -563,25 +576,28 @@ func fakeContainerMounts(name string) []docker.MountInfo {
 
 // Metas returns one synthetic docker.Meta per fleet archetype: state
 // "running"/health "healthy" for the fleet's own identity, except the
-// handful marked archetype.stopped, which report "exited"/"" instead
-// (the fleet's running/stopped split is otherwise fixed -- emitContainerEvents'
-// periodic events simulate restarts/OOMs on top of it, without actually
-// changing any member's own state here), plus a plausible Mounts set
-// (fakeContainerMounts) so the storage panel has something to resolve.
-// main wiring passes this to buildSnapshot/buildContainersList/
-// buildContainerStorage (GANTRY_FAKE_DATA=1 only) so the fake fleet is
-// treated exactly like a real registry's own entries: without it, every
-// fake-mode frame would come up empty, since this generator writes
-// samples straight to the store, bypassing docker's registry entirely.
-// buildContainersList/buildContainerStorage still only care about a
-// container being KNOWN, not which state it's in, so the stopped members
-// flow through those two unchanged.
+// members marked archetype.stopped ("exited"/"") or archetype.created
+// ("created"/"") (the fleet's running/stopped/created split is otherwise
+// fixed -- emitContainerEvents' periodic events simulate restarts/OOMs on
+// top of it, without actually changing any member's own state here),
+// plus a plausible Mounts set (fakeContainerMounts) so the storage panel
+// has something to resolve. main wiring passes this to buildSnapshot/
+// buildContainersList/buildContainerStorage (GANTRY_FAKE_DATA=1 only) so
+// the fake fleet is treated exactly like a real registry's own entries:
+// without it, every fake-mode frame would come up empty, since this
+// generator writes samples straight to the store, bypassing docker's
+// registry entirely. buildContainersList/buildContainerStorage still
+// only care about a container being KNOWN, not which state it's in, so
+// the stopped/created members flow through those two unchanged.
 func (g *Generator) Metas() []docker.Meta {
 	out := make([]docker.Meta, len(fleet))
 	for i, a := range fleet {
 		state, health := "running", "healthy"
-		if a.stopped {
+		switch {
+		case a.stopped:
 			state, health = "exited", ""
+		case a.created:
+			state, health = "created", ""
 		}
 		out[i] = docker.Meta{Name: a.name, State: state, Health: health, Image: "demo/" + a.name + ":latest", Mounts: fakeContainerMounts(a.name)}
 	}

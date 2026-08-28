@@ -203,6 +203,9 @@ func TestParseCPUSetCount(t *testing.T) {
 		{name: "malformed trailing comma", in: "0-5,", want: 0, ok: false},
 		{name: "malformed inverted range", in: "5-2", want: 0, ok: false},
 		{name: "malformed dangling dash", in: "0-5,-", want: 0, ok: false},
+		{name: "range span just under the materialization guard is allowed", in: "0-65535", want: 65536, ok: true},
+		{name: "range span at the materialization guard is rejected", in: "0-65536", want: 0, ok: false},
+		{name: "grossly oversized range rejected rather than materialized", in: "0-4294967295", want: 0, ok: false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

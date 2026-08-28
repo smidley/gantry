@@ -55,13 +55,18 @@ func extractNetworks(hostNet bool, ns *container.NetworkSettings) []NetworkInfo 
 }
 
 // extractPorts reads one container's NetworkSettings.Ports into a
-// slice of PortInfo, sorted by container port/proto/host port for a
-// deterministic result. A nil binding slice -- docker's own shape for a
-// port that's EXPOSEd but never published with -p -- still produces one
-// PortInfo (HostIP/HostPort left at their zero value): "unpublished" is
-// itself useful information for the UI to show, not an absence to
-// filter out. A published port typically carries two bindings (an IPv4
-// and an IPv6 wildcard), each becoming its own PortInfo.
+// slice of PortInfo, sorted by container port/proto/host port/host IP
+// for a fully deterministic result. A nil binding slice -- docker's own
+// shape for a port that's EXPOSEd but never published with -p -- still
+// produces one PortInfo (HostIP/HostPort left at their zero value):
+// "unpublished" is itself useful information for the UI to show, not an
+// absence to filter out. A published port typically carries two
+// bindings (an IPv4 and an IPv6 wildcard) that share ContainerPort,
+// Proto, AND HostPort -- only HostIP tells them apart, so it has to be
+// the sort's final tiebreaker too, or those two entries compare equal
+// and their relative order is left to sort.Slice's own unstable pivot
+// choices (only reliably stable, by accident, on the small slices that
+// land in Go's insertion-sort fallback).
 func extractPorts(ns *container.NetworkSettings) []PortInfo {
 	if ns == nil || len(ns.Ports) == 0 {
 		return nil
@@ -84,7 +89,10 @@ func extractPorts(ns *container.NetworkSettings) []PortInfo {
 		if out[i].Proto != out[j].Proto {
 			return out[i].Proto < out[j].Proto
 		}
-		return out[i].HostPort < out[j].HostPort
+		if out[i].HostPort != out[j].HostPort {
+			return out[i].HostPort < out[j].HostPort
+		}
+		return out[i].HostIP < out[j].HostIP
 	})
 	return out
 }

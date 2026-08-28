@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
@@ -117,4 +118,37 @@ func TestExtractPortsMultiplePortsSortedByContainerPort(t *testing.T) {
 		{ContainerPort: 443, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 443},
 		{ContainerPort: 8096, Proto: "tcp"},
 	}, got)
+}
+
+// TestExtractPortsDualStackOrderIsFullyDeterministic pins the sort's
+// final tiebreaker: a published port's two bindings (the IPv4 and IPv6
+// wildcard docker typically emits for one -p) share ContainerPort,
+// Proto, AND HostPort -- only HostIP tells them apart, so a less func
+// that stops at HostPort compares them equal and leaves their relative
+// order to sort.Slice's own (unstable) pivot choices. At a small size
+// that accidentally lands on Go's insertion-sort fallback this can look
+// stable by luck; this fixture uses 16 container ports (32 bindings,
+// past pdqsort's insertion-sort-only threshold) and re-extracts from the
+// same, map-iteration-order-randomized input 100 times, requiring the
+// exact same byte-identical slice every time.
+func TestExtractPortsDualStackOrderIsFullyDeterministic(t *testing.T) {
+	ports := nat.PortMap{}
+	var want []PortInfo
+	for p := 8000; p < 8016; p++ {
+		key := nat.Port(strconv.Itoa(p) + "/tcp")
+		ports[key] = []nat.PortBinding{
+			{HostIP: "::", HostPort: strconv.Itoa(p)},
+			{HostIP: "0.0.0.0", HostPort: strconv.Itoa(p)},
+		}
+		want = append(want,
+			PortInfo{ContainerPort: p, Proto: "tcp", HostIP: "0.0.0.0", HostPort: p},
+			PortInfo{ContainerPort: p, Proto: "tcp", HostIP: "::", HostPort: p},
+		)
+	}
+	ns := networkSettingsWithPorts(ports)
+
+	for i := 0; i < 100; i++ {
+		got := extractPorts(ns)
+		require.Equal(t, want, got, "extraction %d: HostIP must break the ContainerPort/Proto/HostPort tie deterministically", i)
+	}
 }

@@ -32,3 +32,6 @@ Inputs for the Phase 3 plan — none block Phase 2, all triaged fix-in-phase-3 b
 - nvidia collector end-to-end (no hardware available); cadence already set to 15s.
 - Long soak (>15 min observed so far); API-fallback boxes: N sequential stats calls per tick under the 10s deadline can downgrade to "failing" on slow daemons — correct signal, watch for it.
 - `parity.finish` event gains duration with Phase 4's parity-result work.
+
+## Metric semantic changes
+- 2026-08-28: per-container `cpu.pct` redefined from docker-stats' own per-core percent (100% = one full core, could read >100% on a multicore box) to a host-share percent (that core usage ÷ the host's own core count) -- the "container says 100%, host says 30%" confusion report. New `cpu.cores` metric carries the old per-core-style number instead. Samples recorded before this date under the old meaning were left as-is: dev-phase acceptable, no migration.

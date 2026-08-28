@@ -13,13 +13,22 @@
   import { fetchEvents } from '../lib/api';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtRelTime } from '../lib/format';
   import { etaFromProgress, parityIsRunning, seqStep, sharesFromMetrics } from '../lib/metrics';
-  import { diskRole, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
+  import { diskKind, diskRole, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import HealthDot from '../components/HealthDot.svelte';
 
   const EVENTS_POLL_MS = 30_000;
   const ROLE_LABEL = { parity: 'Parity', data: 'Data disk', pool: 'Cache / pool', flash: 'Boot (flash)' };
+  // Four-way type badge (Scott's own report: a real box's boot flash
+  // device was misread as HDD and its NVMe pools as generic SSD --
+  // rotational alone can't tell either apart, see disks.ts's diskKind
+  // doc). Color identity lives in storage-disk__media--<kind> below, one
+  // per kind except hdd (deliberately left the plain neutral chip
+  // color -- the ordinary/majority case, not one that needs to stand out).
+  const MEDIA_LABEL = { hdd: 'HDD', ssd: 'SSD', nvme: 'NVMe', usb: 'USB' };
+  const MEDIA_TITLE = { hdd: 'Spinning disk', ssd: 'Solid state', nvme: 'NVMe solid state', usb: 'USB flash drive' };
 
   let disks = $derived(live.frame?.disks ?? {});
+  let diskMeta = $derived(live.frame?.disk_meta ?? {});
   let diskNames = $derived(sortDiskEntities(Object.keys(disks)));
   let array = $derived(live.frame?.unraid?.array ?? {});
   let dockerStorage = $derived(live.frame?.unraid?.docker ?? {});
@@ -101,6 +110,44 @@
   }
 </script>
 
+<!-- Type-at-a-glance glyphs (ask: "different types of things in the same
+     category should stand out -- nvme storage vs spinning disk", later
+     extended to all four kinds: "the boot flash drive is not HDD, it's
+     USB... the cache drives are NVMe... color coded or highlighted
+     differently"): a platter+spindle for HDD, a chip-with-pins for SSD,
+     a slim ticked stick for NVMe (an M.2 module's own silhouette, wider
+     and shorter than SSD's square chip), a body+connector for USB
+     (echoing router.ts's own GPU nav icon's "chip" visual language for
+     the solid-state pair) -- every glyph always paired with its own text
+     label AND a tinted badge background (storage-disk__media--<kind>
+     below), never color alone. -->
+{#snippet diskMediaGlyph(type)}
+  {#if type === 'ssd'}
+    <svg class="storage-disk__media-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="3" y="3" width="10" height="10" rx="1.5" />
+      <path
+        d="M5.5 3v2M8 3v2M10.5 3v2M5.5 11v2M8 11v2M10.5 11v2M3 5.5h2M3 8h2M3 10.5h2M11 5.5h2M11 8h2M11 10.5h2"
+      />
+    </svg>
+  {:else if type === 'nvme'}
+    <svg class="storage-disk__media-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="1.5" y="6.25" width="13" height="3.5" rx="1" />
+      <path d="M4.5 6.25v3.5M7.5 6.25v3.5M10.5 6.25v3.5" />
+    </svg>
+  {:else if type === 'usb'}
+    <svg class="storage-disk__media-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="3.5" y="6" width="9" height="8" rx="1.5" />
+      <rect x="6.5" y="2" width="3" height="4" />
+      <path d="M6.5 3.6h3" />
+    </svg>
+  {:else}
+    <svg class="storage-disk__media-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.25" />
+      <circle class="storage-disk__media-icon-hub" cx="8" cy="8" r="1.3" />
+    </svg>
+  {/if}
+{/snippet}
+
 <div class="storage-view">
   <h1 class="page-title">Storage</h1>
 
@@ -163,47 +210,58 @@
       No disk data yet.{sources.unraid && sources.unraid !== 'ok' ? ` ${sources.unraid}` : ''}
     </p>
   {:else}
-    <div class="storage-view__disk-grid">
-      {#each diskNames as name (name)}
-        {@const metrics = disks[name]}
-        {@const role = diskRole(name)}
-        {@const temp = diskTempState(metrics)}
-        {@const usagePct = diskUsagePct(metrics)}
-        {@const errors = metrics['errors'] ?? 0}
-        <div class="card storage-disk">
-          <div class="storage-disk__head">
-            <span class="microlabel">{ROLE_LABEL[role]}</span>
-            {#if temp.kind === 'reading'}
-              <span class="tabular-nums storage-disk__temp">{temp.celsius.toFixed(1)}&deg;C</span>
-            {:else}
-              <span class="storage-disk__chip">{temp.kind === 'spun-down' ? 'Spun down' : 'No sensor'}</span>
+    <div class="card storage-disks">
+      <span class="microlabel">Disks &middot; {diskNames.length}</span>
+      <div class="storage-disks__list">
+        {#each diskNames as name (name)}
+          {@const metrics = disks[name]}
+          {@const role = diskRole(name)}
+          {@const mediaType = diskKind(diskMeta[name], metrics)}
+          {@const temp = diskTempState(metrics)}
+          {@const usagePct = diskUsagePct(metrics)}
+          {@const errors = metrics['errors'] ?? 0}
+          <div class="storage-disk">
+            <div class="storage-disk__head">
+              <span class="microlabel storage-disk__eyebrow">
+                <span>{ROLE_LABEL[role]}</span>
+                {#if mediaType}
+                  <span class="storage-disk__media storage-disk__media--{mediaType}" title={MEDIA_TITLE[mediaType]}>
+                    {@render diskMediaGlyph(mediaType)}<span class="storage-disk__media-label">{MEDIA_LABEL[mediaType]}</span>
+                  </span>
+                {/if}
+              </span>
+              {#if temp.kind === 'reading'}
+                <span class="tabular-nums storage-disk__temp">{temp.celsius.toFixed(1)}&deg;C</span>
+              {:else}
+                <span class="storage-disk__chip">{temp.kind === 'spun-down' ? 'Spun down' : 'No sensor'}</span>
+              {/if}
+            </div>
+            <div class="storage-disk__name">{name}</div>
+
+            {#if usagePct !== null}
+              <div class="storage-disk__usage">
+                <div class="storage-disk__usage-track">
+                  <div
+                    class="storage-disk__usage-fill"
+                    style="width: {usagePct}%; background: {seqStep(usagePct)}"
+                  ></div>
+                </div>
+                <span class="tabular-nums storage-disk__usage-pct">{fmtPct(usagePct)}</span>
+                <span class="tabular-nums storage-disk__bytes">
+                  {fmtBytes(metrics['fs.used_bytes'])} / {fmtBytes(metrics['fs.used_bytes'] + metrics['fs.free_bytes'])}
+                </span>
+                {#if usagePct > 90}
+                  <HealthDot status="warning" label="High usage" />
+                {/if}
+              </div>
+            {/if}
+
+            {#if errors > 0}
+              <HealthDot status="serious" label={`${errors} error${errors === 1 ? '' : 's'}`} />
             {/if}
           </div>
-          <div class="storage-disk__name">{name}</div>
-
-          {#if usagePct !== null}
-            <div class="storage-disk__usage">
-              <div class="storage-disk__usage-track">
-                <div
-                  class="storage-disk__usage-fill"
-                  style="width: {usagePct}%; background: {seqStep(usagePct)}"
-                ></div>
-              </div>
-              <span class="tabular-nums storage-disk__usage-pct">{fmtPct(usagePct)}</span>
-            </div>
-            <div class="tabular-nums storage-disk__bytes">
-              {fmtBytes(metrics['fs.used_bytes'])} / {fmtBytes(metrics['fs.used_bytes'] + metrics['fs.free_bytes'])}
-            </div>
-            {#if usagePct > 90}
-              <HealthDot status="warning" label="High usage" />
-            {/if}
-          {/if}
-
-          {#if errors > 0}
-            <HealthDot status="serious" label={`${errors} error${errors === 1 ? '' : 's'}`} />
-          {/if}
-        </div>
-      {/each}
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -361,22 +419,93 @@
     white-space: nowrap;
   }
 
-  .storage-view__disk-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
-    gap: 0.75rem;
-  }
-  .storage-disk {
-    padding: 0.85rem 1rem;
+  .storage-disks {
+    padding: 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.6rem;
+  }
+  .storage-disks__list {
+    display: flex;
+    flex-direction: column;
+  }
+  /* Rail row, not a card -- was one .card per disk (parity/data/cache
+     alike, 5-20+ of them depending on the array), the exact "same
+     module at every scale" pattern this rollout replaces elsewhere: a
+     hairline between rows instead, same convention as StatTile's own
+     bare rail and EventFeedItem. */
+  .storage-disk {
+    padding: 0.65rem 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    border-bottom: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+  }
+  .storage-disk:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+  .storage-disk:first-child {
+    padding-top: 0;
   }
   .storage-disk__head {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem;
+    gap: 0.3rem 0.5rem;
+  }
+  .storage-disk__eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    white-space: nowrap;
+  }
+  /* Type badge: a tinted pill (Scott's own ask -- "these should be color
+     coded or highlighted differently"), matching storage-disk__chip's
+     own pill shape below. color set here is the KIND's accent, picked up
+     by the glyph's stroke via currentColor -- but never by the text,
+     which storage-disk__media-label pins back to ink-2 explicitly, so
+     color is reinforcement on top of shape+text, never the only channel.
+     hdd (the ordinary/majority case, not one that needs to stand out)
+     deliberately gets no override here -- the plain neutral chip tint
+     below is its own "color". */
+  .storage-disk__media {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.15rem 0.5rem 0.15rem 0.4rem;
+    border-radius: 999px;
+    color: var(--ink-2);
+    background: color-mix(in oklab, var(--ink) 7%, transparent);
+  }
+  .storage-disk__media-label {
+    color: var(--ink-2);
+  }
+  .storage-disk__media--ssd {
+    color: var(--series-3);
+    background: color-mix(in oklab, var(--series-3) 12%, transparent);
+  }
+  .storage-disk__media--nvme {
+    color: var(--series-1);
+    background: color-mix(in oklab, var(--series-1) 12%, transparent);
+  }
+  .storage-disk__media--usb {
+    color: var(--series-4);
+    background: color-mix(in oklab, var(--series-4) 14%, transparent);
+  }
+  .storage-disk__media-icon {
+    width: 11px;
+    height: 11px;
+    flex-shrink: 0;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.2;
+  }
+  .storage-disk__media-icon-hub {
+    fill: currentColor;
+    stroke: none;
   }
   .storage-disk__temp {
     font-size: 0.85rem;
@@ -401,10 +530,11 @@
   .storage-disk__usage {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.5rem;
   }
   .storage-disk__usage-track {
-    flex: 1;
+    flex: 1 1 6rem;
     height: 8px;
     border-radius: 4px;
     background: color-mix(in oklab, var(--ink) 8%, transparent);
@@ -431,6 +561,7 @@
   .storage-disk__bytes {
     font-size: 0.75rem;
     color: var(--ink-2);
+    white-space: nowrap;
   }
 
   .storage-view__row {

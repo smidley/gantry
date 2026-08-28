@@ -9,10 +9,19 @@
    lib/tokens.css, switched by [data-theme] rather than Tailwind's
    dark: variant, since the design needs an explicit system|light|dark
    toggle, not just a prefers-color-scheme mirror. */
+/* Legibility corrective pass: Inter is the single UI+display+data face
+   (--font-sans and --font-display are now the same stack) -- Space
+   Grotesk (quirky letterforms, a flagged '1' that misread in the
+   Overview headline) and IBM Plex Sans are both retired. The two
+   tokens stay separate names, not collapsed into one, since call
+   sites throughout the app already say "this is a display context" or
+   "this is body text" via which token they reference; only the value
+   changed. --font-mono (IBM Plex Mono) is untouched -- true-mono
+   contexts (microlabels, the log viewer) keep their own face. */
 @theme {
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
-  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
   --breakpoint-md: 48rem;
 }
 
@@ -68,10 +77,10 @@ body {
   }
 }
 
-/* Page title convention: every route's own <h1>, Space Grotesk per the
-   design direction ("Space Grotesk display for page titles + hero
-   numbers") -- Layout's header carries the constant "Gantry" wordmark,
-   not a per-route title, so each view renders its own. */
+/* Page title convention: every route's own <h1>, the display face (now
+   Inter, see the @theme block above) -- Layout's header carries the
+   constant "Gantry" wordmark, not a per-route title, so each view
+   renders its own. */
 .page-title {
   font-family: var(--font-display);
   font-weight: 700;
@@ -81,12 +90,15 @@ body {
 }
 
 /* Equipment-tag micro-label convention: metric names, table headers,
-   chart eyebrows. */
+   chart eyebrows. Bumped 11px->12px and 0.08em->0.06em letter-spacing
+   in the same legibility pass as the font swap above -- the tighter
+   original tracking, combined with IBM Plex Mono's own narrow
+   letterforms at 11px, read as borderline illegible at arm's length. */
 .microlabel {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   color: var(--ink-2);
 }
 
@@ -113,4 +125,49 @@ body {
    horizontally as its digits change. */
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* Segmented control: a joined, single-bordered button group for a
+   mutually-exclusive choice (time range, resource, aggregation, theme).
+   D2 rollout consolidation -- Events' time presets, Settings' theme
+   switch, and Top Consumers' window/aggregation toggles had already
+   converged on this exact shape independently; Top Consumers' own
+   resource tabs, Container Detail's range picker, and the GPU view's
+   range picker had each instead grown a SEPARATE "discrete pill" shape
+   (its own full border + radius per button, gapped apart) for the same
+   kind of control. One shared class, used by all six now, so a control
+   for the same kind of choice reads the same everywhere rather than by
+   which view happened to write it. Overview's own compact top-switcher
+   stays its own smaller, microlabel-styled one-off (a different scale --
+   an in-card tab strip, not a page-level control), not a third variant
+   of this. */
+.segmented {
+  display: inline-flex;
+  border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.segmented__btn {
+  min-height: 40px;
+  padding: 0 0.85rem;
+  border: none;
+  border-right: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 0.82rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.segmented__btn:last-child {
+  border-right: none;
+}
+@media (max-width: 47.9375rem) {
+  .segmented__btn {
+    padding: 0 0.6rem;
+  }
+}
+.segmented__btn--active {
+  background: color-mix(in oklab, var(--series-1) 15%, transparent);
+  color: var(--series-1);
+  font-weight: 500;
 }

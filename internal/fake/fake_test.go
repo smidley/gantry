@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
 )
@@ -67,6 +68,36 @@ func TestTickEmitsHostAndContainerSeries(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestContainerCPUIsHostShareWithMatchingCores pins the top-consumers
+// host-share fix's fake-mode half: cpu.pct must read as this container's
+// share of the WHOLE host, not docker-stats' own per-core percent, so it
+// must stay well clear of 100 across many ticks (spikes included) --
+// unlike the old per-core-style number, which routinely approached it --
+// and cpu.cores/fakeHostCores*100 must always reproduce cpu.pct exactly,
+// the same relationship the real collector's cgroupv2.go now guarantees.
+func TestContainerCPUIsHostShareWithMatchingCores(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	tickEvery(g, time.Unix(1_000_000, 0), 2*time.Second, 300) // ~10 simulated minutes: several spike rolls per archetype
+
+	var maxPct float64
+	for k, samples := range sink.recs {
+		if k.Kind != "container" || k.Metric != "cpu.pct" {
+			continue
+		}
+		cores := sink.recs[store.SeriesKey{Kind: "container", Entity: k.Entity, Metric: "cpu.cores"}]
+		require.Len(t, cores, len(samples), "%s: cpu.cores must be emitted alongside every cpu.pct sample", k.Entity)
+		for i, s := range samples {
+			require.InDelta(t, cores[i].Val/fakeHostCores*100, s.Val, 1e-9, "%s: cpu.pct must equal cpu.cores' own host-share", k.Entity)
+			if s.Val > maxPct {
+				maxPct = s.Val
+			}
+		}
+	}
+	require.Greater(t, maxPct, 0.0, "want at least some CPU activity across the fleet")
+	require.Less(t, maxPct, 20.0, "host-share must stay far from 100%% even during a spike -- that was the whole bug")
 }
 
 func TestFakeContainerStartedAtIsPastAndVariesByIndex(t *testing.T) {
@@ -146,7 +177,7 @@ func TestTickEmitsDiskUnraidAndGPUKinds(t *testing.T) {
 			}
 		}
 	}
-	for _, want := range []string{"parity", "disk1", "disk2", "disk3", "disk4", "cache"} {
+	for _, want := range []string{"parity", "disk1", "disk2", "disk3", "disk4", "cache", "rocket_pool", "flash"} {
 		require.True(t, disks[want], "missing disk entity %q", want)
 	}
 	require.True(t, sawArray, "unraid entity \"array\" must be present")
@@ -183,6 +214,68 @@ func TestSpunDownDiskEmitsNoTemp(t *testing.T) {
 			require.LessOrEqual(t, s.Val, 45.0, "%s temp out of [32,45]", other)
 		}
 	}
+}
+
+// TestDiskRotationalDistinguishesCacheAsSolidState pins the fake array's
+// rotational contract: every spinning array/parity disk reads 1, while
+// cache (an NVMe/SSD pool in a realistic Unraid layout) reads 0 -- so
+// dev/Playwright exercise the same HDD-vs-SSD distinction a real box's
+// disks.ini rotational key drives (see disks.go's tickOneDisk).
+// rotational is a static hardware property, recorded every tick
+// regardless of spin state -- unlike temp.c, it must be present even for
+// the permanently-spun-down disk3.
+func TestDiskRotationalDistinguishesCacheAsSolidState(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	for _, spinning := range []string{"parity", "disk1", "disk2", "disk3", "disk4"} {
+		samples := sink.recs[store.SeriesKey{Kind: "disk", Entity: spinning, Metric: "rotational"}]
+		require.NotEmpty(t, samples, "%s must report rotational", spinning)
+		require.Equal(t, 1.0, samples[0].Val, "%s should read as spinning", spinning)
+	}
+
+	cacheSamples := sink.recs[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "rotational"}]
+	require.NotEmpty(t, cacheSamples, "cache must report rotational")
+	require.Equal(t, 0.0, cacheSamples[0].Val, "cache should read as solid-state")
+}
+
+// TestFlashDiskHasNoTempSensorRegardlessOfSpinState pins flash's noSensor
+// contract: temp.c must never appear for it (a USB stick has no SMART
+// temperature sensor at all -- a distinct reason from disk3's spunDown,
+// which omits temp.c for a different one), while spun_up still always
+// reads 1 -- flash is never actually "spun down", there's nothing to
+// spin. Regression coverage for Scott's own report: rotational=1 (real
+// hardware behavior, asserted below via DiskMetas' own test) must not
+// be confused with an ordinary spinning disk's temp behavior either.
+func TestFlashDiskHasNoTempSensorRegardlessOfSpinState(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	tickEvery(g, time.Unix(1_000_000, 0), 2*time.Second, 50)
+
+	_, hasTemp := sink.recs[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "temp.c"}]
+	require.False(t, hasTemp, "flash has no temp sensor and must never emit temp.c")
+
+	spunUp := sink.recs[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "spun_up"}]
+	require.NotEmpty(t, spunUp)
+	for _, s := range spunUp {
+		require.Equal(t, 1.0, s.Val, "flash is never spun down -- spun_up must always read 1")
+	}
+}
+
+// TestDiskMetasCoversAllFourKinds pins DiskMetas' own classification
+// output -- the whole point of growing the fake fleet past its original
+// 6 disks (Scott's own report: a live box misread its boot flash device
+// as HDD and its NVMe pools as generic SSD) is that dev/Playwright now
+// exercise every one of Storage's four type badges, not just HDD-vs-SSD.
+func TestDiskMetasCoversAllFourKinds(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	meta := g.DiskMetas()
+
+	require.Equal(t, unraid.DiskMeta{Device: "sdi", Kind: "usb"}, meta["flash"], "the boot device must classify usb despite rotational=1")
+	require.Equal(t, unraid.DiskMeta{Device: "nvme0n1", Kind: "nvme"}, meta["rocket_pool"])
+	require.Equal(t, unraid.DiskMeta{Device: "sdh", Kind: "ssd"}, meta["cache"], "a non-nvme solid-state pool must classify plain ssd, not nvme")
+	require.Equal(t, unraid.DiskMeta{Device: "sdc", Kind: "hdd"}, meta["disk1"])
 }
 
 // TestParityCheckStartsTwoMinutesAfterBootAndFinishesMonotonically
@@ -450,6 +543,10 @@ func TestGPUBusyPctStaysInContainerAndGPUKinds(t *testing.T) {
 	}
 }
 
+// TestGantrySelfFootprintMetrics pins emitSelf's host-share conversion:
+// the pre-conversion figure is clamp(0.6±0.15, 0, 100) (never clamped in
+// practice), so ÷fakeHostCores must land in exactly [0.45/8, 0.75/8] --
+// centered on 0.075, not the old per-core-style ~0.6.
 func TestGantrySelfFootprintMetrics(t *testing.T) {
 	sink := &capture{}
 	g := New(sink, nil, 1)
@@ -459,7 +556,7 @@ func TestGantrySelfFootprintMetrics(t *testing.T) {
 	rss := sink.recs[store.SeriesKey{Kind: "host", Metric: "gantry.rss_bytes"}]
 	require.Len(t, cpu, 1)
 	require.Len(t, rss, 1)
-	require.GreaterOrEqual(t, cpu[0].Val, 0.0)
-	require.Less(t, cpu[0].Val, 5.0, "gantry's own CPU footprint should be small")
+	require.InDelta(t, 0.6/fakeHostCores, cpu[0].Val, 0.15/fakeHostCores,
+		"gantry's own CPU footprint must read as this generator's host-share, not the old per-core-style ~0.6%%")
 	require.Greater(t, rss[0].Val, 0.0)
 }

@@ -9,19 +9,21 @@
   change.
 -->
 <script>
+  import { untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { fetchTop } from '../lib/api';
-  import { fmtBytes, fmtPct, fmtRate } from '../lib/format';
-  import { topFromFrame } from '../lib/topFromFrame';
+  import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
+  import { isTopResource, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import TopBarList from '../components/TopBarList.svelte';
 
-  const RESOURCES = [
-    { key: 'cpu', label: 'CPU' },
-    { key: 'mem', label: 'Memory' },
-    { key: 'net', label: 'Network' },
-    { key: 'io', label: 'Disk IO' },
-    { key: 'gpu', label: 'GPU' },
-  ];
+  // initialResource: App.svelte's route table passes $route.params.resource
+  // straight through (the "#/top/:resource" pattern -- see router.ts),
+  // same convention as ContainerDetail's own name prop. Read ONCE to seed
+  // `resource` below, not kept live-bound -- once this view has mounted,
+  // its own tab clicks own the selection, the same "seed once" contract
+  // TopBarRow's Tween already uses for row.value.
+  let { initialResource = undefined } = $props();
+
   const WINDOWS = [
     { key: 'now', label: 'Now' },
     { key: '1h', label: '1h' },
@@ -33,9 +35,15 @@
   // -- the peak-of-a-sum caption below only applies to these.
   const SUMMED_RESOURCES = new Set(['net', 'io', 'gpu']);
   const FORMATTERS = { cpu: fmtPct, mem: fmtBytes, net: fmtRate, io: fmtRate, gpu: fmtPct };
+  // SECONDARY_FORMATTERS mirrors FORMATTERS but is deliberately partial --
+  // only cpu rows carry a secondary value (topFromFrame's own
+  // resourceSecondaryMetricKey; a fetched, non-"now" window's rows never
+  // have one either way, see fetchTop's TopRow shape), so every other key
+  // is simply absent rather than mapped to a no-op formatter.
+  const SECONDARY_FORMATTERS = { cpu: fmtCores };
   const WINDOW_LABEL = { '1h': 'the last hour', '24h': 'the last 24 hours', '7d': 'the last 7 days' };
 
-  let resource = $state('cpu');
+  let resource = $state(untrack(() => (isTopResource(initialResource) ? initialResource : 'cpu')));
   let windowKey = $state('now');
   let agg = $state('avg');
 
@@ -97,14 +105,14 @@
   <h1 class="page-title">Top Consumers</h1>
 
   <div class="top-consumers__controls">
-    <div class="top-consumers__tabs" role="tablist" aria-label="Resource">
-      {#each RESOURCES as r (r.key)}
+    <div class="segmented" role="tablist" aria-label="Resource">
+      {#each TOP_RESOURCES as r (r.key)}
         <button
           type="button"
           role="tab"
           aria-selected={resource === r.key}
-          class="top-consumers__tab"
-          class:top-consumers__tab--active={resource === r.key}
+          class="segmented__btn"
+          class:segmented__btn--active={resource === r.key}
           onclick={() => (resource = r.key)}
         >
           {r.label}
@@ -113,12 +121,12 @@
     </div>
 
     <div class="top-consumers__row">
-      <div class="top-consumers__segmented" role="group" aria-label="Window">
+      <div class="segmented" role="group" aria-label="Window">
         {#each WINDOWS as w (w.key)}
           <button
             type="button"
-            class="top-consumers__segment"
-            class:top-consumers__segment--active={windowKey === w.key}
+            class="segmented__btn"
+            class:segmented__btn--active={windowKey === w.key}
             onclick={() => (windowKey = w.key)}
           >
             {w.label}
@@ -127,19 +135,19 @@
       </div>
 
       {#if showAggToggle}
-        <div class="top-consumers__segmented" role="group" aria-label="Aggregation">
+        <div class="segmented" role="group" aria-label="Aggregation">
           <button
             type="button"
-            class="top-consumers__segment"
-            class:top-consumers__segment--active={agg === 'avg'}
+            class="segmented__btn"
+            class:segmented__btn--active={agg === 'avg'}
             onclick={() => (agg = 'avg')}
           >
             Average
           </button>
           <button
             type="button"
-            class="top-consumers__segment"
-            class:top-consumers__segment--active={agg === 'peak'}
+            class="segmented__btn"
+            class:segmented__btn--active={agg === 'peak'}
             onclick={() => (agg = 'peak')}
           >
             Peak
@@ -161,7 +169,13 @@
     {:else if loading}
       <p class="microlabel top-consumers__loading">Loading…</p>
     {:else}
-      <TopBarList {rows} formatValue={FORMATTERS[resource]} {emptyMessage} live={windowKey === 'now'} />
+      <TopBarList
+        {rows}
+        formatValue={FORMATTERS[resource]}
+        formatSecondary={SECONDARY_FORMATTERS[resource]}
+        {emptyMessage}
+        live={windowKey === 'now'}
+      />
     {/if}
   </div>
 </div>
@@ -177,55 +191,10 @@
     flex-direction: column;
     gap: 0.6rem;
   }
-  .top-consumers__tabs {
-    display: flex;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-  .top-consumers__tab {
-    min-height: 40px;
-    padding: 0 0.9rem;
-    border-radius: 6px;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    background: transparent;
-    color: var(--ink-2);
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-  .top-consumers__tab--active {
-    background: color-mix(in oklab, var(--series-1) 15%, transparent);
-    border-color: var(--series-1);
-    color: var(--series-1);
-    font-weight: 500;
-  }
   .top-consumers__row {
     display: flex;
     gap: 0.75rem;
     flex-wrap: wrap;
-  }
-  .top-consumers__segmented {
-    display: inline-flex;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .top-consumers__segment {
-    min-height: 40px;
-    padding: 0 0.75rem;
-    border: none;
-    border-right: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    background: transparent;
-    color: var(--ink-2);
-    font-size: 0.8rem;
-    cursor: pointer;
-  }
-  .top-consumers__segment:last-child {
-    border-right: none;
-  }
-  .top-consumers__segment--active {
-    background: color-mix(in oklab, var(--series-1) 15%, transparent);
-    color: var(--series-1);
-    font-weight: 500;
   }
   .top-consumers__caption {
     margin: 0;

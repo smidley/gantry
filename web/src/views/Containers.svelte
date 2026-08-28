@@ -236,12 +236,15 @@
       </table>
     </div>
 
-    <!-- Mobile: cards instead of table rows. -->
-    <div class="containers-view__cards flex md:hidden">
+    <!-- Mobile: rail rows instead of table rows, one shared card (same
+         "list lives in one card, hairline between rows" convention as
+         the disk list/event feed) rather than a stack of same-shape
+         per-container cards. -->
+    <div class="card containers-view__cards flex md:hidden">
       {#each runningNames as name (name)}
         {@const c = live.frame?.containers?.[name]}
         {#if c}
-          <a class="card containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>
+          <a class="containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>
             <div class="containers-view__card-head">
               <HealthDot status={containerHealthStatus(c.state, c.health)} />
               <ContainerIcon {name} icon={c.icon} size={20} />
@@ -277,11 +280,11 @@
             </tbody>
           </table>
         </div>
-        <div class="containers-view__cards flex md:hidden">
+        <div class="card containers-view__cards flex md:hidden">
           {#each stoppedNames as name (name)}
             {@const c = live.frame?.containers?.[name]}
             {#if c}
-              <a class="card containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>
+              <a class="containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>
                 <div class="containers-view__card-head">
                   <HealthDot status={containerHealthStatus(c.state, c.health)} />
                   <ContainerIcon {name} icon={c.icon} size={20} />
@@ -354,8 +357,11 @@
   }
   .containers-view__cards {
     flex-direction: column;
-    gap: 0.5rem;
+    padding: 0;
   }
+  /* Rail row, not a card -- was one .card per container (up to 20+ of
+     them stacked); a hairline between rows instead, matching the disk
+     list/event feed convention. */
   .containers-view__card {
     padding: 0.75rem 1rem;
     display: flex;
@@ -363,6 +369,10 @@
     gap: 0.4rem;
     text-decoration: none;
     color: var(--ink);
+    border-bottom: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+  }
+  .containers-view__card:last-child {
+    border-bottom: none;
   }
   .containers-view__card-head {
     display: flex;

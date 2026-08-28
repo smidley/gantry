@@ -24,6 +24,7 @@ type Collector struct {
 	rates    *collect.RateTracker
 
 	memTotalBytes atomic.Uint64
+	numCPU        atomic.Int64
 	deviceMap     atomic.Pointer[map[string]string]
 
 	havePrevCPU bool
@@ -51,6 +52,15 @@ func (c *Collector) Probe(context.Context) collect.Status {
 // bytes, or 0 before the first tick. Used by the docker collector as the
 // mem.pct denominator.
 func (c *Collector) MemTotal() uint64 { return c.memTotalBytes.Load() }
+
+// NumCPU returns the most recently observed host logical CPU count (the
+// number of "cpuN" lines in /proc/stat), or 0 before the first tick. Used
+// by the docker collector as the cpu.pct host-share denominator: counting
+// /proc/stat's own lines is what cpu.total (above) is already implicitly
+// normalized against, so this is the one source that can't drift from it,
+// unlike trusting runtime.NumCPU() to reflect the container's own
+// --pid=host affinity mask.
+func (c *Collector) NumCPU() int { return int(c.numCPU.Load()) }
 
 // DeviceName resolves a "major:minor" block device identifier (as reported
 // by a container's cgroup io.stat) to its device name, e.g. "sda". Safe
@@ -91,6 +101,7 @@ func (c *Collector) tickCPU(now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("host: parse stat: %w", err)
 	}
+	c.numCPU.Store(int64(len(perCore)))
 
 	if c.havePrevCPU {
 		ts := now.Unix()

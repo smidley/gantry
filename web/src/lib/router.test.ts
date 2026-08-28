@@ -24,6 +24,10 @@ describe('parseHash', () => {
     });
   });
 
+  it('parses a top route with a resource param, for the Overview switcher deep link', () => {
+    expect(parseHash('#/top/mem')).toEqual({ name: 'top', params: { resource: 'mem' } });
+  });
+
   it('URL-decodes a name param', () => {
     expect(parseHash('#/containers/my%20app')).toEqual({
       name: 'container-detail',

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { diskRole, diskTempState, diskUsagePct, sortDiskEntities } from './disks';
+import { diskKind, diskMediaType, diskRole, diskTempState, diskUsagePct, sortDiskEntities } from './disks';
 
 describe('diskRole', () => {
   it('classifies parity slots, including dual parity', () => {
@@ -69,6 +69,53 @@ describe('diskTempState', () => {
     expect(diskTempState({})).toEqual({ kind: 'no-sensor' });
     expect(diskTempState(undefined)).toEqual({ kind: 'no-sensor' });
     expect(diskTempState(null)).toEqual({ kind: 'no-sensor' });
+  });
+});
+
+describe('diskMediaType', () => {
+  it('reads rotational=0 as solid-state', () => {
+    expect(diskMediaType({ rotational: 0 })).toBe('ssd');
+  });
+
+  it('reads rotational=1 as spinning', () => {
+    expect(diskMediaType({ rotational: 1 })).toBe('hdd');
+  });
+
+  it('treats any nonzero rotational reading as spinning, not just exactly 1', () => {
+    expect(diskMediaType({ rotational: 2 })).toBe('hdd');
+  });
+
+  it('returns null when rotational is absent -- unknown, not a guess', () => {
+    expect(diskMediaType({})).toBeNull();
+    expect(diskMediaType(undefined)).toBeNull();
+    expect(diskMediaType(null)).toBeNull();
+  });
+});
+
+describe('diskKind', () => {
+  it('reads nvme/usb straight from disk_meta -- signals rotational alone can never carry', () => {
+    expect(diskKind({ kind: 'nvme' }, { rotational: 0 })).toBe('nvme');
+    expect(diskKind({ kind: 'usb' }, { rotational: 1 })).toBe('usb');
+  });
+
+  it('reads hdd/ssd from disk_meta too, agreeing with the legacy rotational read', () => {
+    expect(diskKind({ kind: 'hdd' }, { rotational: 1 })).toBe('hdd');
+    expect(diskKind({ kind: 'ssd' }, { rotational: 0 })).toBe('ssd');
+  });
+
+  it('falls back to the legacy rotational-only read when disk_meta has no entry for this slot', () => {
+    expect(diskKind(undefined, { rotational: 0 })).toBe('ssd');
+    expect(diskKind(null, { rotational: 1 })).toBe('hdd');
+    expect(diskKind({}, { rotational: 1 })).toBe('hdd');
+  });
+
+  it('falls back when disk_meta.kind is present but unrecognized (e.g. a future server, an older enum)', () => {
+    expect(diskKind({ kind: 'exotic' }, { rotational: 0 })).toBe('ssd');
+  });
+
+  it('returns null when neither disk_meta nor rotational says anything', () => {
+    expect(diskKind(undefined, {})).toBeNull();
+    expect(diskKind(undefined, undefined)).toBeNull();
   });
 });
 

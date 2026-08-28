@@ -20,9 +20,19 @@ type SnapshotDTO struct {
 	Host          map[string]float64            `json:"host"`       // metric -> latest
 	Containers    map[string]ContainerDTO       `json:"containers"` // name -> meta+metrics
 	Disks         map[string]map[string]float64 `json:"disks"`
-	Unraid        map[string]map[string]float64 `json:"unraid"` // entity ("array"|"docker") -> metric -> value
+	DiskMeta      map[string]DiskMetaDTO        `json:"disk_meta"` // slot -> device+type meta (strings can't ride Disks' float64 map)
+	Unraid        map[string]map[string]float64 `json:"unraid"`    // entity ("array"|"docker") -> metric -> value
 	GPU           map[string]map[string]float64 `json:"gpu"`
 	Sources       map[string]string             `json:"sources"` // collector name -> "ok" | unavailability detail
+}
+
+// DiskMetaDTO is one disk slot's device name and classified type
+// (hdd|ssd|nvme|usb, see unraid.DiskKind) — the frontend's type-badge
+// source of truth; rotational alone can't tell a USB flash stick or an
+// NVMe pool member apart from a plain spinning/SATA-SSD disk.
+type DiskMetaDTO struct {
+	Device string `json:"device"`
+	Kind   string `json:"kind"`
 }
 
 // ContainerDTO is one container's inventory metadata plus its latest

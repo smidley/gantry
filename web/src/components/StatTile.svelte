@@ -3,14 +3,25 @@
   status dot -- the basic building block for Overview's top row and
   similar summary strips in later views.
 
-  value2/unit2/label2 (additive, optional -- Task 14) render a second,
-  smaller readout line below the hero number: Overview's Net and Disk IO
-  tiles each need "two rates in one tile" (down+up, read+write), which
-  the original single value/unit shape had no room for. The sparkline
-  stays single-series either way (charting value's own direction) --
-  cramming two lines into a 28px-tall inline chart would be noise, not
-  signal, so the second rate is text-only. value2 is never touched by
-  hover-scrub below -- it has no sparkline of its own to scrub against.
+  liveValue2/formatValue2/unit2/label2 (additive, optional -- Task 14;
+  scrub-parity corrective pass) render a second, smaller readout line
+  below the hero number: Overview's Net and Disk IO tiles each need "two
+  rates in one tile" (down+up, read+write), which the original single
+  value/unit shape had no room for. The sparkline stays single-series
+  either way (charting the PRIMARY value's own direction) -- cramming
+  two lines into a 28px-tall inline chart would be noise, not signal, so
+  the second rate is text-only.
+
+  value2Points (optional) is what makes value2 scrub-aware: without it,
+  value2 just live-ticks off liveValue2 same as before. WITH it, value2
+  gets its own numberTween/scrubHit pair, an exact mirror of the primary
+  value's own mechanism below, reading the SAME bus.ts -- Scott's own
+  correction: the hero number used to pin correctly while scrubbing but
+  the secondary rate kept live-ticking, since it had no ring of its own
+  to look a past instant up in. Every caller that has one (Overview's
+  Network/Disk IO rows) passes it; a caller with no natural ring for its
+  second value (none exist today) can still pass liveValue2 alone and
+  get a plain live-only reading, same as the pre-fix behavior.
 
   liveValue/formatValue (additive -- hover-scrub) replace what used to be
   a single pre-formatted `value` string: StatTile now owns the hero
@@ -25,6 +36,20 @@
   care whether ITS OWN sparkline is the one being hovered or some OTHER
   tile/row is; it just renders its own metric's value at the bus's
   shared ts whenever one is published, same as every other owner.
+
+  bare (additive, optional -- D2 Overview) swaps the card-chrome
+  presentation for a borderless instrument-rail row: microlabel on the
+  left, the big value with its optional value2 stacked directly beneath
+  it (both right-aligned) on the right, and a full-width sparkline below
+  that -- a bottom hairline separates ROWS, never drawn between a row's
+  own value and its value2 (Scott's own correction: the two used to be
+  split across the sparkline, reading as if value2 belonged to the NEXT
+  row). Every other caller (Settings' own two tiles) leaves `bare` false
+  and renders byte-for-byte as before. Nothing about the underlying
+  mechanism changes either way -- same Tween, same scrub-bus wiring,
+  same Sparkline instance -- `bare` only picks which markup arrangement
+  wraps the identical value/sparkline snippets below, so hover-scrub and
+  the live tween keep working identically in both modes.
 -->
 <script>
   import { Tween } from 'svelte/motion';
@@ -48,9 +73,12 @@
     sparklinePoints = undefined,
     sparklineColor = 'var(--series-1)',
     status = undefined,
-    value2 = undefined,
+    liveValue2 = undefined,
+    value2Points = undefined,
+    formatValue2 = (v) => String(v),
     unit2 = '',
     label2 = '',
+    bare = false,
   } = $props();
 
   // scrubHit is null while live; {ts, value} whenever the shared bus has
@@ -74,6 +102,27 @@
     }
   });
 
+  // value2's own scrub-aware tween -- an exact mirror of the primary
+  // value's pair above, reading the same shared bus.ts against ITS OWN
+  // ring (value2Points) rather than sparklinePoints, so scrubbing pins
+  // EVERY number on the tile at once, not just the hero one. Degrades
+  // to a plain live-only reading (no scrub pin) when a caller has no
+  // ring to pass -- scrubHit2 is simply always null in that case, the
+  // same "no sparklinePoints" degradation the primary value already
+  // has.
+  let scrubHit2 = $derived(scrubBus.ts === null || !value2Points ? null : nearestPointAt(value2Points, scrubBus.ts));
+  let number2Tween = new Tween(untrack(() => liveValue2 ?? 0), { duration: LIVE_TWEEN_MS, easing: cubicOut });
+
+  $effect(() => {
+    if (liveValue2 === undefined) return;
+    const reduced = prefersReducedMotion.current;
+    if (scrubHit2) {
+      number2Tween.set(scrubHit2.value, { duration: reduced ? 0 : SCRUB_TWEEN_MS, easing: cubicOut });
+    } else {
+      number2Tween.set(liveValue2, { duration: reduced ? 0 : LIVE_TWEEN_MS, easing: cubicOut });
+    }
+  });
+
   // chipText retains its last real value across scrubHit going back to
   // null (rather than blanking instantly) so the corner chip's own CSS
   // fade-out (below) fades out its last real reading in place, matching
@@ -84,25 +133,48 @@
   });
 </script>
 
-<div class="card stat-tile">
-  <div class="stat-tile__head">
-    <span class="microlabel">{label}</span>
-    {#if status}<HealthDot {status} />{/if}
-  </div>
-  <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
-  <div class="stat-tile__value">
-    <span class="stat-tile__number tabular-nums">{formatValue(numberTween.current)}</span>
-    {#if unit}<span class="stat-tile__unit">{unit}</span>{/if}
-  </div>
-  {#if value2 !== undefined}
-    <div class="stat-tile__value2 tabular-nums">
-      {#if label2}<span class="stat-tile__value2-label">{label2}</span>{/if}
-      {value2}
-      {#if unit2}<span class="stat-tile__unit">{unit2}</span>{/if}
+{#snippet valueBlock()}
+  <span class="stat-tile__number tabular-nums">{formatValue(numberTween.current)}</span>
+  {#if unit}<span class="stat-tile__unit">{unit}</span>{/if}
+{/snippet}
+
+{#snippet value2Block()}
+  {#if label2}<span class="stat-tile__value2-label">{label2}</span>{/if}
+  {formatValue2(number2Tween.current)}
+  {#if unit2}<span class="stat-tile__unit">{unit2}</span>{/if}
+{/snippet}
+
+<div class="stat-tile" class:card={!bare} class:stat-tile--bare={bare}>
+  {#if bare}
+    <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
+    <div class="stat-tile__row">
+      <span class="stat-tile__row-label">
+        <span class="microlabel">{label}</span>
+        {#if status}<HealthDot {status} />{/if}
+      </span>
+      <div class="stat-tile__row-value-stack">
+        <span class="stat-tile__value">{@render valueBlock()}</span>
+        {#if liveValue2 !== undefined}
+          <span class="stat-tile__value2 tabular-nums">{@render value2Block()}</span>
+        {/if}
+      </div>
     </div>
-  {/if}
-  {#if sparklinePoints}
-    <Sparkline points={sparklinePoints} color={sparklineColor} />
+    {#if sparklinePoints}
+      <Sparkline points={sparklinePoints} color={sparklineColor} />
+    {/if}
+  {:else}
+    <div class="stat-tile__head">
+      <span class="microlabel">{label}</span>
+      {#if status}<HealthDot {status} />{/if}
+    </div>
+    <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
+    <div class="stat-tile__value">{@render valueBlock()}</div>
+    {#if liveValue2 !== undefined}
+      <div class="stat-tile__value2 tabular-nums">{@render value2Block()}</div>
+    {/if}
+    {#if sparklinePoints}
+      <Sparkline points={sparklinePoints} color={sparklineColor} />
+    {/if}
   {/if}
 </div>
 
@@ -127,6 +199,66 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+  }
+  /* bare (D2's instrument rail): no card box at all -- a hairline seam
+     between rows instead, computed off --ink like every other hairline
+     in this app (SourcesBanner, EventFeedItem, ...), not a new token. */
+  .stat-tile--bare {
+    padding: 1.05rem 0;
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    border-bottom: 1px solid color-mix(in oklab, var(--ink) 14%, transparent);
+  }
+  .stat-tile--bare:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+  .stat-tile--bare:first-child {
+    padding-top: 0;
+  }
+  .stat-tile--bare:hover {
+    border-color: color-mix(in oklab, var(--series-1) 35%, transparent);
+  }
+  .stat-tile__row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .stat-tile__row-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  /* value + value2 stack directly on top of each other, right-aligned --
+     the two must never be separated by the sparkline (that's what read
+     as value2 belonging to the NEXT row); both live in this one block,
+     ABOVE the sparkline, so the row's own hairline (on .stat-tile--bare
+     itself, below everything) is the only line anywhere near either. */
+  .stat-tile__row-value-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.15rem;
+  }
+  /* The chip floats over the whole row (top-right, within its own
+     padding) so it never reserves space or disturbs the value stack's
+     layout -- same "overlay, don't push" contract as the card variant
+     below, just anchored to the bare row's own box instead. */
+  .stat-tile--bare .stat-tile__chip {
+    top: 0;
+    right: 0;
+  }
+  .stat-tile--bare .stat-tile__number {
+    font-size: 1.6rem;
+  }
+  /* Sparklines are a real instrument here, not a decorative crumb --
+     floored at 120px regardless of how uPlot's own initial-width read
+     happens to land, so the rail's own charts always breathe. */
+  .stat-tile--bare :global(.sparkline) {
+    min-width: 7.5rem;
   }
   .stat-tile__chip {
     position: absolute;
@@ -160,9 +292,17 @@
     align-items: baseline;
     gap: 0.3rem;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: 0.9rem;
     color: var(--ink-2);
     margin-top: -0.25rem;
+  }
+  /* The stack's own gap (above) replaces the card variant's negative
+     margin-top -- that value was tuned to pull value2 up snug against
+     the hero number when it followed the number directly in normal
+     flow; here it would fight the stack's gap and crowd the two lines
+     into each other instead. */
+  .stat-tile__row-value-stack .stat-tile__value2 {
+    margin-top: 0;
   }
   .stat-tile__value2-label {
     color: var(--ink-2);

@@ -32,7 +32,19 @@
 {#each otherDegraded as [name, detail] (name)}
   <div class="card sources-banner">
     <HealthDot status="warning" label={name} />
-    <span class="sources-banner__detail">{detail}</span>
+    <span class="sources-banner__detail">
+      {detail}
+      {#if name === 'pressure'}
+        <a
+          class="sources-banner__learn-more"
+          href="https://github.com/smidley/gantry/blob/main/docs/psi.md"
+          target="_blank"
+          rel="noopener"
+        >
+          Learn more &rarr;
+        </a>
+      {/if}
+    </span>
     <button type="button" class="sources-banner__dismiss" onclick={() => dismiss(name)} aria-label="Dismiss {name} notice">
       &times;
     </button>
@@ -56,6 +68,15 @@
     font-size: 0.85rem;
     color: var(--ink-2);
     min-width: 0;
+  }
+  .sources-banner__learn-more {
+    margin-left: 0.4em;
+    color: var(--series-1);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .sources-banner__learn-more:hover {
+    text-decoration: underline;
   }
   .sources-banner__dismiss {
     min-width: 40px;

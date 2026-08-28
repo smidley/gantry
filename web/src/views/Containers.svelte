@@ -31,7 +31,7 @@
   // it becomes the active column (sortIndicator only renders once
   // active), which a screen reader user would hit on every page load.
   const COLUMNS = [
-    { key: 'health', label: '', ariaName: 'Health', sortable: true },
+    { key: 'health', label: 'ST', ariaName: 'Health', sortable: true },
     { key: 'name', label: 'Name', sortable: true },
     { key: 'cpu', label: 'CPU', sortable: true, numeric: true },
     { key: 'mem', label: 'Mem', sortable: true, numeric: true },

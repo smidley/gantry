@@ -31,6 +31,23 @@ describe('sortContainerNames', () => {
     expect(sortContainerNames(names, containers, 'health', 'desc', 0)).toEqual(['beta', 'gamma', 'alpha']);
   });
 
+  it('sorts all four health tiers on desc, tie-breaking equal severities by name', () => {
+    const mixed: Record<string, ContainerDTO> = {
+      zeta: { state: 'exited', health: '', image: '', metrics: {} }, // serious
+      yankee: { state: 'running', health: 'unhealthy', image: '', metrics: {} }, // critical
+      alpha: { state: 'running', health: '', image: '', metrics: {} }, // good
+      bravo: { state: 'created', health: '', image: '', metrics: {} }, // warning
+      xray: { state: 'exited', health: '', image: '', metrics: {} }, // serious, ties with zeta
+    };
+    expect(sortContainerNames(Object.keys(mixed), mixed, 'health', 'desc', 0)).toEqual([
+      'yankee',
+      'xray',
+      'zeta',
+      'bravo',
+      'alpha',
+    ]);
+  });
+
   it('missing metrics default to 0 rather than sorting unpredictably', () => {
     const withGpu: Record<string, ContainerDTO> = {
       alpha: { state: 'running', health: '', image: '', metrics: { 'gpu.video.busy_pct': 15 } },

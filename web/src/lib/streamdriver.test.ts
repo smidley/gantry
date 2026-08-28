@@ -1,14 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
   advanceHeadState,
-  easeOutCubic,
   gateReducer,
   headValue,
   initialGateState,
   isDriverActive,
+  isReconnectGap,
   lerp,
+  linear,
   liveWindowRange,
+  MAX_CADENCE_MS,
+  MIN_CADENCE_MS,
   shouldBroadcast,
+  updateCadenceEma,
   type GateState,
   type HeadState,
 } from './streamdriver';
@@ -30,19 +34,20 @@ describe('lerp', () => {
   });
 });
 
-describe('easeOutCubic', () => {
+describe('linear', () => {
   it('starts at 0 and ends at 1', () => {
-    expect(easeOutCubic(0)).toBe(0);
-    expect(easeOutCubic(1)).toBe(1);
+    expect(linear(0)).toBe(0);
+    expect(linear(1)).toBe(1);
   });
 
   it('clamps t below 0 to the start and above 1 to the end', () => {
-    expect(easeOutCubic(-1)).toBe(0);
-    expect(easeOutCubic(2)).toBe(1);
+    expect(linear(-1)).toBe(0);
+    expect(linear(2)).toBe(1);
   });
 
-  it('front-loads progress (fast start, slow finish): more than half done by the midpoint', () => {
-    expect(easeOutCubic(0.5)).toBeCloseTo(0.875, 10);
+  it('progresses at constant velocity -- exactly half done at the midpoint, unlike a front-loaded curve', () => {
+    expect(linear(0.5)).toBe(0.5);
+    expect(linear(0.25)).toBe(0.25);
   });
 });
 
@@ -51,15 +56,15 @@ describe('headValue', () => {
     expect(headValue(10, 50, 1000, 1000)).toBe(10);
   });
 
-  it('reads as targetValue once the ease duration has fully elapsed', () => {
+  it('reads as targetValue once the glide duration has fully elapsed', () => {
     expect(headValue(10, 50, 1000, 1000 + 1500)).toBe(50);
     expect(headValue(10, 50, 1000, 1000 + 5000)).toBe(50); // well past duration, still settled
   });
 
-  it('follows the easeOutCubic curve mid-flight, not a linear one', () => {
-    // t = 0.5 of the default 1500ms duration -> easeOutCubic(0.5) = 0.875
+  it('follows a linear curve mid-flight, not a front-loaded one', () => {
+    // t = 0.5 of the default 1500ms duration -> linear(0.5) = 0.5
     const v = headValue(0, 100, 1000, 1000 + 750);
-    expect(v).toBeCloseTo(87.5, 10);
+    expect(v).toBeCloseTo(50, 10);
   });
 
   it('honors a caller-supplied duration instead of the 1500ms default', () => {
@@ -67,7 +72,7 @@ describe('headValue', () => {
     expect(headValue(0, 100, 1000, 1400, 400)).toBe(100); // fully elapsed at 400ms
   });
 
-  it('snaps straight to target when durationMs is 0 (reduced motion)', () => {
+  it('snaps straight to target when durationMs is 0 (reduced motion, or a reconnect gap)', () => {
     expect(headValue(0, 100, 1000, 1000, 0)).toBe(100);
   });
 
@@ -79,50 +84,113 @@ describe('headValue', () => {
 });
 
 describe('advanceHeadState', () => {
-  it('starts an unanimated ease (prevValue === targetValue) for the first real value', () => {
+  it('starts an unanimated glide (prevValue === targetValue) for the first real value', () => {
     const s = advanceHeadState(null, 42, 1000);
-    expect(s).toEqual({ prevValue: 42, targetValue: 42, arrivalMs: 1000 });
+    expect(s).toEqual({ prevValue: 42, targetValue: 42, arrivalMs: 1000, durationMs: 1500 });
   });
 
   it('keeps the existing state when the raw value has not actually changed', () => {
-    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 1000 };
+    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 1000, durationMs: 1500 };
     expect(advanceHeadState(prev, 50, 1200)).toBe(prev); // same reference, not just equal
   });
 
-  // Regression: re-arrival mid-ease must continue from the value CURRENTLY
+  // Regression: re-arrival mid-glide must continue from the value CURRENTLY
   // ON SCREEN, not restart from the old target -- getting this wrong is
   // exactly the one-frame jump smooth-streaming exists to remove. Trace:
-  // an ease from 10 toward 50 starts at t=0 (arrivalMs=0); a new frame
-  // reports 80 at nowMs=300, 1/5 of the way through the default 1500ms
-  // ease. At that instant the display reads headValue(10,50,0,300) --
-  // easeOutCubic(0.2) = 1-0.8^3 = 0.488, so 10 + 0.488*40 = 29.52 -- and
-  // that, not the old target 50, must become the new ease's prevValue.
-  it('seeds the new ease from the currently-displayed value, not the old target', () => {
-    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 0 };
+  // a glide from 10 toward 50 starts at t=0 (arrivalMs=0, durationMs=1500);
+  // a new frame reports 80 at nowMs=300, 1/5 of the way through that leg.
+  // At that instant the display reads headValue(10,50,0,300,1500) --
+  // linear(0.2) = 0.2, so 10 + 0.2*40 = 18 -- and that, not the old target
+  // 50, must become the new glide's prevValue.
+  it('seeds the new glide from the currently-displayed value, not the old target', () => {
+    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 0, durationMs: 1500 };
     const next = advanceHeadState(prev, 80, 300);
-    expect(next.prevValue).toBeCloseTo(29.52, 10);
+    expect(next.prevValue).toBeCloseTo(18, 10);
     expect(next.targetValue).toBe(80);
     expect(next.arrivalMs).toBe(300);
   });
 
   it('renders the seeded value immediately, proving no jump at the instant of re-arrival', () => {
-    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 0 };
+    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 0, durationMs: 1500 };
     const next = advanceHeadState(prev, 80, 300);
     // At the exact moment `next` takes effect (nowMs === next.arrivalMs),
     // the displayed value must equal what was ALREADY on screen the
     // instant before -- headValue(...) at t=0 returns prevValue verbatim,
-    // so this only holds if seeding used the live 29.52, not the buggy 50.
-    expect(headValue(next.prevValue, next.targetValue, next.arrivalMs, 300)).toBeCloseTo(29.52, 10);
-    expect(headValue(next.prevValue, next.targetValue, next.arrivalMs, 300)).not.toBe(50);
+    // so this only holds if seeding used the live 18, not the buggy 50.
+    expect(headValue(next.prevValue, next.targetValue, next.arrivalMs, 300, next.durationMs)).toBeCloseTo(18, 10);
+    expect(headValue(next.prevValue, next.targetValue, next.arrivalMs, 300, next.durationMs)).not.toBe(50);
   });
 
-  it('honors a caller-supplied durationMs when computing the seed (reduced motion already settled)', () => {
-    // durationMs=0 means the PRIOR ease had already snapped straight to
-    // its target, so re-arriving mid-"ease" (there is none) must seed
-    // from that settled target, same number either way here.
-    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 0 };
+  it("seeds off the OLD leg's own duration even when a new (different) duration is supplied for the new leg", () => {
+    // The old leg was a fast 400ms scrub-style glide, already 3/4 settled
+    // by nowMs=300 (t=0.75 of 400ms) -- linear(0.75) = 0.75, so
+    // 10 + 0.75*40 = 40. A newly-measured 2500ms cadence for the NEW leg
+    // must not retroactively change how far along the OLD one had gotten.
+    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 0, durationMs: 400 };
+    const next = advanceHeadState(prev, 80, 300, 2500);
+    expect(next.prevValue).toBeCloseTo(40, 10);
+    expect(next.durationMs).toBe(2500); // the NEW leg carries the newly-measured duration
+  });
+
+  it('honors a caller-supplied durationMs of 0 for the OLD leg when computing the seed (reduced motion already settled)', () => {
+    // durationMs=0 means the PRIOR leg had already snapped straight to
+    // its target, so re-arriving mid-"glide" (there is none) must seed
+    // from that settled target.
+    const prev: HeadState = { prevValue: 10, targetValue: 50, arrivalMs: 0, durationMs: 0 };
     const next = advanceHeadState(prev, 80, 300, 0);
     expect(next.prevValue).toBe(50);
+  });
+});
+
+describe('updateCadenceEma', () => {
+  it('seeds straight from the first clamped delta when there is no prior estimate', () => {
+    expect(updateCadenceEma(null, 2000)).toBe(2000);
+  });
+
+  it('clamps a seed delta below MIN_CADENCE_MS up to the floor', () => {
+    expect(updateCadenceEma(null, 200)).toBe(MIN_CADENCE_MS);
+  });
+
+  it('clamps a seed delta above MAX_CADENCE_MS down to the ceiling', () => {
+    expect(updateCadenceEma(null, 30_000)).toBe(MAX_CADENCE_MS);
+  });
+
+  it('blends a subsequent delta by alpha toward the new (clamped) value', () => {
+    // prevEma=2000, delta=3000, alpha=0.3 -> 2000 + 0.3*(3000-2000) = 2300
+    expect(updateCadenceEma(2000, 3000, 0.3)).toBeCloseTo(2300, 10);
+  });
+
+  it('a single wild outlier nudges the estimate by at most alpha of the clamp range, not the raw delta', () => {
+    // delta=60s clamps to MAX_CADENCE_MS (4000) before blending: 2000 +
+    // 0.3*(4000-2000) = 2600 -- nowhere near what blending the raw 60000
+    // unclamped would produce.
+    expect(updateCadenceEma(2000, 60_000, 0.3)).toBeCloseTo(2600, 10);
+  });
+
+  it('stays within [MIN_CADENCE_MS, MAX_CADENCE_MS] no matter how many extreme deltas accumulate', () => {
+    let ema: number | null = 2000;
+    for (let i = 0; i < 50; i++) ema = updateCadenceEma(ema, 999_999);
+    expect(ema).toBeLessThanOrEqual(MAX_CADENCE_MS);
+    ema = 2000;
+    for (let i = 0; i < 50; i++) ema = updateCadenceEma(ema, 1);
+    expect(ema).toBeGreaterThanOrEqual(MIN_CADENCE_MS);
+  });
+});
+
+describe('isReconnectGap', () => {
+  it('is false for an ordinary, even slightly jittery cadence', () => {
+    expect(isReconnectGap(1900)).toBe(false);
+    expect(isReconnectGap(MAX_CADENCE_MS)).toBe(false); // inclusive at the boundary
+  });
+
+  it('is true once the delta exceeds the clamp ceiling -- a stalled tab or an SSE reconnect', () => {
+    expect(isReconnectGap(MAX_CADENCE_MS + 1)).toBe(true);
+    expect(isReconnectGap(60_000)).toBe(true);
+  });
+
+  it('honors a caller-supplied threshold instead of the default MAX_CADENCE_MS', () => {
+    expect(isReconnectGap(5000, 10_000)).toBe(false);
+    expect(isReconnectGap(15_000, 10_000)).toBe(true);
   });
 });
 

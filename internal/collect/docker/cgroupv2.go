@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -357,6 +358,39 @@ func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 	}
 }
 
+// hostCoresOrNumCPU returns HostCores(), falling back to runtime.NumCPU()
+// when it's zero/unset (host collector hasn't ticked yet, or was never
+// wired) -- the same last-resort every host-share metric below already
+// relies on.
+func (c *Collector) hostCoresOrNumCPU() int {
+	if hc := c.HostCores(); hc > 0 {
+		return hc
+	}
+	return runtime.NumCPU()
+}
+
+// effectiveCPUAllocCores resolves one alloc's CPU ceiling into a single
+// core count against hostCores: a quota always wins outright when set; a
+// cpuset pin only counts when it actually narrows the container below
+// the host's own core count (cpuset.cpus.effective defaults to every
+// host core when nothing is pinned, which must read as unlimited rather
+// than "restricted to N cores" -- and hostCores itself unknown, <= 0,
+// must not be treated as a restriction either); when both are set, the
+// tighter of the two wins.
+func effectiveCPUAllocCores(a alloc, hostCores int) (cores float64, ok bool) {
+	cpusetRestricts := a.HasCPUSet && hostCores > 0 && a.CPUSetCores < hostCores
+	switch {
+	case a.HasCPUQuota && cpusetRestricts:
+		return math.Min(a.CPUQuotaCores, float64(a.CPUSetCores)), true
+	case a.HasCPUQuota:
+		return a.CPUQuotaCores, true
+	case cpusetRestricts:
+		return float64(a.CPUSetCores), true
+	default:
+		return 0, false
+	}
+}
+
 // recordContainerStats turns one point-in-time cgStats reading into
 // recorded metrics, keyed by container name (the stable identity across
 // recreations — spec §5). Shared by the cgroup v2 fast path (tickStats,
@@ -379,21 +413,36 @@ func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 // collector's first tick. cpu.throttled_pct keeps the old /10,000
 // (Δusec/Δwall_usec×100): throttling has no host-wide analog to
 // normalize against.
+//
+// mem.limit_bytes/cpu.alloc_cores/pids.limit and their *_pct/*_alloc_pct
+// partners are the allocation-side half of the same idea: how much of
+// the container's OWN ceiling (not the host's) it's using. Each pair is
+// gated on its own alloc Has* flag -- unlimited (the real-box default
+// for most containers) emits neither metric of the pair, rather than a
+// misleading 0-byte/0-core/0-pid ceiling. cpu.alloc_cores is available
+// from the first tick (it describes the ceiling, not usage); cpu.alloc_pct
+// needs cpu.cores' own rate, so it only appears once that does, one tick
+// later.
 func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time) {
 	ts := now.Unix()
 	key := func(metric string) store.SeriesKey {
 		return store.SeriesKey{Kind: "container", Entity: name, Metric: metric}
 	}
 
+	hostCores := c.hostCoresOrNumCPU()
+	allocCores, hasAllocCores := effectiveCPUAllocCores(cg.Alloc, hostCores)
+	if hasAllocCores {
+		c.sink.Record(key("cpu.alloc_cores"), ts, allocCores)
+	}
+
 	if usecPerSec, ok := c.rates.Rate(name+".cpu.usage", now, float64(cg.CPUUsageUsec)); ok {
 		cores := usecPerSec / 1_000_000
 		c.sink.Record(key("cpu.cores"), ts, cores)
-		hostCores := c.HostCores()
-		if hostCores <= 0 {
-			hostCores = runtime.NumCPU()
-		}
 		if hostCores > 0 {
 			c.sink.Record(key("cpu.pct"), ts, cores/float64(hostCores)*100)
+		}
+		if hasAllocCores && allocCores > 0 {
+			c.sink.Record(key("cpu.alloc_pct"), ts, cores/allocCores*100)
 		}
 	}
 	if usecPerSec, ok := c.rates.Rate(name+".cpu.throttled", now, float64(cg.ThrottledUsec)); ok {
@@ -412,8 +461,20 @@ func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time)
 	if total := c.MemTotal(); total > 0 {
 		c.sink.Record(key("mem.pct"), ts, 100*memBytes/float64(total))
 	}
+	if cg.Alloc.HasMemLimit {
+		c.sink.Record(key("mem.limit_bytes"), ts, float64(cg.Alloc.MemLimitBytes))
+		if cg.Alloc.MemLimitBytes > 0 {
+			c.sink.Record(key("mem.limit_pct"), ts, 100*memBytes/float64(cg.Alloc.MemLimitBytes))
+		}
+	}
 
 	c.sink.Record(key("pids"), ts, float64(cg.Pids))
+	if cg.Alloc.HasPidsLimit {
+		c.sink.Record(key("pids.limit"), ts, float64(cg.Alloc.PidsLimit))
+		if cg.Alloc.PidsLimit > 0 {
+			c.sink.Record(key("pids.pct"), ts, 100*float64(cg.Pids)/float64(cg.Alloc.PidsLimit))
+		}
+	}
 
 	// io.read_bps/write_bps are the SUM of each device's own rate, not a
 	// rate computed on the summed counters: a device's cumulative counter

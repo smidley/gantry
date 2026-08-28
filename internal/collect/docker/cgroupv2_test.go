@@ -454,3 +454,248 @@ func TestRecordContainerStatsMemBytesFloorsAtZero(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 0.0, memBytes)
 }
+
+// TestEffectiveCPUAllocCores pins the allocation-side CPU decision table
+// FEATURE specifies: a quota always wins outright when set; a cpuset pin
+// only counts when it actually narrows the container below the host's
+// own core count (cpuset.cpus.effective defaults to every host core when
+// nothing is pinned, which must read as unlimited, not "restricted to N
+// cores"); when both are set, the tighter of the two applies.
+func TestEffectiveCPUAllocCores(t *testing.T) {
+	cases := []struct {
+		name      string
+		a         alloc
+		hostCores int
+		wantCores float64
+		wantOK    bool
+	}{
+		{
+			name:      "quota only",
+			a:         alloc{CPUQuotaCores: 4.0, HasCPUQuota: true},
+			hostCores: 16, wantCores: 4.0, wantOK: true,
+		},
+		{
+			name:      "cpuset pinned below host cores",
+			a:         alloc{CPUSetCores: 9, HasCPUSet: true},
+			hostCores: 16, wantCores: 9.0, wantOK: true,
+		},
+		{
+			name:      "cpuset covers every host core is unrestricted",
+			a:         alloc{CPUSetCores: 16, HasCPUSet: true},
+			hostCores: 16, wantCores: 0, wantOK: false,
+		},
+		{
+			name:      "cpuset count exceeding host cores is unrestricted",
+			a:         alloc{CPUSetCores: 20, HasCPUSet: true},
+			hostCores: 16, wantCores: 0, wantOK: false,
+		},
+		{
+			name:      "quota tighter than cpuset: quota wins",
+			a:         alloc{CPUQuotaCores: 4.0, HasCPUQuota: true, CPUSetCores: 9, HasCPUSet: true},
+			hostCores: 16, wantCores: 4.0, wantOK: true,
+		},
+		{
+			name:      "cpuset tighter than quota: cpuset wins",
+			a:         alloc{CPUQuotaCores: 10.0, HasCPUQuota: true, CPUSetCores: 9, HasCPUSet: true},
+			hostCores: 16, wantCores: 9.0, wantOK: true,
+		},
+		{
+			name:      "neither set is unlimited",
+			a:         alloc{},
+			hostCores: 16, wantCores: 0, wantOK: false,
+		},
+		{
+			name:      "cpuset set but host core count unknown must not restrict",
+			a:         alloc{CPUSetCores: 9, HasCPUSet: true},
+			hostCores: 0, wantCores: 0, wantOK: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotCores, gotOK := effectiveCPUAllocCores(c.a, c.hostCores)
+			require.Equal(t, c.wantOK, gotOK)
+			require.InDelta(t, c.wantCores, gotCores, 1e-9)
+		})
+	}
+}
+
+// TestRecordContainerStatsMemLimitEmitsBytesAndExactPct pins FEATURE's
+// worked example verbatim: 512MiB used of a 1GiB limit is 50.0%, exactly.
+func TestRecordContainerStatsMemLimitEmitsBytesAndExactPct(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+
+	c.recordContainerStats("db", cgStats{
+		MemCurrent: 536_870_912, // 512MiB, no inactive_file to subtract
+		Alloc:      alloc{MemLimitBytes: 1_073_741_824, HasMemLimit: true},
+	}, time.Unix(1000, 0))
+
+	limitBytes, ok := sink.value("db", "mem.limit_bytes")
+	require.True(t, ok)
+	require.Equal(t, 1_073_741_824.0, limitBytes)
+
+	limitPct, ok := sink.value("db", "mem.limit_pct")
+	require.True(t, ok)
+	require.Equal(t, 50.0, limitPct)
+}
+
+func TestRecordContainerStatsMemLimitZeroBytesSkipsPctButEmitsLimitBytes(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+
+	c.recordContainerStats("db", cgStats{
+		MemCurrent: 100,
+		Alloc:      alloc{MemLimitBytes: 0, HasMemLimit: true},
+	}, time.Unix(1000, 0))
+
+	limitBytes, ok := sink.value("db", "mem.limit_bytes")
+	require.True(t, ok)
+	require.Equal(t, 0.0, limitBytes)
+	_, ok = sink.value("db", "mem.limit_pct")
+	require.False(t, ok, "must not divide by a zero limit")
+}
+
+// TestRecordContainerStatsCPUAllocQuotaEmitsCoresFromFirstTick pins
+// FEATURE's "2.0 cores on a 4-core quota -> cpu.alloc_pct 50.0" worked
+// example, and that cpu.alloc_cores (the ceiling itself, not a usage
+// rate) is available from the very first tick -- unlike cpu.cores/
+// cpu.pct, which need a second sample before RateTracker has a delta.
+func TestRecordContainerStatsCPUAllocQuotaEmitsCoresFromFirstTick(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+	quota := alloc{CPUQuotaCores: 4.0, HasCPUQuota: true}
+
+	c.recordContainerStats("web", cgStats{CPUUsageUsec: 0, Alloc: quota}, time.Unix(1000, 0))
+	allocCores, ok := sink.value("web", "cpu.alloc_cores")
+	require.True(t, ok, "cpu.alloc_cores describes the ceiling, not usage -- must not need a rate warm-up")
+	require.Equal(t, 4.0, allocCores)
+	_, ok = sink.value("web", "cpu.alloc_pct")
+	require.False(t, ok, "cpu.alloc_pct needs cpu.cores' own rate, unavailable on the first tick")
+
+	// +4,000,000 usec over 2s = 2.0 cores; 2.0/4.0*100 = 50.0.
+	c.recordContainerStats("web", cgStats{CPUUsageUsec: 4_000_000, Alloc: quota}, time.Unix(1002, 0))
+	allocPct, ok := sink.value("web", "cpu.alloc_pct")
+	require.True(t, ok)
+	require.Equal(t, 50.0, allocPct)
+}
+
+// TestRecordContainerStatsCPUAllocCpusetPinnedExactPct pins FEATURE's
+// other worked example: pinned 9 of 16 cores with 1.8 cores of usage is
+// 20.0% of the allocation, exactly.
+func TestRecordContainerStatsCPUAllocCpusetPinnedExactPct(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+	c.HostCores = func() int { return 16 }
+	pinned := alloc{CPUSetCores: 9, HasCPUSet: true}
+
+	c.recordContainerStats("web", cgStats{CPUUsageUsec: 0, Alloc: pinned}, time.Unix(1000, 0))
+	// +3,600,000 usec over 2s = 1.8 cores; 1.8/9*100 = 20.0.
+	c.recordContainerStats("web", cgStats{CPUUsageUsec: 3_600_000, Alloc: pinned}, time.Unix(1002, 0))
+
+	allocCores, ok := sink.value("web", "cpu.alloc_cores")
+	require.True(t, ok)
+	require.Equal(t, 9.0, allocCores)
+	allocPct, ok := sink.value("web", "cpu.alloc_pct")
+	require.True(t, ok)
+	require.InDelta(t, 20.0, allocPct, 1e-9)
+}
+
+func TestRecordContainerStatsCPUAllocZeroCoresSkipsPctButEmitsAllocCores(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+
+	// Degenerate but parseable: a quota of literal 0. Must not divide by
+	// a zero allocation.
+	c.recordContainerStats("web", cgStats{
+		CPUUsageUsec: 1_000_000,
+		Alloc:        alloc{CPUQuotaCores: 0, HasCPUQuota: true},
+	}, time.Unix(1000, 0))
+	c.recordContainerStats("web", cgStats{
+		CPUUsageUsec: 3_000_000,
+		Alloc:        alloc{CPUQuotaCores: 0, HasCPUQuota: true},
+	}, time.Unix(1002, 0))
+
+	allocCores, ok := sink.value("web", "cpu.alloc_cores")
+	require.True(t, ok)
+	require.Equal(t, 0.0, allocCores)
+	_, ok = sink.value("web", "cpu.alloc_pct")
+	require.False(t, ok)
+}
+
+// TestRecordContainerStatsPidsLimitEmitsLimitAndExactPct pins pids'
+// allocation pair to the same "reuse the already-emitted usage number"
+// contract mem.limit_pct and cpu.alloc_pct both follow: 1024 of a 2048
+// pids.max (the real-box default on every container) is 50.0%, exactly.
+func TestRecordContainerStatsPidsLimitEmitsLimitAndExactPct(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+
+	c.recordContainerStats("web", cgStats{
+		Pids:  1024,
+		Alloc: alloc{PidsLimit: 2048, HasPidsLimit: true},
+	}, time.Unix(1000, 0))
+
+	limit, ok := sink.value("web", "pids.limit")
+	require.True(t, ok)
+	require.Equal(t, 2048.0, limit)
+	pct, ok := sink.value("web", "pids.pct")
+	require.True(t, ok)
+	require.Equal(t, 50.0, pct)
+}
+
+func TestRecordContainerStatsPidsLimitZeroSkipsPctButEmitsLimit(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+
+	c.recordContainerStats("web", cgStats{
+		Pids:  5,
+		Alloc: alloc{PidsLimit: 0, HasPidsLimit: true},
+	}, time.Unix(1000, 0))
+
+	limit, ok := sink.value("web", "pids.limit")
+	require.True(t, ok)
+	require.Equal(t, 0.0, limit)
+	_, ok = sink.value("web", "pids.pct")
+	require.False(t, ok, "must not divide by a zero limit")
+}
+
+// TestRecordContainerStatsUnlimitedAllocEmitsNoAllocMetrics pins
+// FEATURE's "absence = unlimited" contract: a container with real usage
+// but no allocation data at all (the real-box default for most
+// containers) must get none of the six allocation-pair metrics.
+func TestRecordContainerStatsUnlimitedAllocEmitsNoAllocMetrics(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+
+	c.recordContainerStats("web", cgStats{CPUUsageUsec: 0, MemCurrent: 1000, Pids: 5}, time.Unix(1000, 0))
+	c.recordContainerStats("web", cgStats{CPUUsageUsec: 2_000_000, MemCurrent: 1000, Pids: 5}, time.Unix(1002, 0))
+
+	for _, metric := range []string{"mem.limit_bytes", "mem.limit_pct", "cpu.alloc_cores", "cpu.alloc_pct", "pids.limit", "pids.pct"} {
+		_, ok := sink.value("web", metric)
+		require.False(t, ok, "unlimited must emit nothing for %s", metric)
+	}
+}
+
+// TestRecordContainerStatsPartialAllocOnlyEmitsThePresentPairs pins the
+// three allocation pairs' independence: a container with only a memory
+// limit set (the common real-box shape for a handful of memory-capped
+// services, everything else unlimited) must get exactly that one pair,
+// not the other two.
+func TestRecordContainerStatsPartialAllocOnlyEmitsThePresentPairs(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+
+	c.recordContainerStats("db", cgStats{
+		MemCurrent: 100,
+		Alloc:      alloc{MemLimitBytes: 1000, HasMemLimit: true},
+	}, time.Unix(1000, 0))
+
+	_, ok := sink.value("db", "mem.limit_bytes")
+	require.True(t, ok)
+	_, ok = sink.value("db", "mem.limit_pct")
+	require.True(t, ok)
+	for _, metric := range []string{"cpu.alloc_cores", "cpu.alloc_pct", "pids.limit", "pids.pct"} {
+		_, ok := sink.value("db", metric)
+		require.False(t, ok, "%s must stay absent when only the memory pair has allocation data", metric)
+	}
+}

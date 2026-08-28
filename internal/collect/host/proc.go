@@ -43,12 +43,22 @@ func cpuBusyPct(prev, cur cpuTimes) (float64, bool) {
 // surfaced as its own host-impact signal (docs/superpowers/backlog.md's
 // "Container→system impact surfacing" design notes) rather than staying
 // invisible.
+//
+// deltaIowait gets a second guard beyond deltaTotal's: /proc/stat's
+// aggregate iowait counter isn't strictly monotonic across cores on SMP
+// (a core going idle can shift which core's ticks count as iowait), so
+// a negative delta is possible even when deltaTotal advanced normally --
+// that must report false, the same as a counter reset, not a negative
+// percentage.
 func cpuIowaitPct(prev, cur cpuTimes) (float64, bool) {
 	deltaTotal := float64(cur.total()) - float64(prev.total())
 	if deltaTotal <= 0 {
 		return 0, false
 	}
 	deltaIowait := float64(cur.iowait) - float64(prev.iowait)
+	if deltaIowait < 0 {
+		return 0, false
+	}
 	return 100 * deltaIowait / deltaTotal, true
 }
 

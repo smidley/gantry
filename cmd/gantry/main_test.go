@@ -431,16 +431,7 @@ func TestDeviceIOFromSamplesEmptyWhenNoSamples(t *testing.T) {
 	require.Empty(t, got)
 }
 
-// TestDeviceIOFromSamplesExcludesStaleSamples pins the fix for stale IO
-// being reported as live (fix round finding 2): a container's ring is
-// evicted on REMOVAL, not on stop (registry.go's applyInventory/
-// applyEvent), so containerStorage's live:io.* lookup used to return a
-// long-stopped container's last-ever rates as if they were current.
-// Gated on the same containerFrameMaxAge cutoff buildSnapshot's own
-// stopped-container filter already uses, and the same ">=" boundary
-// (age >= maxAge excludes, not just age > maxAge) -- a sample exactly
-// that old must not surface as a device row at all, not a device row
-// with stale data.
+// TestDeviceIOFromSamplesExcludesStaleSamples pins the stale-sample age cutoff.
 func TestDeviceIOFromSamplesExcludesStaleSamples(t *testing.T) {
 	now := int64(1000)
 	samples := map[string]store.Sample{
@@ -452,11 +443,7 @@ func TestDeviceIOFromSamplesExcludesStaleSamples(t *testing.T) {
 	require.Empty(t, got, "a sample containerFrameMaxAge seconds old or older must not surface as a live device row")
 }
 
-// TestDeviceIOFromSamplesUnknownSuffixProducesNoRow pins the fix for
-// device fabrication ordering (fix round finding 8): a live:io.<dev>.*
-// sample whose suffix is neither read_bps nor write_bps must not
-// fabricate a zero-valued row for <dev> -- the byDevice entry has to be
-// created inside the suffix switch's two recognized arms, not before it.
+// TestDeviceIOFromSamplesUnknownSuffixProducesNoRow pins that an unknown suffix fabricates no row.
 func TestDeviceIOFromSamplesUnknownSuffixProducesNoRow(t *testing.T) {
 	samples := map[string]store.Sample{
 		"live:io.sda.iops": {TS: 100, Val: 42},

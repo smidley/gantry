@@ -371,12 +371,7 @@ func TestMetasIncludesPlausibleMounts(t *testing.T) {
 	}
 }
 
-// TestTickEmitsContainerDeviceIOSeries pins the other half of the
-// fix-round fix (finding 1): fake containers must also produce a
-// couple of live:io.<dev>.* samples per tick, the same live-ring-only
-// shape cgroupv2.go's recordContainerStats writes for a real container,
-// so the storage panel's device-IO rows have something to show in
-// fake-data mode too.
+// TestTickEmitsContainerDeviceIOSeries pins that fake containers also emit live:io.<dev>.* samples per tick.
 func TestTickEmitsContainerDeviceIOSeries(t *testing.T) {
 	sink := &capture{}
 	g := New(sink, nil, 1)

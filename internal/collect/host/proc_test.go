@@ -110,13 +110,7 @@ func TestCPUIowaitPctFirstSampleOrResetIsFalse(t *testing.T) {
 	require.False(t, ok, "counter reset must report false")
 }
 
-// TestCPUIowaitPctNegativeDeltaIsFalse pins the fix for negative iowait
-// (fix round finding 4): /proc/stat's aggregate iowait counter isn't
-// strictly monotonic across cores on SMP (see cpuIowaitPct's own doc),
-// so a snapshot pair can have deltaTotal > 0 (the existing guard passes)
-// while deltaIowait < 0. That must report false with an exact-zero
-// percentage, the same shape a counter reset already reports -- never a
-// negative gauge.
+// TestCPUIowaitPctNegativeDeltaIsFalse pins that a regressed iowait counter reports false, never negative.
 func TestCPUIowaitPctNegativeDeltaIsFalse(t *testing.T) {
 	prev := cpuTimes{user: 1000, idle: 500, iowait: 600}
 	cur := cpuTimes{user: 1100, idle: 550, iowait: 550} // total advances, iowait itself regresses

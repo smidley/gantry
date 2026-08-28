@@ -13,10 +13,13 @@ import (
 
 // ImageInfo is one entry in GET /api/images -- see Options.Images' own
 // doc for how it's assembled. ID is docker's own 12-character short id
-// (see shortImageID) -- display-only; every mutating route below takes
-// full ids, never these.
+// (see shortImageID), display-only; FullID is the same image's full
+// "sha256:"+64-hex digest -- every mutating route below takes FullID,
+// never ID (see imageIDPattern's own doc for why the short form can
+// never be accepted there).
 type ImageInfo struct {
 	ID         string   `json:"id"`
+	FullID     string   `json:"full_id"`
 	RepoTags   []string `json:"repo_tags"`
 	SizeBytes  int64    `json:"size_bytes"`
 	Created    int64    `json:"created"`
@@ -157,6 +160,7 @@ func (s *Server) handleImagesList(w http.ResponseWriter, r *http.Request) {
 		dto.Images = []ImageInfo{}
 	}
 	for i, im := range dto.Images {
+		dto.Images[i].FullID = im.ID
 		dto.Images[i].ID = shortImageID(im.ID)
 		if len(im.RepoTags) == 0 {
 			dto.Images[i].RepoTags = []string{"<none>"}
@@ -167,13 +171,18 @@ func (s *Server) handleImagesList(w http.ResponseWriter, r *http.Request) {
 }
 
 // imageIDPattern is a docker content-addressable image id -- a bare or
-// "sha256:"-prefixed run of lowercase hex digits. Deliberately narrow
-// enough to reject any repo:tag string (which always contains at least
-// one character outside that set, most commonly ":" beyond a single
-// leading "sha256:", or "/") -- the whole point of "ids only" is closing
-// the tag-race where a name could resolve to a DIFFERENT image than the
-// one the caller saw a moment earlier.
-var imageIDPattern = regexp.MustCompile(`^(sha256:)?[0-9a-f]{12,64}$`)
+// "sha256:"-prefixed run of EXACTLY 64 lowercase hex digits, never fewer.
+// This is moby's own digest length, not an arbitrary choice: its
+// reference parser (distribution/reference.ParseAnyReference) only
+// recognizes a BARE string as a digest -- skipping name resolution
+// entirely -- when it's anchored at exactly 64 hex chars. Anything
+// shorter falls through to ParseNormalizedNamed and is resolved as a
+// repository NAME first, only falling back to id-prefix search if no
+// image happens to be tagged with that literal string. A 12-64 char
+// range would let an image tagged with a name equal to another image's
+// short id shadow it -- silently deleting the wrong image -- so this
+// only ever accepts the one form moby itself treats as unambiguous.
+var imageIDPattern = regexp.MustCompile(`^(sha256:)?[0-9a-f]{64}$`)
 
 type imagesRemoveRequest struct {
 	IDs []string `json:"ids"`

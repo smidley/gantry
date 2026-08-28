@@ -83,6 +83,25 @@ func TestImagesGetShortensIDAndDefaultsRepoTagsForDangling(t *testing.T) {
 	require.Equal(t, []string{"<none>"}, dto.Images[0].RepoTags)
 }
 
+func TestImagesGetCarriesFullIDAlongsideShortID(t *testing.T) {
+	full := "sha256:" + fmt.Sprintf("%064x", 1)
+	s := New(Options{Version: "test-1", Started: time.Now(), Images: func(context.Context) (ImagesDTO, error) {
+		return ImagesDTO{Images: []ImageInfo{{ID: full, SizeBytes: 100, State: "dangling"}}}, nil
+	}})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/images")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	var dto ImagesDTO
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&dto))
+	require.Len(t, dto.Images, 1)
+	require.Equal(t, full, dto.Images[0].FullID, "full_id must carry the untruncated id for mutating calls to use")
+	require.Len(t, dto.Images[0].ID, 12, "id stays docker's own 12-char short form for display")
+}
+
 func TestImagesGetNeverBlockedByReadOnlyOrMissingConfirmHeader(t *testing.T) {
 	s := New(Options{Version: "test-1", Started: time.Now(), ReadOnly: true, Images: func(context.Context) (ImagesDTO, error) {
 		return ImagesDTO{}, nil
@@ -124,6 +143,57 @@ func TestImagesRemoveRejectsNonIDStrings(t *testing.T) {
 	resp := postImages(t, ts.URL+"/api/images/remove", `{"ids":["nginx:latest"]}`, "images")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestImagesRemoveAcceptedIDForms pins F1: only a full 64-hex digest (bare
+// or "sha256:"-prefixed) may reach the backend. Anything shorter -- even a
+// syntactically plausible short id -- must 400 before ever calling
+// RemoveImages: moby's own reference parser only recognizes a BARE
+// identifier as a digest when it's exactly 64 hex chars (anchoredIdentifierRegexp
+// in distribution/reference), so anything shorter falls through to name
+// resolution instead of id-prefix resolution -- see imageIDPattern's own doc.
+func TestImagesRemoveAcceptedIDForms(t *testing.T) {
+	full := fmt.Sprintf("%064x", 1)
+	cases := []struct {
+		name   string
+		id     string
+		wantOK bool
+	}{
+		{"bare 64 hex", full, true},
+		{"sha256-prefixed 64 hex", "sha256:" + full, true},
+		{"12-char short id", full[:12], false},
+		{"63-char hex, one short of full", full[:63], false},
+		{"repo:tag name", "nginx:latest", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calledWith []string
+			s := New(Options{
+				Version: "test-1", Started: time.Now(),
+				RemoveImages: func(_ context.Context, ids []string) ([]ImageRemoveResult, error) {
+					calledWith = ids
+					out := make([]ImageRemoveResult, len(ids))
+					for i, id := range ids {
+						out[i] = ImageRemoveResult{ID: id, OK: true}
+					}
+					return out, nil
+				},
+			})
+			ts := httptest.NewServer(s.Handler())
+			defer ts.Close()
+
+			resp := postImages(t, ts.URL+"/api/images/remove", `{"ids":["`+tc.id+`"]}`, "images")
+			defer func() { _ = resp.Body.Close() }()
+
+			if tc.wantOK {
+				require.Equal(t, http.StatusOK, resp.StatusCode, "id form %q must be accepted", tc.id)
+				require.Equal(t, []string{tc.id}, calledWith, "the backend must see exactly the id the caller sent")
+			} else {
+				require.Equal(t, http.StatusBadRequest, resp.StatusCode, "id form %q must be rejected before ever reaching the backend", tc.id)
+				require.Nil(t, calledWith, "a rejected id must never reach RemoveImages")
+			}
+		})
+	}
 }
 
 func TestImagesRemoveRejectsEmptyIDs(t *testing.T) {

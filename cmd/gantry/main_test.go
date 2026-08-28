@@ -203,8 +203,9 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	require.NoError(t, err)
 	var imagesBody struct {
 		Images []struct {
-			ID    string `json:"id"`
-			State string `json:"state"`
+			ID     string `json:"id"`
+			FullID string `json:"full_id"`
+			State  string `json:"state"`
 		} `json:"images"`
 		Summary struct {
 			Unused int    `json:"unused"`
@@ -216,14 +217,14 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	require.Equal(t, http.StatusOK, imagesResp.StatusCode)
 	require.Len(t, imagesBody.Images, 12, "fake mode's own dozen-image seed")
 	require.NotEmpty(t, imagesBody.Summary.Note)
-	var danglingID string
+	var danglingFullID string
 	for _, im := range imagesBody.Images {
 		if im.State == "dangling" {
-			danglingID = im.ID
+			danglingFullID = im.FullID
 			break
 		}
 	}
-	require.NotEmpty(t, danglingID)
+	require.NotEmpty(t, danglingFullID, "mutating calls use full_id, not GET's own display-only short id")
 
 	pruneResp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), "application/json", strings.NewReader(`{"mode":"unused"}`))
 	require.NoError(t, err)
@@ -247,7 +248,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	require.Equal(t, http.StatusOK, pruneResp2.StatusCode)
 	require.Len(t, pruneBody.Deleted, imagesBody.Summary.Unused, "must delete every currently-unused fake image")
 
-	removeReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/remove", port), strings.NewReader(`{"ids":["`+danglingID+`"]}`))
+	removeReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/remove", port), strings.NewReader(`{"ids":["`+danglingFullID+`"]}`))
 	require.NoError(t, err)
 	removeReq.Header.Set("X-Gantry-Confirm", "images")
 	removeResp, err := http.DefaultClient.Do(removeReq)
@@ -262,7 +263,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	require.Equal(t, []struct {
 		ID string `json:"id"`
 		OK bool   `json:"ok"`
-	}{{ID: danglingID, OK: true}}, removeBody)
+	}{{ID: danglingFullID, OK: true}}, removeBody)
 
 	imagesResp2, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/images", port))
 	require.NoError(t, err)

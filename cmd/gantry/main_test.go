@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/smidley/gantry/internal/collect/docker"
+	"github.com/smidley/gantry/internal/collect/host"
 	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/server"
 	"github.com/smidley/gantry/internal/store"
@@ -474,4 +476,28 @@ func TestRunReturnsOnBindFailure(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("run() hung on bind failure instead of returning the error")
 	}
+}
+
+// TestWireDockerCollectorPinsHostCoresToHostCollector pins main.go's own
+// dc.HostCores wiring: it must be the host collector's own NumCPU method
+// (the /proc/stat-derived, cpuset-immune count), not some other int-
+// returning func (e.g. runtime.NumCPU directly) that would happen to
+// satisfy the field's type and pass every other test in the suite.
+// Method values of the same method share one underlying function per
+// (type, method) pair regardless of receiver, so comparing the
+// reflect.Value's Pointer() -- not the bound values themselves, which
+// Go doesn't let you compare at all -- correctly distinguishes "some
+// *host.Collector's NumCPU" from any other func() int.
+func TestWireDockerCollectorPinsHostCoresToHostCollector(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	h := host.New(st, "/proc", "/host/sys")
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+
+	wireDockerCollector(dc, h, "/host/sys/fs/cgroup")
+
+	require.Equal(t, reflect.ValueOf(h.NumCPU).Pointer(), reflect.ValueOf(dc.HostCores).Pointer(),
+		"dc.HostCores must be wired to the host collector's own NumCPU")
 }

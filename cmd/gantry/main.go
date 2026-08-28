@@ -116,10 +116,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	host := host.New(st, "/proc", sysRoot)
 
 	dc := docker.New(st, st, st.Live().Evict, dockerSock)
-	dc.CgroupRoot = cgroupRoot
-	dc.MemTotal = host.MemTotal
-	dc.HostCores = host.NumCPU
-	dc.DeviceName = host.DeviceName
+	wireDockerCollector(dc, host, cgroupRoot)
 
 	// gpuLookup adapts docker's Meta-returning Lookup to the name-only
 	// signature both GPU collectors (DRM fdinfo and nvidia-smi) need for
@@ -232,6 +229,20 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		log.Println("final flush:", ferr)
 	}
 	return err
+}
+
+// wireDockerCollector points the docker collector's injected dependencies
+// at the host collector's own methods (see docker.Collector's own doc for
+// why: mem.pct, cpu.pct's host-share conversion, and per-device io
+// attribution all need them). Extracted out of run() so this wiring --
+// HostCores in particular, easy to accidentally swap for a plain
+// runtime.NumCPU() -- is unit-testable without a live docker daemon or
+// /proc.
+func wireDockerCollector(dc *docker.Collector, h *host.Collector, cgroupRoot string) {
+	dc.CgroupRoot = cgroupRoot
+	dc.MemTotal = h.MemTotal
+	dc.HostCores = h.NumCPU
+	dc.DeviceName = h.DeviceName
 }
 
 // containerFrameMaxAge is how long a non-running container's live sample

@@ -249,23 +249,23 @@
   </form>
 
   <div class="settings-view__row">
-    <div class="settings-footprint">
+    <div class="card settings-footprint">
       <span class="microlabel">Gantry footprint</span>
       <div class="settings-footprint__tiles">
-        <StatTile label="CPU" liveValue={cpuPct ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
-        <StatTile label="Memory" liveValue={rssBytes ?? 0} formatValue={fmtBytes} sparklinePoints={rssRing.points} />
+        <StatTile bare label="CPU" liveValue={cpuPct ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
+        <StatTile bare label="Memory" liveValue={rssBytes ?? 0} formatValue={fmtBytes} sparklinePoints={rssRing.points} />
       </div>
       <p class="microlabel settings-footprint__caption">Budget: core &le;2% &middot; RSS &le;100MB</p>
     </div>
 
     <div class="card settings-theme">
       <span class="microlabel">Theme</span>
-      <div class="settings-theme__segmented" role="group" aria-label="Theme">
+      <div class="segmented" role="group" aria-label="Theme">
         {#each THEME_OPTIONS as opt (opt.key)}
           <button
             type="button"
-            class="settings-theme__segment"
-            class:settings-theme__segment--active={theme.preference === opt.key}
+            class="segmented__btn"
+            class:segmented__btn--active={theme.preference === opt.key}
             onclick={() => theme.set(opt.key)}
           >
             {opt.label}
@@ -420,14 +420,17 @@
     }
   }
   .settings-footprint {
+    padding: 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
   }
+  /* bare rail rows (see StatTile's own doc), same instrument-rail
+     treatment as Overview's metrics rail -- a hairline between CPU/
+     Memory, not two separate stat cards side by side. */
   .settings-footprint__tiles {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 0.6rem;
+    display: flex;
+    flex-direction: column;
   }
   .settings-footprint__caption {
     margin: 0;
@@ -439,30 +442,8 @@
     flex-direction: column;
     gap: 0.6rem;
   }
-  .settings-theme__segmented {
-    display: inline-flex;
+  .settings-theme .segmented {
     align-self: flex-start;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .settings-theme__segment {
-    min-height: 40px;
-    padding: 0 0.9rem;
-    border: none;
-    border-right: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    background: transparent;
-    color: var(--ink-2);
-    font-size: 0.82rem;
-    cursor: pointer;
-  }
-  .settings-theme__segment:last-child {
-    border-right: none;
-  }
-  .settings-theme__segment--active {
-    background: color-mix(in oklab, var(--series-1) 15%, transparent);
-    color: var(--series-1);
-    font-weight: 500;
   }
   .settings-about__list {
     display: grid;

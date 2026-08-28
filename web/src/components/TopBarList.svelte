@@ -25,6 +25,12 @@
   formatSecondary (additive, optional): passed straight through to every
   row -- see TopBarRow's own doc for what it renders and when.
 
+  formatDirection/directionLabels (additive, optional -- Top Consumers
+  view's attribution page): passed straight through to every row too --
+  see TopBarRow's own doc. Only meaningful for a row that actually
+  carries row.direction (topFromFrame's own opt-in), so Overview's
+  compact module (never opts in) is unaffected either way.
+
   metricKey (additive, optional, default '' -- fixes a real bug: switching
   the Top Consumers resource tab left a row showing the PRIOR resource's
   value, tweening oddly toward the new one instead of reading correctly):
@@ -55,6 +61,8 @@
     rows = [],
     formatValue = (v) => String(v),
     formatSecondary = undefined,
+    formatDirection = undefined,
+    directionLabels = undefined,
     linkFor = (entity) => `#/containers/${encodeURIComponent(entity)}`,
     emptyMessage = 'No data for this window yet.',
     live = false,
@@ -70,7 +78,7 @@
 {:else}
   <ol class="top-bar-list">
     {#each rows as row (`${row.entity}::${metricKey}`)}
-      <TopBarRow {row} {maxValue} {formatValue} {formatSecondary} {linkFor} {live} />
+      <TopBarRow {row} {maxValue} {formatValue} {formatSecondary} {formatDirection} {directionLabels} {linkFor} {live} />
     {/each}
   </ol>
 {/if}

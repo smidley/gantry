@@ -102,6 +102,11 @@
     unit2 = '',
     label2 = '',
     bare = false,
+    // href (additive, optional -- metric breakdown pages): makes the
+    // whole tile a link, e.g. Overview's rail tiles into "#/top/cpu" --
+    // undefined (every non-Overview caller) renders the plain <div> this
+    // always was.
+    href = undefined,
   } = $props();
 
   // scrubHit is null while live; {ts, value} whenever the shared bus has
@@ -186,7 +191,14 @@
   {#if unit2}<span class="stat-tile__unit">{unit2}</span>{/if}
 {/snippet}
 
-<div class="stat-tile" class:card={!bare} class:stat-tile--bare={bare}>
+<svelte:element
+  this={href ? 'a' : 'div'}
+  {href}
+  class="stat-tile"
+  class:card={!bare}
+  class:stat-tile--bare={bare}
+  class:stat-tile--link={!!href}
+>
   {#if bare}
     <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
     <div class="stat-tile__row">
@@ -230,7 +242,7 @@
       <Sparkline points={sparklinePoints} color={sparklineColor} points2={value2Points} color2={sparklineColor2} />
     {/if}
   {/if}
-</div>
+</svelte:element>
 
 <style>
   .stat-tile {
@@ -248,6 +260,14 @@
      its own sparkline sub-region, not just a scrub-specific hotspot. */
   .stat-tile:hover {
     border-color: color-mix(in oklab, var(--series-1) 35%, transparent);
+  }
+  /* href (metric breakdown pages): plain-anchor reset -- the tile's own
+     children already carry their own colors, an inherited blue/underline
+     from the bare <a> would only fight them. */
+  .stat-tile--link {
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
   }
   .stat-tile__head {
     display: flex;

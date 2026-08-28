@@ -52,11 +52,23 @@ test('overview: status headline reflects fleet/array/disk state, the fleet strip
   // the sandbox's own real containers showed up in the fleet total
   // too), so the true size varies by environment. This instead checks
   // that the strip and the sentence -- two client-side views of the
-  // exact same live container set -- agree with each other.
+  // exact same live container set -- agree with each other. The
+  // sentence itself is one of two shapes (fleetSentence, overviewStatus.
+  // ts): "N containers, all running." when nothing's stopped, or "N
+  // running · M stopped." once anything is -- the fake fleet always has
+  // at least one stopped archetype, but a real box's own containers
+  // sharing this environment could tip either way, so both are parsed.
   const fleetSentence = page.locator('.overview__sub-line').first();
   await expect(fleetSentence).toBeVisible();
-  const statedTotal = Number((await fleetSentence.textContent())?.match(/^(\d+)/)?.[1]);
-  expect(statedTotal).toBeGreaterThan(0);
+  const sentenceText = (await fleetSentence.textContent()) ?? '';
+  const stoppedMatch = sentenceText.match(/^(\d+) running · (\d+) stopped\.$/);
+  const allRunningMatch = sentenceText.match(/^(\d+) containers?, all running\.$/);
+  const statedTotal = stoppedMatch
+    ? Number(stoppedMatch[1]) + Number(stoppedMatch[2])
+    : allRunningMatch
+      ? Number(allRunningMatch[1])
+      : NaN;
+  expect(statedTotal, `unrecognized fleet sentence shape: ${sentenceText}`).toBeGreaterThan(0);
 
   const fleetUnits = page.locator('.fleet-strip .fleet-unit');
   await expect.poll(() => fleetUnits.count()).toBe(statedTotal);
@@ -253,6 +265,77 @@ test('top consumers: switching window from Now to 1h renders without erroring', 
   // freshly-started store that may not have an hour of history yet.
   await expect(page.locator('.top-consumers__error')).toHaveCount(0);
   await expect(page.locator('.top-bar-list__row, .top-bar-list__empty').first()).toBeVisible();
+});
+
+// Metric breakdown pages: an Overview rail tile deep-links into its own
+// resource's #/top/:resource route, which grows into a real attribution
+// page there -- host-total header (value + live chart), the COMPLETE
+// container list (not Overview's own top-5 module), a trailing
+// "unattributed" summary row, and -- for a directional resource -- every
+// row (including that summary one) showing both sides of the pair in
+// their own colors. GPU deliberately gets none of the header/summary
+// row (see topFromFrame.ts's own doc on why there's no single honest
+// whole-machine GPU number).
+test('overview: a rail tile deep-links to its own metric breakdown page', async ({ page }) => {
+  await page.goto('#/');
+
+  const memTile = page.locator('.overview__metrics-rail .stat-tile', { hasText: 'Memory' });
+  await expect(memTile).toBeVisible();
+  await expect(memTile).toHaveAttribute('href', '#/top/mem');
+  await memTile.click();
+  await expect(page).toHaveURL(/#\/top\/mem$/);
+  await expect(page.getByRole('tab', { name: 'Memory', exact: true })).toHaveAttribute('aria-selected', 'true');
+});
+
+test('top consumers: cpu breakdown page shows a host-total header with a live chart', async ({ page }) => {
+  await page.goto('#/top/cpu');
+
+  await expect(page.locator('.top-consumers__header')).toBeVisible();
+  await expect(page.locator('.top-consumers__header-value')).toHaveText(/^\d+\.\d%$/);
+  await expect(page.locator('.top-consumers__header canvas')).toBeVisible();
+});
+
+test('top consumers: the cpu breakdown list is complete (not top-5) and ends with an unattributed row', async ({
+  page,
+}) => {
+  await page.goto('#/top/cpu');
+
+  const rows = page.locator('.top-bar-list__row');
+  await expect.poll(() => rows.count()).toBeGreaterThan(5);
+
+  // The last row is the pinned, unlinked "Unattributed (host)" summary --
+  // a plain <span> name, not a link into some container's detail page.
+  const lastRow = rows.last();
+  await expect(lastRow).toContainText('Unattributed (host)');
+  await expect(lastRow.locator('.top-bar-list__name')).toHaveCount(1);
+  const tagName = await lastRow.locator('.top-bar-list__name').evaluate((el) => el.tagName);
+  expect(tagName).toBe('SPAN');
+});
+
+test('top consumers: network breakdown pairs down/up in the header and on every row, in two colors', async ({
+  page,
+}) => {
+  await page.goto('#/top/net');
+
+  const header = page.locator('.top-consumers__header-values .top-consumers__header-value');
+  await expect(header).toHaveCount(2);
+  await expect(header.first()).toContainText('↓');
+  await expect(header.nth(1)).toContainText('↑');
+  const [downColor, upColor] = await header.evaluateAll((els) => els.map((el) => getComputedStyle(el).color));
+  expect(downColor).not.toBe(upColor);
+
+  const firstRow = page.locator('.top-bar-list__row').first();
+  await expect(firstRow.locator('.top-bar-list__value')).toHaveCount(2);
+  await expect(firstRow.locator('.top-bar-list__value').first()).toContainText('↓');
+  await expect(firstRow.locator('.top-bar-list__value').nth(1)).toContainText('↑');
+});
+
+test('top consumers: gpu breakdown has no host-total header or unattributed row', async ({ page }) => {
+  await page.goto('#/top/gpu');
+
+  await expect(page.locator('.top-bar-list__row, .top-bar-list__empty').first()).toBeVisible();
+  await expect(page.locator('.top-consumers__header')).toHaveCount(0);
+  await expect(page.locator('.top-bar-list__row', { hasText: 'Unattributed' })).toHaveCount(0);
 });
 
 // Regression coverage for the top-consumers host-share fix: a container

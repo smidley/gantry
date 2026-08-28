@@ -420,9 +420,17 @@
 
     <div class="overview__col overview__col-right">
       <div class="overview__metrics-rail">
-        <StatTile bare label="CPU" liveValue={host['cpu.total'] ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
         <StatTile
           bare
+          href="#/top/cpu"
+          label="CPU"
+          liveValue={host['cpu.total'] ?? 0}
+          formatValue={fmtPct}
+          sparklinePoints={cpuRing.points}
+        />
+        <StatTile
+          bare
+          href="#/top/mem"
           label="Memory"
           liveValue={host['mem.used_pct'] ?? 0}
           formatValue={fmtPct}
@@ -430,6 +438,7 @@
         />
         <StatTile
           bare
+          href="#/top/net"
           label="Network"
           liveValue={netRx}
           formatValue={(v) => `↓ ${fmtRate(v)}`}
@@ -441,6 +450,7 @@
         />
         <StatTile
           bare
+          href="#/top/io"
           label="Disk IO"
           liveValue={ioRead}
           formatValue={(v) => `r ${fmtRate(v)}`}

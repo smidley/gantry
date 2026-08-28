@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  hostSeriesMetricKeys,
+  hostTotalNow,
   isTopResource,
+  reduceSeriesPoints,
+  resourceDirectionKeys,
   resourceMetricKeys,
   resourceScaleMax,
   resourceSecondaryMetricKey,
   TOP_RESOURCES,
   topFromFrame,
+  unattributedValue,
 } from './topFromFrame';
 import type { SnapshotDTO } from './api';
 
@@ -184,5 +189,130 @@ describe('topFromFrame', () => {
     });
     const [row] = topFromFrame(frame, 'mem');
     expect(row.secondary).toBeUndefined();
+  });
+
+  it('omits direction by default, even for a directional resource', () => {
+    const frame = frameWith({
+      a: { state: 'running', health: '', image: '', metrics: { 'net.rx_bps': 10, 'net.tx_bps': 5 } },
+    });
+    const [row] = topFromFrame(frame, 'net');
+    expect(row.direction).toBeUndefined();
+  });
+
+  it('attaches [down, up] direction when opted in for net', () => {
+    const frame = frameWith({
+      a: { state: 'running', health: '', image: '', metrics: { 'net.rx_bps': 10, 'net.tx_bps': 5 } },
+    });
+    const [row] = topFromFrame(frame, 'net', 10, { direction: true });
+    expect(row.value).toBe(15);
+    expect(row.direction).toEqual([10, 5]);
+  });
+
+  it('attaches [read, write] direction when opted in for io, zero-filling the absent half', () => {
+    const frame = frameWith({
+      a: { state: 'running', health: '', image: '', metrics: { 'io.write_bps': 7 } },
+    });
+    const [row] = topFromFrame(frame, 'io', 10, { direction: true });
+    expect(row.direction).toEqual([0, 7]);
+  });
+
+  it('never attaches direction for a non-directional resource even when opted in', () => {
+    const frame = frameWith({
+      a: { state: 'running', health: '', image: '', metrics: { 'cpu.pct': 10 } },
+    });
+    const [row] = topFromFrame(frame, 'cpu', 10, { direction: true });
+    expect(row.direction).toBeUndefined();
+  });
+});
+
+describe('resourceDirectionKeys', () => {
+  it('names the rx/tx pair for net and read/write for io', () => {
+    expect(resourceDirectionKeys('net')).toEqual(['net.rx_bps', 'net.tx_bps']);
+    expect(resourceDirectionKeys('io')).toEqual(['io.read_bps', 'io.write_bps']);
+  });
+
+  it('is undefined for cpu/mem/gpu -- no natural direction', () => {
+    expect(resourceDirectionKeys('cpu')).toBeUndefined();
+    expect(resourceDirectionKeys('mem')).toBeUndefined();
+    expect(resourceDirectionKeys('gpu')).toBeUndefined();
+  });
+});
+
+describe('hostTotalNow', () => {
+  it('reads cpu.total and mem.used_bytes directly (same units as the per-container rows)', () => {
+    const frame = frameWith({});
+    frame.host = { 'cpu.total': 42, 'mem.used_bytes': 8_000_000_000 };
+    expect(hostTotalNow(frame, 'cpu')).toEqual({ value: 42 });
+    expect(hostTotalNow(frame, 'mem')).toEqual({ value: 8_000_000_000 });
+  });
+
+  it('sums per-device net/io keys into a value AND a direction pair', () => {
+    const frame = frameWith({});
+    frame.host = { 'net.eth0.rx_bps': 10, 'net.eth0.tx_bps': 5, 'diskio.sda.read_bps': 3, 'diskio.sda.write_bps': 9 };
+    expect(hostTotalNow(frame, 'net')).toEqual({ value: 15, direction: [10, 5] });
+    expect(hostTotalNow(frame, 'io')).toEqual({ value: 12, direction: [3, 9] });
+  });
+
+  it('is undefined for gpu -- no single honest whole-machine number', () => {
+    const frame = frameWith({});
+    frame.host = { 'cpu.total': 1 };
+    expect(hostTotalNow(frame, 'gpu')).toBeUndefined();
+  });
+
+  it('is undefined when the frame/host has nothing yet', () => {
+    expect(hostTotalNow(null, 'cpu')).toBeUndefined();
+    expect(hostTotalNow(frameWith({}), 'cpu')).toBeUndefined();
+  });
+});
+
+describe('hostSeriesMetricKeys', () => {
+  it('names one fixed key for cpu/mem', () => {
+    expect(hostSeriesMetricKeys('cpu')).toEqual(['cpu.total']);
+    expect(hostSeriesMetricKeys('mem')).toEqual(['mem.used_bytes']);
+  });
+
+  it('is undefined for net/io (dynamic per-device keys) and gpu (no host total)', () => {
+    expect(hostSeriesMetricKeys('net')).toBeUndefined();
+    expect(hostSeriesMetricKeys('io')).toBeUndefined();
+    expect(hostSeriesMetricKeys('gpu')).toBeUndefined();
+  });
+});
+
+describe('reduceSeriesPoints', () => {
+  it('averages the avg column for agg=avg', () => {
+    const points: [number, number, number][] = [
+      [1, 10, 20],
+      [2, 20, 30],
+      [3, 30, 40],
+    ];
+    expect(reduceSeriesPoints(points, 'avg')).toBe(20);
+  });
+
+  it('takes the max of the max column for agg=peak', () => {
+    const points: [number, number, number][] = [
+      [1, 10, 20],
+      [2, 20, 45],
+      [3, 30, 40],
+    ];
+    expect(reduceSeriesPoints(points, 'peak')).toBe(45);
+  });
+
+  it('is undefined for an empty series -- no host history for that window', () => {
+    expect(reduceSeriesPoints([], 'avg')).toBeUndefined();
+    expect(reduceSeriesPoints([], 'peak')).toBeUndefined();
+  });
+});
+
+describe('unattributedValue', () => {
+  it('is the host total minus the containers sum', () => {
+    expect(unattributedValue(100, 30)).toBe(70);
+  });
+
+  it('clamps at zero rather than going negative', () => {
+    expect(unattributedValue(10, 30)).toBe(0);
+  });
+
+  it('is zero when the containers sum exactly matches the host total', () => {
+    expect(unattributedValue(50, 50)).toBe(0);
   });
 });

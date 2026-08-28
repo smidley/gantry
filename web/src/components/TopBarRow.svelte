@@ -24,7 +24,29 @@
   // topFromFrame's own resourceSecondaryMetricKey. Undefined for every
   // other resource, or on a fetched (non-"now") row, which topFromStore
   // never attaches one to.
-  let { row, maxValue, formatValue, formatSecondary = undefined, linkFor, live = false } = $props();
+  //
+  // formatDirection/directionLabels (additive, optional -- Top Consumers
+  // view's attribution page): when row.direction is set, these render a
+  // [down/read, up/write] PAIR instead of value+secondary -- both at the
+  // value's own size/weight (peers, not primary/secondary, same rule
+  // StatTile's paired tiles follow), each tinted its own series color. A
+  // row only ever carries ONE of row.secondary/row.direction in practice
+  // (topFromFrame's own doc), so the two renderings never compete.
+  //
+  // linkable (row.linkable, default true): false renders a plain name --
+  // no link, no icon -- for a summary row that isn't a real container
+  // (the attribution page's own "unattributed" row).
+  let {
+    row,
+    maxValue,
+    formatValue,
+    formatSecondary = undefined,
+    formatDirection = undefined,
+    directionLabels = undefined,
+    linkFor,
+    live = false,
+  } = $props();
+  let linkable = $derived(row.linkable !== false);
 
   // row.entity is always a container name (every leaderboard on this app
   // is per-container -- see topFromFrame's own doc) -- reading its icon
@@ -78,6 +100,21 @@
     formatSecondary && row.secondary !== undefined ? formatSecondary(secondaryTween.current) : '',
   );
 
+  // direction0Tween/direction1Tween mirror secondaryTween exactly, one
+  // per side of row.direction -- [down/read, up/write], see the module
+  // doc above. Both seed/tick together (a row either has the whole pair
+  // or neither half, per topFromFrame's own all-or-nothing attach).
+  let direction0Tween = new Tween(untrack(() => row.direction?.[0] ?? 0), { duration: liveStore.glideMs, easing: linear });
+  let direction1Tween = new Tween(untrack(() => row.direction?.[1] ?? 0), { duration: liveStore.glideMs, easing: linear });
+
+  $effect(() => {
+    if (!row.direction) return;
+    const reduced = prefersReducedMotion.current;
+    const duration = live && !reduced ? liveStore.glideMs : 0;
+    direction0Tween.set(row.direction[0], { duration, easing: linear });
+    direction1Tween.set(row.direction[1], { duration, easing: linear });
+  });
+
   // Clamped to 100: maxValue is usually the list's own max (nothing can
   // exceed it), but a fixed scale (TopBarList's scaleMax, e.g. gpu's 100)
   // has no such guarantee -- a container using more than one GPU engine
@@ -87,19 +124,35 @@
 </script>
 
 <li class="top-bar-list__row">
-  <a class="top-bar-list__name" href={linkFor(row.entity)} title={row.entity}>
-    <ContainerIcon name={row.entity} {icon} size={16} />
+  <svelte:element
+    this={linkable ? 'a' : 'span'}
+    class="top-bar-list__name"
+    href={linkable ? linkFor(row.entity) : undefined}
+    title={row.entity}
+  >
+    {#if linkable}<ContainerIcon name={row.entity} {icon} size={16} />{/if}
     <span class="top-bar-list__name-text">{row.entity}</span>
-  </a>
+  </svelte:element>
   <div class="top-bar-list__track">
     <div class="top-bar-list__bar" style="width: {widthPct}%"></div>
   </div>
-  <div class="top-bar-list__value-stack">
-    <span class="top-bar-list__value tabular-nums">{formatValue(valueTween.current)}</span>
-    {#if secondaryText}
-      <span class="top-bar-list__secondary tabular-nums">{secondaryText}</span>
-    {/if}
-  </div>
+  {#if row.direction && formatDirection}
+    <div class="top-bar-list__value-stack">
+      <span class="top-bar-list__value tabular-nums" style="color: var(--series-1)">
+        {#if directionLabels}{directionLabels[0]}{/if} {formatDirection(direction0Tween.current)}
+      </span>
+      <span class="top-bar-list__value tabular-nums" style="color: var(--series-4)">
+        {#if directionLabels}{directionLabels[1]}{/if} {formatDirection(direction1Tween.current)}
+      </span>
+    </div>
+  {:else}
+    <div class="top-bar-list__value-stack">
+      <span class="top-bar-list__value tabular-nums">{formatValue(valueTween.current)}</span>
+      {#if secondaryText}
+        <span class="top-bar-list__secondary tabular-nums">{secondaryText}</span>
+      {/if}
+    </div>
+  {/if}
 </li>
 
 <style>
@@ -125,7 +178,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .top-bar-list__name:hover {
+  /* Scoped to the anchor tag only -- a non-linkable row (the attribution
+     page's own "unattributed" summary) renders this same class on a
+     plain <span>, which must not pick up a hover affordance implying
+     it's clickable. */
+  a.top-bar-list__name:hover {
     text-decoration: underline;
   }
   .top-bar-list__track {

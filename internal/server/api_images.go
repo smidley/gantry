@@ -137,6 +137,18 @@ const (
 	gantryConfirmValue  = "images"
 )
 
+// imagesMaxRequestBytes caps both mutating /api/images routes' request
+// bodies (via http.MaxBytesReader) -- Gantry has no auth (see
+// gantryConfirmHeader's own doc), so nothing else stops a request from
+// forcing an unbounded read into memory before validation even runs.
+// imagesMaxIDs caps POST /api/images/remove's ids array for the same
+// reason, one layer further in: a body under the byte cap could still
+// carry an unreasonable number of short ids.
+const (
+	imagesMaxRequestBytes = 1 << 20 // 1MB
+	imagesMaxIDs          = 100
+)
+
 // requireMutationAllowed enforces both /api/images write-path guardrails
 // shared by handleImagesRemove/handleImagesPrune, writing the rejection
 // response itself when either fails. Checked before the request body is
@@ -226,6 +238,7 @@ func (s *Server) handleImagesRemove(w http.ResponseWriter, r *http.Request) {
 	if !s.requireMutationAllowed(w, r) {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, imagesMaxRequestBytes)
 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -236,6 +249,10 @@ func (s *Server) handleImagesRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(body.IDs) == 0 {
 		writeError(w, http.StatusBadRequest, "ids must not be empty")
+		return
+	}
+	if len(body.IDs) > imagesMaxIDs {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many ids: %d (max %d)", len(body.IDs), imagesMaxIDs))
 		return
 	}
 	for _, id := range body.IDs {
@@ -271,6 +288,7 @@ func (s *Server) handleImagesPrune(w http.ResponseWriter, r *http.Request) {
 	if !s.requireMutationAllowed(w, r) {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, imagesMaxRequestBytes)
 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()

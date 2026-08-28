@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,6 +230,70 @@ func TestImagesRemoveRejectsEmptyIDs(t *testing.T) {
 	resp := postImages(t, ts.URL+"/api/images/remove", `{"ids":[]}`, "images")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestImagesRemoveRejectsMoreThanMaxIDs pins F4: an unbounded ids array
+// is a caller mistake (or something worse) either way -- reject it
+// outright rather than passing 101+ ids through to the backend.
+func TestImagesRemoveRejectsMoreThanMaxIDs(t *testing.T) {
+	var calledWith []string
+	s := New(Options{
+		Version: "test-1", Started: time.Now(),
+		RemoveImages: func(_ context.Context, ids []string) ([]ImageRemoveResult, error) {
+			calledWith = ids
+			return nil, nil
+		},
+	})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	ids := make([]string, 101)
+	for i := range ids {
+		ids[i] = fmt.Sprintf(`"%064x"`, i)
+	}
+	body := `{"ids":[` + strings.Join(ids, ",") + `]}`
+
+	resp := postImages(t, ts.URL+"/api/images/remove", body, "images")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Nil(t, calledWith, "over the cap must never reach the backend")
+}
+
+// TestImagesRemoveRejectsOversizedBody and
+// TestImagesPruneRejectsOversizedBody pin F4's other half: both mutating
+// routes cap the request body itself (http.MaxBytesReader), not just
+// the decoded ids count -- a caller can't force an unbounded read into
+// memory before validation even gets a chance to run. The oversized
+// part is leading JSON whitespace (insignificant, and skipped by the
+// decoder) padded well past the 1MB cap around an otherwise entirely
+// valid body -- so this fails ONLY if the byte-size cap itself is
+// enforced, not merely because the payload was nonsense content.
+func TestImagesRemoveRejectsOversizedBody(t *testing.T) {
+	s := New(Options{Version: "test-1", Started: time.Now()})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	oversized := strings.Repeat(" ", 2<<20) + `{"ids":["` + fmt.Sprintf("%064x", 1) + `"]}`
+	resp := postImages(t, ts.URL+"/api/images/remove", oversized, "images")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Contains(t, body["error"], "too large")
+}
+
+func TestImagesPruneRejectsOversizedBody(t *testing.T) {
+	s := New(Options{Version: "test-1", Started: time.Now()})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	oversized := strings.Repeat(" ", 2<<20) + `{"mode":"dangling"}`
+	resp := postImages(t, ts.URL+"/api/images/prune", oversized, "images")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Contains(t, body["error"], "too large")
 }
 
 func TestImagesRemove404WhenBackendNotWired(t *testing.T) {

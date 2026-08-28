@@ -95,14 +95,8 @@ func (l *Live) ForEach(fn func(key SeriesKey, ring *Ring)) {
 
 // LatestByMetricPrefix returns the latest sample of every series matching
 // kind and entity whose metric starts with prefix, keyed by that series'
-// full (unstripped) metric name -- e.g. the per-container storage
-// endpoint's per-device IO rates, recorded as "live:io.<dev>.read_bps"/
-// "write_bps" (live-ring-only; see flush.go for why these never reach
-// SQLite or a snapshot frame). Stripping the prefix and any further
-// structure out of the metric name is left to the caller: this accessor
-// is a generic filtered lookup, not aware of any one metric family's
-// naming convention. Always non-nil, matching SnapshotLatest's own
-// convention, even when nothing matches.
+// full (unstripped) metric name. Always non-nil, matching SnapshotLatest's
+// own convention, even when nothing matches.
 func (l *Live) LatestByMetricPrefix(kind, entity, prefix string) map[string]Sample {
 	l.mu.RLock()
 	defer l.mu.RUnlock()

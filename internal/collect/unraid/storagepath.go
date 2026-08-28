@@ -42,11 +42,6 @@ var diskSlotPattern = regexp.MustCompile(`^disk[1-9][0-9]*$`)
 // read yet) simply means no path resolves as a pool until it's known,
 // same degrade-gracefully convention as every other pre-first-tick
 // accessor in this package.
-//
-// Pure and side-effect-free: this is deliberately just a path-shape
-// classifier over its two inputs, not a Collector method, so it's
-// exhaustively table-testable without any ini fixture or Collector at
-// all.
 func ResolveStoragePath(path string, pools []string) StorageRef {
 	if !strings.HasPrefix(path, "/") {
 		return StorageRef{Kind: "other"}
@@ -81,8 +76,6 @@ func ResolveStoragePath(path string, pools []string) StorageRef {
 	}
 }
 
-// splitFirstSegment splits s on its first "/", returning the part before
-// it (head) and everything after (rest, "" if there was no "/" at all).
 func splitFirstSegment(s string) (head, rest string) {
 	if i := strings.IndexByte(s, '/'); i >= 0 {
 		return s[:i], s[i+1:]
@@ -90,10 +83,6 @@ func splitFirstSegment(s string) (head, rest string) {
 	return s, ""
 }
 
-// isKnownPool reports whether slot is one of the caller-supplied known
-// pool slot names. Linear scan: pools is a handful of entries at most
-// (real Unraid fleets have a handful of cache pools), and this runs once
-// per mount, not once per tick.
 func isKnownPool(slot string, pools []string) bool {
 	for _, p := range pools {
 		if p == slot {

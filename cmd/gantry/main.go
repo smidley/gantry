@@ -433,18 +433,6 @@ func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store
 	}
 }
 
-// containerStorage is buildContainerStorage's assembly logic, pulled out
-// as a plain function over its dependencies (rather than a method on
-// docker.Collector/unraid.Collector/store.Store directly) so it's
-// testable with hand-built lookupMeta/poolSlots closures and a bare
-// *store.Live -- no real registry, daemon, or on-disk store needed --
-// the same reason containerFrameEntities takes lookupByName as a
-// parameter above.
-//
-// ok is false when lookupMeta doesn't recognize name, the same shape
-// docker.Collector.LookupByName itself uses. Mounts/Devices are always
-// non-nil (even when empty) so the wire JSON is "[]", never "null" --
-// see server.StorageDTO's own doc.
 func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots func() []string, live *store.Live, name string, now int64) (server.StorageDTO, bool) {
 	meta, ok := lookupMeta(name)
 	if !ok {

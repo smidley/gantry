@@ -1,7 +1,6 @@
 <!--
   BaySchematic: D2's miniature array visualization -- one usage-
-  proportional bar per disk/pool entity, quiet and wordless except for a
-  callout on whichever bar(s) a caller flags. Deliberately dumb: it knows
+  proportional bar per disk/pool entity. Deliberately dumb: it knows
   nothing about WHY an entry is flagged (that's Overview's own anomaly
   logic), only how to draw what it's handed -- the same "reads straight
   off the array/disk data" reusability the design's own recommendation
@@ -14,6 +13,15 @@
   much in length to reliably abbreviate into the mockup's fixed 2-letter
   labels without risking a misleading collision) rather than an always-
   visible label row.
+
+  A flagged bar carries no floating callout text (corrective pass: a
+  variable-length string like "95.0% capacity" centered over a 13px bar
+  reliably collided with its neighbors). The outline alone marks it
+  visually; the reason lives in the aria-label/title (for anyone
+  hovering or using a screen reader) and, in full, in the "Needs a look"
+  row right above this module -- the flagged unit's own color plus that
+  row's text already carry the information, so nothing here needs to
+  repeat it visibly.
 -->
 <script>
   import { fmtPct } from '../lib/format';
@@ -22,7 +30,14 @@
   // entries: [{ slot, pct, flagged?: boolean, calloutText?: string }] --
   // pct is a plain 0-100 number (diskUsagePct's own range); flagged/
   // calloutText are the caller's own anomaly decision, not derived here.
+  // calloutText (when given) folds into this bar's own title/aria-label
+  // rather than rendering as visible text.
   let { entries = [] } = $props();
+
+  function labelFor(d) {
+    const base = `${d.slot}: ${fmtPct(d.pct)} used`;
+    return d.calloutText ? `${base} — ${d.calloutText}` : base;
+  }
 </script>
 
 {#if entries.length > 0}
@@ -34,10 +49,9 @@
           class="bay-schematic__bar"
           class:bay-schematic__bar--flag={!!d.flagged}
           role="img"
-          title={`${d.slot}: ${fmtPct(d.pct)} used`}
-          aria-label={`${d.slot}: ${fmtPct(d.pct)} used`}
+          title={labelFor(d)}
+          aria-label={labelFor(d)}
         >
-          {#if d.calloutText}<span class="bay-schematic__callout tabular-nums">{d.calloutText}</span>{/if}
           <div
             class="bay-schematic__fill"
             style={`height: ${Math.min(100, Math.max(0, d.pct))}%; background: ${seqStep(d.pct)}`}
@@ -60,12 +74,6 @@
     gap: 4px;
     height: 46px;
     flex-wrap: wrap;
-    /* A flagged bar's callout floats above its own top edge (see
-       .bay-schematic__callout below) -- extra top margin keeps it clear
-       of the "Array · N members" label immediately above instead of
-       crowding its line (reproduced live at 375px, where the two
-       nearly touched). */
-    margin-top: 0.65rem;
   }
   .bay-schematic__bar {
     position: relative;
@@ -85,16 +93,5 @@
     left: 0;
     width: 100%;
     border-radius: 1px 1px 0 0;
-  }
-  .bay-schematic__callout {
-    position: absolute;
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    margin-bottom: 3px;
-    font-family: var(--font-mono);
-    font-size: 9.5px;
-    color: var(--status-warning);
-    white-space: nowrap;
   }
 </style>

@@ -373,6 +373,33 @@ test('top consumers: the CPU core-budget ribbon renders segments that sum to the
   await expect(page.locator('.core-ribbon__bar')).toHaveCount(0);
 });
 
+// Rate-metric scale ceilings: net/io have no fixed 0-100 ceiling, so
+// their bars read against a "nice" 1-2-5 ceiling at least as large as
+// the current max (niceCeiling, lib/metrics.ts) instead of the
+// leaderboard's own busiest row -- labeled once per surface (module vs.
+// view) rather than per row. Percent metrics (cpu/gpu) are unaffected --
+// still absolute 0-100, no ceiling label at all.
+test('top consumers: net/io bars scale to a nice ceiling, labeled once, unlike percent metrics', async ({ page }) => {
+  await page.goto('#/top/net');
+
+  const label = page.locator('.top-consumers__scale');
+  await expect(label).toBeVisible();
+  await expect(label).toHaveText(/^Bars scaled to ≤ \d+(\.\d+)? (B|KB|MB|GB)\/s$/);
+
+  // cpu/gpu stay absolute-0-100 -- no ceiling label at all.
+  await page.getByRole('tab', { name: 'CPU', exact: true }).click();
+  await expect(page.locator('.top-consumers__scale')).toHaveCount(0);
+
+  // Overview's own compact module gets the identical treatment, once
+  // per module rather than per row.
+  await page.goto('#/');
+  const netTab = page.getByRole('tab', { name: 'Net', exact: true });
+  await netTab.click();
+  const moduleLabel = page.locator('.overview__top-scale');
+  await expect(moduleLabel).toBeVisible();
+  await expect(moduleLabel).toHaveText(/^Scale ≤ \d+(\.\d+)? (B|KB|MB|GB)\/s$/);
+});
+
 // Regression coverage for the top-consumers host-share fix: a container
 // used to read docker-stats' own per-core percent (routinely near/at
 // 100%) right next to the host tile's much lower whole-machine total --

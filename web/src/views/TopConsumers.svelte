@@ -22,7 +22,7 @@
   import { seriesPointsToRing } from '../lib/livering';
   import { fetchSeries, fetchSnapshot, fetchTop } from '../lib/api';
   import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
-  import { keysByPattern, sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
+  import { keysByPattern, niceCeiling, sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
   import { buildCoreBudget } from '../lib/coreBudget';
   import {
     hostSeriesMetricKeys,
@@ -334,6 +334,23 @@
   });
 
   let rows = $derived(unattributedRow ? [...containerRows, unattributedRow] : containerRows);
+
+  // scaleMax/scaleCeilingLabel: same nice-1-2-5-ceiling fix as Overview's
+  // own compact module (see metrics.ts's niceCeiling doc) for net/io's
+  // otherwise-unbounded bars -- shown once, in the header, rather than
+  // per row (every row already shares one scale).
+  let scaleMax = $derived.by(() => {
+    const base = resourceScaleMax(resource, live.frame);
+    if (base !== undefined) return base;
+    if (resource === 'net' || resource === 'io') {
+      return niceCeiling(Math.max(0, ...rows.map((r) => r.value)));
+    }
+    return undefined;
+  });
+  let scaleCeilingLabel = $derived(
+    (resource === 'net' || resource === 'io') && scaleMax ? `Bars scaled to ≤ ${FORMATTERS[resource](scaleMax)}` : null,
+  );
+
   let showAggToggle = $derived(windowKey !== 'now');
   let showPeakSumCaption = $derived(windowKey !== 'now' && agg === 'peak' && SUMMED_RESOURCES.has(resource));
   let emptyMessage = $derived(
@@ -420,6 +437,9 @@
           <span class="top-consumers__header-value">{FORMATTERS[resource](hostTotal.value)}</span>
         {/if}
       </div>
+      {#if scaleCeilingLabel}
+        <p class="microlabel top-consumers__scale">{scaleCeilingLabel}</p>
+      {/if}
       {#if showRibbon}
         <CoreBudgetRibbon {hostCores} segments={coreBudget.segments} freeCores={coreBudget.freeCores} icons={coreBudgetIcons} />
       {/if}
@@ -443,7 +463,7 @@
         directionLabels={ROW_DIRECTION_LABELS[resource]}
         {emptyMessage}
         live={windowKey === 'now'}
-        scaleMax={resourceScaleMax(resource, live.frame)}
+        {scaleMax}
         metricKey={resource}
       />
     {/if}
@@ -481,6 +501,10 @@
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 0.5rem;
+  }
+  .top-consumers__scale {
+    margin: 0;
+    text-align: right;
   }
   .top-consumers__header-value {
     font-family: var(--font-display);

@@ -161,6 +161,31 @@ export function seqStep(pct: number): string {
   return `var(--seq-${step}00)`;
 }
 
+// NICE_CEILING_STEPS is the classic 1-2-5-per-decade "nice round number"
+// ladder -- 10 is included so every decade's own top step is exact
+// (100, 1000, ...) rather than falling through to the next decade's 1x.
+const NICE_CEILING_STEPS = [1, 2, 5, 10];
+
+// niceCeiling rounds `max` up to the next step of that ladder, scaled to
+// max's own magnitude -- a byte-rate leaderboard's bar scale (Top
+// Consumers, net/io) reads against this instead of the busiest row's own
+// value, so a quiet fleet's bars don't all read as nearly-full just
+// because nothing happening right now is any busier (Scott: "NET can
+// obviously go higher, but it looks like it's maxed out"). Works at any
+// magnitude (B/s through GB/s and beyond) since it operates on the raw
+// number, not a formatted string. 0 for a non-positive/non-finite max --
+// nothing to scale against.
+export function niceCeiling(max: number): number {
+  if (!Number.isFinite(max) || max <= 0) return 0;
+  const exp = Math.floor(Math.log10(max));
+  const base = 10 ** exp;
+  for (const step of NICE_CEILING_STEPS) {
+    const candidate = step * base;
+    if (candidate >= max) return candidate;
+  }
+  return 10 * base; // unreachable (NICE_CEILING_STEPS's own last step is 10), kept so this stays total
+}
+
 // parityIsRunning applies the parity-progress wire semantic var.go's
 // collector and the fake generator both now guarantee: a check is
 // running iff parity.progress_pct is present AND strictly positive.

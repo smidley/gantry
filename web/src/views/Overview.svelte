@@ -39,7 +39,14 @@
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
   import { fmtBytes, fmtCores, fmtDuration, fmtPct, fmtRate } from '../lib/format';
-  import { keysByPattern, sumMetricsByPattern, sumSeriesPoints, parityIsRunning, etaFromProgress } from '../lib/metrics';
+  import {
+    keysByPattern,
+    sumMetricsByPattern,
+    sumSeriesPoints,
+    parityIsRunning,
+    etaFromProgress,
+    niceCeiling,
+  } from '../lib/metrics';
   import { diskKind, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
@@ -162,6 +169,24 @@
   let fleetLine = $derived(fleetSentence(containerEntries.length, runningCount, stoppedCount));
 
   let topRows = $derived(topFromFrame(live.frame, topResource, 5));
+
+  // topScaleMax/topScaleCeilingLabel: net/io have no fixed 0-100 ceiling
+  // (resourceScaleMax's own doc), so instead of the leaderboard's OWN max
+  // (a quiet fleet then reads as maxed out -- Scott: "NET can obviously
+  // go higher, but it looks like it's maxed out"), scale against a nice
+  // 1-2-5 ceiling at least as big as the current max. One label for the
+  // whole module (not per row): every row already shares one scale.
+  let topScaleMax = $derived.by(() => {
+    const base = resourceScaleMax(topResource, live.frame);
+    if (base !== undefined) return base;
+    if (topResource === 'net' || topResource === 'io') {
+      return niceCeiling(Math.max(0, ...topRows.map((r) => r.value)));
+    }
+    return undefined;
+  });
+  let topScaleCeilingLabel = $derived(
+    (topResource === 'net' || topResource === 'io') && topScaleMax ? `Scale ≤ ${fmtRate(topScaleMax)}` : null,
+  );
 
   // --- Array/disks (moved in from the old ArrayCard, which D2 folds into
   // a quiet headline subline instead of a dedicated card -- see
@@ -407,12 +432,15 @@
             </button>
           {/each}
         </div>
+        {#if topScaleCeilingLabel}
+          <p class="microlabel overview__top-scale">{topScaleCeilingLabel}</p>
+        {/if}
         <TopBarList
           rows={topRows}
           formatValue={TOP_FORMATTERS[topResource]}
           formatSecondary={TOP_SECONDARY_FORMATTERS[topResource]}
           live={true}
-          scaleMax={resourceScaleMax(topResource, live.frame)}
+          scaleMax={topScaleMax}
           metricKey={topResource}
         />
       </div>
@@ -671,6 +699,10 @@
     font-size: 0.78rem;
     color: var(--series-1);
     text-decoration: none;
+  }
+  .overview__top-scale {
+    margin: 0;
+    text-align: right;
   }
   .overview__top-switcher {
     display: inline-flex;

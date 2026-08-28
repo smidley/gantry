@@ -49,6 +49,55 @@ export function sortDiskEntities(names: string[]): string[] {
   });
 }
 
+export type DiskMediaType = 'hdd' | 'ssd';
+
+// diskMediaType reads a disk's rotational value (disks.go's own "0/1 per
+// present disk from disks.ini" contract) into the two-way distinction
+// Storage/Overview render a glyph for: 0 is solid-state, anything else
+// (1, the only other real-world value, but any nonzero reading is
+// treated the same) is spinning. null -- absent, never guessed -- covers
+// a not-present disk (never rendered here anyway) and a stale/pre-
+// upgrade frame that hasn't started sending this metric yet.
+//
+// Superseded by diskKind below as Storage/Overview's own primary read
+// (rotational alone can't tell a USB flash stick or an NVMe pool member
+// apart from an ordinary spinning/SATA-SSD disk -- Scott's own report),
+// but kept, tested, and exported as-is: diskKind falls back to it
+// whenever a frame's disk_meta doesn't (yet) cover a slot.
+export function diskMediaType(metrics: Record<string, number> | undefined | null): DiskMediaType | null {
+  const rotational = metrics?.['rotational'];
+  if (rotational === undefined) return null;
+  return rotational === 0 ? 'ssd' : 'hdd';
+}
+
+export type DiskKind = 'hdd' | 'ssd' | 'nvme' | 'usb';
+
+const DISK_KINDS: ReadonlySet<string> = new Set<DiskKind>(['hdd', 'ssd', 'nvme', 'usb']);
+
+// diskMetaKind narrows an arbitrary string (straight off the wire, never
+// typechecked at its source) to DiskKind -- same "don't trust the network"
+// convention topFromFrame.ts's isTopResource already uses for a route
+// param.
+function diskMetaKind(value: string | undefined): DiskKind | null {
+  return value !== undefined && DISK_KINDS.has(value) ? (value as DiskKind) : null;
+}
+
+// diskKind is Storage/Overview's own primary type read: the server now
+// classifies every present disk (unraid.DiskKind, disks.go) into one of
+// four kinds -- rotational alone can conflate a USB flash stick with an
+// ordinary spinning disk, and an NVMe pool member with a plain SATA SSD,
+// which is exactly the bug report this exists to fix. meta is that
+// slot's own disk_meta entry (SnapshotDTO.DiskMeta, keyed by slot);
+// falling back to the older rotational-only diskMediaType (never hidden
+// outright) covers a frame from before this feature shipped, or a slot
+// disk_meta hasn't (yet) reported on this tick.
+export function diskKind(
+  meta: { kind?: string } | undefined | null,
+  metrics: Record<string, number> | undefined | null,
+): DiskKind | null {
+  return diskMetaKind(meta?.kind) ?? diskMediaType(metrics);
+}
+
 export type DiskTempState = { kind: 'reading'; celsius: number } | { kind: 'spun-down' } | { kind: 'no-sensor' };
 
 // diskTempState reads one disk's temp/spin-state metrics. Absence of the

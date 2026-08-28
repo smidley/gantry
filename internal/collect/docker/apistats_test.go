@@ -2,6 +2,7 @@ package docker
 
 import (
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/stretchr/testify/require"
@@ -53,4 +54,30 @@ func TestStatsFromAPIMissingInactiveFileDefaultsToZero(t *testing.T) {
 	}
 	cg := statsFromAPI(resp)
 	require.Equal(t, uint64(0), cg.MemInactiveFile)
+}
+
+// TestStatsFromAPIThroughRecordContainerStatsComputesHostShareCPU pins the
+// fallback path's own math end to end: two API-shaped responses 2 seconds
+// apart, mapped via statsFromAPI, must feed recordContainerStats' CPU rate
+// the same way the cgroup v2 fast path does -- 4,000,000,000ns (4,000,000
+// usec) of usage over 2s wall is 2 full cores, 25% of an 8-core host.
+func TestStatsFromAPIThroughRecordContainerStatsComputesHostShareCPU(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink) // HostCores stubbed to 8
+
+	first := statsFromAPI(container.StatsResponse{})
+	second := statsFromAPI(container.StatsResponse{
+		CPUStats: container.CPUStats{CPUUsage: container.CPUUsage{TotalUsage: 4_000_000_000}},
+	})
+
+	c.recordContainerStats("web", first, time.Unix(1000, 0))
+	c.recordContainerStats("web", second, time.Unix(1002, 0))
+
+	cores, ok := sink.value("web", "cpu.cores")
+	require.True(t, ok)
+	require.Equal(t, 2.0, cores)
+
+	pct, ok := sink.value("web", "cpu.pct")
+	require.True(t, ok)
+	require.Equal(t, 25.0, pct)
 }

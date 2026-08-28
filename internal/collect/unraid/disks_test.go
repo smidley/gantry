@@ -11,6 +11,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestDiskKind pins the pure classification rule Scott's own report
+// drove (a live box misread its boot flash device as HDD and its NVMe
+// cache pools as generic SSD): slot name wins outright for the boot
+// device, then device-name prefix, then rotational as the last resort.
+func TestDiskKind(t *testing.T) {
+	cases := []struct {
+		name         string
+		slot, device string
+		rotational   float64
+		rotationalOK bool
+		want         string
+	}{
+		{"boot flash device always classifies usb, despite reporting rotational=1 and a plain scsi-style device name", "flash", "sdi", 1, true, "usb"},
+		{"an nvme pool member classifies nvme regardless of its own slot name", "cache", "nvme1n1", 0, true, "nvme"},
+		{"a second, differently-named nvme pool classifies nvme the same way", "rocket_pool", "nvme0n1", 0, true, "nvme"},
+		{"a plain SATA/SAS solid-state disk (rotational=0, non-nvme device) classifies ssd", "cache", "sdh", 0, true, "ssd"},
+		{"a spinning data disk classifies hdd", "disk1", "sdg", 1, true, "hdd"},
+		{"an unparseable rotational reading falls back to hdd, the safe default", "disk1", "sdg", 0, false, "hdd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, DiskKind(tc.slot, tc.device, tc.rotational, tc.rotationalOK))
+		})
+	}
+}
+
 func TestTickDisksExactValuesAcrossSlots(t *testing.T) {
 	dir := t.TempDir()
 	copyFixture(t, "testdata/disks.ini", filepath.Join(dir, "disks.ini"))
@@ -23,6 +49,7 @@ func TestTickDisksExactValuesAcrossSlots(t *testing.T) {
 	require.InDelta(t, 32, sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: "temp.c"}], 1e-9)
 	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: "spun_up"}], 1e-9)
 	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: "errors"}], 1e-9)
+	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: "rotational"}], 1e-9)
 	_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: "fs.used_bytes"}]
 	require.False(t, ok, "parity has fsSize 0, so fs byte metrics must not be emitted")
 	_, ok = sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: "fs.free_bytes"}]
@@ -32,26 +59,31 @@ func TestTickDisksExactValuesAcrossSlots(t *testing.T) {
 	require.InDelta(t, 31, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "temp.c"}], 1e-9)
 	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "spun_up"}], 1e-9)
 	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "errors"}], 1e-9)
+	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 6144000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.used_bytes"}], 1e-9)
 	require.InDelta(t, 4096000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.free_bytes"}], 1e-9)
 
 	// disk2: spun down, temp "*" -- absence is the signal, not a 0 reading.
+	// rotational is a static hardware property, unrelated to spin state, so
+	// it must still be recorded even while spun down.
 	_, ok = sink.records[store.SeriesKey{Kind: "disk", Entity: "disk2", Metric: "temp.c"}]
 	require.False(t, ok, "a spun-down disk's temp is \"*\" and must be omitted, never emitted as 0")
 	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk2", Metric: "spun_up"}], 1e-9)
 	require.InDelta(t, 2, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk2", Metric: "errors"}], 1e-9)
+	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk2", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 4096000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk2", Metric: "fs.used_bytes"}], 1e-9)
 	require.InDelta(t, 6144000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk2", Metric: "fs.free_bytes"}], 1e-9)
 
 	// disk3: DISK_NP (empty slot) -- must emit nothing at all.
-	for _, metric := range []string{"temp.c", "spun_up", "errors", "fs.used_bytes", "fs.free_bytes"} {
+	for _, metric := range []string{"temp.c", "spun_up", "errors", "rotational", "fs.used_bytes", "fs.free_bytes"} {
 		_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "disk3", Metric: metric}]
 		require.False(t, ok, "DISK_NP slot disk3 must emit nothing for metric %s", metric)
 	}
 
-	// cache: normal present disk, different fs numbers.
+	// cache: normal present disk, different fs numbers, solid-state (rotational=0).
 	require.InDelta(t, 38, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "temp.c"}], 1e-9)
 	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "spun_up"}], 1e-9)
+	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 1536000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.used_bytes"}], 1e-9)
 	require.InDelta(t, 512000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.free_bytes"}], 1e-9)
 }
@@ -162,48 +194,75 @@ func TestTickDisksRealCaptureFromLiveUnraidBox(t *testing.T) {
 	c.tickDisks(time.Unix(1000, 0))
 
 	// parity: DISK_NP_DSBL on this real box (no active parity disk) -- must emit nothing.
-	for _, metric := range []string{"temp.c", "spun_up", "errors", "fs.used_bytes", "fs.free_bytes"} {
+	for _, metric := range []string{"temp.c", "spun_up", "errors", "rotational", "fs.used_bytes", "fs.free_bytes"} {
 		_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: metric}]
 		require.False(t, ok, "DISK_NP_DSBL slot parity must emit nothing for metric %s", metric)
 	}
 
 	// disk1: present, xfs -- fsUsed equals fsSize-fsFree in reality, both formulas agree here.
+	// Spinning (rotational=1), same as every array data disk on this box.
 	require.InDelta(t, 38, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "temp.c"}], 1e-9)
 	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "spun_up"}], 1e-9)
 	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "errors"}], 1e-9)
+	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 16375065784320.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.used_bytes"}], 1e-6)
 	require.InDelta(t, 1623005102080.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.free_bytes"}], 1e-6)
 
 	// disk6: present, xfs, a different vendor/model and size class.
 	require.InDelta(t, 34, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk6", Metric: "temp.c"}], 1e-9)
 	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk6", Metric: "spun_up"}], 1e-9)
+	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk6", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 24695444688896.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk6", Metric: "fs.used_bytes"}], 1e-6)
 	require.InDelta(t, 1302864769024.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk6", Metric: "fs.free_bytes"}], 1e-6)
 
 	// disk9: DISK_NP empty data slot -- must emit nothing.
-	for _, metric := range []string{"temp.c", "spun_up", "errors", "fs.used_bytes", "fs.free_bytes"} {
+	for _, metric := range []string{"temp.c", "spun_up", "errors", "rotational", "fs.used_bytes", "fs.free_bytes"} {
 		_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "disk9", Metric: metric}]
 		require.False(t, ok, "DISK_NP slot disk9 must emit nothing for metric %s", metric)
 	}
 
-	// cache: present, btrfs pool -- fsUsed diverges from fsSize-fsFree; fsUsed must win.
+	// cache: present, btrfs pool, nvme transport -- fsUsed diverges from
+	// fsSize-fsFree (fsUsed must win) and rotational reads 0 (solid-state).
 	require.InDelta(t, 36, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "temp.c"}], 1e-9)
+	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 625070358528.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.used_bytes"}], 1e-6)
 	require.InDelta(t, 372920500224.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.free_bytes"}], 1e-6)
 
-	// rocket_pool: a second, differently-named btrfs pool -- proves the
-	// collector doesn't special-case the literal name "cache".
+	// rocket_pool: a second, differently-named btrfs pool, also nvme --
+	// proves the collector doesn't special-case the literal name "cache",
+	// for rotational same as every other per-disk metric.
 	require.InDelta(t, 44, sink.records[store.SeriesKey{Kind: "disk", Entity: "rocket_pool", Metric: "temp.c"}], 1e-9)
+	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "disk", Entity: "rocket_pool", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 545635610624.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "rocket_pool", Metric: "fs.used_bytes"}], 1e-6)
 	require.InDelta(t, 449255231488.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "rocket_pool", Metric: "fs.free_bytes"}], 1e-6)
 
 	// flash: boot device -- temp is "*" (no sensor) despite spundown=0 (not
-	// a spin-down case at all, just nothing to report); spun_up still records.
+	// a spin-down case at all, just nothing to report); spun_up still
+	// records. This real USB thumb drive reports rotational=1 despite being
+	// flash media -- relayed as-is, same as every other raw disks.ini value.
 	_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "temp.c"}]
 	require.False(t, ok, `flash reports temp "*" (no sensor) and must omit temp.c`)
 	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "spun_up"}], 1e-9)
+	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 3022356480.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "fs.used_bytes"}], 1e-6)
 	require.InDelta(t, 58987806720.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "fs.free_bytes"}], 1e-6)
+
+	// DiskMeta: the whole point of this fixture (Scott's own report) --
+	// flash must classify usb despite its rotational=1/plain-sdX shape
+	// above, and BOTH nvme-transport pools must classify nvme even though
+	// their rotational=0 reading alone can't tell them apart from a plain
+	// SATA/SAS SSD. Absent slots (DISK_NP/DISK_NP_DSBL) get no metrics
+	// above and must get no DiskMeta entry either.
+	meta := c.DiskMeta()
+	require.Equal(t, DiskMeta{Device: "sdi", Kind: "usb"}, meta["flash"])
+	require.Equal(t, DiskMeta{Device: "nvme1n1", Kind: "nvme"}, meta["cache"])
+	require.Equal(t, DiskMeta{Device: "nvme0n1", Kind: "nvme"}, meta["rocket_pool"])
+	require.Equal(t, DiskMeta{Device: "sdg", Kind: "hdd"}, meta["disk1"])
+	require.Equal(t, DiskMeta{Device: "sdd", Kind: "hdd"}, meta["disk6"])
+	_, hasParity := meta["parity"]
+	require.False(t, hasParity, "DISK_NP_DSBL slot parity must have no DiskMeta entry either")
+	_, hasDisk9 := meta["disk9"]
+	require.False(t, hasDisk9, "DISK_NP slot disk9 must have no DiskMeta entry either")
 }
 
 func TestTickDisksMissingFileDegradesSilently(t *testing.T) {

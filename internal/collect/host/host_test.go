@@ -195,6 +195,22 @@ func TestHostMemTotalUpdatesEachTick(t *testing.T) {
 	require.Equal(t, uint64(1000000*1024), c.MemTotal())
 }
 
+func TestHostNumCPUCountsPerCoreLinesFromFirstTick(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stat", statA)
+	writeFile(t, dir, "meminfo", meminfoA)
+
+	sink := newFakeSink()
+	c := New(sink, dir, t.TempDir())
+	require.Equal(t, 0, c.NumCPU(), "NumCPU must be 0 before the first tick")
+
+	// Unlike cpu.total (which needs a second sample for a rate), NumCPU
+	// only needs a COUNT of one /proc/stat read's own cpuN lines -- so it
+	// must already be right after the very first tick, not the second.
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+	require.Equal(t, 2, c.NumCPU(), "statA has two cpuN lines")
+}
+
 const netDevA = `Inter-|   Receive                                                |  Transmit
  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
   eth0: 1000000     900    0    0    0     0          0         5   200000      300    0    0    0     0       0          0

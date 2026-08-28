@@ -80,17 +80,22 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 
 	var wg sync.WaitGroup
 
-	// fakeMetas, when fake-data mode is on, is threaded into
+	// fakeMetas/fakeDiskMeta, when fake-data mode is on, are threaded into
 	// buildSnapshot/buildContainersList below so the fake fleet is
 	// treated exactly like dc.Running()'s real entries (Task 11's
 	// ledger-carried fix -- see fake.Generator.Metas' own doc for why
 	// that's required at all: this generator writes samples straight to
-	// the store, never touching dc's registry).
+	// the store, never touching dc's registry, and disks.go's own
+	// unraid.Collector similarly never sees a real disks.ini in fake
+	// mode). fakeDiskMeta mirrors fakeMetas' shape for disk device/type
+	// metadata (see fake.Generator.DiskMetas' own doc).
 	var fakeMetas func() []docker.Meta
+	var fakeDiskMeta func() map[string]unraid.DiskMeta
 	if cfg.Bool("fake_data", false) {
 		log.Println("fake data mode: synthesizing a demo fleet")
 		fk := fake.New(st, st, time.Now().UnixNano())
 		fakeMetas = fk.Metas
+		fakeDiskMeta = fk.DiskMetas
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -102,7 +107,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// own Probe decides availability, so a dev box with no docker socket,
 	// no /proc, or no Nvidia GPU just reports "unavailable" with a hint
 	// (surfaced via healthz sources) rather than erroring. Wiring adapters
-	// (Lookup->name, MemTotal, DeviceName, Running) live here rather than
+	// (Lookup->name, MemTotal, HostCores, DeviceName, Running) live here rather than
 	// in any collector package, keeping the collectors mutually decoupled.
 	sysRoot := envOnly(getenv, "GANTRY_HOST_SYS", "/host/sys")
 	dockerSock := envOnly(getenv, "GANTRY_DOCKER_SOCK", "/var/run/docker.sock")
@@ -111,9 +116,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	host := host.New(st, "/proc", sysRoot)
 
 	dc := docker.New(st, st, st.Live().Evict, dockerSock)
-	dc.CgroupRoot = cgroupRoot
-	dc.MemTotal = host.MemTotal
-	dc.DeviceName = host.DeviceName
+	wireDockerCollector(dc, host, cgroupRoot)
 
 	// gpuLookup adapts docker's Meta-returning Lookup to the name-only
 	// signature both GPU collectors (DRM fdinfo and nvidia-smi) need for
@@ -129,6 +132,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	ur := unraid.New(st, st, envOnly(getenv, "GANTRY_UNRAID_DIR", "/unraid"), "/proc")
 	du := docker.NewDiskUsage(st, dockerSock)
 	ss := selfstat.New(st, "/proc")
+	ss.HostCores = host.NumCPU
 
 	registry := collect.NewRegistry()
 	registry.Add(host)
@@ -174,7 +178,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// snapshot (Options.Snapshot), /api/live's connect frame (Options.
 	// Current), and the publish loop below -- all three read the exact
 	// same assembly, just on different triggers (poll, connect, tick).
-	snapshotFn := buildSnapshot(st, dc, ur, registry.Sources, fakeMetas)
+	snapshotFn := buildSnapshot(st, dc, ur, registry.Sources, fakeMetas, fakeDiskMeta)
 	live := server.NewBroadcaster()
 
 	// SSE publish loop: every 2s, marshal the current snapshot and fan it
@@ -228,6 +232,20 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	return err
 }
 
+// wireDockerCollector points the docker collector's injected dependencies
+// at the host collector's own methods (see docker.Collector's own doc for
+// why: mem.pct, cpu.pct's host-share conversion, and per-device io
+// attribution all need them). Extracted out of run() so this wiring --
+// HostCores in particular, easy to accidentally swap for a plain
+// runtime.NumCPU() -- is unit-testable without a live docker daemon or
+// /proc.
+func wireDockerCollector(dc *docker.Collector, h *host.Collector, cgroupRoot string) {
+	dc.CgroupRoot = cgroupRoot
+	dc.MemTotal = h.MemTotal
+	dc.HostCores = h.NumCPU
+	dc.DeviceName = h.DeviceName
+}
+
 // containerFrameMaxAge is how long a non-running container's live sample
 // keeps it in the snapshot frame after its last write: long enough that
 // the 10s inventory poll and the event stream both have a chance to
@@ -249,14 +267,18 @@ const containerFrameMaxAge = 60
 // fakeMetas is nil outside fake-data mode; when non-nil its entries are
 // treated exactly like dc.Running()'s -- unconditionally seeded, not a
 // mere lookup fallback -- so the fake fleet survives the same filter a
-// real one does.
+// real one does. fakeDiskMeta is its disk-metadata analogue: ur.DiskMeta()
+// (a real box's own unraid collector) is merged into dto.DiskMeta first,
+// then fakeDiskMeta's entries on top when wired -- see server.DiskMetaDTO's
+// own doc for why disk type/device strings ride their own map rather than
+// Disks' numeric one.
 //
 // Containers is filtered, not just seeded: an entity not in the merged
 // running set only stays in the frame while containerFrameEntities says
 // so (a live sample younger than containerFrameMaxAge AND a name
 // lookupByName still recognizes) — see containerFrameEntities' own doc
 // for why that's two different conditions, not one.
-func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, sources func() map[string]string, fakeMetas func() []docker.Meta) func() server.SnapshotDTO {
+func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta) func() server.SnapshotDTO {
 	return func() server.SnapshotDTO {
 		dto := server.SnapshotDTO{
 			TS:            time.Now().Unix(),
@@ -264,12 +286,26 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 			Host:          map[string]float64{},
 			Containers:    map[string]server.ContainerDTO{},
 			Disks:         map[string]map[string]float64{},
+			DiskMeta:      map[string]server.DiskMetaDTO{},
 			Unraid:        map[string]map[string]float64{},
 			GPU:           map[string]map[string]float64{},
 			Sources:       map[string]string{},
 		}
 		if sources != nil {
 			dto.Sources = sources()
+		}
+
+		// DiskMeta: real first, then fake-mode's own overlay when wired --
+		// mirrors fakeMetas' "treated exactly like the real source, not a
+		// mere fallback" contract just below, though in practice the two
+		// never actually collide (fake mode has no real disks.ini to read).
+		for slot, m := range ur.DiskMeta() {
+			dto.DiskMeta[slot] = server.DiskMetaDTO{Device: m.Device, Kind: m.Kind}
+		}
+		if fakeDiskMeta != nil {
+			for slot, m := range fakeDiskMeta() {
+				dto.DiskMeta[slot] = server.DiskMetaDTO{Device: m.Device, Kind: m.Kind}
+			}
 		}
 
 		metas := dc.Running()

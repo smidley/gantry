@@ -8,6 +8,34 @@ import type { ContainerDTO, SnapshotDTO, TopResource } from './api';
 export interface TopFrameRow {
   entity: string;
   value: number;
+  // secondary (additive, optional): a quiet annotation alongside value --
+  // today only cpu's cpu.cores, read straight off the same frame (see
+  // resourceSecondaryMetricKey). Absent whenever the resource has none,
+  // or the container has no sample for it yet.
+  secondary?: number;
+}
+
+// TOP_RESOURCES is the one fixed list/order of "top consumers" resources --
+// shared by the full Top Consumers view's own tabs (label) and Overview's
+// compact module-header switcher (shortLabel, the CPU/Mem/Net/IO/GPU
+// abbreviations Scott's own ask spelled out), so both surfaces stay in
+// lockstep with resourceMetricKeys below and never drift into two
+// independently-maintained resource lists.
+export const TOP_RESOURCES: { key: TopResource; label: string; shortLabel: string }[] = [
+  { key: 'cpu', label: 'CPU', shortLabel: 'CPU' },
+  { key: 'mem', label: 'Memory', shortLabel: 'Mem' },
+  { key: 'net', label: 'Network', shortLabel: 'Net' },
+  { key: 'io', label: 'Disk IO', shortLabel: 'IO' },
+  { key: 'gpu', label: 'GPU', shortLabel: 'GPU' },
+];
+
+// isTopResource narrows an arbitrary string (a route param, a localStorage
+// read -- neither typechecked at their source) to TopResource, so a
+// malformed deep link or a stale/hand-edited storage value falls back to
+// the caller's own default instead of silently propagating an invalid
+// resource key into resourceMetricKeys' switch.
+export function isTopResource(value: string | null | undefined): value is TopResource {
+  return TOP_RESOURCES.some((r) => r.key === value);
 }
 
 // resourceMetricKeys mirrors the server's resourceMetrics (api_history.go)
@@ -28,6 +56,15 @@ export function resourceMetricKeys(resource: TopResource): string[] {
     case 'gpu':
       return ['gpu.render.busy_pct', 'gpu.video.busy_pct', 'gpu.video-enhance.busy_pct', 'gpu.copy.busy_pct'];
   }
+}
+
+// resourceSecondaryMetricKey names the one extra per-entity metric worth
+// annotating a row with, alongside resourceMetricKeys' own primary sum --
+// today only cpu, whose host-share primary value (cpu.pct) leaves the
+// underlying core count implicit; see the collector's cgroupv2.go
+// cpu.cores doc for why that number is worth surfacing on its own.
+export function resourceSecondaryMetricKey(resource: TopResource): string | undefined {
+  return resource === 'cpu' ? 'cpu.cores' : undefined;
 }
 
 // sumPresentMetrics sums metricKeys' values on one container, reporting
@@ -54,10 +91,15 @@ function sumPresentMetrics(c: ContainerDTO, metricKeys: string[]): { sum: number
 // to limit.
 export function topFromFrame(frame: SnapshotDTO | null | undefined, resource: TopResource, limit = 10): TopFrameRow[] {
   const metricKeys = resourceMetricKeys(resource);
+  const secondaryKey = resourceSecondaryMetricKey(resource);
   const rows: TopFrameRow[] = [];
   for (const [entity, c] of Object.entries(frame?.containers ?? {})) {
     const { sum, present } = sumPresentMetrics(c, metricKeys);
-    if (present) rows.push({ entity, value: sum });
+    if (!present) continue;
+    const row: TopFrameRow = { entity, value: sum };
+    const secondary = secondaryKey ? c.metrics[secondaryKey] : undefined;
+    if (secondary !== undefined) row.secondary = secondary;
+    rows.push(row);
   }
   rows.sort((a, b) => (b.value !== a.value ? b.value - a.value : a.entity.localeCompare(b.entity)));
   return rows.slice(0, limit);

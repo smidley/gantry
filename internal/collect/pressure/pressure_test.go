@@ -83,6 +83,16 @@ func TestProbeAvailableIffPressureIoExists(t *testing.T) {
 	require.True(t, c.Probe(context.Background()).Available)
 }
 
+// TestDocsPsiMdQuotesTheProbeDetailStringExactly pins docs/psi.md's own
+// quote of this hint against psiDisabledDetail itself, so a future edit
+// to either one that lets them drift apart fails a test instead of
+// quietly shipping a doc that no longer matches what the UI shows.
+func TestDocsPsiMdQuotesTheProbeDetailStringExactly(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "psi.md"))
+	require.NoError(t, err)
+	require.Contains(t, string(content), psiDisabledDetail)
+}
+
 func TestTickRecordsHostAndContainerPSIAndSkipsMissingResourcesSilently(t *testing.T) {
 	procRoot := t.TempDir()
 	cgroupRoot := t.TempDir()

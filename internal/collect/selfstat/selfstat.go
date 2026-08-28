@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,13 @@ type Collector struct {
 	sink     store.MetricSink
 	procRoot string
 	rates    *collect.RateTracker
+
+	// HostCores mirrors docker.Collector's own field and fallback: wired
+	// to the host collector's core count so gantry.cpu_pct reads as a
+	// host-share percentage instead of the old per-core-style number; 0
+	// (default, or before the host collector's first tick) falls back to
+	// runtime.NumCPU().
+	HostCores func() int
 }
 
 var _ collect.Collector = (*Collector)(nil)
@@ -36,7 +44,10 @@ var _ collect.Collector = (*Collector)(nil)
 // "self" always resolves to this process regardless of which pid it's
 // running as, so no pid needs to be threaded through.
 func New(sink store.MetricSink, procRoot string) *Collector {
-	return &Collector{sink: sink, procRoot: procRoot, rates: collect.NewRateTracker()}
+	return &Collector{
+		sink: sink, procRoot: procRoot, rates: collect.NewRateTracker(),
+		HostCores: func() int { return 0 },
+	}
 }
 
 func (c *Collector) Name() string            { return "selfstat" }
@@ -72,8 +83,14 @@ func (c *Collector) tickCPU(now time.Time) error {
 	}
 
 	cpuSeconds := float64(utimeJiffies+stimeJiffies) / clkTck
-	if fraction, ok := c.rates.Rate("cpu", now, cpuSeconds); ok {
-		c.sink.Record(store.SeriesKey{Kind: "host", Metric: "gantry.cpu_pct"}, now.Unix(), fraction*100)
+	if cores, ok := c.rates.Rate("cpu", now, cpuSeconds); ok {
+		hostCores := c.HostCores()
+		if hostCores <= 0 {
+			hostCores = runtime.NumCPU()
+		}
+		if hostCores > 0 {
+			c.sink.Record(store.SeriesKey{Kind: "host", Metric: "gantry.cpu_pct"}, now.Unix(), cores/float64(hostCores)*100)
+		}
 	}
 	return nil
 }

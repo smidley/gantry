@@ -22,7 +22,7 @@ test('container detail seeds its live CPU chart from server history on arrival',
   test.setTimeout(60_000);
 
   await page.goto('#/');
-  await expect(page.locator('.overview__tiles .stat-tile').first()).toBeVisible();
+  await expect(page.locator('.overview__metrics-rail .stat-tile').first()).toBeVisible();
 
   // playwright.config.ts's webServer boots once for the whole suite and
   // fullyParallel:true means this file's own start time relative to
@@ -84,7 +84,7 @@ test('container detail never flashes "no data" while its live seed is still in f
   test.setTimeout(15_000);
 
   await page.goto('#/');
-  await expect(page.locator('.overview__tiles .stat-tile').first()).toBeVisible();
+  await expect(page.locator('.overview__metrics-rail .stat-tile').first()).toBeVisible();
 
   const seedRequest = page.waitForRequest(
     (req) => new URL(req.url()).pathname === '/api/series' && new URL(req.url()).searchParams.get('kind') === 'container',

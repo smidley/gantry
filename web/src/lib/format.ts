@@ -49,6 +49,15 @@ export function fmtPct(n: number): string {
   return `${clamped.toFixed(1)}%`;
 }
 
+// fmtCores formats a container's core-usage figure (cpu.cores) as a
+// quiet "≈N.N cores" annotation alongside its host-share cpu.pct --
+// '' below 0.05, where the rounded figure would misleadingly read as
+// "≈0.0 cores" for a container barely using any CPU at all.
+export function fmtCores(n: number): string {
+  if (!Number.isFinite(n) || n < 0.05) return '';
+  return `≈${n.toFixed(1)} cores`;
+}
+
 // fmtDuration formats a duration given in seconds as its two biggest
 // non-zero units (e.g. "1d 4h", "2h 15m", "45m 10s", "8s") -- compact
 // enough for a table cell, precise enough to be useful for uptime.

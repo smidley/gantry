@@ -21,6 +21,9 @@
   every SSE frame; every fetched window must stay static), while
   Overview's always-live compact module just passes true. Each row's own
   Tween actually lives in TopBarRow (see its doc for why).
+
+  formatSecondary (additive, optional): passed straight through to every
+  row -- see TopBarRow's own doc for what it renders and when.
 -->
 <script>
   import TopBarRow from './TopBarRow.svelte';
@@ -28,6 +31,7 @@
   let {
     rows = [],
     formatValue = (v) => String(v),
+    formatSecondary = undefined,
     linkFor = (entity) => `#/containers/${encodeURIComponent(entity)}`,
     emptyMessage = 'No data for this window yet.',
     live = false,
@@ -41,7 +45,7 @@
 {:else}
   <ol class="top-bar-list">
     {#each rows as row (row.entity)}
-      <TopBarRow {row} {maxValue} {formatValue} {linkFor} {live} />
+      <TopBarRow {row} {maxValue} {formatValue} {formatSecondary} {linkFor} {live} />
     {/each}
   </ol>
 {/if}

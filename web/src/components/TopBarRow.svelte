@@ -19,7 +19,13 @@
 
   const TWEEN_MS = 400;
 
-  let { row, maxValue, formatValue, linkFor, live = false } = $props();
+  // formatSecondary (additive, optional): a quiet second line under the
+  // value, tweened off row.secondary the same way row.value already is --
+  // today only CPU rows carry one (row.secondary = cpu.cores), via
+  // topFromFrame's own resourceSecondaryMetricKey. Undefined for every
+  // other resource, or on a fetched (non-"now") row, which topFromStore
+  // never attaches one to.
+  let { row, maxValue, formatValue, formatSecondary = undefined, linkFor, live = false } = $props();
 
   // row.entity is always a container name (every leaderboard on this app
   // is per-container -- see topFromFrame's own doc) -- reading its icon
@@ -52,6 +58,23 @@
     valueTween.set(target, { duration: live && !reduced ? TWEEN_MS : 0, easing: cubicOut });
   });
 
+  // secondaryTween mirrors valueTween exactly, off row.secondary instead --
+  // same live/reduced-motion duration rule. Only ever ticks for a row
+  // that HAS a secondary (see the $effect's own guard); a row with none
+  // just leaves this at its seed value, never rendered (formatSecondary
+  // gates the template below).
+  let secondaryTween = new Tween(untrack(() => row.secondary ?? 0), { duration: TWEEN_MS, easing: cubicOut });
+
+  $effect(() => {
+    if (row.secondary === undefined) return;
+    const reduced = prefersReducedMotion.current;
+    secondaryTween.set(row.secondary, { duration: live && !reduced ? TWEEN_MS : 0, easing: cubicOut });
+  });
+
+  let secondaryText = $derived(
+    formatSecondary && row.secondary !== undefined ? formatSecondary(secondaryTween.current) : '',
+  );
+
   let widthPct = $derived(maxValue > 0 ? (valueTween.current / maxValue) * 100 : 0);
 </script>
 
@@ -63,7 +86,12 @@
   <div class="top-bar-list__track">
     <div class="top-bar-list__bar" style="width: {widthPct}%"></div>
   </div>
-  <span class="top-bar-list__value tabular-nums">{formatValue(valueTween.current)}</span>
+  <div class="top-bar-list__value-stack">
+    <span class="top-bar-list__value tabular-nums">{formatValue(valueTween.current)}</span>
+    {#if secondaryText}
+      <span class="top-bar-list__secondary tabular-nums">{secondaryText}</span>
+    {/if}
+  </div>
 </li>
 
 <style>
@@ -106,12 +134,27 @@
     min-width: 2px;
     transition: filter 150ms ease;
   }
+  /* value + secondary stack right-aligned in the row's third column --
+     secondary (additive, CPU-only) sits directly below, never splitting
+     the two across any other element. */
+  .top-bar-list__value-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.1rem;
+  }
   .top-bar-list__value {
     font-family: var(--font-mono);
     font-size: 0.78rem;
     color: var(--ink);
     white-space: nowrap;
     text-align: right;
+  }
+  .top-bar-list__secondary {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    color: var(--ink-2);
+    white-space: nowrap;
   }
   /* Bars are current-state, not time series -- no scrubbing, just
      animated emphasis on hover (brightness + a weight-up on the value

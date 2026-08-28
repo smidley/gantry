@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtRelTime } from './format';
+import { fmtBytes, fmtCores, fmtDuration, fmtPct, fmtRate, fmtRelTime } from './format';
 
 describe('fmtBytes', () => {
   it('formats sub-1024 values with the B unit, one decimal', () => {
@@ -53,6 +53,26 @@ describe('fmtPct', () => {
 
   it('handles non-finite input defensively', () => {
     expect(fmtPct(NaN)).toBe('0.0%');
+  });
+});
+
+describe('fmtCores', () => {
+  it('formats with one decimal and a leading ≈', () => {
+    expect(fmtCores(1.2)).toBe('≈1.2 cores');
+    expect(fmtCores(2)).toBe('≈2.0 cores');
+  });
+
+  it('hides negligible usage below 0.05 cores', () => {
+    expect(fmtCores(0.049)).toBe('');
+    expect(fmtCores(0)).toBe('');
+  });
+
+  it('shows the boundary value at 0.05', () => {
+    expect(fmtCores(0.05)).toBe('≈0.1 cores');
+  });
+
+  it('handles non-finite input defensively', () => {
+    expect(fmtCores(NaN)).toBe('');
   });
 });
 

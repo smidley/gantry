@@ -29,8 +29,9 @@ type Collector struct {
 	dir      string
 	procRoot string
 
-	mu      sync.Mutex
-	version string // guarded by mu; set on tickArray, read via Version()
+	mu       sync.Mutex
+	version  string              // guarded by mu; set on tickArray, read via Version()
+	diskMeta map[string]DiskMeta // guarded by mu; set on tickDisks, read via DiskMeta()
 
 	havePrevArray bool
 	prevArray     ArrayState
@@ -45,6 +46,7 @@ func New(sink store.MetricSink, events EventSink, dir, procRoot string) *Collect
 	return &Collector{
 		sink: sink, events: events, dir: dir, procRoot: procRoot,
 		prevDiskErrors: make(map[string]float64),
+		diskMeta:       make(map[string]DiskMeta),
 	}
 }
 
@@ -65,6 +67,20 @@ func (c *Collector) Version() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.version
+}
+
+// DiskMeta returns a snapshot copy of every present disk's device name
+// and classified type, keyed by slot — a copy (not the live map) so a
+// concurrent snapshot-building caller can range over the result without
+// contending with (or racing) the next tick's own writes.
+func (c *Collector) DiskMeta() map[string]DiskMeta {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]DiskMeta, len(c.diskMeta))
+	for slot, m := range c.diskMeta {
+		out[slot] = m
+	}
+	return out
 }
 
 // Tick's only hard requirement is var.ini, matching Probe's contract

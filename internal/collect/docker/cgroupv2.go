@@ -311,17 +311,22 @@ func readCPUMax(path string) (quotaUsec, periodUsec uint64, hasQuota bool, err e
 }
 
 // parseCPUSetCount parses a cgroup cpuset core list ("0-5,13-15",
-// "0-15", "3") into the number of cores it names. Empty or malformed
-// input reports ok=false, which callers treat as "no pinning info" --
-// i.e. unrestricted -- rather than failing the whole stats read over a
-// garbled cpuset file. Shared verbatim by the cgroup v2 fast path
-// (cpuset.cpus.effective) and the API fallback (HostConfig.CpusetCpus,
-// docker.go's allocFromHostConfig).
+// "0-15", "3") into the number of DISTINCT cores it names. Empty or
+// malformed input reports ok=false, which callers treat as "no pinning
+// info" -- i.e. unrestricted -- rather than failing the whole stats read
+// over a garbled cpuset file. Ids are counted through a set rather than
+// summed range-by-range, since HostConfig.CpusetCpus stores whatever raw
+// string a caller passed to --cpuset-cpus verbatim, and docker doesn't
+// reject overlapping ranges ("0-3,2-5") the way cpuset.cpus.effective's
+// own kernel-normalized form never would. Shared verbatim by the cgroup
+// v2 fast path (cpuset.cpus.effective) and the API fallback
+// (HostConfig.CpusetCpus, docker.go's allocFromHostConfig).
 func parseCPUSetCount(s string) (count int, ok bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, false
 	}
+	ids := map[int]struct{}{}
 	for _, part := range strings.Split(s, ",") {
 		lo, hi, isRange := strings.Cut(part, "-")
 		loN, err := strconv.Atoi(lo)
@@ -329,16 +334,18 @@ func parseCPUSetCount(s string) (count int, ok bool) {
 			return 0, false
 		}
 		if !isRange {
-			count++
+			ids[loN] = struct{}{}
 			continue
 		}
 		hiN, err := strconv.Atoi(hi)
 		if err != nil || hiN < loN {
 			return 0, false
 		}
-		count += hiN - loN + 1
+		for i := loN; i <= hiN; i++ {
+			ids[i] = struct{}{}
+		}
 	}
-	return count, true
+	return len(ids), true
 }
 
 // fallbackAlloc merges the stats-API path's own allocation reading

@@ -93,6 +93,21 @@ func TestReadCgroupStatsUnlimitedAllocFilesReadAsNoLimit(t *testing.T) {
 		"cpuset still parses (it lists every core, not \"max\"), but every Has* limit flag must be false")
 }
 
+// TestReadCgroupStatsCPUMaxZeroPeriodReadsAsUnlimited pins readCgroupStats'
+// own divide-by-zero guard: a real cgroup v2 kernel never writes a zero
+// period, but a malformed or synthetic cpu.max must not crash or produce
+// a spurious quotaCores either -- quota set, period 0 must read the same
+// as no quota at all.
+func TestReadCgroupStatsCPUMaxZeroPeriodReadsAsUnlimited(t *testing.T) {
+	dir := t.TempDir()
+	copyFixtures(t, dir, "cpu.stat", "memory.current", "memory.stat", "pids.current", "io.stat", "memory.max", "pids.max", "cpuset.cpus.effective")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cpu.max"), []byte("400000 0\n"), 0o644))
+
+	cg, err := readCgroupStats(dir)
+	require.NoError(t, err)
+	require.False(t, cg.Alloc.HasCPUQuota, "a zero period must not produce a quota reading")
+}
+
 // TestReadCgroupStatsMissingMemoryMaxReadsAsUnlimited pins that a missing
 // allocation file is NOT the same failure as a missing usage file: a
 // restricted-delegation environment (rootless docker, LXC) can legitimately
@@ -178,6 +193,8 @@ func TestParseCPUSetCount(t *testing.T) {
 		{name: "mixed ranges and singles", in: "0-5,13-15", want: 9, ok: true},
 		{name: "single full-width range", in: "0-15", want: 16, ok: true},
 		{name: "one core, no range", in: "3", want: 1, ok: true},
+		{name: "core zero alone", in: "0", want: 1, ok: true},
+		{name: "overlapping ranges count distinct ids once", in: "0-3,2-5", want: 6, ok: true},
 		{name: "all singles, no ranges", in: "0,1,2,3,4,5,13,14,15", want: 9, ok: true},
 		{name: "trailing newline from a raw file read", in: "0-5,13-15\n", want: 9, ok: true},
 		{name: "empty", in: "", want: 0, ok: false},

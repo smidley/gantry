@@ -28,11 +28,12 @@ const (
 // lifecycle events, and (via cgroupv2.go/apistats.go/net.go) records
 // per-container stats. Name "docker", Interval 2s.
 //
-// CgroupRoot, ProcRoot, MemTotal, and DeviceName are injected dependencies
-// with safe production defaults (set here in New); wiring code overrides
-// MemTotal/DeviceName with the host collector's own methods so mem.pct and
-// per-device io attribution work. Until overridden they degrade silently
-// (mem.pct skipped, no device named) rather than error.
+// CgroupRoot, ProcRoot, MemTotal, HostCores, and DeviceName are injected
+// dependencies with safe production defaults (set here in New); wiring
+// code overrides MemTotal/HostCores/DeviceName with the host collector's
+// own methods so mem.pct, cpu.pct's host-share conversion, and per-device
+// io attribution all work. Until overridden they degrade silently (mem.pct
+// and cpu.pct skipped, no device named) rather than error.
 type Collector struct {
 	cli      *client.Client
 	sink     store.MetricSink
@@ -46,6 +47,7 @@ type Collector struct {
 	CgroupRoot string
 	ProcRoot   string
 	MemTotal   func() uint64
+	HostCores  func() int
 	DeviceName func(majMin string) (string, bool)
 
 	lastInventory time.Time
@@ -73,6 +75,7 @@ func New(sink store.MetricSink, events EventSink, evict func(kind, entity string
 		CgroupRoot: "/host/sys/fs/cgroup",
 		ProcRoot:   "/proc",
 		MemTotal:   func() uint64 { return 0 },
+		HostCores:  func() int { return 0 },
 		DeviceName: func(string) (string, bool) { return "", false },
 	}
 }

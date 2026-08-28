@@ -107,7 +107,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// own Probe decides availability, so a dev box with no docker socket,
 	// no /proc, or no Nvidia GPU just reports "unavailable" with a hint
 	// (surfaced via healthz sources) rather than erroring. Wiring adapters
-	// (Lookup->name, MemTotal, DeviceName, Running) live here rather than
+	// (Lookup->name, MemTotal, HostCores, DeviceName, Running) live here rather than
 	// in any collector package, keeping the collectors mutually decoupled.
 	sysRoot := envOnly(getenv, "GANTRY_HOST_SYS", "/host/sys")
 	dockerSock := envOnly(getenv, "GANTRY_DOCKER_SOCK", "/var/run/docker.sock")
@@ -118,6 +118,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	dc := docker.New(st, st, st.Live().Evict, dockerSock)
 	dc.CgroupRoot = cgroupRoot
 	dc.MemTotal = host.MemTotal
+	dc.HostCores = host.NumCPU
 	dc.DeviceName = host.DeviceName
 
 	// gpuLookup adapts docker's Meta-returning Lookup to the name-only

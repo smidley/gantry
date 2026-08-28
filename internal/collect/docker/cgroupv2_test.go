@@ -96,9 +96,10 @@ func TestReadCgroupStatsEmptyIOStatYieldsEmptyMap(t *testing.T) {
 // formulas are pinned, not just "greater than 0".
 func newStatsCollector(sink store.MetricSink) *Collector {
 	return &Collector{
-		sink:     sink,
-		rates:    collect.NewRateTracker(),
-		MemTotal: func() uint64 { return 1_000_000_000 },
+		sink:      sink,
+		rates:     collect.NewRateTracker(),
+		MemTotal:  func() uint64 { return 1_000_000_000 },
+		HostCores: func() int { return 8 },
 		DeviceName: func(majMin string) (string, bool) {
 			if majMin == "8:0" {
 				return "sda", true
@@ -123,6 +124,8 @@ func TestRecordContainerStatsFirstTickEmitsOnlyGauges(t *testing.T) {
 	}, time.Unix(1000, 0))
 
 	_, ok := sink.value("web", "cpu.pct")
+	require.False(t, ok, "first tick must not emit a CPU rate")
+	_, ok = sink.value("web", "cpu.cores")
 	require.False(t, ok, "first tick must not emit a CPU rate")
 	_, ok = sink.value("web", "io.read_bps")
 	require.False(t, ok, "first tick must not emit an IO rate")
@@ -160,9 +163,13 @@ func TestRecordContainerStatsComputesRatesAcrossTwoTicks(t *testing.T) {
 		},
 	}, time.Unix(1002, 0))
 
+	cpuCores, ok := sink.value("web", "cpu.cores")
+	require.True(t, ok)
+	require.InDelta(t, 1.0, cpuCores, 1e-9, "2,000,000 usec CPU time consumed over 2,000,000 usec wall = one full core")
+
 	cpuPct, ok := sink.value("web", "cpu.pct")
 	require.True(t, ok)
-	require.InDelta(t, 100.0, cpuPct, 1e-9, "2,000,000 usec CPU time consumed over 2,000,000 usec wall = 100%%")
+	require.InDelta(t, 12.5, cpuPct, 1e-9, "one core's worth of usage is 12.5%% of an 8-core host, not 100%%")
 
 	throttledPct, ok := sink.value("web", "cpu.throttled_pct")
 	require.True(t, ok)
@@ -302,6 +309,41 @@ func TestRecordContainerStatsSlugsDeviceNameForLiveSeries(t *testing.T) {
 
 	_, ok = sink.value("web", "live:io.My Disk!.read_bps")
 	require.False(t, ok, "the unslugged device name must never appear in a metric name")
+}
+
+// TestRecordContainerStatsCPUHostShareTwoCoresOnEightCoreHost pins the
+// host-share fix's own worked example: two full cores' worth of usage on
+// an 8-core host is 25% of the HOST, not 200% of one core.
+func TestRecordContainerStatsCPUHostShareTwoCoresOnEightCoreHost(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+
+	c.recordContainerStats("web", cgStats{CPUUsageUsec: 0}, time.Unix(1000, 0))
+	c.recordContainerStats("web", cgStats{CPUUsageUsec: 4_000_000}, time.Unix(1002, 0)) // 4,000,000 usec / 2s = 2 cores
+
+	cores, ok := sink.value("web", "cpu.cores")
+	require.True(t, ok)
+	require.InDelta(t, 2.0, cores, 1e-9)
+
+	pct, ok := sink.value("web", "cpu.pct")
+	require.True(t, ok)
+	require.InDelta(t, 25.0, pct, 1e-9)
+}
+
+func TestRecordContainerStatsSkipsCPUPctWhenHostCoresZero(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+	c.HostCores = func() int { return 0 }
+
+	c.recordContainerStats("web", cgStats{CPUUsageUsec: 1_000_000}, time.Unix(1000, 0))
+	c.recordContainerStats("web", cgStats{CPUUsageUsec: 3_000_000}, time.Unix(1002, 0))
+
+	_, ok := sink.value("web", "cpu.pct")
+	require.False(t, ok, "host-share has no denominator to divide by yet")
+
+	cores, ok := sink.value("web", "cpu.cores")
+	require.True(t, ok, "cpu.cores needs no host core count, so it must still be emitted")
+	require.InDelta(t, 1.0, cores, 1e-9)
 }
 
 func TestRecordContainerStatsSkipsMemPctWhenMemTotalZero(t *testing.T) {

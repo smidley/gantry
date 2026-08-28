@@ -226,11 +226,18 @@ func (c *Collector) tickStats(ctx context.Context, now time.Time) {
 // in, same math out, so which source fed a given tick is invisible
 // downstream.
 //
-// cpu.pct / cpu.throttled_pct reuse RateTracker.Rate, which already
-// computes delta/elapsed-seconds: for a microsecond counter that's
-// "usec consumed per second of wall time", and dividing by 10,000
-// (1,000,000 usec/s per 100%) turns it into the spec's
-// "Δusec/Δwall_usec×100" formula.
+// cpu.cores/cpu.pct/cpu.throttled_pct reuse RateTracker.Rate, which
+// already computes delta/elapsed-seconds: for a microsecond counter
+// that's "usec consumed per second of wall time". /1,000,000 turns that
+// into cpu.cores (1.00 = one full core busy, docker-stats' own per-core
+// convention -- may exceed 1 for a multi-threaded container). cpu.pct
+// then divides cores by HostCores() for a HOST-share percentage instead
+// -- the two numbers read on the same "% of this machine" scale as
+// cpu.total, rather than docker stats' inflated per-core one that reads
+// as if it exceeded the whole host. Skipped (like mem.pct below) when
+// HostCores() isn't known yet. cpu.throttled_pct keeps the old /10,000
+// (Δusec/Δwall_usec×100): throttling has no host-wide analog to
+// normalize against.
 func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time) {
 	ts := now.Unix()
 	key := func(metric string) store.SeriesKey {
@@ -238,7 +245,11 @@ func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time)
 	}
 
 	if usecPerSec, ok := c.rates.Rate(name+".cpu.usage", now, float64(cg.CPUUsageUsec)); ok {
-		c.sink.Record(key("cpu.pct"), ts, usecPerSec/10000)
+		cores := usecPerSec / 1_000_000
+		c.sink.Record(key("cpu.cores"), ts, cores)
+		if hostCores := c.HostCores(); hostCores > 0 {
+			c.sink.Record(key("cpu.pct"), ts, cores/float64(hostCores)*100)
+		}
 	}
 	if usecPerSec, ok := c.rates.Rate(name+".cpu.throttled", now, float64(cg.ThrottledUsec)); ok {
 		c.sink.Record(key("cpu.throttled_pct"), ts, usecPerSec/10000)

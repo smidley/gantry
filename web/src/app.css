@@ -126,3 +126,42 @@ body {
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
+
+/* Segmented control: a joined, single-bordered button group for a
+   mutually-exclusive choice (time range, resource, aggregation, theme).
+   D2 rollout consolidation -- Events' time presets, Settings' theme
+   switch, and Top Consumers' window/aggregation toggles had already
+   converged on this exact shape independently; Top Consumers' own
+   resource tabs, Container Detail's range picker, and the GPU view's
+   range picker had each instead grown a SEPARATE "discrete pill" shape
+   (its own full border + radius per button, gapped apart) for the same
+   kind of control. One shared class, used by all six now, so a control
+   for the same kind of choice reads the same everywhere rather than by
+   which view happened to write it. Overview's own compact top-switcher
+   stays its own smaller, microlabel-styled one-off (a different scale --
+   an in-card tab strip, not a page-level control), not a third variant
+   of this. */
+.segmented {
+  display: inline-flex;
+  border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.segmented__btn {
+  min-height: 40px;
+  padding: 0 0.85rem;
+  border: none;
+  border-right: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.segmented__btn:last-child {
+  border-right: none;
+}
+.segmented__btn--active {
+  background: color-mix(in oklab, var(--series-1) 15%, transparent);
+  color: var(--series-1);
+  font-weight: 500;
+}

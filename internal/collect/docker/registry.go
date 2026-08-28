@@ -23,13 +23,30 @@ import (
 // it's only as fresh as the last 10s inventory poll, unlike the cgroup
 // v2 fast path's own allocation read (cgroupv2.go), which is fresh every
 // 2s tick.
+//
+// UpdateStatus/ChangelogURL/ProjectURL/WebUIURL/Created feed the update-
+// badge/changelog-link UI: UpdateStatus joins Image against the unraid-
+// update-status.json reader's snapshot (updatestatus.go); the other four
+// come straight from metaFromInspect's own resp fields and labels
+// (changelog.go).
+//
+// Networks/Ports are always freshly built slices, one metaFromInspect
+// call at a time -- never a slice retained (let alone mutated in place)
+// from a previous poll, and never shared with another container's Meta.
+// A caller holding onto an older Meta value (or a slice sliced out of
+// it) is therefore never surprised by a later poll's or another
+// container's data changing it out from under them.
 type Meta struct {
 	ID, Name, Image, Icon, State, Health string
 	Pid                                  int
-	StartedAt                            time.Time
+	StartedAt, Created                   time.Time
 	HostNet                              bool
 	RestartCount                         int
 	Alloc                                alloc
+	UpdateStatus                         string // "available" | "current" | "" (unknown: no match, no reader, unreadable file)
+	ChangelogURL, ProjectURL, WebUIURL   string
+	Networks                             []NetworkInfo
+	Ports                                []PortInfo
 }
 
 // EventSink is the narrow slice of store.Store the docker collector needs

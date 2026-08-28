@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -95,8 +96,11 @@ func TestSnapshotEndpointReturnsAssembledDTO(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
 	var got SnapshotDTO
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.NoError(t, json.Unmarshal(body, &got))
 
 	require.Equal(t, int64(1735689600), got.TS)
 	require.Equal(t, 12.5, got.Host["cpu.total"])
@@ -114,7 +118,31 @@ func TestSnapshotEndpointReturnsAssembledDTO(t *testing.T) {
 	require.Equal(t, []NetworkInfoDTO{{Name: "bridge", IP: "172.17.0.2"}}, got.Containers["jellyfin"].Networks)
 	require.Equal(t, []PortInfoDTO{{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096}}, got.Containers["jellyfin"].Ports)
 	require.Equal(t, "exited", got.Containers["radarr"].State)
-	require.Empty(t, got.Containers["radarr"].Networks, "a container with no wired network info must round-trip as empty, not a null-vs-omitted surprise")
+
+	// JSON-level, not just typed-decode: decoding an absent key and
+	// decoding a present-but-empty "[]" both leave a Go slice field at
+	// its nil zero value, so asserting on got.Containers[...].Networks
+	// here can't actually tell "omitted" apart from "[]" -- only the raw
+	// bytes can. ContainerDTO's frame fields are documented to omit
+	// empty collections entirely (see its own doc comment), unlike an
+	// endpoint DTO such as StorageDTO, whose own JSON-level test
+	// (TestStorageEndpointEmptyMountsAndDevicesMarshalAsEmptyArrays) pins
+	// the opposite convention for the same reason -- omission is cheaper
+	// per-container on a frame shipping dozens of them every tick.
+	var envelope map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &envelope))
+	var containers map[string]map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(envelope["containers"], &containers))
+
+	_, present := containers["radarr"]["networks"]
+	require.False(t, present, "a container with no wired network info must omit the \"networks\" key entirely, not marshal it as null or []")
+	_, present = containers["radarr"]["ports"]
+	require.False(t, present, "same omission for \"ports\"")
+
+	jellyfinNetworks, present := containers["jellyfin"]["networks"]
+	require.True(t, present, "a container WITH wired network info must carry the key")
+	require.JSONEq(t, `[{"name":"bridge","ip":"172.17.0.2"}]`, string(jellyfinNetworks))
+
 	require.Equal(t, 42.0, got.Disks["sda"]["used_pct"])
 	require.Equal(t, "6.12.10", got.UnraidVersion)
 	require.Equal(t, 5.5, got.GPU["gpu0"]["engine.render.busy_pct"])

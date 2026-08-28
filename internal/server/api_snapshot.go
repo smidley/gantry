@@ -49,7 +49,21 @@ type DiskMetaDTO struct {
 // not a usable URL. There's no backend resolution: the frontend is
 // responsible for substituting [IP] -> window.location.hostname and
 // [PORT:x] -> x itself, the same way Unraid's own WebUI does, since only
-// the browser making the request knows the right host.
+// the browser making the request knows the right host. Once resolved,
+// the frontend must scheme-allowlist the result (http/https only)
+// before it ever lands in an href, and must never render it via
+// Svelte's {@html} -- container labels are attacker-controllable (a
+// hostile Community Applications template), so a value that isn't even
+// a well-formed http(s) URL must not silently become a script-capable
+// one.
+//
+// Created/UpdateStatus/ChangelogURL/ProjectURL/WebUIURL/Networks/Ports
+// all carry "omitempty": this frame ships every currently-running
+// container on every tick (SSE included), so omitting an empty
+// collection/absent value entirely is cheaper than an endpoint DTO like
+// StorageDTO (server.StorageDTO's own doc), whose Mounts/Devices are
+// deliberately always non-nil "[]" -- a per-request, one-container
+// response has no such multiplied cost.
 type ContainerDTO struct {
 	State        string             `json:"state"`
 	Health       string             `json:"health"`

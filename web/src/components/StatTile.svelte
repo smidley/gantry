@@ -27,14 +27,18 @@
   shared ts whenever one is published, same as every other owner.
 
   bare (additive, optional -- D2 Overview) swaps the card-chrome
-  presentation for a borderless instrument-rail row (label and value on
-  one baseline, a bottom hairline instead of a bordered box): Overview's
-  metrics rail uses this; every other caller (Settings' own two tiles)
-  leaves it false and renders byte-for-byte as before. Nothing about the
-  underlying mechanism changes either way -- same Tween, same scrub-bus
-  wiring, same Sparkline instance -- `bare` only picks which markup
-  arrangement wraps the identical value/sparkline snippets below, so
-  hover-scrub and the live tween keep working identically in both modes.
+  presentation for a borderless instrument-rail row: microlabel on the
+  left, the big value with its optional value2 stacked directly beneath
+  it (both right-aligned) on the right, and a full-width sparkline below
+  that -- a bottom hairline separates ROWS, never drawn between a row's
+  own value and its value2 (Scott's own correction: the two used to be
+  split across the sparkline, reading as if value2 belonged to the NEXT
+  row). Every other caller (Settings' own two tiles) leaves `bare` false
+  and renders byte-for-byte as before. Nothing about the underlying
+  mechanism changes either way -- same Tween, same scrub-bus wiring,
+  same Sparkline instance -- `bare` only picks which markup arrangement
+  wraps the identical value/sparkline snippets below, so hover-scrub and
+  the live tween keep working identically in both modes.
 -->
 <script>
   import { Tween } from 'svelte/motion';
@@ -108,21 +112,21 @@
 
 <div class="stat-tile" class:card={!bare} class:stat-tile--bare={bare}>
   {#if bare}
+    <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
     <div class="stat-tile__row">
       <span class="stat-tile__row-label">
         <span class="microlabel">{label}</span>
         {#if status}<HealthDot {status} />{/if}
       </span>
-      <span class="stat-tile__row-value">
-        <span class="microlabel stat-tile__chip" class:stat-tile__chip--visible={!!scrubHit}>{chipText}</span>
+      <div class="stat-tile__row-value-stack">
         <span class="stat-tile__value">{@render valueBlock()}</span>
-      </span>
+        {#if value2 !== undefined}
+          <span class="stat-tile__value2 tabular-nums">{@render value2Block()}</span>
+        {/if}
+      </div>
     </div>
     {#if sparklinePoints}
       <Sparkline points={sparklinePoints} color={sparklineColor} />
-    {/if}
-    {#if value2 !== undefined}
-      <div class="stat-tile__value2 tabular-nums">{@render value2Block()}</div>
     {/if}
   {:else}
     <div class="stat-tile__head">
@@ -194,22 +198,33 @@
     align-items: center;
     gap: 0.5rem;
   }
-  .stat-tile__row-value {
+  /* value + value2 stack directly on top of each other, right-aligned --
+     the two must never be separated by the sparkline (that's what read
+     as value2 belonging to the NEXT row); both live in this one block,
+     ABOVE the sparkline, so the row's own hairline (on .stat-tile--bare
+     itself, below everything) is the only line anywhere near either. */
+  .stat-tile__row-value-stack {
     display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.15rem;
   }
-  /* The chip floats over the card layout (see .stat-tile__chip below) so
-     it never reserves space there -- in the rail row it instead sits
-     inline just left of the value, in normal flow, since the row's own
-     baseline already has room and there's no card edge for it to hug. */
+  /* The chip floats over the whole row (top-right, within its own
+     padding) so it never reserves space or disturbs the value stack's
+     layout -- same "overlay, don't push" contract as the card variant
+     below, just anchored to the bare row's own box instead. */
   .stat-tile--bare .stat-tile__chip {
-    position: static;
-    top: auto;
-    right: auto;
+    top: 0;
+    right: 0;
   }
   .stat-tile--bare .stat-tile__number {
     font-size: 1.45rem;
+  }
+  /* Sparklines are a real instrument here, not a decorative crumb --
+     floored at 120px regardless of how uPlot's own initial-width read
+     happens to land, so the rail's own charts always breathe. */
+  .stat-tile--bare :global(.sparkline) {
+    min-width: 7.5rem;
   }
   .stat-tile__chip {
     position: absolute;
@@ -246,6 +261,14 @@
     font-size: 0.85rem;
     color: var(--ink-2);
     margin-top: -0.25rem;
+  }
+  /* The stack's own gap (above) replaces the card variant's negative
+     margin-top -- that value was tuned to pull value2 up snug against
+     the hero number when it followed the number directly in normal
+     flow; here it would fight the stack's gap and crowd the two lines
+     into each other instead. */
+  .stat-tile__row-value-stack .stat-tile__value2 {
+    margin-top: 0;
   }
   .stat-tile__value2-label {
     color: var(--ink-2);

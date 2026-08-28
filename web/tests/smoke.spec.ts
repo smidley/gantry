@@ -159,8 +159,10 @@ test('container detail: charts render and the log viewer shows its empty state',
 // "jellyfin" is the only fake-fleet archetype whose mounts cover three
 // different storage kinds at once (fakeContainerMounts: a share, an
 // array disk, and the flash boot device -- "pool" only resolves on a
-// real box, since it needs a real disks.ini).
-test('container detail: storage panel renders mounts with kind badges', async ({ page }) => {
+// real box, since it needs a real disks.ini). Devices are ring-only
+// samples that take the fake generator a couple of ticks to populate
+// after the server starts, hence the generous timeout on the first one.
+test('container detail: storage panel renders mounts with kind badges and live device IO', async ({ page }) => {
   await page.goto('#/containers/jellyfin');
 
   const mountRow = (destination: string) =>
@@ -176,6 +178,11 @@ test('container detail: storage panel renders mounts with kind badges', async ({
 
   await expect(mountRow('/flash').locator('.storage-mount__badge')).toContainText('Flash');
   await expect(mountRow('/flash').locator('.storage-mount__ro')).toBeVisible();
+
+  await expect(page.locator('.storage-device').first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('.storage-device')).toHaveCount(2); // sda, nvme0n1
+  await expect(page.locator('.storage-device', { hasText: 'nvme0n1' })).toContainText('Read');
+  await expect(page.locator('.storage-device', { hasText: 'nvme0n1' })).toContainText('Write');
 });
 
 test('top consumers: switching window from Now to 1h renders without erroring', async ({ page }) => {

@@ -29,6 +29,7 @@
   import HealthDot from '../components/HealthDot.svelte';
   import TimeChart from '../components/TimeChart.svelte';
   import LogViewer from '../components/LogViewer.svelte';
+  import StorageDeviceRow from '../components/StorageDeviceRow.svelte';
 
   let { name } = $props();
 
@@ -422,6 +423,17 @@
           </div>
         {/if}
       </div>
+
+      {#if storageData.devices.length > 0}
+        <div class="container-detail__storage-section">
+          <span class="microlabel">Live IO</span>
+          <div class="container-detail__storage-devices">
+            {#each storageData.devices as d (d.device)}
+              <StorageDeviceRow entry={d} />
+            {/each}
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -536,7 +548,8 @@
   .container-detail__storage-empty {
     margin: 0;
   }
-  .container-detail__storage-mounts {
+  .container-detail__storage-mounts,
+  .container-detail__storage-devices {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;

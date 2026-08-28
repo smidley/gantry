@@ -149,7 +149,12 @@
       </div>
     {/if}
     {#if showPsiHint}
-      <p class="microlabel gpu-view__psi-hint">Pressure insight unavailable: {pressureDetail}</p>
+      <p class="microlabel gpu-view__psi-hint">
+        Pressure insight unavailable: {pressureDetail}
+        <a class="gpu-view__psi-learn-more" href="https://github.com/smidley/gantry/blob/main/docs/psi.md" target="_blank" rel="noopener">
+          Learn more &rarr;
+        </a>
+      </p>
     {/if}
   </div>
 
@@ -260,5 +265,14 @@
   }
   .gpu-view__psi-hint {
     margin: 0;
+  }
+  .gpu-view__psi-learn-more {
+    margin-left: 0.4em;
+    color: var(--series-1);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .gpu-view__psi-learn-more:hover {
+    text-decoration: underline;
   }
 </style>

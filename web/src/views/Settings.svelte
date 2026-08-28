@@ -181,7 +181,21 @@
         {@const ok = detail === 'ok'}
         <li class="settings-sources__row">
           <HealthDot status={ok ? 'good' : 'warning'} label={name} />
-          {#if !ok}<span class="settings-sources__detail">{detail}</span>{/if}
+          {#if !ok}
+            <span class="settings-sources__detail">
+              {detail}
+              {#if name === 'pressure'}
+                <a
+                  class="settings-sources__learn-more"
+                  href="https://github.com/smidley/gantry/blob/main/docs/psi.md"
+                  target="_blank"
+                  rel="noopener"
+                >
+                  Learn more &rarr;
+                </a>
+              {/if}
+            </span>
+          {/if}
         </li>
       {/each}
     </ul>
@@ -305,6 +319,15 @@
   .settings-sources__detail {
     font-size: 0.82rem;
     color: var(--ink-2);
+  }
+  .settings-sources__learn-more {
+    margin-left: 0.4em;
+    color: var(--series-1);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .settings-sources__learn-more:hover {
+    text-decoration: underline;
   }
   .settings-retention__error {
     color: var(--status-warning);

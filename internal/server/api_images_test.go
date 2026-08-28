@@ -37,12 +37,12 @@ func postImages(t *testing.T, url, body, confirm string) *http.Response {
 // asserting image.removed is logged for exactly the successful
 // deletions, never the failed ones.
 type eventCall struct {
-	Kind, Entity, Detail string
+	Kind, Entity, Severity, Detail string
 }
 
 func capturingAppendEvent(calls *[]eventCall) func(store.Event) (int64, error) {
 	return func(e store.Event) (int64, error) {
-		*calls = append(*calls, eventCall{e.Kind, e.Entity, e.Detail})
+		*calls = append(*calls, eventCall{e.Kind, e.Entity, e.Severity, e.Detail})
 		return int64(len(*calls)), nil
 	}
 }
@@ -149,6 +149,55 @@ func TestImagesRemoveRequiresConfirmHeader(t *testing.T) {
 	resp := postImages(t, ts.URL+"/api/images/remove", `{"ids":["sha256:`+fmt.Sprintf("%064x", 1)+`"]}`, "")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusPreconditionRequired, resp.StatusCode)
+}
+
+// TestImagesConfirmHeaderValueIsCaseSensitive pins F7: the guardrail
+// compares the header value with a plain Go string ==, not
+// strings.EqualFold -- "IMAGES" must be rejected exactly like an empty
+// or missing value, guarding against a future refactor loosening this
+// without realizing it's a guardrail, not a UX nicety.
+func TestImagesConfirmHeaderValueIsCaseSensitive(t *testing.T) {
+	s := New(Options{Version: "test-1", Started: time.Now()})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := postImages(t, ts.URL+"/api/images/remove", `{"ids":["`+fmt.Sprintf("%064x", 1)+`"]}`, "IMAGES")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusPreconditionRequired, resp.StatusCode)
+}
+
+// TestImagesOptionsMethodNeverReachesHandler pins F7: net/http's own
+// ServeMux (Go 1.22+ method-specific patterns) 405s any method the
+// route wasn't registered for, including OPTIONS -- confirmed here
+// rather than just assumed, since a browser CORS preflight would send
+// exactly this, and it must never run RemoveImages/PruneImages.
+func TestImagesOptionsMethodNeverReachesHandler(t *testing.T) {
+	var removeCalled, pruneCalled bool
+	s := New(Options{
+		Version: "test-1", Started: time.Now(),
+		RemoveImages: func(context.Context, []string) ([]ImageRemoveResult, error) {
+			removeCalled = true
+			return nil, nil
+		},
+		PruneImages: func(context.Context, string) (ImagePruneResult, error) {
+			pruneCalled = true
+			return ImagePruneResult{}, nil
+		},
+	})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	for _, path := range []string{"/api/images/remove", "/api/images/prune"} {
+		req, err := http.NewRequest(http.MethodOptions, ts.URL+path, bytes.NewBufferString(`{"ids":["`+fmt.Sprintf("%064x", 1)+`"],"mode":"dangling"}`))
+		require.NoError(t, err)
+		req.Header.Set("X-Gantry-Confirm", "images")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		require.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode, "OPTIONS on %s", path)
+	}
+	require.False(t, removeCalled, "OPTIONS must never reach RemoveImages")
+	require.False(t, pruneCalled, "OPTIONS must never reach PruneImages")
 }
 
 func TestImagesRemoveRefusesWhenReadOnly(t *testing.T) {
@@ -338,6 +387,8 @@ func TestImagesRemoveMultiStatusPartialFailureAndLogsEventsOnlyForSuccess(t *tes
 
 	require.Len(t, appendCalls, 1, "only the successful removal logs an event")
 	require.Equal(t, "image.removed", appendCalls[0].Kind)
+	require.Equal(t, "info", appendCalls[0].Severity, "explicit like every other lifecycle event (container.start, parity.start), not left at AppendEvent's own empty-string default")
+	require.Contains(t, appendCalls[0].Detail, goodID, "the full id belongs in Detail for the audit trail -- Entity only ever carries the short form")
 }
 
 func TestImagesPruneRequiresConfirmHeader(t *testing.T) {

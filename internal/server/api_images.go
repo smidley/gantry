@@ -178,9 +178,10 @@ func (s *Server) logImageRemoved(id string, repoTags []string, sizeBytes int64) 
 		tags = "<none>"
 	}
 	if _, err := s.opts.AppendEvent(store.Event{
-		Kind:   "image.removed",
-		Entity: shortImageID(id),
-		Detail: fmt.Sprintf("%s (%d bytes)", tags, sizeBytes),
+		Kind:     "image.removed",
+		Entity:   shortImageID(id),
+		Severity: "info",
+		Detail:   fmt.Sprintf("%s %s (%d bytes)", id, tags, sizeBytes),
 	}); err != nil {
 		log.Printf("images: append event: %v", err)
 	}

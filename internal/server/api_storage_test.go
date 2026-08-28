@@ -39,7 +39,8 @@ func TestStorageEndpointReturnsAssembledDTO(t *testing.T) {
 			{Source: "/mnt/cache/transcode", Destination: "/tmp", RW: true, Storage: StorageRefDTO{Kind: "pool", Name: "cache"}},
 		},
 		Devices: []DeviceIODTO{
-			{Device: "sda", ReadBps: 1024.5, WriteBps: 512},
+			{Device: "sda", Label: "sda", Kind: "", ReadBps: 1024.5, WriteBps: 512},
+			{Device: "nvme0n1", Label: "rocket_pool", Kind: "nvme", ReadBps: 2048, WriteBps: 256},
 		},
 	}
 	s := New(Options{Version: "test-1", Started: time.Now(), Storage: handBuiltStorage(&calls, "jellyfin", dto)})

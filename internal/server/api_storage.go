@@ -44,9 +44,16 @@ type StorageRefDTO struct {
 
 // DeviceIODTO is this container's current IO rate against one backing
 // block device (a live-ring-only sample -- see store.Live.
-// LatestByMetricPrefix's own doc).
+// LatestByMetricPrefix's own doc). Label/Kind are unraid.
+// ResolveDeviceLabel's own output (main wiring's job to fill in, same
+// separation as Storage's Kind/Name -- see StorageDTO's own doc): Label
+// is always populated (Device itself when nothing friendlier is known);
+// Kind is "" unless DiskMeta placed Device in a known array/pool/flash
+// slot.
 type DeviceIODTO struct {
 	Device   string  `json:"device"`
+	Label    string  `json:"label"`
+	Kind     string  `json:"kind"`
 	ReadBps  float64 `json:"read_bps"`
 	WriteBps float64 `json:"write_bps"`
 }

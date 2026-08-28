@@ -252,6 +252,7 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 	}
 	if resp.HostConfig != nil {
 		m.HostNet = resp.HostConfig.NetworkMode.IsHost()
+		m.Alloc = allocFromHostConfig(resp.HostConfig.Resources)
 	}
 	if resp.State != nil {
 		m.State = resp.State.Status
@@ -265,6 +266,46 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 	}
 	m.Mounts = mountsFromInspect(resp.Mounts)
 	return m
+}
+
+// defaultCPUPeriodUsec is runc's own default cpu.max period (100ms),
+// used below when a caller sets --cpu-quota without --cpu-period:
+// dockerd leaves HostConfig.CPUPeriod at 0 in that case rather than
+// filling in the default itself, so allocFromHostConfig has to.
+const defaultCPUPeriodUsec = 100_000
+
+// allocFromHostConfig maps one docker inspect response's HostConfig
+// resource fields into the same alloc shape the cgroup v2 fast path
+// produces from memory.max/cpu.max/cpuset.cpus.effective/pids.max
+// (cgroupv2.go) -- the API fallback's HostConfig-side source of
+// allocation data (of the ceilings, only PidsStats.Limit rides along in
+// the stats response; see fallbackAlloc). NanoCPUs takes priority over CPUQuota/CPUPeriod when a
+// caller (unusually) sets both, matching the docker CLI's own --cpus
+// flag, which compiles down to NanoCPUs in the first place. PidsLimit
+// follows docker's own convention for that field (HostConfig's doc
+// comment): 0 or -1 both mean unlimited, not "a limit of that value".
+func allocFromHostConfig(r container.Resources) alloc {
+	var a alloc
+	if r.Memory > 0 {
+		a.MemLimitBytes, a.HasMemLimit = uint64(r.Memory), true
+	}
+	switch {
+	case r.NanoCPUs > 0:
+		a.CPUQuotaCores, a.HasCPUQuota = float64(r.NanoCPUs)/1e9, true
+	case r.CPUQuota > 0:
+		period := r.CPUPeriod
+		if period == 0 {
+			period = defaultCPUPeriodUsec
+		}
+		a.CPUQuotaCores, a.HasCPUQuota = float64(r.CPUQuota)/float64(period), true
+	}
+	if n, ok := parseCPUSetCount(r.CpusetCpus); ok {
+		a.CPUSetCores, a.HasCPUSet = n, true
+	}
+	if r.PidsLimit != nil && *r.PidsLimit > 0 {
+		a.PidsLimit, a.HasPidsLimit = uint64(*r.PidsLimit), true
+	}
+	return a
 }
 
 // mountsFromInspect filters an inspect response's Mounts down to bind and

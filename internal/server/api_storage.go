@@ -10,6 +10,9 @@ import "net/http"
 // buildSnapshot already keeps for SnapshotDTO -- this package stays
 // store/collector-shape-agnostic.
 //
+// Mounts and Devices are always non-nil, so they marshal as "[]", never
+// "null", even when empty.
+//
 // A container's writable-layer size (docker inspect/DiskUsage's SizeRw)
 // is deliberately not a field here: the docker-disk collector's
 // DiskUsage poll only retains an aggregate total across every

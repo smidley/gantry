@@ -2,6 +2,7 @@ package fake
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/smidley/gantry/internal/collect/docker"
@@ -10,6 +11,57 @@ import (
 
 func newTestGenerator() *Generator {
 	return New(&capture{}, &eventCapture{}, 1)
+}
+
+// TestGeneratorImagesReturnsIndependentCopySafeUnderConcurrentRemove
+// pins F3: Images used to return summarizeImages(g.images) -- the
+// SAME backing array RemoveImages shifts in place via append(g.images
+// [:idx], g.images[idx+1:]...). A caller iterating what Images handed
+// back, after the call has already unlocked, could then be reading the
+// exact memory a concurrent RemoveImages is mutating. Run with -race:
+// this must be clean, not just "doesn't panic".
+func TestGeneratorImagesReturnsIndependentCopySafeUnderConcurrentRemove(t *testing.T) {
+	g := newTestGenerator()
+	stop := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			report, err := g.Images(context.Background())
+			require.NoError(t, err)
+			for _, im := range report.Images {
+				_ = im.ID
+				_ = im.State
+			}
+		}
+	}()
+
+	// fakeImageSeed has 4 dangling entries -- enough removals to give the
+	// reader goroutine above plenty of overlap while this shrinks the
+	// backing array.
+	for i := 0; i < 4; i++ {
+		report, err := g.Images(context.Background())
+		require.NoError(t, err)
+		var id string
+		for _, im := range report.Images {
+			if im.State == "dangling" {
+				id = im.ID
+				break
+			}
+		}
+		require.NotEmpty(t, id, "seed must still have a dangling image left to remove")
+		_, err = g.RemoveImages(context.Background(), []string{id})
+		require.NoError(t, err)
+	}
+	close(stop)
+	wg.Wait()
 }
 
 // TestFakeImageSeedShortIDsAreUnique pins the exact bug a real box's own

@@ -69,11 +69,16 @@ func summarizeImages(images []docker.ImageInfo) docker.ImagesReport {
 	return out
 }
 
-// Images returns the current fake image inventory.
+// Images returns the current fake image inventory. Summarizes a COPY of
+// g.images, not the slice itself: RemoveImages/PruneImages mutate that
+// same backing array in place (a shift-left append, or reslicing to
+// "kept"), so a caller iterating what an earlier Images call handed back
+// would otherwise be reading memory a concurrent mutation is rewriting
+// out from under it, after this call has already unlocked.
 func (g *Generator) Images(_ context.Context) (docker.ImagesReport, error) {
 	g.imagesMu.Lock()
 	defer g.imagesMu.Unlock()
-	return summarizeImages(g.images), nil
+	return summarizeImages(append([]docker.ImageInfo(nil), g.images...)), nil
 }
 
 // RemoveImages deletes each of ids from the fake inventory. A real

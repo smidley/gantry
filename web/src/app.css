@@ -9,10 +9,19 @@
    lib/tokens.css, switched by [data-theme] rather than Tailwind's
    dark: variant, since the design needs an explicit system|light|dark
    toggle, not just a prefers-color-scheme mirror. */
+/* Legibility corrective pass: Inter is the single UI+display+data face
+   (--font-sans and --font-display are now the same stack) -- Space
+   Grotesk (quirky letterforms, a flagged '1' that misread in the
+   Overview headline) and IBM Plex Sans are both retired. The two
+   tokens stay separate names, not collapsed into one, since call
+   sites throughout the app already say "this is a display context" or
+   "this is body text" via which token they reference; only the value
+   changed. --font-mono (IBM Plex Mono) is untouched -- true-mono
+   contexts (microlabels, the log viewer) keep their own face. */
 @theme {
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
-  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
   --breakpoint-md: 48rem;
 }
 
@@ -68,10 +77,10 @@ body {
   }
 }
 
-/* Page title convention: every route's own <h1>, Space Grotesk per the
-   design direction ("Space Grotesk display for page titles + hero
-   numbers") -- Layout's header carries the constant "Gantry" wordmark,
-   not a per-route title, so each view renders its own. */
+/* Page title convention: every route's own <h1>, the display face (now
+   Inter, see the @theme block above) -- Layout's header carries the
+   constant "Gantry" wordmark, not a per-route title, so each view
+   renders its own. */
 .page-title {
   font-family: var(--font-display);
   font-weight: 700;
@@ -81,12 +90,15 @@ body {
 }
 
 /* Equipment-tag micro-label convention: metric names, table headers,
-   chart eyebrows. */
+   chart eyebrows. Bumped 11px->12px and 0.08em->0.06em letter-spacing
+   in the same legibility pass as the font swap above -- the tighter
+   original tracking, combined with IBM Plex Mono's own narrow
+   letterforms at 11px, read as borderline illegible at arm's length. */
 .microlabel {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   color: var(--ink-2);
 }
 

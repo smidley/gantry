@@ -1,14 +1,18 @@
-// Self-hosted fonts only (latin subset; no CDN, ever) -- see the design
-// direction: IBM Plex Sans (UI/body), IBM Plex Mono (all data numerals +
-// micro-labels), Space Grotesk (display: page titles, stat-tile hero
-// numbers).
-import '@fontsource/ibm-plex-sans/latin-400.css';
-import '@fontsource/ibm-plex-sans/latin-500.css';
-import '@fontsource/ibm-plex-sans/latin-600.css';
+// Self-hosted fonts only (no CDN, ever). Legibility corrective pass:
+// Inter is now the single UI+display+data face (body text, page
+// titles, stat-tile hero numbers, and every headline) -- Space
+// Grotesk's flagged '1' and other quirky letterforms read poorly at
+// the sizes this app actually uses them at, and IBM Plex Sans is
+// retired alongside it so there's one sans face, not two. One variable-
+// weight import covers the whole 100-900 range Inter ships (400/500/
+// 600/700 are all drawn from this one file); the browser only fetches
+// the unicode-range subset (e.g. latin) actually used on the page, so
+// this isn't heavier than the old per-weight static imports. IBM Plex
+// Mono survives unchanged -- it's the true-mono face for microlabels
+// and the log viewer, never used for prose or big numbers.
+import '@fontsource-variable/inter/wght.css';
 import '@fontsource/ibm-plex-mono/latin-400.css';
 import '@fontsource/ibm-plex-mono/latin-500.css';
-import '@fontsource/space-grotesk/latin-500.css';
-import '@fontsource/space-grotesk/latin-700.css';
 import 'uplot/dist/uPlot.min.css';
 import './app.css';
 

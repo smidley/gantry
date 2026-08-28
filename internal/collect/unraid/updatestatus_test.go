@@ -97,3 +97,44 @@ func TestUpdateStatusReaderStatusesSelfHealsAcrossUnlink(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte(`{"jellyfin/jellyfin:latest": {"status": "false"}}`), 0o644))
 	require.Equal(t, map[string]string{"jellyfin/jellyfin:latest": "available"}, r.Statuses(), "a rewritten file must be picked up on the very next read, self-healing")
 }
+
+// TestUpdateStatusReaderStatusesServesLastGoodMapOnTornRead pins the one
+// exception to "no caching, no stuck state": PHP's file_put_contents
+// rewrite isn't atomic from a concurrent reader's point of view, so a
+// read can land mid-write and see a file that EXISTS but doesn't parse
+// -- a torn read, not a real @unlink. That one tick must serve the last
+// successfully parsed snapshot rather than blink to nil/"unknown", and
+// a later, cleanly-written rewrite must still update it normally.
+func TestUpdateStatusReaderStatusesServesLastGoodMapOnTornRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unraid-update-status.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"jellyfin/jellyfin:latest": {"status": "true"}}`), 0o644))
+
+	r := NewUpdateStatusReader(path)
+	want := map[string]string{"jellyfin/jellyfin:latest": "current"}
+	require.Equal(t, want, r.Statuses())
+
+	// Simulate a torn write: the file is present but its content is
+	// mid-rewrite garbage, not valid JSON.
+	require.NoError(t, os.WriteFile(path, []byte(`{"jellyfin/jellyfin:latest": {"stat`), 0o644))
+	require.Equal(t, want, r.Statuses(), "a torn (present but unparseable) read must serve the last known-good snapshot, not nil")
+
+	// A subsequent clean rewrite must still take effect normally.
+	require.NoError(t, os.WriteFile(path, []byte(`{"jellyfin/jellyfin:latest": {"status": "false"}}`), 0o644))
+	require.Equal(t, map[string]string{"jellyfin/jellyfin:latest": "available"}, r.Statuses())
+}
+
+// TestUpdateStatusReaderStatusesTornReadCacheIsNotServedAfterUnlink pins
+// the boundary between the two: once a file is genuinely gone (Stat
+// itself fails), Statuses must return nil immediately even though a
+// good snapshot is cached from before -- the torn-read exception only
+// covers "exists but fails to parse", never "doesn't exist at all".
+func TestUpdateStatusReaderStatusesTornReadCacheIsNotServedAfterUnlink(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unraid-update-status.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"jellyfin/jellyfin:latest": {"status": "true"}}`), 0o644))
+
+	r := NewUpdateStatusReader(path)
+	require.Equal(t, map[string]string{"jellyfin/jellyfin:latest": "current"}, r.Statuses())
+
+	require.NoError(t, os.Remove(path))
+	require.Nil(t, r.Statuses(), "an absent file must never serve the torn-read cache")
+}

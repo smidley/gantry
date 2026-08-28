@@ -64,6 +64,7 @@ func TestResolveStoragePath(t *testing.T) {
 		// must resolve by their post-Clean shape, not their literal one.
 		{"dot-dot climbs back out of a user share into a disk slot", "/mnt/user/../disk1/x", StorageRef{Kind: "disk", Name: "disk1"}},
 		{"doubled slash within a user share", "/mnt/user//Movies", StorageRef{Kind: "share", Name: "Movies"}},
+		{"doubled leading slash collapses to one", "//mnt/user/Movies", StorageRef{Kind: "share", Name: "Movies"}},
 		{"relative path (no leading slash) never resolves", "mnt/user/appdata", StorageRef{Kind: "other"}},
 	}
 

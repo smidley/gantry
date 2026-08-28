@@ -168,7 +168,7 @@ func removeImagesWith(ids []string, pre map[string]image.Summary, removeOne func
 	for _, id := range ids {
 		res := ImageRemoveResult{ID: id}
 		if err := removeOne(id); err != nil {
-			res.Error = err.Error()
+			res.Error = describeImageRemoveError(err)
 		} else {
 			res.OK = true
 			if im, ok := pre[id]; ok {
@@ -183,21 +183,21 @@ func removeImagesWith(ids []string, pre map[string]image.Summary, removeOne func
 
 // multiTagConflictText is the one piece of a moby by-id removal
 // conflict's message that's unique to the "2+ tags" case (see
-// describePruneUnusedError's own doc) -- verbatim from moby's own
+// describeImageRemoveError's own doc) -- verbatim from moby's own
 // imageDeleteConflict message, daemon/images/image_delete.go.
 const multiTagConflictText = "image is referenced in multiple repositories"
 
-// describePruneUnusedError maps removeOne's error to pruneImagesWith's
-// per-id message, for the one conflict that's actually permanent here:
-// removing a 2+-tag image by id -- which is all pruneUnused ever does,
-// see PruneImages' own doc -- conflicts unless Force is set (never is,
-// same as RemoveImages), and retrying changes nothing. errdefs.IsConflict
-// alone can't tell this apart from an unrelated conflict (e.g. a
-// container started using the image between classification and
-// removal, same HTTP 409 either way) so this also checks for the one
-// message substring unique to the multi-tag case; anything else keeps
-// its own raw message untouched.
-func describePruneUnusedError(err error) string {
+// describeImageRemoveError maps an ImageRemove error to a clearer
+// per-id message, shared by removeImagesWith and pruneImagesWith, for
+// the one conflict that's actually permanent here: removing a 2+-tag
+// image by id conflicts unless Force is set (never is, in either
+// caller), and retrying changes nothing. errdefs.IsConflict alone can't
+// tell this apart from an unrelated conflict (e.g. a container started
+// using the image between classification and removal, same HTTP 409
+// either way) so this also checks for the one message substring unique
+// to the multi-tag case; anything else keeps its own raw message
+// untouched.
+func describeImageRemoveError(err error) string {
 	if errdefs.IsConflict(err) && strings.Contains(err.Error(), multiTagConflictText) {
 		return "skipped: image has multiple tags (untag manually) (" + err.Error() + ")"
 	}
@@ -213,7 +213,7 @@ func pruneImagesWith(imgs []ImageInfo, removeOne func(id string) error) ImagePru
 	var out ImagePruneResult
 	for _, im := range imgs {
 		if err := removeOne(im.ID); err != nil {
-			out.Errors = append(out.Errors, im.ID+": "+describePruneUnusedError(err))
+			out.Errors = append(out.Errors, im.ID+": "+describeImageRemoveError(err))
 			continue
 		}
 		out.Deleted = append(out.Deleted, DeletedImage{ID: im.ID, RepoTags: im.RepoTags, SizeBytes: im.SizeBytes})

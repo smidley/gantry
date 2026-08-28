@@ -220,6 +220,24 @@ func TestRemoveImagesWithSucceedsWithoutEnrichmentWhenIDMissingFromPre(t *testin
 	require.Equal(t, []ImageRemoveResult{{ID: "sha256:unknown", OK: true}}, results)
 }
 
+// TestRemoveImagesWithMapsMultiTagConflictToAClearerMessage pins N2:
+// describeImageRemoveError's mapping used to be wired only into
+// pruneImagesWith -- POST /api/images/remove hits the exact same
+// permanent multi-tag conflict (removing a 2+-tag image by id) and used
+// to get back the daemon's own raw, retry-shaped string instead of the
+// same "untag manually" explanation pruneUnused already gave it.
+func TestRemoveImagesWithMapsMultiTagConflictToAClearerMessage(t *testing.T) {
+	raw := "conflict: unable to delete deadbeefcafe (must be forced) - image is referenced in multiple repositories"
+	removeOne := func(string) error { return errdefs.Conflict(errors.New(raw)) }
+
+	results := removeImagesWith([]string{"sha256:multi"}, nil, removeOne)
+
+	require.Len(t, results, 1)
+	require.False(t, results[0].OK)
+	require.Contains(t, results[0].Error, "skipped: image has multiple tags (untag manually)")
+	require.Contains(t, results[0].Error, raw, "the raw daemon string must still be present, not discarded")
+}
+
 func TestPruneImagesWithSumsReclaimedBytesAndCollectsPerIDErrors(t *testing.T) {
 	unused := []ImageInfo{
 		{ID: "sha256:a", RepoTags: []string{"old:1"}, SizeBytes: 100},

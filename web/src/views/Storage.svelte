@@ -8,7 +8,10 @@
   own doc) and is polled the same way Overview polls its events feed.
 -->
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { Tween } from 'svelte/motion';
+  import { linear } from 'svelte/easing';
+  import { prefersReducedMotion } from 'svelte/motion';
   import { live } from '../lib/sse.svelte';
   import { fetchEvents } from '../lib/api';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtRelTime } from '../lib/format';
@@ -35,8 +38,23 @@
   let sources = $derived(live.frame?.sources ?? {});
   let ts = $derived(live.frame?.ts ?? 0);
 
+  // glideMs: the perpetual-glide motion pass's own shared duration
+  // (live.glideMs, or 0 under reduced motion -- see streamdriver.ts's
+  // "Cadence-driven glide" doc) -- fed to the CSS-transition-duration
+  // bars below (parity progress, per-disk usage) and to parityPctTween.
+  let glideMs = $derived(prefersReducedMotion.current ? 0 : live.glideMs);
+
   let started = $derived(array['array.started']);
   let parityPct = $derived(array['parity.progress_pct']);
+  // parityPctTween glides the percentage the progress bar/text below
+  // display -- previously a bare fmtPct(parityPct)/width binding,
+  // snapping every ~2s tick with no easing at all (this view's own
+  // instance of the same gap Overview's arrayStateSentence had -- see
+  // its doc). No scrub mechanism exists for either to mirror.
+  let parityPctTween = new Tween(untrack(() => parityPct ?? 0), { duration: untrack(() => glideMs), easing: linear });
+  $effect(() => {
+    parityPctTween.set(parityPct ?? 0, { duration: glideMs, easing: linear });
+  });
   let paritySpeed = $derived(array['parity.speed_bps']);
   // parityIsRunning treats an explicit 0 (the wire value var.go/fake.go
   // now both write on finish -- see its own doc) as idle, not merely
@@ -168,9 +186,12 @@
       {#if parityRunning}
         <div class="storage-parity__progress">
           <div class="storage-parity__progress-track">
-            <div class="storage-parity__progress-fill" style="width: {Math.min(100, Math.max(0, parityPct))}%"></div>
+            <div
+              class="storage-parity__progress-fill"
+              style="width: {Math.min(100, Math.max(0, parityPctTween.current))}%; transition-duration: {glideMs}ms"
+            ></div>
           </div>
-          <span class="tabular-nums storage-parity__progress-pct">{fmtPct(parityPct)}</span>
+          <span class="tabular-nums storage-parity__progress-pct">{fmtPct(parityPctTween.current)}</span>
           <span class="storage-parity__progress-detail tabular-nums">
             {fmtRate(paritySpeed ?? 0)} &middot; ETA {eta === null ? 'calculating…' : fmtDuration(eta)}
           </span>
@@ -243,7 +264,7 @@
                 <div class="storage-disk__usage-track">
                   <div
                     class="storage-disk__usage-fill"
-                    style="width: {usagePct}%; background: {seqStep(usagePct)}"
+                    style="width: {usagePct}%; background: {seqStep(usagePct)}; transition-duration: 150ms, {glideMs}ms"
                   ></div>
                 </div>
                 <span class="tabular-nums storage-disk__usage-pct">{fmtPct(usagePct)}</span>
@@ -364,6 +385,12 @@
   .storage-parity__progress-fill {
     height: 100%;
     background: var(--series-1);
+    /* duration is inline (transition-duration, above) -- see
+       BaySchematic's matching fill for why a plain CSS transition
+       (rather than a Tween/headState) is enough for one interpolated
+       property. */
+    transition-property: width;
+    transition-timing-function: linear;
   }
   .storage-parity__progress-pct {
     font-family: var(--font-mono);
@@ -542,7 +569,13 @@
   }
   .storage-disk__usage-fill {
     height: 100%;
-    transition: filter 150ms ease;
+    /* Two independently-timed transitions on the same element: filter's
+       own fixed 150ms hover feedback (unrelated to live data), and
+       width's live glide duration -- positionally matched to this
+       property order by the inline transition-duration list (above,
+       template). */
+    transition-property: filter, width;
+    transition-timing-function: ease, linear;
   }
   .storage-disk__usage-pct {
     font-size: 0.78rem;

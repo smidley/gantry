@@ -19,8 +19,9 @@
   import { theme, resolveToken } from '../lib/theme.svelte';
   import { fmtRelTime } from '../lib/format';
   import { needsRebuild } from '../lib/chartRebuild';
-  import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
+  import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC } from '../lib/streamdriver';
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
+  import { live as liveStore } from '../lib/sse.svelte';
   import { prefersReducedMotion } from 'svelte/motion';
 
   // formatValue (additive, optional -- Task 14-17's own fold-in note:
@@ -164,26 +165,28 @@
   }
 
   // applyHeadState patches only the LAST index of each series to its
-  // current eased value, MUTATING `aligned` in place rather than
+  // current glided value, MUTATING `aligned` in place rather than
   // returning a copy -- safe because `alignedData` is only ever the
   // pristine target array immediately after the data effect rebuilds it
   // wholesale via buildAlignedData(); every read of a series' true raw
   // tail (tailValue, above) happens before this runs again for that
   // series, so patching the disposable last slot here can never leak a
-  // stale eased value back out as if it were real data. Skips the
+  // stale glided value back out as if it were real data. Skips the
   // per-tick array-clone this would otherwise cost at up to 30fps across
-  // every series of every live chart on screen. durationMs defaults to
-  // the real ease (HEAD_EASE_MS); callers under reduced motion pass 0 so
-  // headValue snaps straight to targetValue -- the driver's own ticks
-  // never run in that state (see streamdriver.svelte.ts), so without this
-  // the tail would otherwise freeze one arrival stale forever instead of
-  // tracking each new value immediately.
-  function applyHeadState(aligned, state, nowMs, durationMs = HEAD_EASE_MS) {
+  // every series of every live chart on screen. No durationMs parameter:
+  // each state's own durationMs (fixed at the instant advanceHeadState
+  // created that leg -- see its doc) is what headValue must read: under
+  // reduced motion that's always 0, so headValue snaps straight to
+  // targetValue -- the driver's own ticks never run in that state (see
+  // streamdriver.svelte.ts), so without this the tail would otherwise
+  // freeze one arrival stale forever instead of tracking each new value
+  // immediately.
+  function applyHeadState(aligned, state, nowMs) {
     for (let i = 0; i < state.length; i++) {
       const s = state[i];
       if (!s) continue;
       const oneSeries = aligned[i + 1];
-      oneSeries[oneSeries.length - 1] = headValue(s.prevValue, s.targetValue, s.arrivalMs, nowMs, durationMs);
+      oneSeries[oneSeries.length - 1] = headValue(s.prevValue, s.targetValue, s.arrivalMs, nowMs, s.durationMs);
     }
     return aligned;
   }
@@ -374,7 +377,12 @@
       // rather than skipping it post-rebuild is what keeps this branch
       // simple.
       const nowMs = Date.now();
-      const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
+      // durationMs is THIS arrival's own leg duration: the shared
+      // driver's freshly-measured cadence EMA (liveStore.glideMs), or 0
+      // to snap under reduced motion -- see streamdriver.ts's
+      // "Cadence-driven glide" doc for why this varies per arrival
+      // instead of a fixed guess.
+      const durationMs = prefersReducedMotion.current ? 0 : liveStore.glideMs;
       // The shared driver's own ticks also step this chart's x-window
       // (see the animation-tick effect below), far more often than this
       // effect re-runs -- but that subscription is gated behind
@@ -398,7 +406,7 @@
       chart.setScale('x', { min, max });
       alignedData = buildAlignedData(series);
       headState = advanceAll(alignedData.slice(1), nowMs, durationMs);
-      chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
+      chart.setData(applyHeadState(alignedData, headState, nowMs), false);
     } else if (!rebuilding) {
       chart.setData(buildAlignedData(series));
     }
@@ -422,8 +430,7 @@
         const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
         chart.setScale('x', { min, max });
         if (headState.length > 0) {
-          const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
-          chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
+          chart.setData(applyHeadState(alignedData, headState, nowMs), false);
         }
       },
     );

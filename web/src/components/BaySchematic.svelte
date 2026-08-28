@@ -22,10 +22,23 @@
   row right above this module -- the flagged unit's own color plus that
   row's text already carry the information, so nothing here needs to
   repeat it visibly.
+
+  Fill height glides on every pct change (perpetual-glide motion pass --
+  previously a bare unanimated style binding, the one live surface the
+  pass's own inventory found with no easing at all, snapping every ~2s
+  tick) via a plain CSS transition rather than a Tween/headState: a
+  transition retargeted before finishing already continues from
+  whatever height is CURRENTLY on screen, the same "never jump to the
+  old target" contract streamdriver.ts's own doc spells out for
+  Tween/headState, for free -- no custom state needed for a single
+  interpolated CSS property. glideMs (live.glideMs, or 0 under reduced
+  motion) is the one piece that still comes from the shared driver.
 -->
 <script>
   import { fmtPct } from '../lib/format';
   import { seqStep } from '../lib/metrics';
+  import { prefersReducedMotion } from 'svelte/motion';
+  import { live as liveStore } from '../lib/sse.svelte';
 
   // entries: [{ slot, pct, flagged?: boolean, calloutText?: string,
   // kind?: DiskKind }] -- pct is a plain 0-100 number (diskUsagePct's own
@@ -40,6 +53,10 @@
   // (the ordinary/majority case) draws no cap at all, same as before
   // this kind ever existed.
   let { entries = [] } = $props();
+
+  // glideMs: see the module doc above -- the CSS transition on each
+  // bar's own fill reads this straight off the shared driver.
+  let glideMs = $derived(prefersReducedMotion.current ? 0 : liveStore.glideMs);
 
   const KIND_LABEL = { ssd: ', solid state', nvme: ', NVMe', usb: ', USB flash' };
 
@@ -67,7 +84,7 @@
         >
           <div
             class="bay-schematic__fill"
-            style={`height: ${Math.min(100, Math.max(0, d.pct))}%; background: ${seqStep(d.pct)}`}
+            style={`height: ${Math.min(100, Math.max(0, d.pct))}%; background: ${seqStep(d.pct)}; transition-duration: ${glideMs}ms`}
           ></div>
         </div>
       {/each}
@@ -120,6 +137,10 @@
     bottom: 0;
     left: 0;
     width: 100%;
+    /* duration is inline (transition-duration, above) -- the shared
+       driver's own live glideMs, per pct-changing frame. */
+    transition-property: height;
+    transition-timing-function: linear;
     border-radius: 1px 1px 0 0;
   }
 </style>

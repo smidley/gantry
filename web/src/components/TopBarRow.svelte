@@ -1,23 +1,22 @@
 <!--
   TopBarRow: one leaderboard row, split out of TopBarList (mirroring
   ContainerRow's own precedent -- see its doc) so a live row can own its
-  OWN Tween across re-renders. TopBarList's {#each rows as row
-  (row.entity)} keys on entity, so the SAME TopBarRow instance (and
-  therefore the same Tween) survives a value tick or a re-rank, and only
-  a genuine leave/enter -- an entity dropping off or climbing onto the
-  leaderboard -- tears one down. A Tween instantiated straight inside the
-  parent's {#each} block would get recreated (and its ease restarted
-  from zero) on every value tick instead.
+  OWN Tween across re-renders. TopBarList's {#each} keys on entity+metric
+  (see its own doc for why metric is part of the key too), so the SAME
+  TopBarRow instance (and therefore the same Tween) survives a value tick
+  or a re-rank, and only a genuine leave/enter -- an entity dropping off
+  or climbing onto the leaderboard, OR the metric itself switching --
+  tears one down. A Tween instantiated straight inside the parent's
+  {#each} block would get recreated (and its glide restarted from zero)
+  on every value tick instead.
 -->
 <script>
   import { untrack } from 'svelte';
   import { Tween } from 'svelte/motion';
-  import { cubicOut } from 'svelte/easing';
+  import { linear } from 'svelte/easing';
   import { prefersReducedMotion } from 'svelte/motion';
   import { live as liveStore } from '../lib/sse.svelte';
   import ContainerIcon from './ContainerIcon.svelte';
-
-  const TWEEN_MS = 400;
 
   // formatSecondary (additive, optional): a quiet second line under the
   // value, tweened off row.secondary the same way row.value already is --
@@ -32,9 +31,9 @@
   // straight off the live frame here, the same ambient-store pattern
   // ContainerRow/ContainerDetail already use, is simpler than threading
   // a new prop through TopBarList/TopConsumers/Overview for a single
-  // derived lookup. Renamed to liveStore on import only because this
-  // component's own `live` prop (the animate-or-not flag) already owns
-  // that name.
+  // derived lookup. liveStore is this same import aliased (see below);
+  // this component's own `live` prop (the animate-or-not flag) already
+  // owns the bare name `live`.
   let icon = $derived(liveStore.frame?.containers?.[row.entity]?.icon);
 
   // untrack: this is a deliberate ONE-TIME read of row's initial value
@@ -45,17 +44,21 @@
   // reading a prop directly in a non-reactive position is usually a
   // mistake; here it's the documented Tween constructor contract (seed
   // value, not a live binding).
-  let valueTween = new Tween(untrack(() => row.value), { duration: TWEEN_MS, easing: cubicOut });
+  let valueTween = new Tween(untrack(() => row.value), { duration: liveStore.glideMs, easing: linear });
 
   // Fetched/historical windows stay fully static (no interpolation, per
   // the smooth-streaming design) -- duration collapses to 0 whenever
   // `live` is false, which makes .set() apply the new value to .current
   // synchronously (see svelte/motion's own Tween.set: duration===0 skips
-  // the animation loop entirely), same as reduced motion.
+  // the animation loop entirely), same as reduced motion. The live
+  // duration/curve (liveStore.glideMs/linear) are the perpetual-glide
+  // motion pass's own retiming -- see streamdriver.ts's "Cadence-driven
+  // glide" doc: a fixed guessed duration with a front-loaded curve is
+  // what used to settle well before the next real tick and sit frozen.
   $effect(() => {
     const target = row.value;
     const reduced = prefersReducedMotion.current;
-    valueTween.set(target, { duration: live && !reduced ? TWEEN_MS : 0, easing: cubicOut });
+    valueTween.set(target, { duration: live && !reduced ? liveStore.glideMs : 0, easing: linear });
   });
 
   // secondaryTween mirrors valueTween exactly, off row.secondary instead --
@@ -63,12 +66,12 @@
   // that HAS a secondary (see the $effect's own guard); a row with none
   // just leaves this at its seed value, never rendered (formatSecondary
   // gates the template below).
-  let secondaryTween = new Tween(untrack(() => row.secondary ?? 0), { duration: TWEEN_MS, easing: cubicOut });
+  let secondaryTween = new Tween(untrack(() => row.secondary ?? 0), { duration: liveStore.glideMs, easing: linear });
 
   $effect(() => {
     if (row.secondary === undefined) return;
     const reduced = prefersReducedMotion.current;
-    secondaryTween.set(row.secondary, { duration: live && !reduced ? TWEEN_MS : 0, easing: cubicOut });
+    secondaryTween.set(row.secondary, { duration: live && !reduced ? liveStore.glideMs : 0, easing: linear });
   });
 
   let secondaryText = $derived(

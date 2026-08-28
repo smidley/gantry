@@ -78,6 +78,11 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 
 	cfg := config.New(st, getenv)
 	port := cfg.Int("port", 8380)
+	// readOnly is Gantry's write-path kill switch (GANTRY_READ_ONLY=1,
+	// resolved through the same env>settings>default precedence every
+	// other cfg.Bool call uses): every /api/images mutating route 403s
+	// while it's set, GET unaffected -- see server.Options.ReadOnly.
+	readOnly := cfg.Bool("read_only", false)
 
 	var wg sync.WaitGroup
 
@@ -89,12 +94,15 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// the store, never touching dc's registry, and disks.go's own
 	// unraid.Collector similarly never sees a real disks.ini in fake
 	// mode). fakeDiskMeta mirrors fakeMetas' shape for disk device/type
-	// metadata (see fake.Generator.DiskMetas' own doc).
+	// metadata (see fake.Generator.DiskMetas' own doc). fk itself (nil
+	// outside fake-data mode) is kept for the image-inventory wiring
+	// below, once dc exists to default against.
 	var fakeMetas func() []docker.Meta
 	var fakeDiskMeta func() map[string]unraid.DiskMeta
+	var fk *fake.Generator
 	if cfg.Bool("fake_data", false) {
 		log.Println("fake data mode: synthesizing a demo fleet")
-		fk := fake.New(st, st, time.Now().UnixNano())
+		fk = fake.New(st, st, time.Now().UnixNano())
 		fakeMetas = fk.Metas
 		fakeDiskMeta = fk.DiskMetas
 		wg.Add(1)
@@ -120,6 +128,20 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	wireDockerCollector(dc, host, cgroupRoot)
 	usr := unraid.NewUpdateStatusReader(envOnly(getenv, "GANTRY_UPDATE_STATUS_PATH", "/updates/unraid-update-status.json"))
 	dc.UpdateStatuses = usr.Statuses
+
+	// imagesSrc/removeImagesSrc/pruneImagesSrc default to the real
+	// docker collector and switch entirely to fk's synthetic inventory
+	// in fake-data mode (unlike fakeMetas/fakeDiskMeta above, this is an
+	// exclusive swap, not a merge -- fake-data mode's dev box has no
+	// real docker daemon for dc's own methods to mean anything against).
+	imagesSrc := dc.Images
+	removeImagesSrc := dc.RemoveImages
+	pruneImagesSrc := dc.PruneImages
+	if fk != nil {
+		imagesSrc = fk.Images
+		removeImagesSrc = fk.RemoveImages
+		pruneImagesSrc = fk.PruneImages
+	}
 
 	// gpuLookup adapts docker's Meta-returning Lookup to the name-only
 	// signature both GPU collectors (DRM fdinfo and nvidia-smi) need for
@@ -225,6 +247,12 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Logs:       dc.StreamLogs,
 		Storage:    buildContainerStorage(dc, ur, st, fakeMetas),
 		Settings:   settingsAdapter{st: st, cfg: cfg},
+
+		Images:       buildImages(imagesSrc),
+		RemoveImages: buildRemoveImages(removeImagesSrc),
+		PruneImages:  buildPruneImages(pruneImagesSrc),
+		ReadOnly:     readOnly,
+		AppendEvent:  st.AppendEvent,
 	}).ListenAndServe(runCtx)
 	cancel()
 	wg.Wait()
@@ -614,6 +642,72 @@ func buildTop(st *store.Store) func(ctx context.Context, kind, metric string, fr
 			out[i] = server.TopRow{Entity: row.Entity, Value: row.Value}
 		}
 		return out, nil
+	}
+}
+
+// buildImages adapts docker.ImagesReport (src is dc.Images in real mode,
+// fk.Images in fake mode -- see run()'s imagesSrc wiring) to
+// server.ImagesDTO for server.Options.Images: a field-by-field copy, the
+// same shape as buildTop above. ImagesDTO.Summary.Note is left zero here
+// -- it's a fixed caveat about the reclaimable_bytes field itself, not
+// data from either source, so the server package's own handler fills it
+// in unconditionally.
+func buildImages(src func(ctx context.Context) (docker.ImagesReport, error)) func(ctx context.Context) (server.ImagesDTO, error) {
+	return func(ctx context.Context) (server.ImagesDTO, error) {
+		report, err := src(ctx)
+		if err != nil {
+			return server.ImagesDTO{}, err
+		}
+		out := server.ImagesDTO{
+			Images: make([]server.ImageInfo, len(report.Images)),
+			Summary: server.ImagesSummary{
+				InUse:            report.Summary.InUse,
+				Unused:           report.Summary.Unused,
+				Dangling:         report.Summary.Dangling,
+				ReclaimableBytes: report.Summary.ReclaimableBytes,
+			},
+		}
+		for i, im := range report.Images {
+			out.Images[i] = server.ImageInfo{
+				ID: im.ID, RepoTags: im.RepoTags, RepoDigests: im.RepoDigests, SizeBytes: im.SizeBytes,
+				Created: im.Created, State: im.State, Containers: im.Containers,
+			}
+		}
+		return out, nil
+	}
+}
+
+// buildRemoveImages adapts []docker.ImageRemoveResult to
+// []server.ImageRemoveResult for server.Options.RemoveImages -- see
+// buildImages.
+func buildRemoveImages(src func(ctx context.Context, ids []string) ([]docker.ImageRemoveResult, error)) func(ctx context.Context, ids []string) ([]server.ImageRemoveResult, error) {
+	return func(ctx context.Context, ids []string) ([]server.ImageRemoveResult, error) {
+		results, err := src(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]server.ImageRemoveResult, len(results))
+		for i, r := range results {
+			out[i] = server.ImageRemoveResult{ID: r.ID, OK: r.OK, Error: r.Error, RepoTags: r.RepoTags, SizeBytes: r.SizeBytes}
+		}
+		return out, nil
+	}
+}
+
+// buildPruneImages adapts docker.ImagePruneResult to
+// server.ImagePruneResult for server.Options.PruneImages -- see
+// buildImages.
+func buildPruneImages(src func(ctx context.Context, mode string) (docker.ImagePruneResult, error)) func(ctx context.Context, mode string) (server.ImagePruneResult, error) {
+	return func(ctx context.Context, mode string) (server.ImagePruneResult, error) {
+		r, err := src(ctx, mode)
+		if err != nil {
+			return server.ImagePruneResult{}, err
+		}
+		deleted := make([]server.DeletedImage, len(r.Deleted))
+		for i, d := range r.Deleted {
+			deleted[i] = server.DeletedImage{ID: d.ID, RepoTags: d.RepoTags, SizeBytes: d.SizeBytes}
+		}
+		return server.ImagePruneResult{Deleted: deleted, ReclaimedBytes: r.ReclaimedBytes, Errors: r.Errors}, nil
 	}
 }
 

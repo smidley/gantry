@@ -191,6 +191,89 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	drainAndClose(settingsResp2)
 	require.Equal(t, 72, settingsBody2.Retention.R1Hours, "PUT must persist through the real store, visible on the very next GET")
 
+	// /api/images smoke check: exercises the real fake.Generator-backed
+	// Images/RemoveImages/PruneImages wiring end to end (fake mode has no
+	// real docker daemon, so this is the ONLY way that selection is ever
+	// exercised against a live server). GET first sees the full fake
+	// seed, a prune("unused") removes some of it, and a targeted
+	// remove of one still-dangling id removes exactly that one --
+	// together proving both mutating routes actually reach the fake
+	// inventory, not just validate and stop.
+	imagesResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/images", port))
+	require.NoError(t, err)
+	var imagesBody struct {
+		Images []struct {
+			ID     string `json:"id"`
+			FullID string `json:"full_id"`
+			State  string `json:"state"`
+		} `json:"images"`
+		Summary struct {
+			Unused int    `json:"unused"`
+			Note   string `json:"note"`
+		} `json:"summary"`
+	}
+	require.NoError(t, json.NewDecoder(imagesResp.Body).Decode(&imagesBody))
+	drainAndClose(imagesResp)
+	require.Equal(t, http.StatusOK, imagesResp.StatusCode)
+	require.Len(t, imagesBody.Images, 13, "fake mode's own image seed")
+	require.NotEmpty(t, imagesBody.Summary.Note)
+	var danglingFullID string
+	for _, im := range imagesBody.Images {
+		if im.State == "dangling" {
+			danglingFullID = im.FullID
+			break
+		}
+	}
+	require.NotEmpty(t, danglingFullID, "mutating calls use full_id, not GET's own display-only short id")
+
+	pruneResp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), "application/json", strings.NewReader(`{"mode":"unused"}`))
+	require.NoError(t, err)
+	drainAndClose(pruneResp)
+	// No X-Gantry-Confirm header on this request: must 428, proving the
+	// guardrail is really wired into the live route, not bypassed.
+	require.Equal(t, http.StatusPreconditionRequired, pruneResp.StatusCode)
+
+	pruneReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), strings.NewReader(`{"mode":"unused"}`))
+	require.NoError(t, err)
+	pruneReq.Header.Set("X-Gantry-Confirm", "images")
+	pruneResp2, err := http.DefaultClient.Do(pruneReq)
+	require.NoError(t, err)
+	var pruneBody struct {
+		Deleted []struct {
+			ID string `json:"id"`
+		} `json:"deleted"`
+	}
+	require.NoError(t, json.NewDecoder(pruneResp2.Body).Decode(&pruneBody))
+	drainAndClose(pruneResp2)
+	require.Equal(t, http.StatusOK, pruneResp2.StatusCode)
+	require.Len(t, pruneBody.Deleted, imagesBody.Summary.Unused, "must delete every currently-unused fake image")
+
+	removeReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/remove", port), strings.NewReader(`{"ids":["`+danglingFullID+`"]}`))
+	require.NoError(t, err)
+	removeReq.Header.Set("X-Gantry-Confirm", "images")
+	removeResp, err := http.DefaultClient.Do(removeReq)
+	require.NoError(t, err)
+	var removeBody []struct {
+		ID string `json:"id"`
+		OK bool   `json:"ok"`
+	}
+	require.NoError(t, json.NewDecoder(removeResp.Body).Decode(&removeBody))
+	drainAndClose(removeResp)
+	require.Equal(t, http.StatusOK, removeResp.StatusCode)
+	require.Equal(t, []struct {
+		ID string `json:"id"`
+		OK bool   `json:"ok"`
+	}{{ID: danglingFullID, OK: true}}, removeBody)
+
+	imagesResp2, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/images", port))
+	require.NoError(t, err)
+	var imagesBody2 struct {
+		Images []struct{} `json:"images"`
+	}
+	require.NoError(t, json.NewDecoder(imagesResp2.Body).Decode(&imagesBody2))
+	drainAndClose(imagesResp2)
+	require.Len(t, imagesBody2.Images, 13-len(pruneBody.Deleted)-1, "both the prune and the remove must have actually mutated the fake inventory")
+
 	// Every request above went through http.DefaultTransport, which keeps
 	// the underlying connection open (keep-alive) for reuse even after its
 	// response body is drained and closed. An idle-but-open connection
@@ -218,6 +301,55 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 func drainAndClose(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
+}
+
+// TestRunReadOnlyModeBlocksImageMutationsButNotGet pins GANTRY_READ_ONLY's
+// wiring through the real config resolver (cfg.Bool("read_only", ...),
+// same envName mapping every other GANTRY_* setting uses) all the way to
+// Options.ReadOnly: a mutating route must 403 even with a correct
+// X-Gantry-Confirm header, while GET /api/images is unaffected.
+func TestRunReadOnlyModeBlocksImageMutationsButNotGet(t *testing.T) {
+	port := freePort(t)
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_READ_ONLY": "1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	getResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/images", port))
+	require.NoError(t, err)
+	drainAndClose(getResp)
+	require.Equal(t, http.StatusOK, getResp.StatusCode, "GET must stay available in read-only mode")
+
+	pruneReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), strings.NewReader(`{"mode":"unused"}`))
+	require.NoError(t, err)
+	pruneReq.Header.Set("X-Gantry-Confirm", "images")
+	pruneResp, err := http.DefaultClient.Do(pruneReq)
+	require.NoError(t, err)
+	drainAndClose(pruneResp)
+	require.Equal(t, http.StatusForbidden, pruneResp.StatusCode)
+
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
 }
 
 // TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed exercises the

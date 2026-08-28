@@ -285,6 +285,7 @@ func (g *Generator) Tick(now time.Time) {
 			g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "cpu.alloc_pct"}, ts, 100*cpuCores/a.cpuAllocCores)
 		}
 		pidsUsed := 6.0 + g.rng.Float64()*14 // low, ~0.3-1.0% of fakePidsLimit
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "pids"}, ts, pidsUsed)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "pids.limit"}, ts, fakePidsLimit)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "pids.pct"}, ts, 100*pidsUsed/fakePidsLimit)
 

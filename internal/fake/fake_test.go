@@ -576,18 +576,24 @@ func TestFakeCPUSetPinnedArchetypeExactPct(t *testing.T) {
 // TestFakePidsLimitOnEveryContainerWithLowUsage pins the real-box
 // default (pids.max=2048 on every container, docker default) onto every
 // fake fleet member, at a low percentage -- unlike the memory/cpu pairs,
-// this one is universal, not archetype-specific.
+// this one is universal, not archetype-specific. The real collector
+// always emits a bare `pids` usage metric alongside pids.limit/pids.pct
+// (cgroupv2.go's recordContainerStats) -- demo mode must match, so a
+// UI's "142 / 2048" treatment has real numerator data in fake mode too.
 func TestFakePidsLimitOnEveryContainerWithLowUsage(t *testing.T) {
 	sink := &capture{}
 	g := New(sink, nil, 3)
 	g.Tick(time.Unix(1_000_000, 0))
 
 	for _, name := range []string{"jellyfin", "postgres", "minecraft", "vaultwarden"} {
+		pids := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids"}]
 		limit := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids.limit"}]
 		pct := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids.pct"}]
+		require.Len(t, pids, 1, "%s must get a bare pids sample too, matching the real collector's contract", name)
 		require.Len(t, limit, 1, "%s must get pids.limit", name)
 		require.Equal(t, 2048.0, limit[0].Val)
 		require.Len(t, pct, 1)
+		require.Equal(t, 100*pids[0].Val/limit[0].Val, pct[0].Val, "pids.pct must be derived from the same value pids reports")
 		require.Greater(t, pct[0].Val, 0.0)
 		require.Less(t, pct[0].Val, 5.0, "%s: pids.pct must read as a low percentage, not near capacity", name)
 	}

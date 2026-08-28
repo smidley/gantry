@@ -75,6 +75,15 @@ type Options struct {
 	// state rather than a hard error.
 	Logs func(ctx context.Context, name string, follow bool, tail int) (io.ReadCloser, error)
 
+	// Storage assembles one container's storage-usage view (main wiring
+	// points this at a closure combining docker.Collector's Meta.Mounts,
+	// unraid.ResolveStoragePath, and store.Live's per-device IO rates)
+	// for GET /api/containers/{name}/storage. ok is false for a name the
+	// closure doesn't recognize, same as docker.Collector.LookupByName's
+	// own shape -- the route then 404s, same as Logs' unknown-name case.
+	// Nil in tests that don't wire one, and in fake-data mode -- see Logs.
+	Storage func(name string) (StorageDTO, bool)
+
 	// Settings backs GET/PUT /api/settings (main wiring points this at a
 	// small adapter over *config.Config + *store.Store — see
 	// api_settings.go for why the interface stays this minimal). Nil in
@@ -123,6 +132,7 @@ func New(o Options) *Server {
 	s.mux.Handle("GET /api/events", withGzip(http.HandlerFunc(s.handleEvents)))
 	s.mux.HandleFunc("GET /api/live", s.handleLive)                   // no gzip: SSE flushes each event uncompressed
 	s.mux.HandleFunc("GET /api/containers/{name}/logs", s.handleLogs) // no gzip: unbounded follow=1 stream
+	s.mux.Handle("GET /api/containers/{name}/storage", withGzip(http.HandlerFunc(s.handleStorage)))
 	s.mux.Handle("GET /api/settings", withGzip(http.HandlerFunc(s.handleSettingsGet)))
 	s.mux.Handle("PUT /api/settings", withGzip(http.HandlerFunc(s.handleSettingsPut)))
 

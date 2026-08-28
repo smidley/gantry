@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -216,6 +217,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Live:       live,
 		Current:    func() []byte { b, _ := json.Marshal(snapshotFn()); return b },
 		Logs:       dc.StreamLogs,
+		Storage:    buildContainerStorage(dc, ur, st),
 		Settings:   settingsAdapter{st: st, cfg: cfg},
 	}).ListenAndServe(runCtx)
 	cancel()
@@ -404,6 +406,90 @@ func buildContainersList(dc *docker.Collector, fakeMetas func() []docker.Meta) f
 		}
 		return out
 	}
+}
+
+// buildContainerStorage returns the closure wired to server.Options.
+// Storage: dc.LookupByName and ur.Slots are passed straight through to
+// containerStorage (its own doc explains why that split exists), and
+// st.Live() gives it the live-ring accessor it needs for per-device IO.
+func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store.Store) func(name string) (server.StorageDTO, bool) {
+	return func(name string) (server.StorageDTO, bool) {
+		return containerStorage(dc.LookupByName, ur.Slots, st.Live(), name)
+	}
+}
+
+// containerStorage is buildContainerStorage's assembly logic, pulled out
+// as a plain function over its dependencies (rather than a method on
+// docker.Collector/unraid.Collector/store.Store directly) so it's
+// testable with hand-built lookupMeta/poolSlots closures and a bare
+// *store.Live -- no real registry, daemon, or on-disk store needed --
+// the same reason containerFrameEntities takes lookupByName as a
+// parameter above.
+//
+// ok is false when lookupMeta doesn't recognize name, the same shape
+// docker.Collector.LookupByName itself uses. Mounts/Devices are always
+// non-nil (even when empty) so the wire JSON is "[]", never "null" --
+// see server.StorageDTO's own doc.
+func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots func() (pools, disks []string), live *store.Live, name string) (server.StorageDTO, bool) {
+	meta, ok := lookupMeta(name)
+	if !ok {
+		return server.StorageDTO{}, false
+	}
+
+	pools, _ := poolSlots()
+	mounts := make([]server.MountDTO, 0, len(meta.Mounts))
+	for _, m := range meta.Mounts {
+		ref := unraid.ResolveStoragePath(m.Source, pools)
+		mounts = append(mounts, server.MountDTO{
+			Source:      m.Source,
+			Destination: m.Destination,
+			RW:          m.RW,
+			Storage:     server.StorageRefDTO{Kind: ref.Kind, Name: ref.Name},
+		})
+	}
+
+	devices := deviceIOFromSamples(live.LatestByMetricPrefix("container", name, "live:io."))
+	return server.StorageDTO{Mounts: mounts, Devices: devices}, true
+}
+
+// deviceIOFromSamples turns store.Live's live:io.<dev>.read_bps/
+// write_bps samples (recorded by cgroupv2.go's recordContainerStats,
+// live-ring-only by design) into one DeviceIODTO per device, sorted by
+// device name for a stable response. A device with only one of the two
+// rates yet (its RateTracker key for the other direction hasn't produced
+// a second reading) still appears, with the missing half left at its
+// float64 zero value rather than being dropped.
+func deviceIOFromSamples(samples map[string]store.Sample) []server.DeviceIODTO {
+	byDevice := make(map[string]*server.DeviceIODTO, len(samples))
+	for metric, sample := range samples {
+		dev, suffix, ok := strings.Cut(strings.TrimPrefix(metric, "live:io."), ".")
+		if !ok {
+			continue
+		}
+		d, exists := byDevice[dev]
+		if !exists {
+			d = &server.DeviceIODTO{Device: dev}
+			byDevice[dev] = d
+		}
+		switch suffix {
+		case "read_bps":
+			d.ReadBps = sample.Val
+		case "write_bps":
+			d.WriteBps = sample.Val
+		}
+	}
+
+	names := make([]string, 0, len(byDevice))
+	for dev := range byDevice {
+		names = append(names, dev)
+	}
+	sort.Strings(names)
+
+	out := make([]server.DeviceIODTO, 0, len(names))
+	for _, dev := range names {
+		out = append(out, *byDevice[dev])
+	}
+	return out
 }
 
 // buildTop adapts store.TopEntities' anonymous-struct return type to

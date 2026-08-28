@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { diskRole, diskTempState, diskUsagePct, sortDiskEntities } from './disks';
+import { diskMediaType, diskRole, diskTempState, diskUsagePct, sortDiskEntities } from './disks';
 
 describe('diskRole', () => {
   it('classifies parity slots, including dual parity', () => {
@@ -69,6 +69,26 @@ describe('diskTempState', () => {
     expect(diskTempState({})).toEqual({ kind: 'no-sensor' });
     expect(diskTempState(undefined)).toEqual({ kind: 'no-sensor' });
     expect(diskTempState(null)).toEqual({ kind: 'no-sensor' });
+  });
+});
+
+describe('diskMediaType', () => {
+  it('reads rotational=0 as solid-state', () => {
+    expect(diskMediaType({ rotational: 0 })).toBe('ssd');
+  });
+
+  it('reads rotational=1 as spinning', () => {
+    expect(diskMediaType({ rotational: 1 })).toBe('hdd');
+  });
+
+  it('treats any nonzero rotational reading as spinning, not just exactly 1', () => {
+    expect(diskMediaType({ rotational: 2 })).toBe('hdd');
+  });
+
+  it('returns null when rotational is absent -- unknown, not a guess', () => {
+    expect(diskMediaType({})).toBeNull();
+    expect(diskMediaType(undefined)).toBeNull();
+    expect(diskMediaType(null)).toBeNull();
   });
 });
 

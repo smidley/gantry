@@ -13,11 +13,13 @@
   import { fetchEvents } from '../lib/api';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtRelTime } from '../lib/format';
   import { etaFromProgress, parityIsRunning, seqStep, sharesFromMetrics } from '../lib/metrics';
-  import { diskRole, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
+  import { diskMediaType, diskRole, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import HealthDot from '../components/HealthDot.svelte';
 
   const EVENTS_POLL_MS = 30_000;
   const ROLE_LABEL = { parity: 'Parity', data: 'Data disk', pool: 'Cache / pool', flash: 'Boot (flash)' };
+  const MEDIA_LABEL = { hdd: 'HDD', ssd: 'SSD' };
+  const MEDIA_TITLE = { hdd: 'Spinning disk', ssd: 'Solid state' };
 
   let disks = $derived(live.frame?.disks ?? {});
   let diskNames = $derived(sortDiskEntities(Object.keys(disks)));
@@ -101,6 +103,27 @@
   }
 </script>
 
+<!-- Type-at-a-glance glyphs (ask: "different types of things in the same
+     category should stand out -- nvme storage vs spinning disk"): a
+     platter+spindle for HDD, a chip-with-pins for SSD/NVMe (echoing
+     router.ts's own GPU nav icon, same "chip" visual language), always
+     paired with the HDD/SSD text right next to it -- never color alone. -->
+{#snippet diskMediaGlyph(type)}
+  {#if type === 'ssd'}
+    <svg class="storage-disk__media-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="3" y="3" width="10" height="10" rx="1.5" />
+      <path
+        d="M5.5 3v2M8 3v2M10.5 3v2M5.5 11v2M8 11v2M10.5 11v2M3 5.5h2M3 8h2M3 10.5h2M11 5.5h2M11 8h2M11 10.5h2"
+      />
+    </svg>
+  {:else}
+    <svg class="storage-disk__media-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.25" />
+      <circle class="storage-disk__media-icon-hub" cx="8" cy="8" r="1.3" />
+    </svg>
+  {/if}
+{/snippet}
+
 <div class="storage-view">
   <h1 class="page-title">Storage</h1>
 
@@ -167,12 +190,20 @@
       {#each diskNames as name (name)}
         {@const metrics = disks[name]}
         {@const role = diskRole(name)}
+        {@const mediaType = diskMediaType(metrics)}
         {@const temp = diskTempState(metrics)}
         {@const usagePct = diskUsagePct(metrics)}
         {@const errors = metrics['errors'] ?? 0}
         <div class="card storage-disk">
           <div class="storage-disk__head">
-            <span class="microlabel">{ROLE_LABEL[role]}</span>
+            <span class="microlabel storage-disk__eyebrow">
+              <span>{ROLE_LABEL[role]}</span>
+              {#if mediaType}
+                <span class="storage-disk__media" title={MEDIA_TITLE[mediaType]}>
+                  {@render diskMediaGlyph(mediaType)}{MEDIA_LABEL[mediaType]}
+                </span>
+              {/if}
+            </span>
             {#if temp.kind === 'reading'}
               <span class="tabular-nums storage-disk__temp">{temp.celsius.toFixed(1)}&deg;C</span>
             {:else}
@@ -377,6 +408,30 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
+  }
+  .storage-disk__eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+  .storage-disk__media {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    color: var(--ink-2);
+  }
+  .storage-disk__media-icon {
+    width: 11px;
+    height: 11px;
+    flex-shrink: 0;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.2;
+  }
+  .storage-disk__media-icon-hub {
+    fill: currentColor;
+    stroke: none;
   }
   .storage-disk__temp {
     font-size: 0.85rem;

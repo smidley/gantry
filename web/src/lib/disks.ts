@@ -49,6 +49,21 @@ export function sortDiskEntities(names: string[]): string[] {
   });
 }
 
+export type DiskMediaType = 'hdd' | 'ssd';
+
+// diskMediaType reads a disk's rotational value (disks.go's own "0/1 per
+// present disk from disks.ini" contract) into the two-way distinction
+// Storage/Overview render a glyph for: 0 is solid-state, anything else
+// (1, the only other real-world value, but any nonzero reading is
+// treated the same) is spinning. null -- absent, never guessed -- covers
+// a not-present disk (never rendered here anyway) and a stale/pre-
+// upgrade frame that hasn't started sending this metric yet.
+export function diskMediaType(metrics: Record<string, number> | undefined | null): DiskMediaType | null {
+  const rotational = metrics?.['rotational'];
+  if (rotational === undefined) return null;
+  return rotational === 0 ? 'ssd' : 'hdd';
+}
+
 export type DiskTempState = { kind: 'reading'; celsius: number } | { kind: 'spun-down' } | { kind: 'no-sensor' };
 
 // diskTempState reads one disk's temp/spin-state metrics. Absence of the

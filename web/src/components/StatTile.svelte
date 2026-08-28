@@ -80,6 +80,13 @@
   // pointer-driven interaction, not tied to arrival cadence at all.
   const SCRUB_TWEEN_MS = 120;
 
+  // BARE_SPARKLINE_HEIGHT: the D2 instrument rail's own charts read as a
+  // real instrument, not a decorative crumb (Scott: "charts are so small
+  // it's difficult to see the detail in the spikes") -- ~1.85x Sparkline's
+  // own 28px default. Card-mode tiles (Settings) are unaffected, they
+  // never pass this.
+  const BARE_SPARKLINE_HEIGHT = 52;
+
   let {
     label,
     liveValue,
@@ -147,6 +154,25 @@
   $effect(() => {
     if (scrubHit) chipText = fmtRelTime(scrubHit.ts, Date.now());
   });
+
+  // paired: this tile carries a directional pair (down/up, read/write),
+  // not one hero number with an unrelated annotation -- the bare rail's
+  // equal-size/tinted treatment below only makes sense for that case
+  // (Scott: "values should not be different sizes... [they're] peers,
+  // not primary/secondary"). CPU/Memory's lone value never sets
+  // liveValue2, so this stays false there and both keep plain ink.
+  let paired = $derived(liveValue2 !== undefined);
+
+  // pairedTint resolves a series color var into a text-safe tone: mixed
+  // toward --ink so it darkens in light mode and lightens in dark mode,
+  // the direction that improves contrast against the page in BOTH
+  // themes -- --series-4 (amber) read under AA-large contrast on its own
+  // in light mode, this is what fixes that without inventing a new token
+  // just for this. Only applied in bare/paired mode; the sparkline LINE
+  // itself keeps the raw series color unchanged.
+  function pairedTint(colorVar) {
+    return `color: color-mix(in oklab, ${colorVar} 70%, var(--ink) 30%)`;
+  }
 </script>
 
 {#snippet valueBlock()}
@@ -169,14 +195,26 @@
         {#if status}<HealthDot {status} />{/if}
       </span>
       <div class="stat-tile__row-value-stack">
-        <span class="stat-tile__value">{@render valueBlock()}</span>
+        <span
+          class="stat-tile__value"
+          class:stat-tile__value--paired={paired}
+          style={paired ? pairedTint(sparklineColor) : undefined}>{@render valueBlock()}</span
+        >
         {#if liveValue2 !== undefined}
-          <span class="stat-tile__value2 tabular-nums">{@render value2Block()}</span>
+          <span class="stat-tile__value2 stat-tile__value2--paired tabular-nums" style={pairedTint(sparklineColor2)}
+            >{@render value2Block()}</span
+          >
         {/if}
       </div>
     </div>
     {#if sparklinePoints}
-      <Sparkline points={sparklinePoints} color={sparklineColor} points2={value2Points} color2={sparklineColor2} />
+      <Sparkline
+        points={sparklinePoints}
+        color={sparklineColor}
+        points2={value2Points}
+        color2={sparklineColor2}
+        height={BARE_SPARKLINE_HEIGHT}
+      />
     {/if}
   {:else}
     <div class="stat-tile__head">
@@ -269,6 +307,28 @@
   }
   .stat-tile--bare .stat-tile__number {
     font-size: 1.6rem;
+  }
+  /* Paired value1/value2 (down/up, read/write) read as PEERS, not a
+     hero-plus-secondary-annotation pair: value2 matches value1's own
+     bare font-size, and both pick up their tint (set inline via
+     pairedTint on the wrapping span, above) via `inherit` overrides on
+     their own children -- .stat-tile__number/-value2-label otherwise
+     hardcode ink/ink-2, which would otherwise win over an ancestor's
+     inline color (an element's own explicit color always beats an
+     inherited one, regardless of the ancestor's specificity). */
+  .stat-tile__value--paired .stat-tile__number {
+    color: inherit;
+  }
+  /* Compound (.stat-tile__value2 AND .stat-tile__value2--paired), not
+     just the modifier alone -- same specificity trick .stat-tile--bare
+     .stat-tile__number already uses above, needed here so this reliably
+     beats .stat-tile__value2's own 0.9rem base rule regardless of which
+     one happens to come first in the stylesheet. */
+  .stat-tile__value2.stat-tile__value2--paired {
+    font-size: 1.6rem;
+  }
+  .stat-tile__value2--paired .stat-tile__value2-label {
+    color: inherit;
   }
   /* Sparklines are a real instrument here, not a decorative crumb --
      floored at 120px regardless of how uPlot's own initial-width read

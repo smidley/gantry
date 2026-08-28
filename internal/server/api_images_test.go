@@ -316,7 +316,10 @@ func TestImagesRemoveRejectsMoreThanMaxIDs(t *testing.T) {
 // part is leading JSON whitespace (insignificant, and skipped by the
 // decoder) padded well past the 1MB cap around an otherwise entirely
 // valid body -- so this fails ONLY if the byte-size cap itself is
-// enforced, not merely because the payload was nonsense content.
+// enforced, not merely because the payload was nonsense content. This
+// is specifically a MaxBytesReader overflow (a *http.MaxBytesError),
+// not a malformed body, so it must 413, not 400 -- see
+// writeDecodeError's own doc.
 func TestImagesRemoveRejectsOversizedBody(t *testing.T) {
 	s := New(Options{Version: "test-1", Started: time.Now()})
 	ts := httptest.NewServer(s.Handler())
@@ -325,7 +328,7 @@ func TestImagesRemoveRejectsOversizedBody(t *testing.T) {
 	oversized := strings.Repeat(" ", 2<<20) + `{"ids":["` + fmt.Sprintf("%064x", 1) + `"]}`
 	resp := postImages(t, ts.URL+"/api/images/remove", oversized, "images")
 	defer func() { _ = resp.Body.Close() }()
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
 	var body map[string]string
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	require.Contains(t, body["error"], "too large")
@@ -339,10 +342,24 @@ func TestImagesPruneRejectsOversizedBody(t *testing.T) {
 	oversized := strings.Repeat(" ", 2<<20) + `{"mode":"dangling"}`
 	resp := postImages(t, ts.URL+"/api/images/prune", oversized, "images")
 	defer func() { _ = resp.Body.Close() }()
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
 	var body map[string]string
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	require.Contains(t, body["error"], "too large")
+}
+
+// TestImagesRemoveNonOversizedBodyErrorStays400 guards the split above
+// against over-firing: a malformed-but-not-oversized body (invalid
+// JSON, well under imagesMaxRequestBytes) is a genuinely different
+// problem than a MaxBytesReader overflow and must keep 400, not 413.
+func TestImagesRemoveNonOversizedBodyErrorStays400(t *testing.T) {
+	s := New(Options{Version: "test-1", Started: time.Now()})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := postImages(t, ts.URL+"/api/images/remove", `{not valid json`, "images")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestImagesRemove404WhenBackendNotWired(t *testing.T) {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -166,6 +167,23 @@ func (s *Server) requireMutationAllowed(w http.ResponseWriter, r *http.Request) 
 	return true
 }
 
+// writeDecodeError writes dec.Decode's error as the appropriate 4xx --
+// shared by handleImagesRemove/handleImagesPrune, the only two routes
+// that wrap their body in http.MaxBytesReader (imagesMaxRequestBytes).
+// A body over that cap surfaces here as a *http.MaxBytesError, which is
+// a distinct problem from a malformed one (413, not 400: the body may
+// well have been well-formed JSON that simply never got to finish
+// arriving); anything else decode can fail on -- bad JSON, an unknown
+// field, wrong types -- keeps 400.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var mbe *http.MaxBytesError
+	if errors.As(err, &mbe) {
+		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+		return
+	}
+	writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+}
+
 // logImageRemoved appends one image.removed event, when Options.
 // AppendEvent is wired -- shared by handleImagesRemove (one per
 // successful id) and handleImagesPrune (one per deleted image).
@@ -245,7 +263,7 @@ func (s *Server) handleImagesRemove(w http.ResponseWriter, r *http.Request) {
 	dec.DisallowUnknownFields()
 	var body imagesRemoveRequest
 	if err := dec.Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		writeDecodeError(w, err)
 		return
 	}
 	if len(body.IDs) == 0 {
@@ -295,7 +313,7 @@ func (s *Server) handleImagesPrune(w http.ResponseWriter, r *http.Request) {
 	dec.DisallowUnknownFields()
 	var body imagesPruneRequest
 	if err := dec.Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		writeDecodeError(w, err)
 		return
 	}
 	if body.Mode != "dangling" && body.Mode != "unused" {

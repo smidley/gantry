@@ -19,6 +19,51 @@ import (
 // not on an allowlist of known-good statuses.
 const diskNotPresent = "DISK_NP"
 
+// DiskMeta is one present disk slot's device name and classified type
+// (see DiskKind) — strings, so unlike rotational/temp/etc. they can't
+// ride the numeric MetricSink. Collector.DiskMeta() exposes the latest
+// tick's own map for the snapshot builder to merge into
+// server.SnapshotDTO.DiskMeta, mirroring Version()'s identical "set on
+// tick under mu, read via a copying getter" shape, for the same
+// cross-goroutine reason (the snapshot builder runs on a different
+// goroutine than Tick).
+type DiskMeta struct {
+	Device string
+	Kind   string
+}
+
+// DiskKind classifies a present disk slot into the frontend's four-way
+// type badge: "usb" for the boot flash device, "nvme" for an NVMe pool
+// member, "ssd" for any other solid-state member, "hdd" for a spinning
+// one. Exported and pure (no *Collector receiver) so both a real box's
+// own tickOneDisk below and the fake generator's disk metadata share one
+// tested rule.
+//
+// Neither signal alone is enough (Scott's own report, reproduced against
+// testdata/disks_real.ini): the boot flash device reports rotational=1
+// AND a plain SCSI-style device name ("sdi") — indistinguishable from a
+// real spinning disk by either signal on its own — and an NVMe pool
+// member reports rotational=0, the same as a plain SATA/SAS SSD; only
+// the device name ("nvme0n1" vs "sdX") tells THOSE two apart. Order
+// matters: the boot device's SLOT NAME ("flash", Unraid's own fixed,
+// version-independent name for it) is checked first and wins outright,
+// before either signal below ever looks at this slot's own device name
+// or rotational value. An unparseable/absent rotational reading (should
+// not happen for a present disk in practice) falls back to "hdd", the
+// least alarming default.
+func DiskKind(slot, device string, rotational float64, rotationalOK bool) string {
+	if slot == "flash" {
+		return "usb"
+	}
+	if strings.HasPrefix(device, "nvme") {
+		return "nvme"
+	}
+	if rotationalOK && rotational == 0 {
+		return "ssd"
+	}
+	return "hdd"
+}
+
 // tickDisks reads disks.ini and records per-present-disk stats, emitting
 // a disk.errors event whenever a slot's error count has risen since the
 // last tick it was seen. Missing/unreadable disks.ini degrades silently
@@ -59,9 +104,19 @@ func (c *Collector) tickOneDisk(slot string, disk map[string]string, ts int64) {
 		c.sink.Record(store.SeriesKey{Kind: "disk", Entity: slot, Metric: "spun_up"}, ts, 1-spundown)
 	}
 
-	if rotational, ok := parseFloatOK(disk["rotational"]); ok {
+	// rotational/rotationalOK feed both the numeric metric below (recorded
+	// only when parseable, same as every other metric here) and DiskKind's
+	// classification just after (which needs to know when it's missing,
+	// not merely treat an unparseable reading as some default value).
+	rotational, rotationalOK := parseFloatOK(disk["rotational"])
+	if rotationalOK {
 		c.sink.Record(store.SeriesKey{Kind: "disk", Entity: slot, Metric: "rotational"}, ts, rotational)
 	}
+
+	device := disk["device"]
+	c.mu.Lock()
+	c.diskMeta[slot] = DiskMeta{Device: device, Kind: DiskKind(slot, device, rotational, rotationalOK)}
+	c.mu.Unlock()
 
 	// temp is a number, or the literal "*" when the disk is spun down or
 	// its temp is otherwise unknown; parseFloatOK's failure on "*" is

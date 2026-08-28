@@ -11,6 +11,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestDiskKind pins the pure classification rule Scott's own report
+// drove (a live box misread its boot flash device as HDD and its NVMe
+// cache pools as generic SSD): slot name wins outright for the boot
+// device, then device-name prefix, then rotational as the last resort.
+func TestDiskKind(t *testing.T) {
+	cases := []struct {
+		name         string
+		slot, device string
+		rotational   float64
+		rotationalOK bool
+		want         string
+	}{
+		{"boot flash device always classifies usb, despite reporting rotational=1 and a plain scsi-style device name", "flash", "sdi", 1, true, "usb"},
+		{"an nvme pool member classifies nvme regardless of its own slot name", "cache", "nvme1n1", 0, true, "nvme"},
+		{"a second, differently-named nvme pool classifies nvme the same way", "rocket_pool", "nvme0n1", 0, true, "nvme"},
+		{"a plain SATA/SAS solid-state disk (rotational=0, non-nvme device) classifies ssd", "cache", "sdh", 0, true, "ssd"},
+		{"a spinning data disk classifies hdd", "disk1", "sdg", 1, true, "hdd"},
+		{"an unparseable rotational reading falls back to hdd, the safe default", "disk1", "sdg", 0, false, "hdd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, DiskKind(tc.slot, tc.device, tc.rotational, tc.rotationalOK))
+		})
+	}
+}
+
 func TestTickDisksExactValuesAcrossSlots(t *testing.T) {
 	dir := t.TempDir()
 	copyFixture(t, "testdata/disks.ini", filepath.Join(dir, "disks.ini"))
@@ -220,6 +246,23 @@ func TestTickDisksRealCaptureFromLiveUnraidBox(t *testing.T) {
 	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 3022356480.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "fs.used_bytes"}], 1e-6)
 	require.InDelta(t, 58987806720.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "flash", Metric: "fs.free_bytes"}], 1e-6)
+
+	// DiskMeta: the whole point of this fixture (Scott's own report) --
+	// flash must classify usb despite its rotational=1/plain-sdX shape
+	// above, and BOTH nvme-transport pools must classify nvme even though
+	// their rotational=0 reading alone can't tell them apart from a plain
+	// SATA/SAS SSD. Absent slots (DISK_NP/DISK_NP_DSBL) get no metrics
+	// above and must get no DiskMeta entry either.
+	meta := c.DiskMeta()
+	require.Equal(t, DiskMeta{Device: "sdi", Kind: "usb"}, meta["flash"])
+	require.Equal(t, DiskMeta{Device: "nvme1n1", Kind: "nvme"}, meta["cache"])
+	require.Equal(t, DiskMeta{Device: "nvme0n1", Kind: "nvme"}, meta["rocket_pool"])
+	require.Equal(t, DiskMeta{Device: "sdg", Kind: "hdd"}, meta["disk1"])
+	require.Equal(t, DiskMeta{Device: "sdd", Kind: "hdd"}, meta["disk6"])
+	_, hasParity := meta["parity"]
+	require.False(t, hasParity, "DISK_NP_DSBL slot parity must have no DiskMeta entry either")
+	_, hasDisk9 := meta["disk9"]
+	require.False(t, hasDisk9, "DISK_NP slot disk9 must have no DiskMeta entry either")
 }
 
 func TestTickDisksMissingFileDegradesSilently(t *testing.T) {

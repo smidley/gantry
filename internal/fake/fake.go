@@ -102,6 +102,14 @@ type diskSpec struct {
 	spunDown   bool
 	noSensor   bool    // true for a device with no temp sensor at all (e.g. USB flash) -- distinct from spunDown; never emits temp.c regardless of spun state
 	rotational float64 // disks.ini's own rotational value: 1 spinning, 0 solid-state
+	// ioReadScale/ioWriteScale: this device's own read/write bytes/sec
+	// UPPER bound -- emitDiskIO below draws a uniform 0..scale sample
+	// each tick, same "no baseline floor" shape the old single flat
+	// diskio.read_bps/write_bps pair used. Pools front the fleet's real
+	// traffic (downloads, transcodes); parity and the boot flash device
+	// sit close to idle in ordinary operation.
+	ioReadScale  float64
+	ioWriteScale float64
 }
 
 // disks is the fake array's fixed 8-disk fleet, covering all four of
@@ -120,15 +128,20 @@ type diskSpec struct {
 // exempt from that field) and a plain SCSI-style device name ("sdi") --
 // classifying it correctly depends entirely on unraid.DiskKind's
 // slot-name override, never on either of those two signals.
+// disk1 carries a deliberately higher ioReadScale/ioWriteScale than its
+// disk2-4 siblings (a media-library disk seeing real reads, next to
+// otherwise-quiet array members) so the Storage chart's own "any drive
+// with recent IO defaults visible" rule has a real data disk to apply
+// to, not just the two pools.
 var disks = []diskSpec{
-	{"parity", "sdb", false, 12e12, 0, 38, false, false, 1},
-	{"disk1", "sdc", true, 8e12, 0.62, 34, false, false, 1},
-	{"disk2", "sdd", true, 8e12, 0.71, 35, false, false, 1},
-	{"disk3", "sde", true, 8e12, 0.55, 36, true, false, 1},
-	{"disk4", "sdf", true, 4e12, 0.40, 37, false, false, 1},
-	{"cache", "sdh", true, 1e12, 0.35, 41, false, false, 0},
-	{"rocket_pool", "nvme0n1", true, 2e12, 0.28, 44, false, false, 0},
-	{"flash", "sdi", true, 32e9, 0.05, 0, false, true, 1},
+	{"parity", "sdb", false, 12e12, 0, 38, false, false, 1, 1e4, 5e3},
+	{"disk1", "sdc", true, 8e12, 0.62, 34, false, false, 1, 2.5e6, 1.2e6},
+	{"disk2", "sdd", true, 8e12, 0.71, 35, false, false, 1, 1.5e5, 6e4},
+	{"disk3", "sde", true, 8e12, 0.55, 36, true, false, 1, 1.5e5, 6e4},
+	{"disk4", "sdf", true, 4e12, 0.40, 37, false, false, 1, 1.5e5, 6e4},
+	{"cache", "sdh", true, 1e12, 0.35, 41, false, false, 0, 4e6, 10e6},
+	{"rocket_pool", "nvme0n1", true, 2e12, 0.28, 44, false, false, 0, 2e6, 1.5e6},
+	{"flash", "sdi", true, 32e9, 0.05, 0, false, true, 1, 3e3, 1e3},
 }
 
 const (
@@ -368,8 +381,6 @@ func (g *Generator) Tick(now time.Time) {
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "mem.used_pct"}, ts, clamp(55+10*math.Sin(phase/3)+2*g.rng.Float64(), 0, 100))
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "net.rx_bps"}, ts, 20e6*(0.5+g.rng.Float64()))
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "net.tx_bps"}, ts, 5e6*(0.5+g.rng.Float64()))
-	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio.read_bps"}, ts, 30e6*g.rng.Float64())
-	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio.write_bps"}, ts, 15e6*g.rng.Float64())
 
 	g.emitDisks(ts, elapsed)
 	g.emitArray(ts, elapsed)
@@ -378,9 +389,15 @@ func (g *Generator) Tick(now time.Time) {
 	g.emitContainerEvents(ts, elapsed)
 }
 
-// emitDisks records every fake disk's spun_up/temp.c/fs.*/errors series
-// for one tick -- see the disks var and errorDiskEntity/diskErrorsAt
-// consts for the per-disk shape and the one rare error's schedule.
+// emitDisks records every fake disk's spun_up/temp.c/fs.*/errors/diskio
+// series for one tick -- see the disks var and errorDiskEntity/
+// diskErrorsAt consts for the per-disk shape and the one rare error's
+// schedule. diskio is recorded host-scoped and device-keyed
+// ("diskio.<device>.read_bps", not a per-disk-entity series) to mirror
+// real mode's own host.go shape exactly (per-device /proc/diskstats
+// counters have no disk-SLOT dimension of their own) -- Storage's chart
+// joins it back to a slot via disk_meta[slot].device, same as any other
+// real-mode consumer would.
 func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 	phase := elapsed.Seconds() / 300.0
 	for i, d := range disks {
@@ -390,6 +407,8 @@ func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 		}
 		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "spun_up"}, ts, spunUp)
 		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "rotational"}, ts, d.rotational)
+		g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + d.device + ".read_bps"}, ts, d.ioReadScale*g.rng.Float64())
+		g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + d.device + ".write_bps"}, ts, d.ioWriteScale*g.rng.Float64())
 
 		if !d.spunDown && !d.noSensor {
 			temp := clamp(d.tempBase+2.5*math.Sin(phase+float64(i))+(g.rng.Float64()-0.5)*1.5, 32, 45)

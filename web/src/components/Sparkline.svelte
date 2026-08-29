@@ -26,7 +26,7 @@
   import { live as liveStore } from '../lib/sse.svelte';
   import { nearestPointAt, tsAtFraction } from '../lib/scrub';
   import { scrubBus } from '../lib/scrubbus.svelte';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
 
   // live defaults true: every real Sparkline in this app charts a
   // liveRing (StatTile, ContainerRow's per-row CPU column) -- there is
@@ -180,7 +180,7 @@
       // under reduced motion -- see streamdriver.ts's "Cadence-driven
       // glide" doc for why this varies per arrival instead of a fixed
       // guess.
-      const durationMs = prefersReducedMotion.current ? 0 : liveStore.glideMs;
+      const durationMs = motion.reduced ? 0 : liveStore.glideMs;
       // Always step the window here, not only under reduced motion: the
       // shared driver's own (far more frequent) tick is the ONLY other
       // place this gets set, and it's gated behind IntersectionObserver

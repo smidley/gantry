@@ -20,7 +20,7 @@
   import { untrack } from 'svelte';
   import { Tween } from 'svelte/motion';
   import { linear } from 'svelte/easing';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { live as liveStore } from '../lib/sse.svelte';
   import ContainerIcon from './ContainerIcon.svelte';
 
@@ -85,7 +85,7 @@
   // what used to settle well before the next real tick and sit frozen.
   $effect(() => {
     const target = row.value;
-    const reduced = prefersReducedMotion.current;
+    const reduced = motion.reduced;
     valueTween.set(target, { duration: live && !reduced ? liveStore.glideMs : 0, easing: linear });
   });
 
@@ -98,7 +98,7 @@
 
   $effect(() => {
     if (row.secondary === undefined) return;
-    const reduced = prefersReducedMotion.current;
+    const reduced = motion.reduced;
     secondaryTween.set(row.secondary, { duration: live && !reduced ? liveStore.glideMs : 0, easing: linear });
   });
 
@@ -115,7 +115,7 @@
 
   $effect(() => {
     if (!row.direction) return;
-    const reduced = prefersReducedMotion.current;
+    const reduced = motion.reduced;
     const duration = live && !reduced ? liveStore.glideMs : 0;
     direction0Tween.set(row.direction[0], { duration, easing: linear });
     direction1Tween.set(row.direction[1], { duration, easing: linear });

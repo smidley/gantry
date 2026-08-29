@@ -14,7 +14,7 @@
 <script>
   import { Tween } from 'svelte/motion';
   import { cubicOut, linear } from 'svelte/easing';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate } from '../lib/format';
@@ -82,7 +82,7 @@
   // per-row wrapper needed for these, unlike TopBarRow, which exists
   // because ITS parent doesn't already instantiate a component per row.
   function tweenTo(tween, value) {
-    tween.set(value, { duration: prefersReducedMotion.current ? 0 : live.glideMs, easing: linear });
+    tween.set(value, { duration: motion.reduced ? 0 : live.glideMs, easing: linear });
   }
 
   const SCRUB_TWEEN_MS = 120;
@@ -108,7 +108,7 @@
   let cpuScrubHit = $derived(scrubBus.ts === null ? null : nearestPointAt(cpuRing.points, scrubBus.ts));
 
   $effect(() => {
-    const reduced = prefersReducedMotion.current;
+    const reduced = motion.reduced;
     if (cpuScrubHit) {
       cpuTween.set(cpuScrubHit.value, { duration: reduced ? 0 : SCRUB_TWEEN_MS, easing: cubicOut });
     } else {

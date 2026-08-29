@@ -69,7 +69,7 @@
 <script>
   import { Tween } from 'svelte/motion';
   import { cubicOut, linear } from 'svelte/easing';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { untrack } from 'svelte';
   import { fmtRelTime } from '../lib/format';
   import { bandToken } from '../lib/thresholds';
@@ -142,7 +142,7 @@
   let numberTween = new Tween(untrack(() => liveValue ?? 0), { duration: liveStore.glideMs, easing: linear });
 
   $effect(() => {
-    const reduced = prefersReducedMotion.current;
+    const reduced = motion.reduced;
     if (scrubHit) {
       numberTween.set(scrubHit.value, { duration: reduced ? 0 : SCRUB_TWEEN_MS, easing: cubicOut });
     } else {
@@ -163,7 +163,7 @@
 
   $effect(() => {
     if (liveValue2 === undefined) return;
-    const reduced = prefersReducedMotion.current;
+    const reduced = motion.reduced;
     if (scrubHit2) {
       number2Tween.set(scrubHit2.value, { duration: reduced ? 0 : SCRUB_TWEEN_MS, easing: cubicOut });
     } else {

@@ -19,7 +19,7 @@
   import { untrack } from 'svelte';
   import { Tween } from 'svelte/motion';
   import { linear } from 'svelte/easing';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { live as liveStore } from '../lib/sse.svelte';
   import { fmtRate } from '../lib/format';
 
@@ -36,11 +36,11 @@
   let writeTween = new Tween(untrack(() => totalWrite), { duration: liveStore.glideMs, easing: linear });
 
   $effect(() => {
-    const reduced = prefersReducedMotion.current;
+    const reduced = motion.reduced;
     readTween.set(totalRead, { duration: reduced ? 0 : liveStore.glideMs, easing: linear });
   });
   $effect(() => {
-    const reduced = prefersReducedMotion.current;
+    const reduced = motion.reduced;
     writeTween.set(totalWrite, { duration: reduced ? 0 : liveStore.glideMs, easing: linear });
   });
 </script>

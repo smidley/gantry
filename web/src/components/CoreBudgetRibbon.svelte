@@ -18,7 +18,7 @@
   TimeChart's own marker-hover label uses.
 -->
 <script>
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { live as liveStore } from '../lib/sse.svelte';
   import { fmtCores } from '../lib/format';
   import ContainerIcon from './ContainerIcon.svelte';
@@ -31,7 +31,7 @@
   // renders without one.
   let { hostCores = 0, segments = [], freeCores = 0, icons = {} } = $props();
 
-  let glideMs = $derived(prefersReducedMotion.current ? 0 : liveStore.glideMs);
+  let glideMs = $derived(motion.reduced ? 0 : liveStore.glideMs);
 
   let hoveredKey = $state(null);
   let hoveredSegment = $derived(segments.find((s) => s.key === hoveredKey) ?? null);

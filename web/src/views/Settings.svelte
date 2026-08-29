@@ -9,6 +9,7 @@
   import { onMount } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { theme } from '../lib/theme.svelte';
+  import { motion } from '../lib/motion.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
   import { fetchSeries, fetchSettings, fetchVersion, putSettings } from '../lib/api';
@@ -36,6 +37,15 @@
     { key: 'system', label: 'System' },
     { key: 'light', label: 'Light' },
     { key: 'dark', label: 'Dark' },
+  ];
+  // MOTION_OPTIONS: on/off force animations regardless of the OS's own
+  // prefers-reduced-motion setting -- Scott's own ask, in case that OS
+  // setting (never confirmed either way) turns out to be part of why a
+  // real list reorder read as a hard swap for him.
+  const MOTION_OPTIONS = [
+    { key: 'system', label: 'System' },
+    { key: 'on', label: 'On' },
+    { key: 'off', label: 'Off' },
   ];
 
   let sources = $derived(live.frame?.sources ?? {});
@@ -276,6 +286,20 @@
             class="segmented__btn"
             class:segmented__btn--active={theme.preference === opt.key}
             onclick={() => theme.set(opt.key)}
+          >
+            {opt.label}
+          </button>
+        {/each}
+      </div>
+
+      <span class="microlabel">Animations</span>
+      <div class="segmented" role="group" aria-label="Animations">
+        {#each MOTION_OPTIONS as opt (opt.key)}
+          <button
+            type="button"
+            class="segmented__btn"
+            class:segmented__btn--active={motion.preference === opt.key}
+            onclick={() => motion.set(opt.key)}
           >
             {opt.label}
           </button>

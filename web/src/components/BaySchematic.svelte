@@ -41,7 +41,7 @@
   import { fmtBytes, fmtPct } from '../lib/format';
   import { seqStep } from '../lib/metrics';
   import { band, bandToken } from '../lib/thresholds';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { live as liveStore } from '../lib/sse.svelte';
 
   // entries: [{ slot, pct, flagged?, calloutText?, kind?, device?,
@@ -57,7 +57,7 @@
 
   // glideMs: see the module doc above -- the CSS transition on each
   // bar's own fill reads this straight off the shared driver.
-  let glideMs = $derived(prefersReducedMotion.current ? 0 : liveStore.glideMs);
+  let glideMs = $derived(motion.reduced ? 0 : liveStore.glideMs);
 
   const KIND_LABEL = { ssd: ', solid state', nvme: ', NVMe', usb: ', USB flash' };
 

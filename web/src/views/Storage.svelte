@@ -12,7 +12,7 @@
   import { onMount, untrack } from 'svelte';
   import { Tween } from 'svelte/motion';
   import { linear } from 'svelte/easing';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { live } from '../lib/sse.svelte';
   import { fetchEvents, fetchSeries } from '../lib/api';
   import { pushRing } from '../lib/livering';
@@ -338,7 +338,7 @@
   // (live.glideMs, or 0 under reduced motion -- see streamdriver.ts's
   // "Cadence-driven glide" doc) -- fed to the CSS-transition-duration
   // bars below (parity progress, per-disk usage) and to parityPctTween.
-  let glideMs = $derived(prefersReducedMotion.current ? 0 : live.glideMs);
+  let glideMs = $derived(motion.reduced ? 0 : live.glideMs);
 
   let started = $derived(array['array.started']);
   let parityPct = $derived(array['parity.progress_pct']);

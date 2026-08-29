@@ -19,7 +19,7 @@
 <script>
   import { Tween } from 'svelte/motion';
   import { linear } from 'svelte/easing';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { live } from '../lib/sse.svelte';
   import { fmtBytes, fmtCores, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { containerHealthStatus } from '../lib/containerStatus';
@@ -39,7 +39,7 @@
   let coresLabel = $derived(fmtCores(m['cpu.cores'] ?? 0));
 
   function tweenTo(tween, value) {
-    tween.set(value, { duration: prefersReducedMotion.current ? 0 : live.glideMs, easing: linear });
+    tween.set(value, { duration: motion.reduced ? 0 : live.glideMs, easing: linear });
   }
 
   let cpuTween = new Tween(0, { duration: live.glideMs, easing: linear });

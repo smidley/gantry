@@ -27,7 +27,7 @@
   otherwise carries this information in aria-label alone.
 -->
 <script>
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { live as liveStore } from '../lib/sse.svelte';
   import { containerHealthStatus } from '../lib/containerStatus';
   import { fleetHeatVar } from '../lib/fleetHeat';
@@ -40,7 +40,7 @@
   // the caller.
   let { containers = [] } = $props();
 
-  let glideMs = $derived(prefersReducedMotion.current ? 0 : liveStore.glideMs);
+  let glideMs = $derived(motion.reduced ? 0 : liveStore.glideMs);
 
   let hoveredName = $state(null);
   let hoveredContainer = $derived(containers.find((c) => c.name === hoveredName) ?? null);

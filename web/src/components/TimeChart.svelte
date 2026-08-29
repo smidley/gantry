@@ -22,7 +22,7 @@
   import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC } from '../lib/streamdriver';
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
   import { live as liveStore } from '../lib/sse.svelte';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
 
   // formatValue (additive, optional -- Task 14-17's own fold-in note:
   // "views pre-format tooltip values (or formatter callback) -- TimeChart
@@ -443,7 +443,7 @@
       // to snap under reduced motion -- see streamdriver.ts's
       // "Cadence-driven glide" doc for why this varies per arrival
       // instead of a fixed guess.
-      const durationMs = prefersReducedMotion.current ? 0 : liveStore.glideMs;
+      const durationMs = motion.reduced ? 0 : liveStore.glideMs;
       // The shared driver's own ticks also step this chart's x-window
       // (see the animation-tick effect below), far more often than this
       // effect re-runs -- but that subscription is gated behind

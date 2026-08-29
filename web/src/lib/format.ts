@@ -58,6 +58,16 @@ export function fmtCores(n: number): string {
   return `≈${n.toFixed(1)} cores`;
 }
 
+// fmtCoresCeiling formats a CONFIGURED core ceiling (cpu.alloc_cores) as
+// a plain "N.N cores" -- unlike fmtCores' own "≈N.N cores" annotation for
+// a container's CURRENT usage, a ceiling is exact (no "≈") and never
+// blanks near zero (an allocation that small is unusual but real, not a
+// rounding artifact to hide).
+export function fmtCoresCeiling(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '';
+  return `${n.toFixed(1)} cores`;
+}
+
 // fmtDuration formats a duration given in seconds as its two biggest
 // non-zero units (e.g. "1d 4h", "2h 15m", "45m 10s", "8s") -- compact
 // enough for a table cell, precise enough to be useful for uptime.

@@ -15,6 +15,15 @@ export interface ContainerDTO {
   // docker compose. Backs the Containers view's Groups chip row and the
   // compare view (lib/composeGroups.ts).
   compose_project: string;
+  // cpuset is docker.Meta's own field of the same name, straight through
+  // -- "" for no cpuset pin (or one that doesn't narrow below the host's
+  // own core count). Backs Container Detail's Limits facts line
+  // (lib/containerLimits.ts).
+  cpuset: string;
+  // exit_code is docker.Meta's own field of the same name, straight
+  // through -- meaningful only once state is "exited"/"dead". Backs
+  // Container Detail's anomaly banner (lib/containerAnomaly.ts).
+  exit_code: number;
   metrics: Record<string, number>;
 }
 

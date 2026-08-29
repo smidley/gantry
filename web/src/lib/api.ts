@@ -353,6 +353,165 @@ export async function putGroups(groups: Group[]): Promise<GroupsResponse> {
   return body;
 }
 
+// ImageInfo/ImagesSummary/ImagesDTO mirror internal/server/api_images.go's
+// structs of the same names exactly. repo_tags is never empty on the
+// wire -- the server itself fills in a digest ref or the literal
+// "<none>" (see its own digestRefsOrNone) whenever a real image has no
+// tag, so this view never needs to look at repo_digests directly.
+export interface ImageInfo {
+  id: string;
+  full_id: string;
+  repo_tags: string[];
+  repo_digests?: string[];
+  size_bytes: number;
+  created: number;
+  state: string; // 'in-use' | 'unused' | 'dangling'
+  containers?: string[];
+}
+
+export interface ImagesSummary {
+  in_use: number;
+  unused: number;
+  dangling: number;
+  reclaimable_bytes: number;
+  note: string;
+}
+
+export interface ImagesDTO {
+  images: ImageInfo[];
+  summary: ImagesSummary;
+}
+
+export function fetchImages(signal?: AbortSignal): Promise<ImagesDTO> {
+  return getJSON<ImagesDTO>('/api/images', signal);
+}
+
+export interface ImageRemoveResult {
+  id: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface DeletedImage {
+  id: string;
+  repo_tags: string[];
+  size_bytes: number;
+}
+
+export interface ImagePruneResult {
+  deleted: DeletedImage[];
+  reclaimed_bytes: number;
+  errors: string[];
+}
+
+// postConfirmed is the shared shape of every /api/images and
+// /api/containers/maintenance mutating route: POST with the resource's
+// own X-Gantry-Confirm value, JSON body. Every one of those routes'
+// error bodies (400/403/413/428/500) is the app-wide {"error":"..."}
+// shape (writeError), so a thrown Error's message is always that string
+// rather than a generic status line -- matching putSettings/putGroups'
+// own "surface the server's own message" convention, just without their
+// extra structured fields (none of these routes attach any).
+async function postConfirmed<T>(url: string, confirmValue: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Gantry-Confirm': confirmValue },
+    body: JSON.stringify(body),
+  });
+  const parsed = await res.json();
+  if (!res.ok) {
+    throw new Error((parsed as { error?: string })?.error ?? `POST ${url}: ${res.status} ${res.statusText}`);
+  }
+  return parsed as T;
+}
+
+export function removeImages(ids: string[]): Promise<ImageRemoveResult[]> {
+  return postConfirmed('/api/images/remove', 'images', { ids });
+}
+
+export function pruneImages(mode: 'dangling' | 'unused'): Promise<ImagePruneResult> {
+  return postConfirmed('/api/images/prune', 'images', { mode });
+}
+
+// ContainerMaintenanceInfo/-Summary/-DTO mirror internal/server/
+// api_containers_maintenance.go's structs of the same names exactly.
+export interface ContainerMaintenanceInfo {
+  id: string;
+  full_id: string;
+  name: string;
+  image: string;
+  state: string; // 'exited' | 'created' | 'dead'
+  exit_code?: number;
+  created: number;
+  finished_at?: number;
+  managed?: string;
+  restart_policy?: string;
+}
+
+export interface ContainerMaintenanceSummary {
+  exited: number;
+  created: number;
+  dead: number;
+}
+
+export interface ContainerMaintenanceDTO {
+  containers: ContainerMaintenanceInfo[];
+  summary: ContainerMaintenanceSummary;
+}
+
+export function fetchContainersMaintenance(signal?: AbortSignal): Promise<ContainerMaintenanceDTO> {
+  return getJSON<ContainerMaintenanceDTO>('/api/containers/maintenance', signal);
+}
+
+export interface ContainerRemoveResult {
+  id: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface DeletedContainer {
+  id: string;
+  name: string;
+  image: string;
+}
+
+export interface ContainerPruneResult {
+  deleted: DeletedContainer[];
+  errors: string[];
+}
+
+export function removeContainersMaintenance(ids: string[]): Promise<ContainerRemoveResult[]> {
+  return postConfirmed('/api/containers/maintenance/remove', 'containers', { ids });
+}
+
+export function pruneContainersMaintenance(
+  mode: 'exited' | 'created' | 'all-stopped',
+  olderThanHours: number = 0,
+): Promise<ContainerPruneResult> {
+  return postConfirmed('/api/containers/maintenance/prune', 'containers', { mode, older_than_hours: olderThanHours });
+}
+
+// probeReadOnly detects GANTRY_READ_ONLY (never exposed on any GET
+// response -- there's no config hint for it anywhere in the frame or
+// /api/settings) without ever risking a real mutation. Every mutating
+// /api/images and /api/containers/maintenance route checks the confirm
+// header and the read-only flag (requireMutationAllowed, server-side)
+// BEFORE the body is even decoded, so a deliberately-invalid mode can
+// never reach an actual remove/prune call -- it 400s "mode must be..."
+// when writable, or 403s "read-only mode" when not, either way before
+// anything real happens. images/prune is picked arbitrarily: ReadOnly is
+// one flag shared by every mutating route on both resources, never
+// scoped per-resource, so one probe answers for both Maintenance cards.
+export async function probeReadOnly(signal?: AbortSignal): Promise<boolean> {
+  const res = await fetch('/api/images/prune', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Gantry-Confirm': 'images' },
+    body: JSON.stringify({ mode: '__gantry_probe__' }),
+    signal,
+  });
+  return res.status === 403;
+}
+
 // streamLogs opens /api/containers/{name}/logs and yields decoded text
 // chunks as they arrive. follow=1 streams indefinitely; follow=0 (the
 // default) yields the tail then ends. Callers drive this with a

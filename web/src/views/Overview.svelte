@@ -29,6 +29,17 @@
   "Needs a look", and orphaned corner-bracket glyphs, all deleted
   outright. The one rule that survived: a line either separates two
   real regions or encodes real data, or it doesn't exist.
+
+  Header compaction pass (Scott: "lots of wasted space here" -- the
+  headline/fleet-strip/facts/callouts/schematic stack was spending a
+  full screen height): the status band -- headline's own facts on the
+  left, fleet strip + array schematic stacked on the right -- is now a
+  two-column row at >=1024px (overview__status-band), not a single
+  vertical stack; the schematic itself moved out of the conditional
+  attention section into that right column, always visible rather than
+  only during a disk anomaly; and each attention row collapsed from a
+  title line plus a separate detail line into one inline sentence.
+  Mobile (<1024px) keeps the original vertical stack.
 -->
 <script>
   import { onMount, untrack } from 'svelte';
@@ -323,19 +334,16 @@
   );
   let statusColor = $derived(`var(--status-${worstSeverity(overviewStatus.anomalies)})`);
 
-  // The bay schematic (and its "N other members are within normal
-  // range" closing line) only earns a place in the attention module when
-  // a disk itself is one of the flagged reasons -- showing it alongside
-  // an anomaly that was never about the array (an unhealthy container,
-  // say) would assert a reassurance ("array members are fine") nobody
-  // asked about.
   let diskAnomalies = $derived(
     overviewStatus.anomalies.filter((a) => a.kind === 'disk-usage' || a.kind === 'disk-errors'),
   );
-  let showBaySchematic = $derived(diskAnomalies.length > 0 && diskEntries.length > 0);
 
+  // baySchematicEntries: the schematic is now always in the status
+  // band's own right column (header-compaction pass), not gated behind
+  // a disk anomaly -- an empty diskEntries just maps to an empty array,
+  // which BaySchematic's own `{#if entries.length > 0}` already renders
+  // as nothing.
   let baySchematicEntries = $derived.by(() => {
-    if (!showBaySchematic) return [];
     const calloutBySlot = calloutTextBySlot(diskAnomalies);
     return diskEntries.map((d) => ({
       slot: d.slot,
@@ -350,9 +358,12 @@
     }));
   });
 
+  // closingLine only appears once something has actually been flagged --
+  // reassuring about "the rest" of an array nobody raised a concern
+  // about in the first place would be a non sequitur.
   let closingLine = $derived.by(() => {
-    if (!showBaySchematic) return null;
     const flaggedCount = new Set(overviewStatus.flaggedDiskSlots).size;
+    if (flaggedCount === 0) return null;
     const rest = diskEntries.length - flaggedCount;
     if (rest <= 0) return null; // every member is flagged -- nothing left to reassure about
     return rest === 1 ? '1 other array member is within normal range.' : `${rest} other array members are within normal range.`;
@@ -413,13 +424,21 @@
           ></span>
           <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
         </div>
-        <div class="overview__headline-subs">
-          <p class="overview__sub-line">{fleetLine}</p>
-          <FleetStrip containers={fleetContainers} />
-          <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
-          {#if hottestSentence}
-            <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
-          {/if}
+        <div class="overview__status-band">
+          <div class="overview__status-facts">
+            <p class="overview__sub-line">{fleetLine}</p>
+            <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
+            {#if hottestSentence}
+              <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
+            {/if}
+          </div>
+          <div class="overview__status-visuals">
+            <FleetStrip containers={fleetContainers} />
+            <BaySchematic entries={baySchematicEntries} />
+            {#if closingLine}
+              <p class="overview__closing-line">{closingLine}</p>
+            {/if}
+          </div>
         </div>
 
         {#if !overviewStatus.ok}
@@ -427,31 +446,17 @@
             <span class="microlabel">Needs a look</span>
             {#each overviewStatus.anomalies as anomaly, i (i)}
               {@const text = describeAnomaly(anomaly)}
-              <div class="overview__attn-row">
+              <p class="overview__attn-line">
                 <span class="overview__attn-dot" style={`background:var(--status-${text.severity})`} aria-hidden="true"
                 ></span>
-                <div>
-                  <div class="overview__attn-title">
-                    {#if text.linkContainer}
-                      <a href={`#/containers/${encodeURIComponent(text.linkContainer)}`}>{text.title}</a>
-                    {:else}
-                      {text.title}
-                    {/if}
-                  </div>
-                  {#if text.detail}
-                    <div class="overview__attn-detail">{text.detail}</div>
-                  {/if}
-                </div>
-              </div>
+                {#if text.linkContainer}
+                  <a class="overview__attn-title" href={`#/containers/${encodeURIComponent(text.linkContainer)}`}>{text.title}</a>
+                {:else}
+                  <span class="overview__attn-title">{text.title}</span>
+                {/if}
+                {#if text.detail}<span class="overview__attn-detail">&mdash; {text.detail}</span>{/if}
+              </p>
             {/each}
-
-            {#if showBaySchematic}
-              <BaySchematic entries={baySchematicEntries} />
-            {/if}
-
-            {#if closingLine}
-              <p class="overview__closing-line">{closingLine}</p>
-            {/if}
           </section>
         {/if}
       </div>
@@ -667,10 +672,38 @@
     }
   }
 
-  .overview__headline-subs {
+  /* --- Status band: facts (left) + fleet strip/schematic (right) at
+     >=1024px, one vertical stack below it -- the header-compaction
+     pass. Facts keep a tighter gap than the old headline-subs stack
+     (0.5rem -> 0.35rem): with the fleet strip gone to the right column,
+     these three lines are pure quick-reference text with no visual
+     device between them anymore, so they read better tightened. ---- */
+  .overview__status-band {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.75rem;
+  }
+  @media (min-width: 64rem) {
+    .overview__status-band {
+      flex-direction: row;
+      align-items: flex-start;
+      gap: 2rem;
+    }
+    .overview__status-facts,
+    .overview__status-visuals {
+      flex: 1 1 0;
+      min-width: 0;
+    }
+  }
+  .overview__status-facts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .overview__status-visuals {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
   }
   .overview__sub-line {
     margin: 0;
@@ -693,37 +726,40 @@
      own flex column, spaced by that column's own gap, same as every
      other subline above it. No frame, no brackets, no leader line: the
      one rule surviving the corrective pass is that a line either
-     separates two real regions or encodes real data. -------------- */
+     separates two real regions or encodes real data. Each row is one
+     inline sentence (title + reason), not a title line over a separate
+     detail line -- the header-compaction pass. --------------------- */
 
   .overview__attention {
     display: flex;
     flex-direction: column;
-    gap: 0.9rem;
+    gap: 0.5rem;
   }
-  .overview__attn-row {
+  .overview__attn-line {
     display: flex;
-    align-items: flex-start;
-    gap: 0.7rem;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 0;
   }
   .overview__attn-dot {
     width: 9px;
     height: 9px;
     border-radius: 50%;
     flex-shrink: 0;
-    margin-top: 0.35em;
+    align-self: center;
   }
   .overview__attn-title {
     font-weight: 600;
     font-size: 1.02rem;
     color: var(--ink);
   }
-  .overview__attn-title a {
+  a.overview__attn-title {
     color: inherit;
   }
   .overview__attn-detail {
     color: var(--ink-2);
     font-size: 0.88rem;
-    margin-top: 0.2rem;
   }
   .overview__closing-line {
     color: var(--ink-2);

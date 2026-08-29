@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { diskKind, diskMediaType, diskRole, diskTempState, diskUsagePct, sortDiskEntities } from './disks';
+import {
+  defaultDiskChartVisible,
+  diskKind,
+  diskMediaType,
+  diskRole,
+  diskTempState,
+  diskUsagePct,
+  diskUsagePctSeries,
+  sortDiskEntities,
+} from './disks';
 
 describe('diskRole', () => {
   it('classifies parity slots, including dual parity', () => {
@@ -133,5 +142,54 @@ describe('diskUsagePct', () => {
 
   it('returns 0 rather than dividing by zero when total is 0', () => {
     expect(diskUsagePct({ 'fs.used_bytes': 0, 'fs.free_bytes': 0 })).toBe(0);
+  });
+});
+
+describe('diskUsagePctSeries', () => {
+  it('zips used/free points sharing a ts into a pct series', () => {
+    const used: [number, number, number][] = [
+      [100, 30, 30],
+      [200, 40, 40],
+    ];
+    const free: [number, number, number][] = [
+      [100, 70, 70],
+      [200, 60, 60],
+    ];
+    expect(diskUsagePctSeries(used, free)).toEqual([
+      [100, 30],
+      [200, 40],
+    ]);
+  });
+
+  it('skips a ts missing from either side rather than guessing', () => {
+    const used: [number, number, number][] = [
+      [100, 30, 30],
+      [200, 40, 40],
+    ];
+    const free: [number, number, number][] = [[100, 70, 70]];
+    expect(diskUsagePctSeries(used, free)).toEqual([[100, 30]]);
+  });
+
+  it('returns 0 rather than dividing by zero when both sides are 0', () => {
+    expect(diskUsagePctSeries([[100, 0, 0]], [[100, 0, 0]])).toEqual([[100, 0]]);
+  });
+
+  it('returns an empty series for empty input', () => {
+    expect(diskUsagePctSeries([], [])).toEqual([]);
+  });
+});
+
+describe('defaultDiskChartVisible', () => {
+  it('defaults pools and parity visible regardless of activity', () => {
+    expect(defaultDiskChartVisible('cache', false)).toBe(true);
+    expect(defaultDiskChartVisible('rocket_pool', false)).toBe(true);
+    expect(defaultDiskChartVisible('parity', false)).toBe(true);
+  });
+
+  it('defaults an ordinary data disk or flash visible only with recent IO', () => {
+    expect(defaultDiskChartVisible('disk1', false)).toBe(false);
+    expect(defaultDiskChartVisible('disk1', true)).toBe(true);
+    expect(defaultDiskChartVisible('flash', false)).toBe(false);
+    expect(defaultDiskChartVisible('flash', true)).toBe(true);
   });
 });

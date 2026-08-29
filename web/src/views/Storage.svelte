@@ -1,11 +1,12 @@
 <!--
-  Storage: the array/disk detail view. Disk grid (one card per disk
-  entity, grouped parity -> data -> cache/pools -> flash), a parity
-  card (state + progress/speed/ETA + a short start/finish history), a
-  mover chip, a shares table, and a docker storage card -- all read
-  straight off the live SSE frame except the parity history, which
-  isn't in the frame at all (events never are -- see sse.svelte.ts's
-  own doc) and is polled the same way Overview polls its events feed.
+  Storage: the array/disk detail view. A header chart (IO/Used/Temp per
+  drive, see its own doc below), disk grid (one card per disk entity,
+  grouped parity -> data -> cache/pools -> flash), a parity card (state
+  + progress/speed/ETA + a short start/finish history), a mover chip, a
+  shares table, and a docker storage card -- all read straight off the
+  live SSE frame except the parity history, which isn't in the frame at
+  all (events never are -- see sse.svelte.ts's own doc) and is polled
+  the same way Overview polls its events feed.
 -->
 <script>
   import { onMount, untrack } from 'svelte';
@@ -13,12 +14,22 @@
   import { linear } from 'svelte/easing';
   import { prefersReducedMotion } from 'svelte/motion';
   import { live } from '../lib/sse.svelte';
-  import { fetchEvents } from '../lib/api';
+  import { fetchEvents, fetchSeries } from '../lib/api';
+  import { pushRing } from '../lib/livering';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtRelTime } from '../lib/format';
-  import { etaFromProgress, parityIsRunning, seqStep, sharesFromMetrics } from '../lib/metrics';
-  import { diskKind, diskRole, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
+  import { etaFromProgress, parityIsRunning, seqStep, sharesFromMetrics, sumSeriesPoints } from '../lib/metrics';
+  import {
+    defaultDiskChartVisible,
+    diskKind,
+    diskRole,
+    diskTempState,
+    diskUsagePct,
+    diskUsagePctSeries,
+    sortDiskEntities,
+  } from '../lib/disks';
   import { band, bandToken } from '../lib/thresholds';
   import HealthDot from '../components/HealthDot.svelte';
+  import TimeChart from '../components/TimeChart.svelte';
 
   const EVENTS_POLL_MS = 30_000;
   const ROLE_LABEL = { parity: 'Parity', data: 'Data disk', pool: 'Cache / pool', flash: 'Boot (flash)' };
@@ -38,6 +49,290 @@
   let dockerStorage = $derived(live.frame?.unraid?.docker ?? {});
   let sources = $derived(live.frame?.sources ?? {});
   let ts = $derived(live.frame?.ts ?? 0);
+
+  // --- Header chart: IO/Used/Temp per drive --------------------------
+  //
+  // "Have a graph that can switch between disk IO, storage used, and
+  // temperature. Each line on the chart should be a separate drive."
+  // Reuses the Metrics page's own multi-line hero pattern (TopConsumers.
+  // svelte: legend chips, focus-on-hover, click-to-toggle) -- the legend
+  // here is kind-tinted (ssd/nvme/usb accent colors, hdd a plain muted
+  // line) rather than per-container-icon, since a drive's identity is
+  // its slot name, not an icon.
+  //
+  // diskio has no per-disk-ENTITY series of its own (host.go's real
+  // per-device counters, and fake.go's own mirror of that shape, are
+  // both host-scoped and keyed by raw device name -- see fake.go's own
+  // emitDisks doc) -- CHART_IO_KEYS below joins back to a slot via
+  // disk_meta[slot].device, the same join any other real-mode consumer
+  // of this data would need.
+  const CHART_METRICS = [
+    { key: 'io', label: 'IO' },
+    { key: 'used', label: 'Used' },
+    { key: 'temp', label: 'Temp' },
+  ];
+  const CHART_WINDOWS = [
+    { key: 'now', label: 'Now' },
+    { key: '1h', label: '1h' },
+    { key: '24h', label: '24h' },
+    { key: '7d', label: '7d' },
+  ];
+  const CHART_WINDOW_SECONDS = { '1h': 3600, '24h': 86400, '7d': 7 * 86400 };
+  const CHART_FORMATTERS = { io: fmtRate, used: fmtPct, temp: (v) => `${v.toFixed(1)}°C` };
+  const CHART_LIVE_WINDOW_SEC = 900;
+  // KIND_COLOR_VAR mirrors BaySchematic/Storage's own per-kind mapping
+  // exactly (ssd/nvme/usb get an accent color, hdd -- the ordinary/
+  // majority case -- gets no override there; a LINE needs some stroke
+  // color regardless, so hdd draws in a plain muted ink tone here,
+  // "calm, not a rainbow" for what's typically the biggest group).
+  const KIND_COLOR_VAR = { ssd: '--series-3', nvme: '--series-1', usb: '--series-4' };
+  function kindColorVar(kind) {
+    return KIND_COLOR_VAR[kind] ?? '--ink-2';
+  }
+  // DISK_CHART_ACTIVE_BPS: the "any drive with recent IO" default-
+  // visibility threshold (combined read+write) -- generous enough that
+  // an ordinarily-quiet data disk's own small tick-to-tick jitter never
+  // crosses it, low enough that a genuinely active drive reliably does.
+  const DISK_CHART_ACTIVE_BPS = 500_000;
+
+  let chartMetric = $state('io');
+  let chartWindow = $state('now');
+  let chartInstance = $state(undefined);
+
+  // hiddenSlots: null until seeded once (see the effect below) -- kept
+  // separate from "empty Set" so seeding can tell "haven't decided yet"
+  // apart from "decided, and nothing happens to be hidden."
+  let hiddenSlots = $state(null);
+
+  // MAX_CHART_DISKS: a fixed ring pool, sized well above any array this
+  // app is likely to see (Scott's own "12 members" plus headroom) --
+  // rings can't be created dynamically per disk slot (same "call
+  // $state/$effect from a component's own synchronous setup" contract
+  // livering.svelte.ts's liveRing() documents); a fixed pool assigned by
+  // SORTED POSITION, reset on reassignment, is the same shape
+  // TopConsumers' own heroSlots use for its (far more volatile) top-N
+  // ranking.
+  const MAX_CHART_DISKS = 32;
+  function makeDiskSlot() {
+    let ioSum = $state([]);
+    let ioA = $state([]);
+    let ioB = $state([]);
+    let used = $state([]);
+    let temp = $state([]);
+    let assigned = null;
+    return {
+      get ioPoints() {
+        return ioSum;
+      },
+      get ioDirection() {
+        return [ioA, ioB];
+      },
+      get usedPoints() {
+        return used;
+      },
+      get tempPoints() {
+        return temp;
+      },
+      tick(tickTs, slot, ioRead, ioWrite, usedPct, tempC) {
+        if (slot !== assigned) {
+          assigned = slot;
+          ioSum = [];
+          ioA = [];
+          ioB = [];
+          used = [];
+          temp = [];
+        }
+        if (slot === null) return;
+        if (ioRead !== undefined || ioWrite !== undefined) {
+          const r = ioRead ?? 0;
+          const w = ioWrite ?? 0;
+          ioSum = untrack(() => pushRing(ioSum, tickTs, r + w, CHART_LIVE_WINDOW_SEC));
+          ioA = untrack(() => pushRing(ioA, tickTs, r, CHART_LIVE_WINDOW_SEC));
+          ioB = untrack(() => pushRing(ioB, tickTs, w, CHART_LIVE_WINDOW_SEC));
+        }
+        if (usedPct !== undefined) used = untrack(() => pushRing(used, tickTs, usedPct, CHART_LIVE_WINDOW_SEC));
+        if (tempC !== undefined) temp = untrack(() => pushRing(temp, tickTs, tempC, CHART_LIVE_WINDOW_SEC));
+      },
+    };
+  }
+  const diskSlotRings = Array.from({ length: MAX_CHART_DISKS }, () => makeDiskSlot());
+
+  // ioForSlot: this slot's current host-scoped diskio read/write, via
+  // disk_meta's own device join -- undefined (not 0) when the slot's
+  // device isn't known yet, so a genuinely-idle drive (0 B/s) is never
+  // confused with "no reading at all".
+  function ioForSlot(frame, slot) {
+    const device = diskMeta[slot]?.device;
+    if (device === undefined) return [undefined, undefined];
+    return [frame.host?.[`diskio.${device}.read_bps`], frame.host?.[`diskio.${device}.write_bps`]];
+  }
+
+  // Drives every slot's own ring pool from the live frame, one tick at a
+  // time -- assignment is by SORTED POSITION (diskNames' own fixed
+  // order), so a slot only ever resets when the array's actual member
+  // set changes, never on an ordinary tick.
+  $effect(() => {
+    const frame = live.frame;
+    if (!frame) return;
+    for (let i = 0; i < MAX_CHART_DISKS; i++) {
+      const slot = diskNames[i] ?? null;
+      if (slot === null) {
+        diskSlotRings[i].tick(frame.ts, null);
+        continue;
+      }
+      const [ioRead, ioWrite] = ioForSlot(frame, slot);
+      diskSlotRings[i].tick(frame.ts, slot, ioRead, ioWrite, diskUsagePct(disks[slot]) ?? undefined, disks[slot]?.['temp.c']);
+    }
+  });
+
+  // Seeds the legend's own starting visibility exactly once, off
+  // whatever the live frame first reports -- see defaultDiskChartVisible's
+  // own doc. Every run after the first is a one-line no-op (the guard
+  // returns before reading anything else), so this effect stops costing
+  // anything at all once seeded.
+  $effect(() => {
+    if (hiddenSlots !== null) return;
+    const frame = live.frame;
+    if (!frame || diskNames.length === 0) return;
+    const next = new Set();
+    for (const slot of diskNames) {
+      const [read, write] = ioForSlot(frame, slot);
+      const hasRecentIO = (read ?? 0) + (write ?? 0) > DISK_CHART_ACTIVE_BPS;
+      if (!defaultDiskChartVisible(slot, hasRecentIO)) next.add(slot);
+    }
+    hiddenSlots = next;
+  });
+
+  function toggleChartSlot(slot) {
+    const next = new Set(hiddenSlots ?? []);
+    if (next.has(slot)) next.delete(slot);
+    else next.add(slot);
+    hiddenSlots = next;
+  }
+  function focusChartSlot(slot) {
+    const idx = visibleChartSeries.findIndex((s) => s.slot === slot);
+    chartInstance?.focusSeries(idx === -1 ? null : idx + 1);
+  }
+
+  // fetchedDiskSeries (history windows only): {slot -> {used, temp,
+  // ioSum, ioA, ioB}}, refetched only on a window switch -- diskNames/
+  // diskMeta are read via untrack (both re-derive off the live frame
+  // every ~2s tick; tracking them here would refetch history on every
+  // single tick for no reason). A disk added or removed while a
+  // history window is showing picks up on the next window toggle, not
+  // instantly.
+  let fetchedDiskSeries = $state({});
+  let chartLoading = $state(false);
+  let chartFailed = $state(false);
+
+  $effect(() => {
+    const w = chartWindow;
+    if (w === 'now') {
+      fetchedDiskSeries = {};
+      chartFailed = false;
+      chartLoading = false;
+      return;
+    }
+    const names = untrack(() => diskNames);
+    const dm = untrack(() => diskMeta);
+    if (names.length === 0) {
+      fetchedDiskSeries = {};
+      return;
+    }
+    const seconds = CHART_WINDOW_SECONDS[w];
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - seconds;
+    const controller = new AbortController();
+    chartLoading = true;
+    chartFailed = false;
+    Promise.all(
+      names.map((slot) => {
+        const device = dm[slot]?.device;
+        const hostMetrics = device !== undefined ? [`diskio.${device}.read_bps`, `diskio.${device}.write_bps`] : [];
+        return Promise.all([
+          fetchSeries({
+            kind: 'disk',
+            entity: slot,
+            metrics: ['fs.used_bytes', 'fs.free_bytes', 'temp.c'],
+            from,
+            to,
+            signal: controller.signal,
+          }),
+          hostMetrics.length > 0
+            ? fetchSeries({ kind: 'host', entity: '', metrics: hostMetrics, from, to, signal: controller.signal })
+            : Promise.resolve([]),
+        ]).then(([diskResults, hostResults]) => ({ slot, diskResults, hostResults, device }));
+      }),
+    )
+      .then((perSlot) => {
+        const out = {};
+        for (const { slot, diskResults, hostResults, device } of perSlot) {
+          const byMetric = {};
+          for (const r of diskResults) byMetric[r.metric] = r.points;
+          for (const r of hostResults) byMetric[r.metric] = r.points;
+          const readPts = device !== undefined ? (byMetric[`diskio.${device}.read_bps`] ?? []) : [];
+          const writePts = device !== undefined ? (byMetric[`diskio.${device}.write_bps`] ?? []) : [];
+          out[slot] = {
+            used: diskUsagePctSeries(byMetric['fs.used_bytes'] ?? [], byMetric['fs.free_bytes'] ?? []),
+            temp: byMetric['temp.c'] ?? [],
+            ioA: readPts,
+            ioB: writePts,
+            ioSum: sumSeriesPoints([readPts, writePts]),
+          };
+        }
+        fetchedDiskSeries = out;
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // superseded by a newer window switch
+        fetchedDiskSeries = {};
+        chartFailed = true;
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) chartLoading = false;
+      });
+    return () => controller.abort();
+  });
+
+  // chartSeriesAll: one entry per drive, EVERY drive (visibleChartSeries
+  // below is what actually reaches TimeChart) -- the legend renders off
+  // this full list so a toggled-off chip stays visible to toggle back
+  // on. entity/kind never change with chartMetric/chartWindow; points/
+  // directionPoints do.
+  let chartSeriesAll = $derived.by(() => {
+    const metric = chartMetric;
+    const w = chartWindow;
+    return diskNames.map((slot, i) => {
+      const kind = diskKind(diskMeta[slot], disks[slot]);
+      const colorVar = kindColorVar(kind);
+      // label: TimeChart's own tooltip keys each row by `label` (see its
+      // {#each tooltip.rows as row (row.label)}) -- every series here
+      // must carry one, or every row shares the same undefined key the
+      // instant a tooltip actually renders (each_key_duplicate,
+      // reproduced live on first hover).
+      if (w === 'now') {
+        const ring = diskSlotRings[i];
+        if (metric === 'io') return { slot, label: slot, colorVar, points: ring.ioPoints, directionPoints: ring.ioDirection, directionLabels: ['r', 'w'] };
+        if (metric === 'used') return { slot, label: slot, colorVar, points: ring.usedPoints };
+        return { slot, label: slot, colorVar, points: ring.tempPoints };
+      }
+      const fetched = fetchedDiskSeries[slot];
+      if (!fetched) return { slot, label: slot, colorVar, points: [] };
+      if (metric === 'io') return { slot, label: slot, colorVar, points: fetched.ioSum, directionPoints: [fetched.ioA, fetched.ioB], directionLabels: ['r', 'w'] };
+      if (metric === 'used') return { slot, label: slot, colorVar, points: fetched.used };
+      return { slot, label: slot, colorVar, points: fetched.temp };
+    });
+  });
+
+  // visibleChartSeries: chartSeriesAll minus every currently-hidden
+  // slot -- filtered OUT of the array TimeChart receives entirely
+  // (rather than kept in and uPlot-hidden, TopConsumers' own toggle
+  // mechanism) so a hidden line is also absent from the hover tooltip,
+  // not just undrawn -- "scrub pins all VISIBLE lines," never a toggled-
+  // off one.
+  let visibleChartSeries = $derived(
+    hiddenSlots === null ? chartSeriesAll : chartSeriesAll.filter((s) => !hiddenSlots.has(s.slot)),
+  );
+  let chartLabel = $derived(`${CHART_METRICS.find((m) => m.key === chartMetric)?.label} by drive`);
 
   // glideMs: the perpetual-glide motion pass's own shared duration
   // (live.glideMs, or 0 under reduced motion -- see streamdriver.ts's
@@ -169,6 +464,74 @@
 
 <div class="storage-view">
   <h1 class="page-title">Storage</h1>
+
+  <div class="card storage-chart">
+    <div class="storage-chart__head">
+      <span class="microlabel">{chartLabel}</span>
+      <div class="segmented" role="tablist" aria-label="Chart metric">
+        {#each CHART_METRICS as m (m.key)}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={chartMetric === m.key}
+            class="segmented__btn"
+            class:segmented__btn--active={chartMetric === m.key}
+            onclick={() => (chartMetric = m.key)}
+          >
+            {m.label}
+          </button>
+        {/each}
+      </div>
+    </div>
+    <div class="segmented" role="group" aria-label="Chart window">
+      {#each CHART_WINDOWS as w (w.key)}
+        <button
+          type="button"
+          class="segmented__btn"
+          class:segmented__btn--active={chartWindow === w.key}
+          onclick={() => (chartWindow = w.key)}
+        >
+          {w.label}
+        </button>
+      {/each}
+    </div>
+
+    {#if diskNames.length === 0}
+      <p class="microlabel storage-chart__empty">No disk data yet.</p>
+    {:else if chartFailed}
+      <p class="microlabel storage-chart__error">Couldn't load this window. Try again shortly.</p>
+    {:else}
+      {#if chartLoading}
+        <p class="microlabel storage-chart__loading">Loading…</p>
+      {/if}
+      <TimeChart
+        bind:this={chartInstance}
+        series={visibleChartSeries}
+        formatValue={CHART_FORMATTERS[chartMetric]}
+        live={chartWindow === 'now'}
+        height={240}
+        showLegend={false}
+      />
+      <div class="storage-chart__legend" role="group" aria-label="Chart drives">
+        {#each chartSeriesAll as s (s.slot)}
+          {@const hidden = hiddenSlots?.has(s.slot) ?? false}
+          <button
+            type="button"
+            class="storage-chart__chip"
+            class:storage-chart__chip--off={hidden}
+            style={`--chip-color: var(${s.colorVar})`}
+            aria-pressed={!hidden}
+            aria-label={`${s.slot} line, click to ${hidden ? 'show' : 'hide'}`}
+            onmouseenter={() => focusChartSlot(s.slot)}
+            onmouseleave={() => focusChartSlot(null)}
+            onclick={() => toggleChartSlot(s.slot)}
+          >
+            {s.slot}
+          </button>
+        {/each}
+      </div>
+    {/if}
+  </div>
 
   <div class="card storage-parity">
     <div class="storage-parity__head">
@@ -356,6 +719,58 @@
   .storage-view__empty {
     margin: 0;
   }
+
+  .storage-chart {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .storage-chart__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .storage-chart__empty,
+  .storage-chart__loading {
+    margin: 0;
+  }
+  .storage-chart__error {
+    margin: 0;
+    color: var(--status-warning);
+  }
+  /* Legend chips: same shape/interaction as the Metrics page's own hero
+     chart (top-consumers__chip) -- kind-tinted rather than icon+name,
+     since a drive's identity is its slot name, not a container icon. */
+  .storage-chart__legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .storage-chart__chip {
+    padding: 0.25rem 0.55rem;
+    border: 1px solid color-mix(in oklab, var(--chip-color) 45%, transparent);
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--chip-color) 12%, transparent);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    cursor: pointer;
+    transition:
+      opacity 150ms ease,
+      background-color 150ms ease;
+  }
+  .storage-chart__chip:hover {
+    background: color-mix(in oklab, var(--chip-color) 22%, transparent);
+  }
+  /* A toggled-off line's chip stays legible (never the near-invisible
+     disabled treatment) -- it's a live, click-to-restore choice. */
+  .storage-chart__chip--off {
+    opacity: 0.45;
+  }
+
   .storage-parity {
     padding: 1rem;
     display: flex;

@@ -4,6 +4,7 @@
 // (matching containersSort.ts/topFromFrame.ts's one-file-per-view-concern
 // convention) rather than folded into metrics.ts's more general,
 // disk-agnostic helpers.
+import type { SeriesPoint } from './api';
 
 export type DiskRole = 'parity' | 'data' | 'pool' | 'flash';
 
@@ -130,4 +131,33 @@ export function diskUsagePct(metrics: Record<string, number> | undefined | null)
   if (used === undefined || free === undefined) return null;
   const total = used + free;
   return total > 0 ? (used / total) * 100 : 0;
+}
+
+// diskUsagePctSeries is diskUsagePct's history-shaped sibling, for the
+// Storage chart's "Used" line: fs.used_bytes and fs.free_bytes are two
+// separate /api/series results (there's no server-side usage-percent
+// series), zipped point-by-point by exact ts -- both are recorded on
+// the same collector tick, so a ts missing from one side (a store gap)
+// is skipped rather than guessed at.
+export function diskUsagePctSeries(usedPoints: SeriesPoint[], freePoints: SeriesPoint[]): [number, number][] {
+  const freeByTs = new Map(freePoints.map(([ts, avg]) => [ts, avg]));
+  const out: [number, number][] = [];
+  for (const [ts, used] of usedPoints) {
+    const free = freeByTs.get(ts);
+    if (free === undefined) continue;
+    const total = used + free;
+    out.push([ts, total > 0 ? (used / total) * 100 : 0]);
+  }
+  return out;
+}
+
+// defaultDiskChartVisible decides the storage chart's own starting
+// legend state ("keep 12+ lines calm"): pools and parity default
+// visible regardless of activity (the array's own backbone -- and
+// parity carries no usage/IO of its own to judge activity by anyway),
+// an ordinary data/flash disk only if it's actually doing something
+// right now; everything else starts toggled off.
+export function defaultDiskChartVisible(slot: string, hasRecentIO: boolean): boolean {
+  const role = diskRole(slot);
+  return role === 'pool' || role === 'parity' || hasRecentIO;
 }

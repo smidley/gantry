@@ -386,9 +386,17 @@
      just the modifier alone -- same specificity trick .stat-tile--bare
      .stat-tile__number already uses above, needed here so this reliably
      beats .stat-tile__value2's own 0.9rem base rule regardless of which
-     one happens to come first in the stylesheet. */
+     one happens to come first in the stylesheet. Peers means the same
+     size AND the same weight/family too (Scott: the amber one read
+     visibly less bold than the blue one) -- value2's number is bare text
+     with no .stat-tile__number span of its own, so it was only ever
+     picking up .stat-tile__value2's mono/regular base instead of
+     matching value1's font-display/700; only the hue (pairedTint, above)
+     should tell the two apart now. */
   .stat-tile__value2.stat-tile__value2--paired {
     font-size: 1.6rem;
+    font-weight: 700;
+    font-family: var(--font-display);
   }
   .stat-tile__value2--paired .stat-tile__value2-label {
     color: inherit;

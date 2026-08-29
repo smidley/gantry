@@ -352,6 +352,121 @@ func TestRunReadOnlyModeBlocksImageMutationsButNotGet(t *testing.T) {
 	}
 }
 
+// TestRunWiresContainerMaintenanceThroughFakeDataEndToEnd pins main's own
+// containersMaintenanceSrc/removeContainersSrc/pruneContainersSrc wiring
+// (buildContainersMaintenance/buildRemoveContainers), not just the
+// server package's own handler behavior (already covered without a real
+// run() at all): GET must return the real fake seed's own
+// "duplicati" entry, and removing it by the id GET actually handed back
+// must succeed end to end -- a broken or missing adapter wiring would
+// otherwise still return 200s (Options fields default to empty/404, not
+// a compile error), so only exercising real data through the full stack
+// catches it.
+func TestRunWiresContainerMaintenanceThroughFakeDataEndToEnd(t *testing.T) {
+	port := freePort(t)
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_FAKE_DATA": "1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	getResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/containers/maintenance", port))
+	require.NoError(t, err)
+	var dto server.ContainerMaintenanceDTO
+	require.NoError(t, json.NewDecoder(getResp.Body).Decode(&dto))
+	drainAndClose(getResp)
+	require.Equal(t, http.StatusOK, getResp.StatusCode)
+
+	var duplicatiID string
+	for _, ct := range dto.Containers {
+		if ct.Name == "duplicati" {
+			duplicatiID = ct.FullID
+		}
+	}
+	require.NotEmpty(t, duplicatiID, "fake mode's seed must include a duplicati entry")
+
+	removeReq, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/api/containers/maintenance/remove", port),
+		strings.NewReader(`{"ids":["`+duplicatiID+`"]}`))
+	require.NoError(t, err)
+	removeReq.Header.Set("X-Gantry-Confirm", "containers")
+	removeResp, err := http.DefaultClient.Do(removeReq)
+	require.NoError(t, err)
+	var results []server.ContainerRemoveResult
+	require.NoError(t, json.NewDecoder(removeResp.Body).Decode(&results))
+	drainAndClose(removeResp)
+	require.Equal(t, http.StatusOK, removeResp.StatusCode)
+	require.Equal(t, []server.ContainerRemoveResult{{ID: duplicatiID, OK: true}}, results)
+
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+}
+
+// TestRunReadOnlyModeBlocksContainerMaintenanceMutationsButNotGet mirrors
+// TestRunReadOnlyModeBlocksImageMutationsButNotGet exactly, for the
+// container-maintenance write path.
+func TestRunReadOnlyModeBlocksContainerMaintenanceMutationsButNotGet(t *testing.T) {
+	port := freePort(t)
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_READ_ONLY": "1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	getResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/containers/maintenance", port))
+	require.NoError(t, err)
+	drainAndClose(getResp)
+	require.Equal(t, http.StatusOK, getResp.StatusCode, "GET must stay available in read-only mode")
+
+	pruneReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/containers/maintenance/prune", port), strings.NewReader(`{"mode":"exited"}`))
+	require.NoError(t, err)
+	pruneReq.Header.Set("X-Gantry-Confirm", "containers")
+	pruneResp, err := http.DefaultClient.Do(pruneReq)
+	require.NoError(t, err)
+	drainAndClose(pruneResp)
+	require.Equal(t, http.StatusForbidden, pruneResp.StatusCode)
+
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+}
+
 // TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed exercises the
 // real buildSnapshot closure used in main wiring — offline, with no
 // daemon or /proc required: dc.Running()/ur.Version() on freshly

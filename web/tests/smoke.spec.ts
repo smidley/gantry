@@ -11,6 +11,7 @@ const ROUTES: { hash: string; h1: string }[] = [
   { hash: '#/containers/jellyfin', h1: 'jellyfin' },
   { hash: '#/top', h1: 'Metrics' },
   { hash: '#/storage', h1: 'Storage' },
+  { hash: '#/maintenance', h1: 'Maintenance' },
   { hash: '#/gpu', h1: 'GPU' },
   { hash: '#/events', h1: 'Events' },
   { hash: '#/settings', h1: 'Settings' },

@@ -245,6 +245,13 @@ type Generator struct {
 	// ever touches.
 	imagesMu sync.Mutex
 	images   []docker.ImageInfo
+
+	// containersMu guards containers, this Generator's own mutable copy
+	// of fakeContainerMaintenanceSeed (see New) -- ContainersMaintenance/
+	// RemoveContainers/PruneContainers (containers_maintenance.go) are
+	// called concurrently by HTTP handlers, same reasoning as imagesMu.
+	containersMu sync.Mutex
+	containers   []docker.ContainerMaintenanceInfo
 }
 
 func New(sink store.MetricSink, events EventSink, seed int64) *Generator {
@@ -257,6 +264,9 @@ func New(sink store.MetricSink, events EventSink, seed int64) *Generator {
 		// be independent, or one instance's append/delete would corrupt
 		// another's view into the same backing array.
 		images: append([]docker.ImageInfo(nil), fakeImageSeed...),
+		// Same shallow-copy reasoning as images, just for the container-
+		// maintenance seed -- see containersMu's own doc.
+		containers: append([]docker.ContainerMaintenanceInfo(nil), fakeContainerMaintenanceSeed...),
 	}
 }
 

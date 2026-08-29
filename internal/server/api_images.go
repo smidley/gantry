@@ -140,25 +140,32 @@ const (
 	gantryConfirmValue  = "images"
 )
 
-// imagesMaxRequestBytes caps both mutating /api/images routes' request
-// bodies (via http.MaxBytesReader) -- Gantry has no auth (see
-// gantryConfirmHeader's own doc), so nothing else stops a request from
-// forcing an unbounded read into memory before validation even runs.
-// imagesMaxIDs caps POST /api/images/remove's ids array for the same
-// reason, one layer further in: a body under the byte cap could still
-// carry an unreasonable number of short ids.
+// mutationMaxRequestBytes caps every mutating /api/images and
+// /api/containers/maintenance route's request body (via
+// http.MaxBytesReader) -- Gantry has no auth (see gantryConfirmHeader's
+// own doc), so nothing else stops a request from forcing an unbounded
+// read into memory before validation even runs. mutationMaxIDs caps
+// POST /api/images/remove's and POST /api/containers/maintenance/
+// remove's ids array for the same reason, one layer further in: a body
+// under the byte cap could still carry an unreasonable number of short
+// ids.
 const (
-	imagesMaxRequestBytes = 1 << 20 // 1MB
-	imagesMaxIDs          = 100
+	mutationMaxRequestBytes = 1 << 20 // 1MB
+	mutationMaxIDs          = 100
 )
 
-// requireMutationAllowed enforces both /api/images write-path guardrails
-// shared by handleImagesRemove/handleImagesPrune, writing the rejection
-// response itself when either fails. Checked before the request body is
-// even decoded, so both are independently testable without a wired
-// backend.
-func (s *Server) requireMutationAllowed(w http.ResponseWriter, r *http.Request) bool {
-	if r.Header.Get(gantryConfirmHeader) != gantryConfirmValue {
+// requireMutationAllowed enforces the write-path guardrails shared by
+// every mutating route across both /api/images and
+// /api/containers/maintenance, writing the rejection response itself
+// when either fails. confirmValue is the caller's resource-specific
+// X-Gantry-Confirm value (gantryConfirmValue for images,
+// containersConfirmValue for containers -- see the latter's own doc for
+// why the value is scoped per-resource); ReadOnly, unlike confirmValue,
+// is a single global kill switch with no per-resource variant. Checked
+// before the request body is even decoded, so both are independently
+// testable without a wired backend.
+func (s *Server) requireMutationAllowed(w http.ResponseWriter, r *http.Request, confirmValue string) bool {
+	if r.Header.Get(gantryConfirmHeader) != confirmValue {
 		writeError(w, http.StatusPreconditionRequired, "missing or invalid "+gantryConfirmHeader+" header")
 		return false
 	}
@@ -170,9 +177,10 @@ func (s *Server) requireMutationAllowed(w http.ResponseWriter, r *http.Request) 
 }
 
 // writeDecodeError writes dec.Decode's error as the appropriate 4xx --
-// shared by handleImagesRemove/handleImagesPrune, the only two routes
-// that wrap their body in http.MaxBytesReader (imagesMaxRequestBytes).
-// A body over that cap surfaces here as a *http.MaxBytesError, which is
+// shared by every mutating /api/images and /api/containers/maintenance
+// route, all of which wrap their body in http.MaxBytesReader
+// (mutationMaxRequestBytes). A body over that cap surfaces here as a
+// *http.MaxBytesError, which is
 // a distinct problem from a malformed one (413, not 400: the body may
 // well have been well-formed JSON that simply never got to finish
 // arriving); anything else decode can fail on -- bad JSON, an unknown
@@ -256,10 +264,10 @@ type imagesRemoveRequest struct {
 
 // handleImagesRemove serves POST /api/images/remove.
 func (s *Server) handleImagesRemove(w http.ResponseWriter, r *http.Request) {
-	if !s.requireMutationAllowed(w, r) {
+	if !s.requireMutationAllowed(w, r, gantryConfirmValue) {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, imagesMaxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, mutationMaxRequestBytes)
 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -272,8 +280,8 @@ func (s *Server) handleImagesRemove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ids must not be empty")
 		return
 	}
-	if len(body.IDs) > imagesMaxIDs {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many ids: %d (max %d)", len(body.IDs), imagesMaxIDs))
+	if len(body.IDs) > mutationMaxIDs {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many ids: %d (max %d)", len(body.IDs), mutationMaxIDs))
 		return
 	}
 	for _, id := range body.IDs {
@@ -306,10 +314,10 @@ type imagesPruneRequest struct {
 
 // handleImagesPrune serves POST /api/images/prune.
 func (s *Server) handleImagesPrune(w http.ResponseWriter, r *http.Request) {
-	if !s.requireMutationAllowed(w, r) {
+	if !s.requireMutationAllowed(w, r, gantryConfirmValue) {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, imagesMaxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, mutationMaxRequestBytes)
 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()

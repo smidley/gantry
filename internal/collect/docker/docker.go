@@ -42,7 +42,8 @@ const (
 // doc in cgroupv2.go).
 type Collector struct {
 	cli      *client.Client
-	imgCli   imagesClient // same value as cli, narrowed -- see imagesClient's own doc
+	imgCli   imagesClient     // same value as cli, narrowed -- see imagesClient's own doc
+	ctrCli   containersClient // same value as cli, narrowed -- see containersClient's own doc
 	sink     store.MetricSink
 	events   EventSink
 	evict    func(kind, entity string)
@@ -88,12 +89,14 @@ func New(sink store.MetricSink, events EventSink, evict func(kind, entity string
 		UpdateStatuses: func() map[string]string { return nil },
 	}
 	if cli != nil {
-		// Not just "imgCli: cli" above: NewClientWithOpts can return a nil
-		// *client.Client alongside a non-nil err, and assigning a nil
-		// concrete pointer into an interface field produces a non-nil
-		// interface (it still carries the pointer's type) -- imgCli's own
-		// nil check in Images/RemoveImages would never trip.
+		// Not just "imgCli: cli"/"ctrCli: cli" above: NewClientWithOpts can
+		// return a nil *client.Client alongside a non-nil err, and
+		// assigning a nil concrete pointer into an interface field
+		// produces a non-nil interface (it still carries the pointer's
+		// type) -- imgCli/ctrCli's own nil checks in Images/RemoveImages/
+		// ContainersMaintenance would never trip.
 		c.imgCli = cli
+		c.ctrCli = cli
 	}
 	return c
 }

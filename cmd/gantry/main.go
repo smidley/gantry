@@ -143,6 +143,19 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		pruneImagesSrc = fk.PruneImages
 	}
 
+	// containersMaintenanceSrc/removeContainersSrc/pruneContainersSrc are
+	// the container-maintenance analogue of imagesSrc/removeImagesSrc/
+	// pruneImagesSrc immediately above -- same exclusive real/fake swap,
+	// same reasoning.
+	containersMaintenanceSrc := dc.ContainersMaintenance
+	removeContainersSrc := dc.RemoveContainers
+	pruneContainersSrc := dc.PruneContainers
+	if fk != nil {
+		containersMaintenanceSrc = fk.ContainersMaintenance
+		removeContainersSrc = fk.RemoveContainers
+		pruneContainersSrc = fk.PruneContainers
+	}
+
 	// gpuLookup adapts docker's Meta-returning Lookup to the name-only
 	// signature both GPU collectors (DRM fdinfo and nvidia-smi) need for
 	// pid->container attribution.
@@ -251,8 +264,13 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Images:       buildImages(imagesSrc),
 		RemoveImages: buildRemoveImages(removeImagesSrc),
 		PruneImages:  buildPruneImages(pruneImagesSrc),
-		ReadOnly:     readOnly,
-		AppendEvent:  st.AppendEvent,
+
+		ContainersMaintenance: buildContainersMaintenance(containersMaintenanceSrc),
+		RemoveContainers:      buildRemoveContainers(removeContainersSrc),
+		PruneContainers:       buildPruneContainers(pruneContainersSrc),
+
+		ReadOnly:    readOnly,
+		AppendEvent: st.AppendEvent,
 	}).ListenAndServe(runCtx)
 	cancel()
 	wg.Wait()
@@ -708,6 +726,70 @@ func buildPruneImages(src func(ctx context.Context, mode string) (docker.ImagePr
 			deleted[i] = server.DeletedImage{ID: d.ID, RepoTags: d.RepoTags, SizeBytes: d.SizeBytes}
 		}
 		return server.ImagePruneResult{Deleted: deleted, ReclaimedBytes: r.ReclaimedBytes, Errors: r.Errors}, nil
+	}
+}
+
+// buildContainersMaintenance adapts docker.ContainerMaintenanceReport
+// (src is dc.ContainersMaintenance in real mode, fk.
+// ContainersMaintenance in fake mode -- see run()'s
+// containersMaintenanceSrc wiring) to server.ContainerMaintenanceDTO for
+// server.Options.ContainersMaintenance -- see buildImages.
+func buildContainersMaintenance(src func(ctx context.Context) (docker.ContainerMaintenanceReport, error)) func(ctx context.Context) (server.ContainerMaintenanceDTO, error) {
+	return func(ctx context.Context) (server.ContainerMaintenanceDTO, error) {
+		report, err := src(ctx)
+		if err != nil {
+			return server.ContainerMaintenanceDTO{}, err
+		}
+		out := server.ContainerMaintenanceDTO{
+			Containers: make([]server.ContainerMaintenanceInfo, len(report.Containers)),
+			Summary: server.ContainerMaintenanceSummary{
+				Exited:  report.Summary.Exited,
+				Created: report.Summary.Created,
+				Dead:    report.Summary.Dead,
+			},
+		}
+		for i, ct := range report.Containers {
+			out.Containers[i] = server.ContainerMaintenanceInfo{
+				ID: ct.ID, Name: ct.Name, Image: ct.Image, State: ct.State,
+				ExitCode: ct.ExitCode, Created: ct.Created, FinishedAt: ct.FinishedAt, Managed: ct.Managed,
+				RestartPolicy: ct.RestartPolicy,
+			}
+		}
+		return out, nil
+	}
+}
+
+// buildRemoveContainers adapts []docker.ContainerRemoveResult to
+// []server.ContainerRemoveResult for server.Options.RemoveContainers --
+// see buildImages/buildRemoveImages.
+func buildRemoveContainers(src func(ctx context.Context, ids []string) ([]docker.ContainerRemoveResult, error)) func(ctx context.Context, ids []string) ([]server.ContainerRemoveResult, error) {
+	return func(ctx context.Context, ids []string) ([]server.ContainerRemoveResult, error) {
+		results, err := src(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]server.ContainerRemoveResult, len(results))
+		for i, r := range results {
+			out[i] = server.ContainerRemoveResult{ID: r.ID, OK: r.OK, Error: r.Error, Name: r.Name, Image: r.Image}
+		}
+		return out, nil
+	}
+}
+
+// buildPruneContainers adapts docker.ContainerPruneResult to
+// server.ContainerPruneResult for server.Options.PruneContainers -- see
+// buildImages/buildPruneImages.
+func buildPruneContainers(src func(ctx context.Context, mode string, olderThanHours int) (docker.ContainerPruneResult, error)) func(ctx context.Context, mode string, olderThanHours int) (server.ContainerPruneResult, error) {
+	return func(ctx context.Context, mode string, olderThanHours int) (server.ContainerPruneResult, error) {
+		r, err := src(ctx, mode, olderThanHours)
+		if err != nil {
+			return server.ContainerPruneResult{}, err
+		}
+		deleted := make([]server.DeletedContainer, len(r.Deleted))
+		for i, d := range r.Deleted {
+			deleted[i] = server.DeletedContainer{ID: d.ID, Name: d.Name, Image: d.Image}
+		}
+		return server.ContainerPruneResult{Deleted: deleted, Errors: r.Errors}, nil
 	}
 }
 

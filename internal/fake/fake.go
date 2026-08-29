@@ -132,6 +132,34 @@ var fleet = []archetype{
 	{name: "gridmind-worker", cpuBase: 3, cpuAmp: 3, cpuSpike: 0.03, memBytes: 500e6, netScale: 3e5, composeProject: "gridmind-cloud"},
 	{name: "gridmind-scheduler", cpuBase: 0.3, cpuAmp: 0.2, cpuSpike: 0.002, memBytes: 120e6, netScale: 2e4, composeProject: "gridmind-cloud"},
 	{name: "gridmind-db", cpuBase: 1, cpuAmp: 0.4, cpuSpike: 0.001, memBytes: 600e6, netScale: 5e4, memLimitBytes: 1e9, composeProject: "gridmind-cloud"},
+
+	// tie cluster: a dozen quiet sidecar/exporter-style containers, all
+	// under a fifth of a percent of host CPU -- the real-box shape
+	// rankStability.ts's own stability fix targets (Scott's report: "38+
+	// containers with MANY tied values... whose relative order can flap
+	// every 2s tick"). cpuBase/cpuAmp barely matter at this scale: Tick's
+	// own `+ g.rng.Float64()` noise term (up to a full raw unit) already
+	// dwarfs them, so every one of these independently jitters around
+	// ~0.0-0.15% host share every tick regardless -- reproducing the real
+	// per-tick sampling noise, not a display artifact of stale data.
+	{name: "cadvisor", cpuBase: 0.08, cpuAmp: 0.03, cpuSpike: 0.001, memBytes: 60e6, netScale: 2e4},
+	{name: "node-exporter", cpuBase: 0.06, cpuAmp: 0.02, cpuSpike: 0.001, memBytes: 30e6, netScale: 1e4},
+	{name: "promtail", cpuBase: 0.1, cpuAmp: 0.04, cpuSpike: 0.001, memBytes: 45e6, netScale: 3e4},
+	{name: "autoheal", cpuBase: 0.05, cpuAmp: 0.02, cpuSpike: 0.001, memBytes: 20e6, netScale: 5e3},
+	{name: "speedtest-tracker", cpuBase: 0.12, cpuAmp: 0.05, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4},
+	{name: "uptime-kuma", cpuBase: 0.09, cpuAmp: 0.03, cpuSpike: 0.001, memBytes: 70e6, netScale: 8e3},
+	{name: "dozzle", cpuBase: 0.07, cpuAmp: 0.03, cpuSpike: 0.001, memBytes: 40e6, netScale: 6e3},
+	// flaresolverr's own cpuSpike is deliberately much higher than its
+	// tie-cluster siblings -- a reliable-enough-to-observe (not just
+	// theoretically-possible) genuine, momentary rank-changing event
+	// among an otherwise noise-only cluster, for a manual "does a REAL
+	// change still glide" check without needing a dedicated scenario-
+	// control endpoint.
+	{name: "flaresolverr", cpuBase: 0.1, cpuAmp: 0.04, cpuSpike: 0.15, memBytes: 250e6, netScale: 4e4},
+	{name: "ntfy", cpuBase: 0.06, cpuAmp: 0.02, cpuSpike: 0.001, memBytes: 35e6, netScale: 5e3},
+	{name: "syncthing", cpuBase: 0.11, cpuAmp: 0.04, cpuSpike: 0.001, memBytes: 110e6, netScale: 5e4},
+	{name: "filebrowser", cpuBase: 0.05, cpuAmp: 0.02, cpuSpike: 0.001, memBytes: 25e6, netScale: 4e3},
+	{name: "changedetection", cpuBase: 0.09, cpuAmp: 0.03, cpuSpike: 0.001, memBytes: 80e6, netScale: 1e4},
 }
 
 // diskSpec describes one of the fake array's fixed 8 disks: parity

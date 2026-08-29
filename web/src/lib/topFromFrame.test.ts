@@ -4,7 +4,6 @@ import {
   hostTotalNow,
   isTopResource,
   reduceSeriesPoints,
-  reorderByLastDisplayedValue,
   resourceDirectionKeys,
   resourceMetricKeys,
   resourceScaleMax,
@@ -12,7 +11,6 @@ import {
   TOP_RESOURCES,
   topFromFrame,
   unattributedValue,
-  withGracePeriod,
 } from './topFromFrame';
 import type { SnapshotDTO } from './api';
 
@@ -302,161 +300,6 @@ describe('reduceSeriesPoints', () => {
   it('is undefined for an empty series -- no host history for that window', () => {
     expect(reduceSeriesPoints([], 'avg')).toBeUndefined();
     expect(reduceSeriesPoints([], 'peak')).toBeUndefined();
-  });
-});
-
-describe('reorderByLastDisplayedValue', () => {
-  it('sorts by current value on the first call -- nothing to lag behind yet', () => {
-    const previous = new Map();
-    const rows = [
-      { entity: 'a', value: 10 },
-      { entity: 'b', value: 30 },
-      { entity: 'c', value: 20 },
-    ];
-    expect(reorderByLastDisplayedValue(rows, previous, 'net').map((r) => r.entity)).toEqual(['b', 'c', 'a']);
-  });
-
-  it('re-sorts by each entity\'s PREVIOUS value once one exists, not the fresh one just passed in', () => {
-    const previous = new Map();
-    // Tick 1: b leads.
-    reorderByLastDisplayedValue(
-      [
-        { entity: 'a', value: 10 },
-        { entity: 'b', value: 30 },
-      ],
-      previous,
-      'net',
-    );
-    // Tick 2: a's fresh value now leads, but its DISPLAY is still easing
-    // up from tick 1's 10 -- rank must not jump ahead of b until that
-    // catches up on a LATER tick.
-    const tick2 = reorderByLastDisplayedValue(
-      [
-        { entity: 'a', value: 40 },
-        { entity: 'b', value: 5 },
-      ],
-      previous,
-      'net',
-    );
-    expect(tick2.map((r) => r.entity)).toEqual(['b', 'a']); // b's prior value (30) still beats a's prior value (10)
-
-    // Tick 3: NOW a's prior value (40, recorded at the end of tick 2)
-    // outranks b's prior value (5) -- the lag has caught up.
-    const tick3 = reorderByLastDisplayedValue(
-      [
-        { entity: 'a', value: 45 },
-        { entity: 'b', value: 6 },
-      ],
-      previous,
-      'net',
-    );
-    expect(tick3.map((r) => r.entity)).toEqual(['a', 'b']);
-  });
-
-  it('breaks a tie by entity name ascending, deterministically', () => {
-    const previous = new Map();
-    const rows = [
-      { entity: 'zeta', value: 10 },
-      { entity: 'alpha', value: 10 },
-    ];
-    expect(reorderByLastDisplayedValue(rows, previous, 'net').map((r) => r.entity)).toEqual(['alpha', 'zeta']);
-  });
-
-  it('never reorders a linkable:false row -- it stays pinned wherever the caller put it', () => {
-    const previous = new Map();
-    const rows = [
-      { entity: 'quiet', value: 1 },
-      { entity: 'Unattributed (host)', value: 999, linkable: false },
-    ];
-    expect(reorderByLastDisplayedValue(rows, previous, 'cpu').map((r) => r.entity)).toEqual([
-      'quiet',
-      'Unattributed (host)',
-    ]);
-  });
-
-  it('keys `previous` by metric too, so a resource switch cannot read a stale value', () => {
-    const previous = new Map();
-    reorderByLastDisplayedValue([{ entity: 'a', value: 10 }], previous, 'cpu');
-    // 'a' has no recorded value under 'mem' yet -- must fall back to its
-    // OWN fresh value here, not the unrelated one recorded under 'cpu'.
-    const rows = reorderByLastDisplayedValue(
-      [
-        { entity: 'a', value: 1 },
-        { entity: 'b', value: 5 },
-      ],
-      previous,
-      'mem',
-    );
-    expect(rows.map((r) => r.entity)).toEqual(['b', 'a']);
-  });
-});
-
-describe('withGracePeriod', () => {
-  function freshState() {
-    return { lastSeenRow: new Map(), lastPresentTick: new Map(), tick: 0 };
-  }
-
-  it('passes rows through unchanged when nothing has dropped out', () => {
-    const state = freshState();
-    const rows = [
-      { entity: 'a', value: 1 },
-      { entity: 'b', value: 2 },
-    ];
-    expect(withGracePeriod(rows, state, 'cpu')).toEqual(rows);
-  });
-
-  it('keeps a row that just dropped out visible, at its last known value, for one more call', () => {
-    const state = freshState();
-    withGracePeriod([{ entity: 'a', value: 10 }, { entity: 'b', value: 5 }], state, 'cpu');
-    // Tick 2: 'a' falls out of the top-N the caller computed.
-    const tick2 = withGracePeriod([{ entity: 'b', value: 5 }], state, 'cpu');
-    expect(tick2).toEqual([
-      { entity: 'b', value: 5 },
-      { entity: 'a', value: 10 }, // graced -- last known value, not dropped
-    ]);
-  });
-
-  it('a flicker that recovers on the very next call never actually leaves', () => {
-    const state = freshState();
-    withGracePeriod([{ entity: 'a', value: 10 }, { entity: 'b', value: 5 }], state, 'cpu');
-    withGracePeriod([{ entity: 'b', value: 5 }], state, 'cpu'); // a dips below the cutoff
-    // Tick 3: 'a' is back in the caller's own top-N -- it was never
-    // dropped from the grace bookkeeping, so this is a plain pass-through,
-    // not a "re-add" the {#each} block would see as a fresh key.
-    const tick3 = withGracePeriod([{ entity: 'a', value: 12 }, { entity: 'b', value: 5 }], state, 'cpu');
-    expect(tick3).toEqual([
-      { entity: 'a', value: 12 },
-      { entity: 'b', value: 5 },
-    ]);
-  });
-
-  it('truly forgets a row once its grace window elapses', () => {
-    const state = freshState();
-    withGracePeriod([{ entity: 'a', value: 10 }, { entity: 'b', value: 5 }], state, 'cpu');
-    const tick2 = withGracePeriod([{ entity: 'b', value: 5 }], state, 'cpu');
-    expect(tick2.map((r) => r.entity)).toEqual(['b', 'a']); // still graced
-    const tick3 = withGracePeriod([{ entity: 'b', value: 5 }], state, 'cpu');
-    expect(tick3.map((r) => r.entity)).toEqual(['b']); // grace window (1 tick) elapsed
-  });
-
-  it('keys grace bookkeeping by metric too, mirroring reorderByLastDisplayedValue', () => {
-    const state = freshState();
-    withGracePeriod([{ entity: 'a', value: 10 }], state, 'cpu');
-    // A DIFFERENT metric has never seen 'a' drop out of anything -- no
-    // grace row should appear under 'mem'.
-    const rows = withGracePeriod([{ entity: 'b', value: 5 }], state, 'mem');
-    expect(rows.map((r) => r.entity)).toEqual(['b']);
-  });
-
-  it('respects a custom graceTicks window', () => {
-    const state = freshState();
-    withGracePeriod([{ entity: 'a', value: 10 }], state, 'cpu', 2);
-    const tick2 = withGracePeriod([], state, 'cpu', 2);
-    const tick3 = withGracePeriod([], state, 'cpu', 2);
-    const tick4 = withGracePeriod([], state, 'cpu', 2);
-    expect(tick2.map((r) => r.entity)).toEqual(['a']);
-    expect(tick3.map((r) => r.entity)).toEqual(['a']);
-    expect(tick4.map((r) => r.entity)).toEqual([]); // 2-tick window elapsed
   });
 });
 

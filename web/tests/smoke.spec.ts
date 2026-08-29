@@ -641,14 +641,14 @@ test('top consumers: cpu breakdown page shows a host-total header with a live mu
   await expect(page.locator('.top-consumers__header-value')).toHaveText(/^\d+\.\d%$/);
   await expect(page.locator('.top-consumers__header canvas')).toBeVisible();
 
-  // The hero chart's own legend: up to 8 container chips + a trailing
+  // The hero chart's own legend: up to 10 container chips + a trailing
   // "Host total" reference chip, in the SAME order as the ranked list
   // below (both read the same top-N ranking).
   const chips = page.locator('.top-consumers__chip');
   await expect.poll(() => chips.count()).toBeGreaterThan(1);
   await expect(chips.last()).toHaveText('Host total');
   const chipCount = await chips.count();
-  expect(chipCount).toBeLessThanOrEqual(9); // top 8 containers + host total
+  expect(chipCount).toBeLessThanOrEqual(11); // top 10 containers + host total
 
   const firstChipName = (await chips.first().textContent())?.trim();
   const firstRowName = await page.locator('.top-bar-list__name-text').first().textContent();

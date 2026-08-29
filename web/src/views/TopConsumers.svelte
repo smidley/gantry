@@ -36,6 +36,7 @@
     topFromFrame,
     unattributedValue,
   } from '../lib/topFromFrame';
+  import { createRankStabilityState, stableTopN } from '../lib/rankStability';
   import TopBarList from '../components/TopBarList.svelte';
   import TimeChart from '../components/TimeChart.svelte';
   import CoreBudgetRibbon from '../components/CoreBudgetRibbon.svelte';
@@ -95,11 +96,11 @@
   // only the CHART bounds itself, both because a legend/line count much
   // past this stops being readable and because Now mode backs every
   // line with its own live ring (heroSlots below) and a fetched window
-  // backs every line with its own /api/series request -- 8 is exactly
-  // the categorical --series-1..8 palette's own size (tokens.css), so
+  // backs every line with its own /api/series request -- 10 is exactly
+  // the categorical --series-1..10 palette's own size (tokens.css), so
   // every line gets a real, distinct hue with nothing left to bucket
   // into an "Other."
-  const MAX_HERO_LINES = 8;
+  const MAX_HERO_LINES = 10;
 
   let resource = $state(untrack(() => (isTopResource(initialResource) ? initialResource : 'cpu')));
   let windowKey = $state('now');
@@ -115,8 +116,19 @@
   // fetchedRows below, which intentionally does NOT depend on live.frame
   // at all. direction is opted in for net/io -- see topFromFrame's own
   // doc for why Overview's compact module (a separate call site) never
-  // sees this.
+  // sees this. This is the raw, per-tick instant ranking -- listRankState/
+  // heroRankState below each stabilize their OWN top-N cut of it
+  // (rankStability.ts): the complete list's own membership never
+  // actually excludes anyone (its limit is COMPLETE_LIST_LIMIT), but its
+  // ORDER still needs the same rolling-average/cadence treatment the
+  // hero selection's membership does, so both read off this one shared,
+  // unlimited computation.
   let nowRows = $derived(topFromFrame(live.frame, resource, COMPLETE_LIST_LIMIT, { direction: isDirectional }));
+  const listRankState = createRankStabilityState();
+  const heroRankState = createRankStabilityState();
+  let stableNowRows = $derived(
+    stableTopN(nowRows, listRankState, resource, COMPLETE_LIST_LIMIT, live.frame?.ts ?? 0),
+  );
 
   let fetchedRows = $state([]);
   let loading = $state(false);
@@ -359,10 +371,14 @@
   }
   const heroSlots = Array.from({ length: MAX_HERO_LINES }, () => makeHeroSlot());
 
-  // heroTopNow: the top MAX_HERO_LINES entries of nowRows -- the exact
-  // same ranking (and, for net/io, the exact same row.direction pair)
-  // the ranked list below reads, just cut shorter for the chart.
-  let heroTopNow = $derived(nowRows.slice(0, MAX_HERO_LINES));
+  // heroTopNow: the stable top-MAX_HERO_LINES entries of nowRows -- its
+  // own rankStability selection, not merely the ranked list's own naive
+  // slice: each hero SLOT (heroSlots above) resets its whole ring the
+  // instant its assigned entity changes, so a chart line churning at the
+  // same rate the leaderboard USED to would repeatedly blank a line back
+  // to empty instead of drawing a real trend, an even worse symptom than
+  // the leaderboard's own hard-swap.
+  let heroTopNow = $derived(stableTopN(nowRows, heroRankState, resource, MAX_HERO_LINES, live.frame?.ts ?? 0));
 
   $effect(() => {
     if (windowKey !== 'now') return;
@@ -501,7 +517,7 @@
     Object.fromEntries(Object.entries(live.frame?.containers ?? {}).map(([name, c]) => [name, c.icon])),
   );
 
-  let containerRows = $derived(windowKey === 'now' ? nowRows : fetchedRows);
+  let containerRows = $derived(windowKey === 'now' ? stableNowRows : fetchedRows);
 
   // heroCapped: whether the ranked list actually has MORE entities than
   // the chart is showing -- drives the quiet "showing the top N" note,

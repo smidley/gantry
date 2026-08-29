@@ -47,7 +47,7 @@
   import { fade, fly } from 'svelte/transition';
   import { Tween } from 'svelte/motion';
   import { linear } from 'svelte/easing';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
@@ -63,6 +63,7 @@
   import { diskKind, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import { containerRunState, unhealthyContainerNames } from '../lib/containerStatus';
   import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
+  import { createRankStabilityState, stableTopN } from '../lib/rankStability';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
   import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, fleetSentence, worstSeverity } from '../lib/overviewStatus';
   import { band } from '../lib/thresholds';
@@ -167,7 +168,7 @@
     return () => controller.abort();
   });
 
-  let feedMotionMs = $derived(prefersReducedMotion.current ? 0 : FEED_MOTION_MS);
+  let feedMotionMs = $derived(motion.reduced ? 0 : FEED_MOTION_MS);
 
   let host = $derived(live.frame?.host ?? {});
   let netRx = $derived(sumMetricsByPattern(host, 'net', '.rx_bps'));
@@ -207,7 +208,25 @@
   // fleet it's describing.
   let fleetLine = $derived(fleetSentence(runningCount + stoppedCount, runningCount, stoppedCount));
 
-  let topRows = $derived(topFromFrame(live.frame, topResource, 5));
+  // TOP_MODULE_LIMIT: this module's own top-N cut, per the D2 compact-
+  // module brief. ALL_PRESENT_LIMIT feeds topFromFrame instead -- rank
+  // stability (rankStability.ts) needs every present container's own
+  // instant value to compute a correct rolling average and to let a real
+  // challenger be seen climbing BEFORE it's already inside the naive
+  // top-5, not just TOP_MODULE_LIMIT's own cut re-applied one metric
+  // late; stableTopN does the actual top-N cut itself, after averaging.
+  const TOP_MODULE_LIMIT = 5;
+  const ALL_PRESENT_LIMIT = 500;
+  const topRankState = createRankStabilityState();
+  let topRows = $derived(
+    stableTopN(
+      topFromFrame(live.frame, topResource, ALL_PRESENT_LIMIT),
+      topRankState,
+      topResource,
+      TOP_MODULE_LIMIT,
+      live.frame?.ts ?? 0,
+    ),
+  );
 
   // topScaleMax/topScaleCeilingLabel: net/io have no fixed 0-100 ceiling
   // (resourceScaleMax's own doc), so instead of the leaderboard's OWN max
@@ -244,7 +263,7 @@
   // scrub mechanism for this sentence to mirror.
   let parityPctTween = new Tween(untrack(() => parityPct ?? 0), { duration: live.glideMs, easing: linear });
   $effect(() => {
-    const reduced = prefersReducedMotion.current;
+    const reduced = motion.reduced;
     parityPctTween.set(parityPct ?? 0, { duration: reduced ? 0 : live.glideMs, easing: linear });
   });
   // parityIsRunning treats an explicit 0 (the wire value var.go/fake.go

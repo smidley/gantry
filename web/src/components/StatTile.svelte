@@ -89,11 +89,11 @@
   const SCRUB_TWEEN_MS = 120;
 
   // BARE_SPARKLINE_HEIGHT: the D2 instrument rail's own charts read as a
-  // real instrument, not a decorative crumb (Scott: "charts are so small
-  // it's difficult to see the detail in the spikes") -- ~1.85x Sparkline's
-  // own 28px default. Card-mode tiles (Settings) are unaffected, they
-  // never pass this.
-  const BARE_SPARKLINE_HEIGHT = 52;
+  // real instrument, not a decorative crumb (Scott, round 2: still "not
+  // tall enough for the graphs to look good" at the previous 52px) --
+  // roughly 3.4x Sparkline's own 28px default. Card-mode tiles (Settings)
+  // are unaffected, they never pass this.
+  const BARE_SPARKLINE_HEIGHT = 96;
 
   let {
     label,
@@ -313,7 +313,10 @@
      between rows instead, computed off --ink like every other hairline
      in this app (SourcesBanner, EventFeedItem, ...), not a new token. */
   .stat-tile--bare {
-    padding: 1.05rem 0;
+    /* Tightened from 1.05rem now that the sparkline itself (below) carries
+       far more visual weight -- the same generous frame around a now-96px
+       chart read as leftover padding, not an intentional rail row. */
+    padding: 0.75rem 0;
     border-radius: 0;
     border: none;
     box-shadow: none;

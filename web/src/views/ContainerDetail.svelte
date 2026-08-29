@@ -22,6 +22,9 @@
   import { fetchContainerStorage, fetchEvents, fetchSeries } from '../lib/api';
   import { fmtBytes, fmtCores, fmtDuration, fmtPct, fmtRate } from '../lib/format';
   import { containerHealthStatus } from '../lib/containerStatus';
+  import { deriveContainerAnomaly, containerAnomalyEvidence } from '../lib/containerAnomaly';
+  import { limitsFactsParts } from '../lib/containerLimits';
+  import { band, bandToken } from '../lib/thresholds';
   import { GPU_ENGINE_ORDER } from '../lib/metrics';
   import { eventsToMarkers } from '../lib/eventMarkers';
   import {
@@ -40,6 +43,7 @@
   import LogViewer from '../components/LogViewer.svelte';
   import StorageDeviceRow from '../components/StorageDeviceRow.svelte';
   import StorageTotalRow from '../components/StorageTotalRow.svelte';
+  import AnomalyBanner from '../components/AnomalyBanner.svelte';
 
   let { name } = $props();
 
@@ -77,6 +81,11 @@
   const ALL_METRICS = [
     'cpu.pct',
     'cpu.throttled_pct',
+    // cpu.alloc_pct (additive -- allocation display): only actually
+    // plotted as a third CPU-chart series once hasPoints('cpu.alloc_pct')
+    // says a limited container has real data for it, same conditional-
+    // series shape cpu.throttled_pct already uses just below.
+    'cpu.alloc_pct',
     'mem.bytes',
     'net.rx_bps',
     'net.tx_bps',
@@ -220,6 +229,12 @@
   let cpuSeries = $derived.by(() => {
     const s = [{ label: 'CPU', points: pointsFor('cpu.pct'), colorVar: '--series-1' }];
     if (hasNonzero('cpu.throttled_pct')) s.push({ label: 'Throttled', points: pointsFor('cpu.throttled_pct'), colorVar: '--series-2' });
+    // Allocation (additive -- dual-perspective usage): a limited
+    // container's % of its OWN ceiling, plotted alongside host-share so
+    // scrubbing/hovering the chart shows both at once via TimeChart's
+    // existing per-series tooltip -- no new chart plumbing needed, same
+    // "related percentage, same chart" pattern Throttled already uses.
+    if (hasPoints('cpu.alloc_pct')) s.push({ label: 'Allocation', points: pointsFor('cpu.alloc_pct'), colorVar: '--series-3' });
     return s;
   });
   let memSeries = $derived([{ label: 'Memory', points: pointsFor('mem.bytes'), colorVar: '--series-1' }]);
@@ -345,6 +360,84 @@
   // leaves its docker-stats-style core count implicit; this reads that
   // straight off the live frame the same way the header facts above do.
   let cpuCoresNow = $derived(fmtCores(c?.metrics?.['cpu.cores'] ?? 0));
+
+  // Dual-perspective usage (Scott: "I want to know how much of the
+  // system resources it's consuming, AND how much of it's own allocated
+  // resources it's consuming"): host-share stats stay live-frame "now"
+  // annotations, same convention as cpuCoresNow above -- NOT tied to
+  // activeRange, which only governs the charts' own history. The
+  // allocation-relative half is undefined (blank) for an unlimited
+  // container, same "absence means unlimited" contract the metrics
+  // themselves carry.
+  let cpuPctNow = $derived(c?.metrics?.['cpu.pct']);
+  let cpuAllocPctNow = $derived(c?.metrics?.['cpu.alloc_pct']);
+  let cpuNowText = $derived.by(() => {
+    const parts = [];
+    if (cpuPctNow !== undefined) parts.push(fmtPct(cpuPctNow));
+    if (cpuCoresNow) parts.push(cpuCoresNow);
+    return parts.join(' · ');
+  });
+  let cpuAllocText = $derived(cpuAllocPctNow !== undefined ? `${fmtPct(cpuAllocPctNow)} of its allocation` : '');
+
+  let memBytesNow = $derived(c?.metrics?.['mem.bytes']);
+  let memPctNow = $derived(c?.metrics?.['mem.pct']);
+  let memLimitPctNow = $derived(c?.metrics?.['mem.limit_pct']);
+  let memNowText = $derived.by(() => {
+    const parts = [];
+    if (memBytesNow !== undefined) parts.push(fmtBytes(memBytesNow));
+    if (memPctNow !== undefined) parts.push(`${fmtPct(memPctNow)} of host`);
+    return parts.join(' · ');
+  });
+  let memLimitText = $derived(memLimitPctNow !== undefined ? `${fmtPct(memLimitPctNow)} of its limit` : '');
+  // memLimitColor: the ONE number in this whole dual-perspective display
+  // that threshold-colors (Scott's own ask), via thresholds.ts' existing
+  // container.mem_limit_pct band -- undefined (plain ink) below its own
+  // "warn" floor, same as every other banded number in this app.
+  let memLimitColor = $derived(memLimitPctNow !== undefined ? bandToken(band('container.mem_limit_pct', memLimitPctNow)) : undefined);
+
+  // pidsNow/pidsLimitNow back the Metadata card's own quiet "142 / 2048"
+  // row -- shown only when pidsLimitNow is defined (limited), per the
+  // "nothing shown when fully unlimited" rule the whole limits feature
+  // follows; see limitsParts below for the same rule applied to memory/
+  // CPU/cpuset.
+  let pidsNow = $derived(c?.metrics?.['pids']);
+  let pidsLimitNow = $derived(c?.metrics?.['pids.limit']);
+
+  // limitsParts backs the header's own "Limits" facts line -- empty when
+  // every resource is unlimited, in which case the caller renders no
+  // line at all (Scott: "containers that have limits... should list
+  // them", implicitly: containers that don't, shouldn't grow any new
+  // chrome at all).
+  let limitsParts = $derived(
+    c
+      ? limitsFactsParts({
+          memLimitBytes: c.metrics?.['mem.limit_bytes'],
+          cpuAllocCores: c.metrics?.['cpu.alloc_cores'],
+          pidsLimit: c.metrics?.['pids.limit'],
+          cpuset: c.cpuset,
+        })
+      : [],
+  );
+
+  // anomaly/evidence back the "why does this need me" banner -- null
+  // (no banner) for a healthy running container or one whose frame
+  // hasn't arrived yet; isGone (a confirmed-removed container) also
+  // naturally yields null here since c itself is undefined by then.
+  let anomaly = $derived(c ? deriveContainerAnomaly(c.state, c.health, c.exit_code) : null);
+  let evidence = $derived(anomaly ? containerAnomalyEvidence(events) : []);
+
+  // logsSectionEl backs the banner's own "jump to logs" control --
+  // scrollIntoView + a manual focus (tabindex="-1" on the target, see
+  // the template below) rather than a plain href="#..." anchor: this
+  // app's whole router treats location.hash as A ROUTE (router.ts parses
+  // the ENTIRE hash on every change), so a bare in-page named anchor
+  // would be read as an unknown route and land on Not Found instead of
+  // scrolling anywhere.
+  let logsSectionEl = $state();
+  function scrollToLogs() {
+    logsSectionEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    logsSectionEl?.focus?.();
+  }
 </script>
 
 <div class="container-detail">
@@ -366,8 +459,17 @@
         </span>
         <span class="tabular-nums">Restarts {restarts ?? '—'}</span>
       </div>
+      {#if limitsParts.length > 0}
+        <div class="container-detail__facts container-detail__limits tabular-nums">
+          <span>Limits: {limitsParts.join(' · ')}</span>
+        </div>
+      {/if}
     {/if}
   </div>
+
+  {#if anomaly}
+    <AnomalyBanner severity={anomaly.severity} headline={anomaly.headline} {evidence} onJumpToLogs={scrollToLogs} />
+  {/if}
 
   <div class="segmented" role="group" aria-label="Time range">
     {#each RANGES as r (r.key)}
@@ -395,7 +497,10 @@
     <div class="card container-detail__chart-card">
       <div class="container-detail__chart-head">
         <span class="microlabel">CPU</span>
-        {#if cpuCoresNow}<span class="container-detail__chart-now">{cpuCoresNow}</span>{/if}
+        <div class="container-detail__chart-stats">
+          {#if cpuNowText}<span class="container-detail__chart-now">{cpuNowText}</span>{/if}
+          {#if cpuAllocText}<span class="container-detail__chart-now">{cpuAllocText}</span>{/if}
+        </div>
       </div>
       {#if hasPoints('cpu.pct')}
         <TimeChart series={cpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
@@ -410,7 +515,17 @@
       {/if}
     </div>
     <div class="card container-detail__chart-card">
-      <span class="microlabel">Memory</span>
+      <div class="container-detail__chart-head">
+        <span class="microlabel">Memory</span>
+        <div class="container-detail__chart-stats">
+          {#if memNowText}<span class="container-detail__chart-now">{memNowText}</span>{/if}
+          {#if memLimitText}
+            <span class="container-detail__chart-now" style={memLimitColor ? `color: ${memLimitColor}` : undefined}>
+              {memLimitText}
+            </span>
+          {/if}
+        </div>
+      </div>
       {#if hasPoints('mem.bytes')}
         <TimeChart series={memSeries} formatValue={fmtBytes} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
       {:else if activeRange === 'live' && liveSeedPending}
@@ -560,10 +675,14 @@
       <dd>{startedAt !== undefined ? new Date(startedAt * 1000).toLocaleString() : '—'}</dd>
       <dt>Restarts</dt>
       <dd>{restarts ?? '—'}</dd>
+      {#if pidsLimitNow !== undefined}
+        <dt>Pids</dt>
+        <dd>{pidsNow !== undefined ? Math.round(pidsNow) : '—'} / {Math.round(pidsLimitNow)}</dd>
+      {/if}
     </dl>
   </div>
 
-  <div class="card container-detail__logs">
+  <div class="card container-detail__logs" bind:this={logsSectionEl} tabindex="-1">
     <span class="microlabel">Logs</span>
     <LogViewer {name} />
   </div>
@@ -598,6 +717,12 @@
     font-family: var(--font-mono);
     font-size: 0.8rem;
     color: var(--ink-2);
+  }
+  /* Limits reuses .container-detail__facts' own typography (same row
+     visually continues the identity summary just above it) -- this
+     class only adds the small gap that separates it as its own line. */
+  .container-detail__limits {
+    margin-top: -0.1rem;
   }
   .container-detail__fetch-error {
     color: var(--status-warning);
@@ -654,6 +779,16 @@
     color: var(--ink-2);
     font-family: var(--font-mono);
     font-size: 0.78rem;
+  }
+  /* Dual-perspective usage: up to two stat lines (host-relative, then
+     allocation-relative) stacked right-aligned under the chart-head's
+     own baseline row, rather than crammed onto one line -- reproduced at
+     375px, where both figures inline together ran past the card edge. */
+  .container-detail__chart-stats {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.1rem;
   }
   .container-detail__empty {
     margin: 2rem 0;

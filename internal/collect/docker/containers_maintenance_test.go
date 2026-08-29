@@ -293,6 +293,41 @@ func TestSelectPruneTargetsZeroOlderThanHoursMeansNoAgeFilter(t *testing.T) {
 	require.Equal(t, []ContainerMaintenanceInfo{recent}, out)
 }
 
+// TestSelectPruneTargetsSkipsExitedWithNilFinishedAtWhenAgeFilterActive
+// pins C1's fix: an exited container with no trustworthy FinishedAt (nil
+// -- see ContainersMaintenance's own doc for when that happens) must
+// never be matched by falling back to Created. Created only reflects
+// when the container was originally started, which can be arbitrarily
+// older than when it actually stopped -- guessing from it risks deleting
+// something that in reality just exited moments ago.
+func TestSelectPruneTargetsSkipsExitedWithNilFinishedAtWhenAgeFilterActive(t *testing.T) {
+	now := time.Now()
+	untrustworthy := ContainerMaintenanceInfo{
+		ID: "untrustworthy", State: "exited", FinishedAt: nil,
+		Created: now.Add(-30 * 24 * time.Hour).Unix(), // 30 days old by Created alone
+	}
+
+	out := selectPruneTargets([]ContainerMaintenanceInfo{untrustworthy}, "exited", 24, now)
+
+	require.Empty(t, out, "an exited container with no trustworthy FinishedAt must be skipped, never deleted on a Created-based guess")
+}
+
+// TestSelectPruneTargetsExitedWithNilFinishedAtIncludedWhenNoAgeFilter
+// pins the boundary of C1's fix: the skip only applies once an age
+// filter is actually active. With no filter, mode selection alone
+// decides membership and no timestamp is ever consulted, so a container
+// that never got enriched must still be a normal, includable prune
+// target -- exactly PruneContainers' own default (olderThanHours=0)
+// behavior already relied on before this fix.
+func TestSelectPruneTargetsExitedWithNilFinishedAtIncludedWhenNoAgeFilter(t *testing.T) {
+	now := time.Now()
+	unenriched := ContainerMaintenanceInfo{ID: "unenriched", State: "exited", FinishedAt: nil}
+
+	out := selectPruneTargets([]ContainerMaintenanceInfo{unenriched}, "exited", 0, now)
+
+	require.Equal(t, []ContainerMaintenanceInfo{unenriched}, out)
+}
+
 // fakeContainersClient is a hand-rolled containersClient double --
 // injected via Collector's own ctrCli field (see containersClient's own
 // doc) so ContainersMaintenance/RemoveContainers/PruneContainers' real
@@ -396,6 +431,30 @@ func TestContainersMaintenanceInspectFailureLeavesFieldsUnsetNotError(t *testing
 	require.Len(t, report.Containers, 1)
 	require.Nil(t, report.Containers[0].ExitCode)
 	require.Nil(t, report.Containers[0].FinishedAt)
+}
+
+// TestContainersMaintenanceZeroTimeFinishedAtLeftUnset pins C1's second
+// fix: dockerd can report FinishedAt as Go's own zero time
+// ("0001-01-01T00:00:00Z"), which time.Parse(time.RFC3339Nano, ...)
+// happily parses without error -- .Unix() on that value is a huge
+// negative number (-62135596800), which would otherwise satisfy
+// virtually any older_than_hours filter. Must be left nil, the same
+// "untrustworthy" bucket a failed parse or a failed inspect already
+// fall into, never stored as a real (if absurd-looking) timestamp.
+func TestContainersMaintenanceZeroTimeFinishedAtLeftUnset(t *testing.T) {
+	fc := &fakeContainersClient{
+		containerListReturn: []container.Summary{summaryOfState("exited1", "one", "exited")},
+		inspectReturn: map[string]container.InspectResponse{
+			"exited1": inspectWithState(137, "0001-01-01T00:00:00Z"),
+		},
+	}
+	c := &Collector{ctrCli: fc}
+
+	report, err := c.ContainersMaintenance(context.Background())
+
+	require.NoError(t, err)
+	require.NotNil(t, report.Containers[0].ExitCode, "ExitCode enrichment is independent of FinishedAt's own validity")
+	require.Nil(t, report.Containers[0].FinishedAt, "a Go zero-time FinishedAt must never be stored, or any age filter could treat this container as infinitely old")
 }
 
 // TestRemoveContainersCallsContainerRemoveWithForceFalseAndRemoveVolumesFalse

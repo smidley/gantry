@@ -241,6 +241,16 @@ func pruneContainersWith(cts []ContainerMaintenanceInfo, removeOne func(id strin
 // never ran at all, so Created is the only lifecycle timestamp it has).
 // 0 means no age filter, matching every other optional-filter default in
 // this codebase.
+//
+// An exited container with no trustworthy FinishedAt (nil -- either the
+// Collector's own enrichment inspect never ran/succeeded, or it parsed a
+// Go zero-time value; see ContainersMaintenance's own doc for both) is
+// SKIPPED whenever an age filter is active, never matched by falling
+// back to Created: Created only reflects when the container was
+// originally started, which can be arbitrarily older than when it
+// actually stopped, so guessing from it risks deleting something that
+// only just exited. Age-filterless calls are unaffected -- mode
+// selection alone decides membership then, with no timestamp involved.
 func selectPruneTargets(cts []ContainerMaintenanceInfo, mode string, olderThanHours int, now time.Time) []ContainerMaintenanceInfo {
 	var cutoff time.Time
 	if olderThanHours > 0 {
@@ -267,7 +277,10 @@ func selectPruneTargets(cts []ContainerMaintenanceInfo, mode string, olderThanHo
 		}
 		if !cutoff.IsZero() {
 			ts := ct.Created
-			if ct.FinishedAt != nil {
+			if ct.State == container.StateExited {
+				if ct.FinishedAt == nil {
+					continue // untrustworthy age -- never delete on a guess
+				}
 				ts = *ct.FinishedAt
 			}
 			if !time.Unix(ts, 0).Before(cutoff) {
@@ -329,7 +342,13 @@ func (c *Collector) ContainersMaintenance(ctx context.Context) (ContainerMainten
 		}
 		code := insp.State.ExitCode
 		report.Containers[i].ExitCode = &code
-		if t, err := time.Parse(time.RFC3339Nano, insp.State.FinishedAt); err == nil {
+		// !t.IsZero() rejects Go's own zero time ("0001-01-01T00:00:00Z"),
+		// which dockerd can report and which time.Parse accepts without
+		// error -- .Unix() on it is a huge negative number that would
+		// otherwise satisfy virtually any older_than_hours filter (see
+		// selectPruneTargets' own doc on why an untrustworthy timestamp
+		// must never be stored as a real one).
+		if t, err := time.Parse(time.RFC3339Nano, insp.State.FinishedAt); err == nil && !t.IsZero() {
 			ts := t.Unix()
 			report.Containers[i].FinishedAt = &ts
 		}

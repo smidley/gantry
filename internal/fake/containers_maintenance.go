@@ -144,10 +144,11 @@ func indexOfFakeContainer(containers []docker.ContainerMaintenanceInfo, id strin
 // actually reaches it -- a real possibility docker.RemoveContainers' own
 // conflict passthrough exists to handle (see its own doc), unlike
 // RemoveImages' conflict, which reflects a real, persistent State this
-// package already tracks. Never actually removed: State stays "exited"
-// and visible in every GET/prune sweep exactly as before, the same way
-// a real container racing back to running would still show up in the
-// NEXT list poll.
+// package already tracks. Never actually removed: both RemoveContainers
+// and PruneContainers refuse it (real mode funnels both through the
+// same Force:false ContainerRemove), so it stays "exited" and visible
+// in every GET, the same way a real container racing back to running
+// would still show up in the NEXT list poll.
 var fakeRunningConflictContainerID = fakeContainerID(2)
 
 // fakeRunningConflictError is the manufactured conflict
@@ -232,6 +233,11 @@ func (g *Generator) PruneContainers(_ context.Context, mode string, olderThanHou
 		}
 		if hasCutoff && age >= cutoff {
 			kept = append(kept, ct)
+			continue
+		}
+		if ct.ID == fakeRunningConflictContainerID {
+			kept = append(kept, ct)
+			out.Errors = append(out.Errors, ct.ID+": "+fakeRunningConflictError)
 			continue
 		}
 		out.Deleted = append(out.Deleted, docker.DeletedContainer{ID: ct.ID, Name: ct.Name, Image: ct.Image})

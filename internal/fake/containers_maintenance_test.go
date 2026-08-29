@@ -175,11 +175,12 @@ func TestGeneratorPruneContainersExitedRemovesOnlyExited(t *testing.T) {
 	result, err := g.PruneContainers(context.Background(), "exited", 0)
 
 	require.NoError(t, err)
-	require.Len(t, result.Deleted, wantDeleted)
+	require.Len(t, result.Deleted, wantDeleted-1, "every exited entry except the running-conflict fixture")
+	require.Len(t, result.Errors, 1)
 
 	after, err := g.ContainersMaintenance(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, 0, after.Summary.Exited)
+	require.Equal(t, 1, after.Summary.Exited, "only the conflict fixture survives")
 	require.Equal(t, before.Summary.Created, after.Summary.Created)
 }
 
@@ -207,11 +208,13 @@ func TestGeneratorPruneContainersAllStoppedRemovesEverySeedEntry(t *testing.T) {
 	result, err := g.PruneContainers(context.Background(), "all-stopped", 0)
 
 	require.NoError(t, err)
-	require.Len(t, result.Deleted, len(before.Containers), "the seed has no dead entries, so all-stopped clears everything")
+	require.Len(t, result.Deleted, len(before.Containers)-1, "all-stopped clears every seed entry except the manufactured running-conflict fixture")
+	require.Len(t, result.Errors, 1, "the conflict fixture surfaces as a per-container prune error")
+	require.Contains(t, result.Errors[0], "container is running")
 
 	after, err := g.ContainersMaintenance(context.Background())
 	require.NoError(t, err)
-	require.Empty(t, after.Containers)
+	require.Len(t, after.Containers, 1, "only the conflict fixture survives")
 }
 
 // TestGeneratorPruneContainersOlderThanHoursFiltersRelativeToFixedEpoch

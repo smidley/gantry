@@ -320,12 +320,10 @@ type containersClient interface {
 // under load, or an exited-container count well past a typical box's
 // handful, could otherwise leave GET /api/containers/maintenance
 // hanging for as long as N sequential inspects take, with nothing
-// capping N. A var, not a const, so a test can shrink it: an
-// already-cancelled/expired parent context propagates into
-// context.WithTimeout's child immediately, giving a deterministic way
-// to pin the "deadline already blew" path without ever sleeping for
-// real (see the timeout test's own doc).
-var containersInspectFanOutTimeout = 10 * time.Second
+// capping N. Tests pin the "deadline already blew" path with an
+// already-cancelled parent context (which propagates into
+// context.WithTimeout's child immediately), never by shrinking this.
+const containersInspectFanOutTimeout = 10 * time.Second
 
 // containersInspectFanOutCap bounds the same fan-out by COUNT, on top of
 // containersInspectFanOutTimeout's bound by TIME -- an unusually large

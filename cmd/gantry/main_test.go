@@ -631,9 +631,10 @@ func TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage(t *testing.T) {
 
 // TestBuildSnapshotDropsStaleSampleFromRunningContainer pins the
 // per-sample freshness gate a running container's metrics still need:
-// containerFrameEntities/include only decide whether the ENTITY belongs
-// in the frame, so a still-running container's own individual samples
-// were previously included unconditionally, no matter how old. That let
+// buildSnapshot's own entity-membership seeding only decides whether the
+// ENTITY belongs in the frame, so a still-running container's own
+// individual samples were previously included unconditionally, no
+// matter how old. That let
 // a metric that stops being emitted (e.g. `docker update --memory 0`
 // clearing mem.limit_bytes) serve its last recorded value as "current"
 // forever. A sample this stale must be dropped even though its
@@ -764,8 +765,6 @@ func TestBuildSnapshotPassesThroughCpusetAndExitCode(t *testing.T) {
 // the per-sample freshness gate's own boundary (main.go: "nowUnix-
 // sample.TS >= containerFrameMaxAge"): a sample exactly containerFrameMaxAge
 // seconds old must be dropped, not just one older than that -- >=, not >.
-// containerFrameEntities' own boundary (the entity-level cutoff) already
-// has this exact pin; this is the per-sample gate's turn.
 func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
 	require.NoError(t, err)
@@ -901,14 +900,9 @@ func TestBuildContainersListNilFakeMetasUnaffected(t *testing.T) {
 	require.Empty(t, buildContainersList(dc, nil)())
 }
 
-// fakeMeta builds a minimal known-container answer for a lookupByName
-// stand-in, without needing a real docker.Collector/daemon.
-func fakeMeta(name string) docker.Meta { return docker.Meta{Name: name} }
-
 // TestContainerStorageResolvesMountsAndDeviceIO pins containerStorage's
 // full happy path: a hand-built lookupMeta/poolSlots pair (no real
-// docker.Collector registry or daemon needed, the same reason
-// containerFrameEntities takes lookupByName as a parameter) plus a bare
+// docker.Collector registry or daemon needed) plus a bare
 // *store.Live carrying this container's live:io.* samples -- proving the
 // mount->storage resolution and the per-device rate assembly both land
 // in the DTO correctly.
@@ -1190,65 +1184,6 @@ func TestBuildContainerStorageNilFakeMetasUnaffected(t *testing.T) {
 
 	_, ok := buildContainerStorage(dc, ur, st, nil, nil, nil, nil, "/unused")("ghost")
 	require.False(t, ok)
-}
-
-// TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup pins the OR's
-// first clause: a name in `running` is included unconditionally — the
-// lookup function must not even be consulted for it (a call for this name
-// fails the test immediately, proving the OR short-circuits).
-func TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup(t *testing.T) {
-	running := map[string]struct{}{"jellyfin": {}}
-	lookup := func(name string) (docker.Meta, bool) {
-		t.Fatalf("lookupByName must not be consulted for a running container, got %q", name)
-		return docker.Meta{}, false
-	}
-
-	got := containerFrameEntities(running, map[string]int64{}, 60, lookup)
-	require.Contains(t, got, "jellyfin")
-}
-
-// TestContainerFrameEntitiesIncludesFreshKnownNonRunning pins the OR's
-// second clause: a non-running name with a live sample younger than
-// maxAge AND a known lookup result is included.
-func TestContainerFrameEntitiesIncludesFreshKnownNonRunning(t *testing.T) {
-	lookup := func(name string) (docker.Meta, bool) { return fakeMeta(name), name == "radarr" }
-
-	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 59}, 60, lookup)
-	require.Contains(t, got, "radarr")
-}
-
-// TestContainerFrameEntitiesExcludesStaleEvenWhenKnown pins the
-// "stopped-and-gone" cutoff itself: once a non-running container's
-// freshest sample is 60s old or older, it drops out of the frame even
-// though lookupByName still recognizes the name (registry cleanup and
-// the frame's own 60s cutoff are two different clocks).
-func TestContainerFrameEntitiesExcludesStaleEvenWhenKnown(t *testing.T) {
-	lookup := func(name string) (docker.Meta, bool) { return fakeMeta(name), true }
-
-	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 60}, 60, lookup)
-	require.NotContains(t, got, "radarr", "age >= maxAge must exclude, not just age > maxAge")
-}
-
-// TestContainerFrameEntitiesExcludesFreshButUnknown pins the other half:
-// a stopped-AND-REMOVED container's lingering fresh sample must not
-// resurrect it once dc no longer knows the name at all.
-func TestContainerFrameEntitiesExcludesFreshButUnknown(t *testing.T) {
-	lookup := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
-
-	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 0}, 60, lookup)
-	require.NotContains(t, got, "radarr", "a name the registry no longer knows must drop immediately")
-}
-
-// TestContainerFrameEntitiesRunningWinsOverStaleSample confirms a name
-// present in both `running` and `sampleAge` (the common case: a running
-// container that also has metric samples) is included via the running
-// clause and isn't accidentally excluded by a stale sampleAge entry.
-func TestContainerFrameEntitiesRunningWinsOverStaleSample(t *testing.T) {
-	running := map[string]struct{}{"jellyfin": {}}
-	lookup := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
-
-	got := containerFrameEntities(running, map[string]int64{"jellyfin": 99999}, 60, lookup)
-	require.Contains(t, got, "jellyfin")
 }
 
 func TestHealthcheckExitPath(t *testing.T) {

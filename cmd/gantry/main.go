@@ -501,38 +501,6 @@ func convertPorts(in []docker.PortInfo) []server.PortInfoDTO {
 	return out
 }
 
-// containerFrameEntities decides which container entities belong in this
-// tick's frame: every name in running is always included; a name that's
-// merely referenced by a live sample gets one more chance, but only if
-// its freshest sample is younger than maxAge seconds AND lookupByName
-// still recognizes the name. Both conditions matter independently: age
-// alone would let a fully-removed container's still-fresh-but-orphaned
-// sample flicker back into view for up to maxAge seconds, and
-// lookupByName alone would let a long-stopped-but-not-removed
-// container's stale metrics linger for as long as its ring happens to
-// still hold data (~15 minutes) instead of the frame's own, much shorter
-// cutoff. Extracted as a pure function so it's testable without a real
-// docker daemon or *store.Store.
-func containerFrameEntities(running map[string]struct{}, sampleAge map[string]int64, maxAge int64, lookupByName func(string) (docker.Meta, bool)) map[string]struct{} {
-	out := make(map[string]struct{}, len(running))
-	for name := range running {
-		out[name] = struct{}{}
-	}
-	for name, age := range sampleAge {
-		if _, already := out[name]; already {
-			continue
-		}
-		if age >= maxAge {
-			continue
-		}
-		if _, known := lookupByName(name); !known {
-			continue
-		}
-		out[name] = struct{}{}
-	}
-	return out
-}
-
 // buildContainersList returns the closure wired to server.Options.
 // Containers: /api/containers' v2 contract serves dc.Running() directly
 // (name/state/health/image only), with no snapshot/DTO detour --

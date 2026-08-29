@@ -130,18 +130,55 @@ func indexOfFakeContainer(containers []docker.ContainerMaintenanceInfo, id strin
 	return -1
 }
 
+// fakeRunningConflictContainerID names watchtower's own seed id (see
+// fakeContainerMaintenanceSeed) -- singled out so RemoveContainers can
+// manufacture a running-container conflict for it, mirroring
+// RemoveImages' own in-use conflict (see its own doc) so fake mode's UI
+// has SOME id that always exercises the removal-refusal path, not just
+// the successful one.
+//
+// watchtower is a fitting pick precisely because its real job is
+// restarting containers: the scenario this simulates is a container
+// that genuinely was "exited" at GET-list time racing back to running
+// (its own restart policy, or a human) by the time a remove call
+// actually reaches it -- a real possibility docker.RemoveContainers' own
+// conflict passthrough exists to handle (see its own doc), unlike
+// RemoveImages' conflict, which reflects a real, persistent State this
+// package already tracks. Never actually removed: State stays "exited"
+// and visible in every GET/prune sweep exactly as before, the same way
+// a real container racing back to running would still show up in the
+// NEXT list poll.
+var fakeRunningConflictContainerID = fakeContainerID(2)
+
+// fakeRunningConflictError is the manufactured conflict
+// fakeRunningConflictContainerID's own removal attempts always get --
+// worded like a real docker daemon conflict (see docker package's own
+// TestRemoveContainersWithPassesRunningConflictErrorThroughVerbatim for
+// the shape a real one takes), never images' rewritten "skipped: ..."
+// style: a running-container conflict has no permanent-conflict
+// rewrite the way images' multi-tag one does (see the container
+// maintenance carry-ins bullet).
+const fakeRunningConflictError = `conflict: cannot remove container "watchtower": container is running: stop the container before removing or force remove`
+
 // RemoveContainers deletes each of ids from the fake inventory. Unlike
-// RemoveImages, there's no "in-use" state to refuse here: this
-// inventory only ever holds non-running containers by construction
-// (ContainersMaintenance's own contract), so fake mode has no running-
-// container conflict to simulate -- an id either matches a stopped
-// entry (removed) or it doesn't (error), full stop.
+// RemoveImages, there's no persistent "in-use" State to refuse against
+// here: this inventory only ever holds non-running containers by
+// construction (ContainersMaintenance's own contract). Fake mode
+// instead simulates the OTHER real conflict source docker.
+// RemoveContainers' own conflict passthrough exists for -- a container
+// racing back to running between list and remove -- via one designated
+// id (see fakeRunningConflictContainerID's own doc); every other id
+// either matches a stopped entry (removed) or it doesn't (error).
 func (g *Generator) RemoveContainers(_ context.Context, ids []string) ([]docker.ContainerRemoveResult, error) {
 	g.containersMu.Lock()
 	defer g.containersMu.Unlock()
 
 	out := make([]docker.ContainerRemoveResult, 0, len(ids))
 	for _, id := range ids {
+		if id == fakeRunningConflictContainerID {
+			out = append(out, docker.ContainerRemoveResult{ID: id, Error: fakeRunningConflictError})
+			continue
+		}
 		idx := indexOfFakeContainer(g.containers, id)
 		if idx < 0 {
 			out = append(out, docker.ContainerRemoveResult{ID: id, Error: "no such container: " + id})

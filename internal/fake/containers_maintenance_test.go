@@ -131,6 +131,30 @@ func TestGeneratorRemoveContainersDeletesFromInventory(t *testing.T) {
 	}
 }
 
+// TestGeneratorRemoveContainersRefusesRunningConflictFixture mirrors
+// TestGeneratorRemoveImagesRefusesInUseImage's shape for the container
+// surface: one designated seed id (watchtower) always manufactures a
+// running-container conflict from RemoveContainers instead of ever
+// actually being removable, so fake mode's UI has something to exercise
+// the removal-refusal path against -- see
+// fakeRunningConflictContainerID's own doc for why. Must never actually
+// disappear from the inventory: this simulates a conflict, not a state
+// change.
+func TestGeneratorRemoveContainersRefusesRunningConflictFixture(t *testing.T) {
+	g := newTestGenerator()
+	before, err := g.ContainersMaintenance(context.Background())
+	require.NoError(t, err)
+
+	results, err := g.RemoveContainers(context.Background(), []string{fakeRunningConflictContainerID})
+
+	require.NoError(t, err)
+	require.Equal(t, []docker.ContainerRemoveResult{{ID: fakeRunningConflictContainerID, OK: false, Error: fakeRunningConflictError}}, results)
+
+	after, err := g.ContainersMaintenance(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, len(before.Containers), len(after.Containers), "the conflict fixture must never actually be removed")
+}
+
 func TestGeneratorRemoveContainersUnknownIDReturnsError(t *testing.T) {
 	g := newTestGenerator()
 

@@ -24,7 +24,38 @@ export interface ContainerDTO {
   // through -- meaningful only once state is "exited"/"dead". Backs
   // Container Detail's anomaly banner (lib/containerAnomaly.ts).
   exit_code: number;
+  // created/update_status/changelog_url/project_url/webui_url/networks/
+  // ports all mirror docker.Meta's own fields of the same name straight
+  // through (server's api_snapshot.go) and all carry "omitempty" on the
+  // Go side -- absent, not just falsy, when unpopulated.
+  created?: number;
+  update_status?: string;
+  changelog_url?: string;
+  project_url?: string;
+  webui_url?: string;
+  networks?: NetworkInfoDTO[];
+  ports?: PortInfoDTO[];
   metrics: Record<string, number>;
+}
+
+// NetworkInfoDTO mirrors server.NetworkInfoDTO -- one docker network a
+// container is attached to. ip is absent for a network that assigns none
+// to this container and for the synthetic {name: "host"} entry
+// host-network containers report.
+export interface NetworkInfoDTO {
+  name: string;
+  ip?: string;
+}
+
+// PortInfoDTO mirrors server.PortInfoDTO -- one container-port binding.
+// host_ip/host_port are both absent for an exposed-but-unpublished port
+// (EXPOSE with no -p) -- itself useful information, not an absence to
+// filter out.
+export interface PortInfoDTO {
+  container_port: number;
+  proto: string;
+  host_ip?: string;
+  host_port?: number;
 }
 
 // GPUMetaDTO mirrors server.GPUMetaDTO -- one GPU entity's vendor +

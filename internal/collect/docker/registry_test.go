@@ -10,6 +10,8 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/go-connections/nat"
 	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
@@ -663,7 +665,7 @@ func TestMetaFromInspectExtractsUnraidIconLabel(t *testing.T) {
 		},
 	}
 
-	m := metaFromInspect(resp)
+	m := metaFromInspect(resp, nil)
 
 	require.Equal(t, "https://example.com/icons/jellyfin.png", m.Icon)
 }
@@ -684,7 +686,7 @@ func TestMetaFromInspectIconEmptyWhenLabelAbsent(t *testing.T) {
 		Config: &container.Config{Image: "jellyfin/jellyfin:latest"}, // Labels left nil
 	}
 
-	m := metaFromInspect(resp)
+	m := metaFromInspect(resp, nil)
 
 	require.Equal(t, "", m.Icon)
 }
@@ -706,7 +708,7 @@ func TestMetaFromInspectExtractsComposeProjectLabel(t *testing.T) {
 		},
 	}
 
-	m := metaFromInspect(resp)
+	m := metaFromInspect(resp, nil)
 
 	require.Equal(t, "gridmind-cloud", m.ComposeProject)
 }
@@ -727,7 +729,7 @@ func TestMetaFromInspectComposeProjectEmptyWhenLabelAbsent(t *testing.T) {
 		Config: &container.Config{Image: "jellyfin/jellyfin:latest"}, // Labels left nil
 	}
 
-	m := metaFromInspect(resp)
+	m := metaFromInspect(resp, nil)
 
 	require.Equal(t, "", m.ComposeProject)
 }
@@ -758,6 +760,18 @@ func TestAllocFromHostConfigFallsBackToCPUQuotaAndPeriod(t *testing.T) {
 // period.
 func TestAllocFromHostConfigCPUQuotaWithoutPeriodDefaultsTo100000(t *testing.T) {
 	a := allocFromHostConfig(container.Resources{CPUQuota: 200_000, CPUPeriod: 0})
+	require.True(t, a.HasCPUQuota)
+	require.Equal(t, 2.0, a.CPUQuotaCores)
+}
+
+// TestAllocFromHostConfigCPUQuotaWithNegativePeriodDefaultsTo100000 pins
+// the same runc default for a negative period, not just zero: dockerd
+// itself never writes a negative CPUPeriod, but a non-dockerd writer of
+// this same HostConfig shape (a bespoke tool poking the container's
+// config) could, and the guard must treat it the same as "absent"
+// rather than flowing a negative number into the quota/period division.
+func TestAllocFromHostConfigCPUQuotaWithNegativePeriodDefaultsTo100000(t *testing.T) {
+	a := allocFromHostConfig(container.Resources{CPUQuota: 200_000, CPUPeriod: -1})
 	require.True(t, a.HasCPUQuota)
 	require.Equal(t, 2.0, a.CPUQuotaCores)
 }
@@ -827,7 +841,7 @@ func TestMetaFromInspectPopulatesAllocFromHostConfig(t *testing.T) {
 		Config: &container.Config{Image: "postgres:16"},
 	}
 
-	m := metaFromInspect(resp)
+	m := metaFromInspect(resp, nil)
 
 	require.True(t, m.Alloc.HasMemLimit)
 	require.Equal(t, uint64(1_073_741_824), m.Alloc.MemLimitBytes)
@@ -849,9 +863,237 @@ func TestMetaFromInspectAllocZeroValueWhenHostConfigNil(t *testing.T) {
 		Config: &container.Config{Image: "jellyfin/jellyfin:latest"},
 	}
 
-	m := metaFromInspect(resp)
+	m := metaFromInspect(resp, nil)
 
 	require.Equal(t, alloc{}, m.Alloc)
+}
+
+// TestMetaFromInspectExtractsCreatedTimestamp pins Created's parse from
+// ContainerJSONBase.Created (RFC3339Nano, same format/field convention
+// State.StartedAt already uses).
+func TestMetaFromInspectExtractsCreatedTimestamp(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/jellyfin", Created: "2026-08-25T10:00:00.123456789Z",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{Image: "jellyfin/jellyfin:latest"},
+	}
+
+	m := metaFromInspect(resp, nil)
+
+	require.True(t, m.Created.Equal(time.Date(2026, 8, 25, 10, 0, 0, 123456789, time.UTC)))
+}
+
+// TestMetaFromInspectCreatedZeroWhenUnparseable pins the fallback half:
+// an empty or malformed Created string must leave Meta.Created at its
+// zero value rather than propagate a parse error or a garbage time.
+func TestMetaFromInspectCreatedZeroWhenUnparseable(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/jellyfin", // Created left as the zero string ""
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{Image: "jellyfin/jellyfin:latest"},
+	}
+
+	m := metaFromInspect(resp, nil)
+
+	require.True(t, m.Created.IsZero())
+}
+
+// TestMetaFromInspectExtractsWebUIURLLabel pins WebUIURL's extraction
+// from the net.unraid.docker.webui label -- the raw templated form
+// ("http://[IP]:[PORT:8096]/") passes through completely unresolved;
+// only the UI knows the request's own host to substitute for [IP].
+func TestMetaFromInspectExtractsWebUIURLLabel(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{
+			Image:  "jellyfin/jellyfin:latest",
+			Labels: map[string]string{unraidWebUILabel: "http://[IP]:[PORT:8096]/"},
+		},
+	}
+
+	m := metaFromInspect(resp, nil)
+
+	require.Equal(t, "http://[IP]:[PORT:8096]/", m.WebUIURL)
+}
+
+// TestMetaFromInspectWebUIURLEmptyWhenLabelAbsent mirrors Icon's own
+// absent-label contract for WebUIURL.
+func TestMetaFromInspectWebUIURLEmptyWhenLabelAbsent(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{Image: "jellyfin/jellyfin:latest"}, // Labels left nil
+	}
+
+	m := metaFromInspect(resp, nil)
+
+	require.Equal(t, "", m.WebUIURL)
+}
+
+// TestMetaFromInspectDerivesChangelogAndProjectURLsFromLabels confirms
+// metaFromInspect actually wires Config.Labels/Image through to
+// changelogAndProjectURLs (that function's own tests pin the derivation
+// rules in isolation) -- the real-box jellyfin shape: a github source
+// label plus a project url label.
+func TestMetaFromInspectDerivesChangelogAndProjectURLsFromLabels(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{
+			Image: "jellyfin/jellyfin:latest",
+			Labels: map[string]string{
+				ociSourceLabel: "https://github.com/jellyfin/jellyfin-packaging",
+				ociURLLabel:    "https://jellyfin.org",
+			},
+		},
+	}
+
+	m := metaFromInspect(resp, nil)
+
+	require.Equal(t, "https://github.com/jellyfin/jellyfin-packaging/releases", m.ChangelogURL)
+	require.Equal(t, "https://jellyfin.org", m.ProjectURL)
+}
+
+// TestMetaFromInspectJoinsUpdateStatusByImage confirms metaFromInspect
+// wires Image through to joinUpdateStatus (that function's own tests
+// pin the join/normalization rules in isolation), including the
+// no-tag-in-Config.Image case.
+func TestMetaFromInspectJoinsUpdateStatusByImage(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/audiobookshelf",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{Image: "ghcr.io/advplyr/audiobookshelf"}, // no tag
+	}
+	statuses := map[string]string{"ghcr.io/advplyr/audiobookshelf:latest": "available"}
+
+	m := metaFromInspect(resp, statuses)
+
+	require.Equal(t, "available", m.UpdateStatus)
+}
+
+// TestMetaFromInspectUpdateStatusEmptyWhenStatusesNil pins the "no
+// reader wired" / "unreadable this poll" degrade-to-unknown case.
+func TestMetaFromInspectUpdateStatusEmptyWhenStatusesNil(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/audiobookshelf",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{Image: "ghcr.io/advplyr/audiobookshelf:latest"},
+	}
+
+	m := metaFromInspect(resp, nil)
+
+	require.Equal(t, "", m.UpdateStatus)
+}
+
+// TestMetaFromInspectExtractsNetworksAndPorts confirms metaFromInspect
+// wires NetworkSettings through to extractNetworks/extractPorts (those
+// functions' own tests pin the extraction rules in isolation) for an
+// ordinary bridge-networked, published-port container.
+func TestMetaFromInspectExtractsNetworksAndPorts(t *testing.T) {
+	ns := &container.NetworkSettings{
+		Networks: map[string]*network.EndpointSettings{"bridge": {IPAddress: "172.17.0.2"}},
+	}
+	ns.Ports = nat.PortMap{"8096/tcp": []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: "8096"}}} // plain field assignment, not a NetworkSettingsBase literal -- see networkSettingsWithPorts' own doc in netinfo_test.go
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config:          &container.Config{Image: "jellyfin/jellyfin:latest"},
+		NetworkSettings: ns,
+	}
+
+	m := metaFromInspect(resp, nil)
+
+	require.Equal(t, []NetworkInfo{{Name: "bridge", IP: "172.17.0.2"}}, m.Networks)
+	require.Equal(t, []PortInfo{{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096}}, m.Ports)
+}
+
+// TestMetaFromInspectHostNetworkReportsHostEntryNoIP confirms
+// metaFromInspect resolves HostNet BEFORE calling extractNetworks, so a
+// host-network container reports the synthetic {Name: "host"} entry
+// even when NetworkSettings itself still carries bridge-shaped entries
+// (as a real host-network container's inspect response typically does).
+func TestMetaFromInspectHostNetworkReportsHostEntryNoIP(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/pihole",
+			State:      &container.State{Status: "running"},
+			HostConfig: &container.HostConfig{NetworkMode: "host"},
+		},
+		Config: &container.Config{Image: "pihole/pihole:latest"},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{"bridge": {IPAddress: "172.17.0.2"}},
+		},
+	}
+
+	m := metaFromInspect(resp, nil)
+
+	require.True(t, m.HostNet)
+	require.Equal(t, []NetworkInfo{{Name: "host"}}, m.Networks)
+}
+
+// TestMetaFromInspectNetworksSliceNotAliasedAcrossCalls pins the Meta
+// doc comment's immutability invariant: two metaFromInspect calls
+// against the same underlying resp produce independent Networks slices,
+// so mutating one Meta's slice can never leak into another's -- e.g. a
+// caller retaining an older Meta value across a poll must never see it
+// change out from under it.
+func TestMetaFromInspectNetworksSliceNotAliasedAcrossCalls(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{Image: "jellyfin/jellyfin:latest"},
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{"bridge": {IPAddress: "172.17.0.2"}},
+		},
+	}
+
+	m1 := metaFromInspect(resp, nil)
+	m2 := metaFromInspect(resp, nil)
+
+	m1.Networks[0].IP = "corrupted"
+	require.Equal(t, "172.17.0.2", m2.Networks[0].IP, "each metaFromInspect call must build its own fresh Networks slice")
+}
+
+// TestMetaFromInspectPortsSliceNotAliasedAcrossCalls mirrors
+// TestMetaFromInspectNetworksSliceNotAliasedAcrossCalls for Ports: the
+// same immutability invariant applies to both of Meta's slice fields,
+// not just Networks.
+func TestMetaFromInspectPortsSliceNotAliasedAcrossCalls(t *testing.T) {
+	ns := &container.NetworkSettings{}
+	ns.Ports = nat.PortMap{"8096/tcp": []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: "8096"}}} // plain field assignment, not a NetworkSettingsBase literal -- see networkSettingsWithPorts' own doc in netinfo_test.go
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID: "abc123", Name: "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config:          &container.Config{Image: "jellyfin/jellyfin:latest"},
+		NetworkSettings: ns,
+	}
+
+	m1 := metaFromInspect(resp, nil)
+	m2 := metaFromInspect(resp, nil)
+
+	m1.Ports[0].HostPort = 9999
+	require.Equal(t, 8096, m2.Ports[0].HostPort, "each metaFromInspect call must build its own fresh Ports slice")
 }
 
 // TestMetaFromInspectExtractsBindAndVolumeMounts pins the storage-panel
@@ -874,7 +1116,7 @@ func TestMetaFromInspectExtractsBindAndVolumeMounts(t *testing.T) {
 		},
 	}
 
-	m := metaFromInspect(resp)
+	m := metaFromInspect(resp, nil)
 
 	require.Equal(t, []MountInfo{
 		{Source: "/mnt/user/appdata/jellyfin", Destination: "/config", RW: true},
@@ -900,7 +1142,7 @@ func TestMetaFromInspectSkipsNonBindVolumeMountTypes(t *testing.T) {
 		},
 	}
 
-	m := metaFromInspect(resp)
+	m := metaFromInspect(resp, nil)
 
 	require.Equal(t, []MountInfo{{Source: "/mnt/user/data", Destination: "/data", RW: true}}, m.Mounts)
 }
@@ -918,7 +1160,7 @@ func TestMetaFromInspectMountsNilWhenNoMounts(t *testing.T) {
 		},
 	}
 
-	m := metaFromInspect(resp)
+	m := metaFromInspect(resp, nil)
 
 	require.Nil(t, m.Mounts)
 }

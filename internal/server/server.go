@@ -94,6 +94,60 @@ type Options struct {
 	// unlike Logs), and PUT — which has no meaningful no-op success for
 	// a write with nowhere to write to — answers 404.
 	Settings SettingsIface
+
+	// Images lists every image plus a usage-classification summary for
+	// GET /api/images (main wiring: a small adapter over
+	// docker.Collector.Images in real mode, fake.Generator.Images in
+	// fake mode — see api_images.go). Nil in tests that don't wire one —
+	// the route then reports an empty images list and a zeroed summary,
+	// matching Containers' own nil->empty convention.
+	Images func(ctx context.Context) (ImagesDTO, error)
+	// RemoveImages deletes the given image ids for POST
+	// /api/images/remove (main wiring: docker.Collector.RemoveImages /
+	// fake.Generator.RemoveImages). Nil in tests that don't wire one —
+	// unlike Images, there's no meaningful no-op success for a write
+	// with nowhere to write to, so the route 404s the same way Settings'
+	// PUT does for the same reason.
+	RemoveImages func(ctx context.Context, ids []string) ([]ImageRemoveResult, error)
+	// PruneImages deletes every image in one mode's set ("dangling" or
+	// "unused") for POST /api/images/prune (main wiring:
+	// docker.Collector.PruneImages / fake.Generator.PruneImages). Nil in
+	// tests that don't wire one — see RemoveImages.
+	PruneImages func(ctx context.Context, mode string) (ImagePruneResult, error)
+	// ContainersMaintenance lists every non-running container (see
+	// docker.ContainerMaintenanceInfo's own doc for the exact state set:
+	// exited/created/dead, paused/running excluded) plus per-state summary
+	// counts for GET /api/containers/maintenance (main wiring: a small
+	// adapter over docker.Collector.ContainersMaintenance in real mode,
+	// fake.Generator.ContainersMaintenance in fake mode — see
+	// api_containers_maintenance.go). Nil in tests that don't wire one —
+	// the route then reports an empty containers list, matching Images'
+	// own nil->empty convention.
+	ContainersMaintenance func(ctx context.Context) (ContainerMaintenanceDTO, error)
+	// RemoveContainers deletes the given container ids for POST
+	// /api/containers/maintenance/remove (main wiring:
+	// docker.Collector.RemoveContainers / fake.Generator.RemoveContainers).
+	// Nil in tests that don't wire one — see RemoveImages.
+	RemoveContainers func(ctx context.Context, ids []string) ([]ContainerRemoveResult, error)
+	// PruneContainers deletes every container in one mode's set ("exited",
+	// "created", or "all-stopped"), optionally further filtered to only
+	// those older than olderThanHours (0 = no age filter) for POST
+	// /api/containers/maintenance/prune (main wiring:
+	// docker.Collector.PruneContainers / fake.Generator.PruneContainers).
+	// Nil in tests that don't wire one — see RemoveImages.
+	PruneContainers func(ctx context.Context, mode string, olderThanHours int) (ContainerPruneResult, error)
+	// ReadOnly, when true, makes every /api/images and
+	// /api/containers/maintenance mutating route answer 403 without ever
+	// calling the corresponding Remove*/Prune* closure (both GET routes
+	// are unaffected) — main wiring resolves this once at startup from
+	// GANTRY_READ_ONLY, Gantry's write-path kill switch. Default false.
+	ReadOnly bool
+	// AppendEvent records one event (main wiring: store.Store.
+	// AppendEvent, a direct passthrough, same as Events) so a successful
+	// image removal/prune shows up in the Events view. Nil in tests that
+	// don't wire one — a successful mutation then simply skips event
+	// logging rather than panicking.
+	AppendEvent func(e store.Event) (int64, error)
 }
 
 type Server struct {
@@ -137,6 +191,12 @@ func New(o Options) *Server {
 	s.mux.Handle("GET /api/containers/{name}/storage", withGzip(http.HandlerFunc(s.handleStorage)))
 	s.mux.Handle("GET /api/settings", withGzip(http.HandlerFunc(s.handleSettingsGet)))
 	s.mux.Handle("PUT /api/settings", withGzip(http.HandlerFunc(s.handleSettingsPut)))
+	s.mux.Handle("GET /api/images", withGzip(http.HandlerFunc(s.handleImagesList)))
+	s.mux.Handle("POST /api/images/remove", withGzip(http.HandlerFunc(s.handleImagesRemove)))
+	s.mux.Handle("POST /api/images/prune", withGzip(http.HandlerFunc(s.handleImagesPrune)))
+	s.mux.Handle("GET /api/containers/maintenance", withGzip(http.HandlerFunc(s.handleContainersMaintenanceList)))
+	s.mux.Handle("POST /api/containers/maintenance/remove", withGzip(http.HandlerFunc(s.handleContainersMaintenanceRemove)))
+	s.mux.Handle("POST /api/containers/maintenance/prune", withGzip(http.HandlerFunc(s.handleContainersMaintenancePrune)))
 
 	s.mux.Handle("GET /", withGzip(webHandler()))
 	return s

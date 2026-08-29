@@ -318,6 +318,17 @@ func readCPUMax(path string) (quotaUsec, periodUsec uint64, hasQuota bool, err e
 	return quotaUsec, periodUsec, true, nil
 }
 
+// maxCPUSetRangeSpan caps both how wide a single "lo-hi" range in a
+// cpuset list may be AND how many distinct ids the list may name in
+// total, before parseCPUSetCount rejects it outright: no real host has
+// anywhere near this many cores, so either kind of excess is either a
+// corrupt read or an adversarial value, and materializing it into the
+// id set below (one map entry per core) would otherwise size that
+// allocation off an attacker- or corruption-controlled number. The
+// per-range check alone isn't enough: many disjoint ranges, each
+// individually under it, can still sum to an arbitrarily large total.
+const maxCPUSetRangeSpan = 1 << 16
+
 // parseCPUSetCount parses a cgroup cpuset core list ("0-5,13-15",
 // "0-15", "3") into the number of DISTINCT cores it names. Empty or
 // malformed input reports ok=false, which callers treat as "no pinning
@@ -326,9 +337,15 @@ func readCPUMax(path string) (quotaUsec, periodUsec uint64, hasQuota bool, err e
 // summed range-by-range, since HostConfig.CpusetCpus stores whatever raw
 // string a caller passed to --cpuset-cpus verbatim, and docker doesn't
 // reject overlapping ranges ("0-3,2-5") the way cpuset.cpus.effective's
-// own kernel-normalized form never would. Shared verbatim by the cgroup
-// v2 fast path (cpuset.cpus.effective) and the API fallback
-// (HostConfig.CpusetCpus, docker.go's allocFromHostConfig).
+// own kernel-normalized form never would. A single range spanning
+// maxCPUSetRangeSpan or more ids is rejected outright (see its own
+// doc), and so is the list as a whole once its running total of
+// distinct ids crosses that same cap -- checked after every
+// comma-separated part, so many disjoint ranges that each individually
+// pass the per-range check can't still add up to an unbounded total.
+// Shared verbatim by the cgroup v2 fast path (cpuset.cpus.effective)
+// and the API fallback (HostConfig.CpusetCpus, docker.go's
+// allocFromHostConfig).
 func parseCPUSetCount(s string) (count int, ok bool) {
 	ids, ok := parseCPUSetIDList(s)
 	return len(ids), ok
@@ -352,14 +369,20 @@ func parseCPUSetIDList(s string) (ids []int, ok bool) {
 		}
 		if !isRange {
 			idSet[loN] = struct{}{}
-			continue
+		} else {
+			hiN, err := strconv.Atoi(hi)
+			if err != nil || hiN < loN {
+				return nil, false
+			}
+			if hiN-loN >= maxCPUSetRangeSpan {
+				return nil, false
+			}
+			for i := loN; i <= hiN; i++ {
+				idSet[i] = struct{}{}
+			}
 		}
-		hiN, err := strconv.Atoi(hi)
-		if err != nil || hiN < loN {
-			return nil, false
-		}
-		for i := loN; i <= hiN; i++ {
-			idSet[i] = struct{}{}
+		if len(idSet) > maxCPUSetRangeSpan {
+			return nil, false // per-part total cap: catches many disjoint under-cap ranges summing past it
 		}
 	}
 	out := make([]int, 0, len(idSet))
@@ -470,18 +493,26 @@ func (c *Collector) hostCoresOrNumCPU() int {
 }
 
 // effectiveCPUAllocCores resolves one alloc's CPU ceiling into a single
-// core count against hostCores: a quota always wins outright when set; a
-// cpuset pin only counts when it actually narrows the container below
-// the host's own core count (cpuset.cpus.effective defaults to every
-// host core when nothing is pinned, which must read as unlimited rather
-// than "restricted to N cores" -- and hostCores itself unknown, <= 0,
-// must not be treated as a restriction either); when both are set, the
-// tighter of the two wins. The result is then clamped to hostCores:
+// core count: a quota always wins outright when set; a cpuset pin only
+// counts when it actually narrows the container below hostCores
+// (cpuset.cpus.effective defaults to every host core when nothing is
+// pinned, which must read as unlimited rather than "restricted to N
+// cores" -- and hostCores itself unknown, <= 0, must not be treated as a
+// restriction either); when both are set, the tighter of the two wins.
+//
+// hostCores and rawHostCores are deliberately different params. hostCores
+// (the caller's hostCoresOrNumCPU(), runtime.NumCPU()-backed when the
+// host collector hasn't ticked yet) only ever gates the cpuset-narrowing
+// decision above -- a rough guess is fine there, it's just a yes/no. The
+// final clamp below is different: it can silently overwrite
+// cpu.alloc_cores, a precise config readout, so it may only fire against
+// rawHostCores (the caller's own c.HostCores(), no NumCPU() fallback) --
 // dockerd doesn't validate --cpu-quota against the host's own core
-// count, and a ceiling above the machine is unusable headroom -- left
-// unclamped, alloc_pct would stay permanently capped below 100 even for
-// a container using every cycle the host can give it.
-func effectiveCPUAllocCores(a alloc, hostCores int) (cores float64, ok bool) {
+// count, and a ceiling above the machine is unusable headroom, but a
+// guessed "host size" is the wrong tool to fix that with. rawHostCores
+// <= 0 (host collector hasn't ticked) skips the clamp entirely rather
+// than guess.
+func effectiveCPUAllocCores(a alloc, hostCores, rawHostCores int) (cores float64, ok bool) {
 	cpusetRestricts := a.HasCPUSet && hostCores > 0 && a.CPUSetCores < hostCores
 	switch {
 	case a.HasCPUQuota && cpusetRestricts:
@@ -493,8 +524,8 @@ func effectiveCPUAllocCores(a alloc, hostCores int) (cores float64, ok bool) {
 	default:
 		return 0, false
 	}
-	if hostCores > 0 && cores > float64(hostCores) {
-		cores = float64(hostCores)
+	if rawHostCores > 0 && cores > float64(rawHostCores) {
+		cores = float64(rawHostCores)
 	}
 	return cores, ok
 }
@@ -538,7 +569,7 @@ func (c *Collector) recordContainerStats(name string, cg cgStats, now time.Time)
 	}
 
 	hostCores := c.hostCoresOrNumCPU()
-	allocCores, hasAllocCores := effectiveCPUAllocCores(cg.Alloc, hostCores)
+	allocCores, hasAllocCores := effectiveCPUAllocCores(cg.Alloc, hostCores, c.HostCores())
 	if hasAllocCores {
 		c.sink.Record(key("cpu.alloc_cores"), ts, allocCores)
 	}

@@ -16,7 +16,13 @@ import (
 // refreshed on the collector's 10s poll. It's the id -> data every other
 // collector (cgroup/API stats, per-container net, GPU attribution)
 // consumes via Lookup/Running. Metas are immutable once published --
-// never mutate a field in place, build a fresh Meta instead.
+// never mutate a field in place, build a fresh Meta instead: Networks/
+// Ports/Mounts in particular are always freshly built slices, one
+// metaFromInspect call at a time, never retained (let alone mutated in
+// place) from a previous poll and never shared with another container's
+// Meta, so a caller holding onto an older Meta value (or a slice sliced
+// out of it) is never surprised by a later poll's or another
+// container's data changing it out from under them.
 //
 // Alloc carries the HostConfig resource ceiling (allocFromHostConfig) --
 // the API-fallback path's primary source of allocation data (of the
@@ -24,6 +30,12 @@ import (
 // itself). Like the rest of Meta, it's only as fresh as the last 10s
 // inventory poll, unlike the cgroup v2 fast path's own allocation read
 // (cgroupv2.go), which is fresh every 2s tick.
+//
+// UpdateStatus/ChangelogURL/ProjectURL/WebUIURL/Created feed the update-
+// badge/changelog-link UI: UpdateStatus joins Image against the unraid-
+// update-status.json reader's snapshot (updatestatus.go); the other four
+// come straight from metaFromInspect's own resp fields and labels
+// (changelog.go).
 type Meta struct {
 	ID, Name, Image, Icon, State, Health string
 	// ComposeProject is the com.docker.compose.project label docker
@@ -31,11 +43,11 @@ type Meta struct {
 	// belongs to -- "" for a container not created via compose. Extracted
 	// in metaFromInspect exactly like Icon (a label read, nil-Labels-safe,
 	// no separate absence check).
-	ComposeProject string
-	Pid            int
-	StartedAt      time.Time
-	HostNet        bool
-	RestartCount   int
+	ComposeProject     string
+	Pid                int
+	StartedAt, Created time.Time
+	HostNet            bool
+	RestartCount       int
 	// Cpuset is the display-ready cpuset pin string ("0-5, 13-15") when
 	// this container's cpuset actually narrows it below the host's own
 	// core count -- "" for an unpinned or unrestricted one (CPUSetPin,
@@ -50,9 +62,13 @@ type Meta struct {
 	// meaningful only once State is "exited" or "dead" (0 while running,
 	// same "always present, contextually interpreted" convention as
 	// State/Health themselves).
-	ExitCode int
-	Alloc    alloc
-	Mounts   []MountInfo
+	ExitCode                           int
+	Alloc                              alloc
+	Mounts                             []MountInfo
+	UpdateStatus                       string // "available" | "current" | "" (unknown: no match, no reader, unreadable file)
+	ChangelogURL, ProjectURL, WebUIURL string
+	Networks                           []NetworkInfo
+	Ports                              []PortInfo
 }
 
 // MountInfo is one container mount, as reported by docker inspect's

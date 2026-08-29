@@ -192,6 +192,89 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	drainAndClose(settingsResp2)
 	require.Equal(t, 72, settingsBody2.Retention.R1Hours, "PUT must persist through the real store, visible on the very next GET")
 
+	// /api/images smoke check: exercises the real fake.Generator-backed
+	// Images/RemoveImages/PruneImages wiring end to end (fake mode has no
+	// real docker daemon, so this is the ONLY way that selection is ever
+	// exercised against a live server). GET first sees the full fake
+	// seed, a prune("unused") removes some of it, and a targeted
+	// remove of one still-dangling id removes exactly that one --
+	// together proving both mutating routes actually reach the fake
+	// inventory, not just validate and stop.
+	imagesResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/images", port))
+	require.NoError(t, err)
+	var imagesBody struct {
+		Images []struct {
+			ID     string `json:"id"`
+			FullID string `json:"full_id"`
+			State  string `json:"state"`
+		} `json:"images"`
+		Summary struct {
+			Unused int    `json:"unused"`
+			Note   string `json:"note"`
+		} `json:"summary"`
+	}
+	require.NoError(t, json.NewDecoder(imagesResp.Body).Decode(&imagesBody))
+	drainAndClose(imagesResp)
+	require.Equal(t, http.StatusOK, imagesResp.StatusCode)
+	require.Len(t, imagesBody.Images, 13, "fake mode's own image seed")
+	require.NotEmpty(t, imagesBody.Summary.Note)
+	var danglingFullID string
+	for _, im := range imagesBody.Images {
+		if im.State == "dangling" {
+			danglingFullID = im.FullID
+			break
+		}
+	}
+	require.NotEmpty(t, danglingFullID, "mutating calls use full_id, not GET's own display-only short id")
+
+	pruneResp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), "application/json", strings.NewReader(`{"mode":"unused"}`))
+	require.NoError(t, err)
+	drainAndClose(pruneResp)
+	// No X-Gantry-Confirm header on this request: must 428, proving the
+	// guardrail is really wired into the live route, not bypassed.
+	require.Equal(t, http.StatusPreconditionRequired, pruneResp.StatusCode)
+
+	pruneReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), strings.NewReader(`{"mode":"unused"}`))
+	require.NoError(t, err)
+	pruneReq.Header.Set("X-Gantry-Confirm", "images")
+	pruneResp2, err := http.DefaultClient.Do(pruneReq)
+	require.NoError(t, err)
+	var pruneBody struct {
+		Deleted []struct {
+			ID string `json:"id"`
+		} `json:"deleted"`
+	}
+	require.NoError(t, json.NewDecoder(pruneResp2.Body).Decode(&pruneBody))
+	drainAndClose(pruneResp2)
+	require.Equal(t, http.StatusOK, pruneResp2.StatusCode)
+	require.Len(t, pruneBody.Deleted, imagesBody.Summary.Unused, "must delete every currently-unused fake image")
+
+	removeReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/remove", port), strings.NewReader(`{"ids":["`+danglingFullID+`"]}`))
+	require.NoError(t, err)
+	removeReq.Header.Set("X-Gantry-Confirm", "images")
+	removeResp, err := http.DefaultClient.Do(removeReq)
+	require.NoError(t, err)
+	var removeBody []struct {
+		ID string `json:"id"`
+		OK bool   `json:"ok"`
+	}
+	require.NoError(t, json.NewDecoder(removeResp.Body).Decode(&removeBody))
+	drainAndClose(removeResp)
+	require.Equal(t, http.StatusOK, removeResp.StatusCode)
+	require.Equal(t, []struct {
+		ID string `json:"id"`
+		OK bool   `json:"ok"`
+	}{{ID: danglingFullID, OK: true}}, removeBody)
+
+	imagesResp2, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/images", port))
+	require.NoError(t, err)
+	var imagesBody2 struct {
+		Images []struct{} `json:"images"`
+	}
+	require.NoError(t, json.NewDecoder(imagesResp2.Body).Decode(&imagesBody2))
+	drainAndClose(imagesResp2)
+	require.Len(t, imagesBody2.Images, 13-len(pruneBody.Deleted)-1, "both the prune and the remove must have actually mutated the fake inventory")
+
 	// Every request above went through http.DefaultTransport, which keeps
 	// the underlying connection open (keep-alive) for reuse even after its
 	// response body is drained and closed. An idle-but-open connection
@@ -219,6 +302,170 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 func drainAndClose(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
+}
+
+// TestRunReadOnlyModeBlocksImageMutationsButNotGet pins GANTRY_READ_ONLY's
+// wiring through the real config resolver (cfg.Bool("read_only", ...),
+// same envName mapping every other GANTRY_* setting uses) all the way to
+// Options.ReadOnly: a mutating route must 403 even with a correct
+// X-Gantry-Confirm header, while GET /api/images is unaffected.
+func TestRunReadOnlyModeBlocksImageMutationsButNotGet(t *testing.T) {
+	port := freePort(t)
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_READ_ONLY": "1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	getResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/images", port))
+	require.NoError(t, err)
+	drainAndClose(getResp)
+	require.Equal(t, http.StatusOK, getResp.StatusCode, "GET must stay available in read-only mode")
+
+	pruneReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), strings.NewReader(`{"mode":"unused"}`))
+	require.NoError(t, err)
+	pruneReq.Header.Set("X-Gantry-Confirm", "images")
+	pruneResp, err := http.DefaultClient.Do(pruneReq)
+	require.NoError(t, err)
+	drainAndClose(pruneResp)
+	require.Equal(t, http.StatusForbidden, pruneResp.StatusCode)
+
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+}
+
+// TestRunWiresContainerMaintenanceThroughFakeDataEndToEnd pins main's own
+// containersMaintenanceSrc/removeContainersSrc/pruneContainersSrc wiring
+// (buildContainersMaintenance/buildRemoveContainers), not just the
+// server package's own handler behavior (already covered without a real
+// run() at all): GET must return the real fake seed's own
+// "duplicati" entry, and removing it by the id GET actually handed back
+// must succeed end to end -- a broken or missing adapter wiring would
+// otherwise still return 200s (Options fields default to empty/404, not
+// a compile error), so only exercising real data through the full stack
+// catches it.
+func TestRunWiresContainerMaintenanceThroughFakeDataEndToEnd(t *testing.T) {
+	port := freePort(t)
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_FAKE_DATA": "1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	getResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/containers/maintenance", port))
+	require.NoError(t, err)
+	var dto server.ContainerMaintenanceDTO
+	require.NoError(t, json.NewDecoder(getResp.Body).Decode(&dto))
+	drainAndClose(getResp)
+	require.Equal(t, http.StatusOK, getResp.StatusCode)
+
+	var duplicatiID string
+	for _, ct := range dto.Containers {
+		if ct.Name == "duplicati" {
+			duplicatiID = ct.FullID
+		}
+	}
+	require.NotEmpty(t, duplicatiID, "fake mode's seed must include a duplicati entry")
+
+	removeReq, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/api/containers/maintenance/remove", port),
+		strings.NewReader(`{"ids":["`+duplicatiID+`"]}`))
+	require.NoError(t, err)
+	removeReq.Header.Set("X-Gantry-Confirm", "containers")
+	removeResp, err := http.DefaultClient.Do(removeReq)
+	require.NoError(t, err)
+	var results []server.ContainerRemoveResult
+	require.NoError(t, json.NewDecoder(removeResp.Body).Decode(&results))
+	drainAndClose(removeResp)
+	require.Equal(t, http.StatusOK, removeResp.StatusCode)
+	require.Equal(t, []server.ContainerRemoveResult{{ID: duplicatiID, OK: true}}, results)
+
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+}
+
+// TestRunReadOnlyModeBlocksContainerMaintenanceMutationsButNotGet mirrors
+// TestRunReadOnlyModeBlocksImageMutationsButNotGet exactly, for the
+// container-maintenance write path.
+func TestRunReadOnlyModeBlocksContainerMaintenanceMutationsButNotGet(t *testing.T) {
+	port := freePort(t)
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_READ_ONLY": "1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	getResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/containers/maintenance", port))
+	require.NoError(t, err)
+	drainAndClose(getResp)
+	require.Equal(t, http.StatusOK, getResp.StatusCode, "GET must stay available in read-only mode")
+
+	pruneReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/containers/maintenance/prune", port), strings.NewReader(`{"mode":"exited"}`))
+	require.NoError(t, err)
+	pruneReq.Header.Set("X-Gantry-Confirm", "containers")
+	pruneResp, err := http.DefaultClient.Do(pruneReq)
+	require.NoError(t, err)
+	drainAndClose(pruneResp)
+	require.Equal(t, http.StatusForbidden, pruneResp.StatusCode)
+
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
 }
 
 // TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed exercises the
@@ -311,6 +558,75 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 	require.Equal(t, "healthy", c.Health)
 	require.Equal(t, "demo/jellyfin:latest", c.Image)
 	require.Equal(t, 4.2, c.Metrics["cpu.pct"])
+}
+
+// TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO pins
+// buildSnapshot's own field-by-field copy of Meta's badge/changelog/
+// network/port fields into ContainerDTO -- the same copy State/Health/
+// Image/Icon already get, just for this round's additions. Each of
+// docker.Meta's own producer functions (metaFromInspect, extractNetworks/
+// extractPorts, changelogAndProjectURLs, joinUpdateStatus) has its own
+// tests pinning the values themselves; this pins that buildSnapshot
+// actually wires them through to the DTO once Meta carries them.
+func TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
+	sources := func() map[string]string { return map[string]string{} }
+	created := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{
+			Name: "jellyfin", State: "running", Health: "healthy", Image: "jellyfin/jellyfin:latest",
+			Created:      created,
+			UpdateStatus: "available",
+			ChangelogURL: "https://github.com/jellyfin/jellyfin-packaging/releases",
+			ProjectURL:   "https://jellyfin.org",
+			WebUIURL:     "http://[IP]:[PORT:8096]/",
+			Networks:     []docker.NetworkInfo{{Name: "bridge", IP: "172.17.0.2"}},
+			Ports:        []docker.PortInfo{{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096}},
+		}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil)()
+
+	c, ok := snap.Containers["jellyfin"]
+	require.True(t, ok)
+	require.Equal(t, created.Unix(), c.Created)
+	require.Equal(t, "available", c.UpdateStatus)
+	require.Equal(t, "https://github.com/jellyfin/jellyfin-packaging/releases", c.ChangelogURL)
+	require.Equal(t, "https://jellyfin.org", c.ProjectURL)
+	require.Equal(t, "http://[IP]:[PORT:8096]/", c.WebUIURL)
+	require.Equal(t, []server.NetworkInfoDTO{{Name: "bridge", IP: "172.17.0.2"}}, c.Networks)
+	require.Equal(t, []server.PortInfoDTO{{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096}}, c.Ports)
+}
+
+// TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage pins the zero-time
+// guard: Go's zero time.Time.Unix() is a large negative number (year 1),
+// not 0 -- a container Meta never populated Created (metaFromInspect
+// couldn't parse it, or fake mode doesn't set it) must map to
+// ContainerDTO.Created == 0, not that garbage value.
+func TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "jellyfin", State: "running"}} // Created left at its zero value
+	}
+
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil)()
+
+	require.Equal(t, int64(0), snap.Containers["jellyfin"].Created)
 }
 
 // TestBuildSnapshotDropsStaleSampleFromRunningContainer pins the
@@ -444,6 +760,70 @@ func TestBuildSnapshotPassesThroughCpusetAndExitCode(t *testing.T) {
 	require.Equal(t, 0, snap.Containers["jellyfin"].ExitCode)
 }
 
+// TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary pins
+// the per-sample freshness gate's own boundary (main.go: "nowUnix-
+// sample.TS >= containerFrameMaxAge"): a sample exactly containerFrameMaxAge
+// seconds old must be dropped, not just one older than that -- >=, not >.
+// containerFrameEntities' own boundary (the entity-level cutoff) already
+// has this exact pin; this is the per-sample gate's turn.
+func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().Unix()
+	st.Record(store.SeriesKey{Kind: "container", Entity: "db", Metric: "mem.limit_bytes"}, now-containerFrameMaxAge, 1e9) // exactly at the boundary
+	st.Record(store.SeriesKey{Kind: "container", Entity: "db", Metric: "mem.bytes"}, now-(containerFrameMaxAge-1), 5e8)   // one second younger: must survive
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "db", State: "running"}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil)()
+
+	c, ok := snap.Containers["db"]
+	require.True(t, ok)
+	_, hasAtBoundary := c.Metrics["mem.limit_bytes"]
+	require.False(t, hasAtBoundary, "a sample exactly containerFrameMaxAge seconds old must be dropped (>=, not >)")
+	require.Equal(t, 5e8, c.Metrics["mem.bytes"], "a sample one second younger than the boundary must still come through")
+}
+
+// TestBuildSnapshotDropsStaleContainerGPUBusyPct pins main.go's own claim
+// (buildSnapshot's per-sample freshness-gate comment) that the same gate
+// covers container-attributed gpu.*.busy_pct going quiet, not just the
+// mem/cpu-family metrics the other stale-sample test already exercises --
+// gpu.render.busy_pct is one of the four names resourceMetrics' own "gpu"
+// resource family recognizes (api_history.go).
+func TestBuildSnapshotDropsStaleContainerGPUBusyPct(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().Unix()
+	st.Record(store.SeriesKey{Kind: "container", Entity: "plex", Metric: "gpu.render.busy_pct"}, now-90, 42.0) // stale: older than containerFrameMaxAge
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "plex", State: "running"}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil)()
+
+	c, ok := snap.Containers["plex"]
+	require.True(t, ok)
+	_, hasStale := c.Metrics["gpu.render.busy_pct"]
+	require.False(t, hasStale, "a stale container-attributed gpu.render.busy_pct sample must be dropped, same as any other stale metric on a running container")
+}
+
 // TestBuildSnapshotMergesDiskMetaFromRealAndFake pins the disk_meta
 // analogue of the fake-Metas test above: a real box's own unraid
 // collector (ticked against a hand-written disks.ini) and fake mode's
@@ -520,6 +900,10 @@ func TestBuildContainersListNilFakeMetasUnaffected(t *testing.T) {
 
 	require.Empty(t, buildContainersList(dc, nil)())
 }
+
+// fakeMeta builds a minimal known-container answer for a lookupByName
+// stand-in, without needing a real docker.Collector/daemon.
+func fakeMeta(name string) docker.Meta { return docker.Meta{Name: name} }
 
 // TestContainerStorageResolvesMountsAndDeviceIO pins containerStorage's
 // full happy path: a hand-built lookupMeta/poolSlots pair (no real
@@ -806,6 +1190,65 @@ func TestBuildContainerStorageNilFakeMetasUnaffected(t *testing.T) {
 
 	_, ok := buildContainerStorage(dc, ur, st, nil, nil, nil, nil, "/unused")("ghost")
 	require.False(t, ok)
+}
+
+// TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup pins the OR's
+// first clause: a name in `running` is included unconditionally — the
+// lookup function must not even be consulted for it (a call for this name
+// fails the test immediately, proving the OR short-circuits).
+func TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup(t *testing.T) {
+	running := map[string]struct{}{"jellyfin": {}}
+	lookup := func(name string) (docker.Meta, bool) {
+		t.Fatalf("lookupByName must not be consulted for a running container, got %q", name)
+		return docker.Meta{}, false
+	}
+
+	got := containerFrameEntities(running, map[string]int64{}, 60, lookup)
+	require.Contains(t, got, "jellyfin")
+}
+
+// TestContainerFrameEntitiesIncludesFreshKnownNonRunning pins the OR's
+// second clause: a non-running name with a live sample younger than
+// maxAge AND a known lookup result is included.
+func TestContainerFrameEntitiesIncludesFreshKnownNonRunning(t *testing.T) {
+	lookup := func(name string) (docker.Meta, bool) { return fakeMeta(name), name == "radarr" }
+
+	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 59}, 60, lookup)
+	require.Contains(t, got, "radarr")
+}
+
+// TestContainerFrameEntitiesExcludesStaleEvenWhenKnown pins the
+// "stopped-and-gone" cutoff itself: once a non-running container's
+// freshest sample is 60s old or older, it drops out of the frame even
+// though lookupByName still recognizes the name (registry cleanup and
+// the frame's own 60s cutoff are two different clocks).
+func TestContainerFrameEntitiesExcludesStaleEvenWhenKnown(t *testing.T) {
+	lookup := func(name string) (docker.Meta, bool) { return fakeMeta(name), true }
+
+	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 60}, 60, lookup)
+	require.NotContains(t, got, "radarr", "age >= maxAge must exclude, not just age > maxAge")
+}
+
+// TestContainerFrameEntitiesExcludesFreshButUnknown pins the other half:
+// a stopped-AND-REMOVED container's lingering fresh sample must not
+// resurrect it once dc no longer knows the name at all.
+func TestContainerFrameEntitiesExcludesFreshButUnknown(t *testing.T) {
+	lookup := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
+
+	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 0}, 60, lookup)
+	require.NotContains(t, got, "radarr", "a name the registry no longer knows must drop immediately")
+}
+
+// TestContainerFrameEntitiesRunningWinsOverStaleSample confirms a name
+// present in both `running` and `sampleAge` (the common case: a running
+// container that also has metric samples) is included via the running
+// clause and isn't accidentally excluded by a stale sampleAge entry.
+func TestContainerFrameEntitiesRunningWinsOverStaleSample(t *testing.T) {
+	running := map[string]struct{}{"jellyfin": {}}
+	lookup := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
+
+	got := containerFrameEntities(running, map[string]int64{"jellyfin": 99999}, 60, lookup)
+	require.Contains(t, got, "jellyfin")
 }
 
 func TestHealthcheckExitPath(t *testing.T) {

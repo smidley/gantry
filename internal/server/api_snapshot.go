@@ -47,12 +47,39 @@ type DiskMetaDTO struct {
 
 // ContainerDTO is one container's inventory metadata plus its latest
 // metric values, keyed by container name in SnapshotDTO.Containers.
+//
+// UpdateStatus is "available" | "current" | "" (unknown: no unraid-
+// update-status.json reader wired, the file was unreadable this poll,
+// or this image has no entry in it). ChangelogURL/ProjectURL are each
+// independently "" when nothing could be derived for that one field —
+// see docker.changelogAndProjectURLs' own doc for the derivation rules.
+//
+// WebUIURL is the net.unraid.docker.webui label's RAW value, completely
+// unresolved -- a template placeholder like "http://[IP]:[PORT:8096]/",
+// not a usable URL. There's no backend resolution: the frontend is
+// responsible for substituting [IP] -> window.location.hostname and
+// [PORT:x] -> x itself, the same way Unraid's own WebUI does, since only
+// the browser making the request knows the right host. Once resolved,
+// the frontend must scheme-allowlist the result (http/https only)
+// before it ever lands in an href, and must never render it via
+// Svelte's {@html} -- container labels are attacker-controllable (a
+// hostile Community Applications template), so a value that isn't even
+// a well-formed http(s) URL must not silently become a script-capable
+// one.
+//
+// Created/UpdateStatus/ChangelogURL/ProjectURL/WebUIURL/Networks/Ports
+// all carry "omitempty": this frame ships every currently-running
+// container on every tick (SSE included), so omitting an empty
+// collection/absent value entirely is cheaper than an endpoint DTO like
+// StorageDTO (server.StorageDTO's own doc), whose Mounts/Devices are
+// deliberately always non-nil "[]" -- a per-request, one-container
+// response has no such multiplied cost.
 type ContainerDTO struct {
-	State   string             `json:"state"`
-	Health  string             `json:"health"`
-	Image   string             `json:"image"`
-	Icon    string             `json:"icon"`
-	Metrics map[string]float64 `json:"metrics"`
+	State   string `json:"state"`
+	Health  string `json:"health"`
+	Image   string `json:"image"`
+	Icon    string `json:"icon"`
+	Created int64  `json:"created,omitempty"`
 	// ComposeProject is docker.Meta's own field of the same name, straight
 	// through -- "" for a container not created via docker compose. The
 	// compare view's Groups chip row (Containers.svelte) groups by this.
@@ -65,7 +92,32 @@ type ContainerDTO struct {
 	// ExitCode is docker.Meta's own field of the same name, straight
 	// through -- meaningful only once State is "exited"/"dead". Backs
 	// Container Detail's anomaly banner ("Stopped -- exit code 137 ...").
-	ExitCode int `json:"exit_code"`
+	ExitCode     int                `json:"exit_code"`
+	UpdateStatus string             `json:"update_status,omitempty"`
+	ChangelogURL string             `json:"changelog_url,omitempty"`
+	ProjectURL   string             `json:"project_url,omitempty"`
+	WebUIURL     string             `json:"webui_url,omitempty"`
+	Networks     []NetworkInfoDTO   `json:"networks,omitempty"`
+	Ports        []PortInfoDTO      `json:"ports,omitempty"`
+	Metrics      map[string]float64 `json:"metrics"`
+}
+
+// NetworkInfoDTO is one docker network a container is attached to. IP
+// is "" for a network that assigns none to this container and for the
+// synthetic {Name: "host"} entry host-network containers report.
+type NetworkInfoDTO struct {
+	Name string `json:"name"`
+	IP   string `json:"ip,omitempty"`
+}
+
+// PortInfoDTO is one container-port binding. HostIP/HostPort are both
+// their zero value for an exposed-but-unpublished port (EXPOSE with no
+// -p) -- itself useful information, not an absence to filter out.
+type PortInfoDTO struct {
+	ContainerPort int    `json:"container_port"`
+	Proto         string `json:"proto"`
+	HostIP        string `json:"host_ip,omitempty"`
+	HostPort      int    `json:"host_port,omitempty"`
 }
 
 // ContainerInfo is the /api/containers response shape: inventory facts

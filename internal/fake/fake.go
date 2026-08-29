@@ -10,6 +10,8 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/smidley/gantry/internal/collect/docker"
@@ -82,13 +84,48 @@ type archetype struct {
 	// set this, so the Containers view's Groups chip row has a real
 	// multi-container "team" to render in fake mode.
 	composeProject string
+
+	// updateStatus/changelogURL/projectURL are the update-badge demo
+	// variety: "" (most of the fleet, the real-box default) means no
+	// update data at all. jellyfin and paperless are given an
+	// "available" update, matching real-box label/image shapes Scott
+	// found on his own box (jellyfin: a github source label plus a
+	// project url; paperless: changelog derived from its ghcr.io image
+	// ref alone, no labels); sonarr demos the OTHER non-empty state,
+	// "current" (already up to date, still worth badging).
+	updateStatus string
+	changelogURL string
+	projectURL   string
+
+	// webUIURL/hostNet/networks/ports are the container-detail demo
+	// variety (network/port/webui-launch surfaces): "" / false / nil /
+	// nil (most of the fleet, the real-box default for a plain bridge
+	// container with no CA webui label) means nothing to show. jellyfin
+	// gets a Community-Applications-style webui template placeholder
+	// plus a published dual-stack port pair and one unpublished port,
+	// mirroring a real box's own jellyfin container; pihole is the
+	// fleet's one host-network demo container (a common real-box choice
+	// for DNS).
+	webUIURL string
+	hostNet  bool
+	networks []docker.NetworkInfo
+	ports    []docker.PortInfo
 }
 
 var fleet = []archetype{
-	{name: "jellyfin", cpuBase: 4, cpuAmp: 3, cpuSpike: 0.02, memBytes: 900e6, netScale: 4e6},
+	{name: "jellyfin", cpuBase: 4, cpuAmp: 3, cpuSpike: 0.02, memBytes: 900e6, netScale: 4e6,
+		updateStatus: "available", changelogURL: "https://github.com/jellyfin/jellyfin-packaging/releases", projectURL: "https://jellyfin.org",
+		webUIURL: "http://[IP]:[PORT:8096]/",
+		networks: []docker.NetworkInfo{{Name: "bridge", IP: "172.17.0.2"}},
+		ports: []docker.PortInfo{
+			{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096},
+			{ContainerPort: 8096, Proto: "tcp", HostIP: "::", HostPort: 8096},
+			{ContainerPort: 8920, Proto: "tcp"}, // EXPOSEd HTTPS port, unpublished -- the real template's own default
+		}},
 	{name: "plex", cpuBase: 3, cpuAmp: 2, cpuSpike: 0.02, memBytes: 800e6, netScale: 3e6},
 	{name: "radarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 300e6, netScale: 2e5},
-	{name: "sonarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 320e6, netScale: 2e5},
+	// sonarr: the "already up to date" update-status demo container.
+	{name: "sonarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 320e6, netScale: 2e5, updateStatus: "current"},
 	{name: "prowlarr", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 150e6, netScale: 5e4, stopped: true},
 	{name: "qbittorrent", cpuBase: 6, cpuAmp: 4, cpuSpike: 0.01, memBytes: 500e6, netScale: 8e6},
 	{name: "sabnzbd", cpuBase: 2, cpuAmp: 6, cpuSpike: 0.01, memBytes: 400e6, netScale: 9e6},
@@ -101,14 +138,18 @@ var fleet = []archetype{
 	// needs one currently-unhealthy fleet member to demo against; see
 	// unhealthyEventFired's own doc for the matching events-feed evidence.
 	{name: "grafana", cpuBase: 1, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 250e6, netScale: 6e4, unhealthy: true},
-	{name: "pihole", cpuBase: 0.5, cpuAmp: 0.3, cpuSpike: 0.001, memBytes: 120e6, netScale: 4e4},
+	// pihole: the host-network demo container (--net=host, a common
+	// real-box choice for DNS).
+	{name: "pihole", cpuBase: 0.5, cpuAmp: 0.3, cpuSpike: 0.001, memBytes: 120e6, netScale: 4e4,
+		hostNet: true, networks: []docker.NetworkInfo{{Name: "host"}}},
 	{name: "nginx", cpuBase: 0.3, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 80e6, netScale: 5e5},
 	// vaultwarden's exitCode 137 (SIGKILL/OOM-likely) gives the anomaly
 	// banner's exit-code table a dramatic stopped demo alongside
 	// prowlarr's own plain, code-0 "stopped cleanly" one below.
 	{name: "vaultwarden", cpuBase: 0.2, cpuAmp: 0.1, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4, stopped: true, exitCode: 137},
 	{name: "immich", cpuBase: 5, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.5e9, netScale: 1e6},
-	{name: "paperless", cpuBase: 1, cpuAmp: 2, cpuSpike: 0.01, memBytes: 400e6, netScale: 8e4},
+	{name: "paperless", cpuBase: 1, cpuAmp: 2, cpuSpike: 0.01, memBytes: 400e6, netScale: 8e4,
+		updateStatus: "available", changelogURL: "https://github.com/paperless-ngx/paperless-ngx/releases"},
 	{name: "gitea", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 300e6, netScale: 6e4},
 	// minecraft: the cpuset-pinned demo container (pinned to 2 of the fake host's 8 cores).
 	{name: "minecraft", cpuBase: 8, cpuAmp: 5, cpuSpike: 0.01, memBytes: 2.5e9, netScale: 3e5, cpuAllocCores: 2.0, cpusetRaw: "0-1"},
@@ -319,10 +360,37 @@ type Generator struct {
 	// jellyfinBurstTicks counts down a GPU-usage burst in progress; 0
 	// means idle and eligible to roll a new burst.
 	jellyfinBurstTicks int
+
+	// imagesMu guards images, this Generator's own mutable copy of
+	// fakeImageSeed (see New) -- Images/RemoveImages/PruneImages
+	// (images.go) are called concurrently by HTTP handlers, unlike
+	// everything else on Generator, which only Run's single goroutine
+	// ever touches.
+	imagesMu sync.Mutex
+	images   []docker.ImageInfo
+
+	// containersMu guards containers, this Generator's own mutable copy
+	// of fakeContainerMaintenanceSeed (see New) -- ContainersMaintenance/
+	// RemoveContainers/PruneContainers (containers_maintenance.go) are
+	// called concurrently by HTTP handlers, same reasoning as imagesMu.
+	containersMu sync.Mutex
+	containers   []docker.ContainerMaintenanceInfo
 }
 
 func New(sink store.MetricSink, events EventSink, seed int64) *Generator {
-	return &Generator{sink: sink, events: events, rng: rand.New(rand.NewSource(seed))}
+	return &Generator{
+		sink: sink, events: events, rng: rand.New(rand.NewSource(seed)),
+		// A shallow copy of the slice header: RemoveImages/PruneImages
+		// only ever remove whole elements (never mutate one in place), so
+		// sharing fakeImageSeed's element structs/inner slices across
+		// every Generator is safe -- only the top-level slice itself must
+		// be independent, or one instance's append/delete would corrupt
+		// another's view into the same backing array.
+		images: append([]docker.ImageInfo(nil), fakeImageSeed...),
+		// Same shallow-copy reasoning as images, just for the container-
+		// maintenance seed -- see containersMu's own doc.
+		containers: append([]docker.ContainerMaintenanceInfo(nil), fakeContainerMaintenanceSeed...),
+	}
 }
 
 func clamp(v, lo, hi float64) float64 { return math.Max(lo, math.Min(hi, v)) }
@@ -697,16 +765,21 @@ func fakeContainerMounts(name string) []docker.MountInfo {
 // members marked archetype.stopped ("exited"/"") or archetype.created
 // ("created"/"") (the fleet's running/stopped/created split is otherwise
 // fixed -- emitContainerEvents' periodic events simulate restarts/OOMs on
-// top of it, without actually changing any member's own state here),
+// top of it, without actually changing any member's own state here), and
+// health "unhealthy" for the one member marked archetype.unhealthy,
 // plus a plausible Mounts set (fakeContainerMounts) so the storage panel
-// has something to resolve. main wiring passes this to buildSnapshot/
-// buildContainersList/buildContainerStorage (GANTRY_FAKE_DATA=1 only) so
-// the fake fleet is treated exactly like a real registry's own entries:
-// without it, every fake-mode frame would come up empty, since this
-// generator writes samples straight to the store, bypassing docker's
-// registry entirely. buildContainersList/buildContainerStorage still
-// only care about a container being KNOWN, not which state it's in, so
-// the stopped/created members flow through those two unchanged.
+// has something to resolve. Created reuses fakeContainerStartedAt's own
+// instant rather than a separate offset: this fleet's identity never
+// restarts, so "created" and "started" are the same moment, exactly
+// like a real container that's run continuously since it was first
+// created. main wiring passes this to buildSnapshot/buildContainersList/
+// buildContainerStorage (GANTRY_FAKE_DATA=1 only) so the fake fleet is
+// treated exactly like a real registry's own entries: without it, every
+// fake-mode frame would come up empty, since this generator writes
+// samples straight to the store, bypassing docker's registry entirely.
+// buildContainersList/buildContainerStorage still only care about a
+// container being KNOWN, not which state it's in, so the stopped/created
+// members flow through those two unchanged.
 func (g *Generator) Metas() []docker.Meta {
 	out := make([]docker.Meta, len(fleet))
 	for i, a := range fleet {
@@ -721,7 +794,11 @@ func (g *Generator) Metas() []docker.Meta {
 		}
 		m := docker.Meta{
 			Name: a.name, State: state, Health: health, Image: "demo/" + a.name + ":latest",
-			ComposeProject: a.composeProject, Mounts: fakeContainerMounts(a.name), ExitCode: a.exitCode,
+			Created:        fakeContainerStartedAt(g.boot, i),
+			ComposeProject: a.composeProject, HostNet: a.hostNet,
+			Mounts: fakeContainerMounts(a.name), ExitCode: a.exitCode,
+			UpdateStatus: a.updateStatus, ChangelogURL: a.changelogURL, ProjectURL: a.projectURL,
+			WebUIURL: a.webUIURL, Networks: slices.Clone(a.networks), Ports: slices.Clone(a.ports),
 		}
 		// Cpuset: docker.CPUSetPin, not a literal, so fake mode's own
 		// "narrows below host" gate can never drift from the real

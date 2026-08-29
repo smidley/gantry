@@ -32,7 +32,7 @@ func TestMetaFromInspectExtractsExitCode(t *testing.T) {
 					State: c.state,
 				},
 			}
-			m := metaFromInspect(resp)
+			m := metaFromInspect(resp, nil)
 			require.Equal(t, c.wantCode, m.ExitCode)
 			require.Equal(t, c.state.Status, m.State)
 		})

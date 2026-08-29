@@ -78,6 +78,11 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 
 	cfg := config.New(st, getenv)
 	port := cfg.Int("port", 8380)
+	// readOnly is Gantry's write-path kill switch (GANTRY_READ_ONLY=1,
+	// resolved through the same env>settings>default precedence every
+	// other cfg.Bool call uses): every /api/images mutating route 403s
+	// while it's set, GET unaffected -- see server.Options.ReadOnly.
+	readOnly := cfg.Bool("read_only", false)
 
 	var wg sync.WaitGroup
 
@@ -95,14 +100,18 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// own doc); fakeSharePlacement is the same overlay again, for the
 	// share->cache-pool join (see fake.Generator.SharePlacements' own
 	// doc) -- real mode never sees a shares.ini in this closure at all,
-	// so there's nothing to overlay onto there either.
+	// so there's nothing to overlay onto there either. fk itself (nil
+	// outside fake-data mode) is kept for the image-inventory and
+	// container-maintenance wiring below, once dc exists to default
+	// against.
 	var fakeMetas func() []docker.Meta
 	var fakeDiskMeta func() map[string]unraid.DiskMeta
 	var fakeDeviceLabels func() map[string]unraid.DeviceLabel
 	var fakeSharePlacement func() map[string]unraid.SharePlacement
+	var fk *fake.Generator
 	if cfg.Bool("fake_data", false) {
 		log.Println("fake data mode: synthesizing a demo fleet")
-		fk := fake.New(st, st, time.Now().UnixNano())
+		fk = fake.New(st, st, time.Now().UnixNano())
 		fakeMetas = fk.Metas
 		fakeDiskMeta = fk.DiskMetas
 		fakeDeviceLabels = fk.DeviceLabels
@@ -128,6 +137,35 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 
 	dc := docker.New(st, st, st.Live().Evict, dockerSock)
 	wireDockerCollector(dc, host, cgroupRoot)
+	usr := unraid.NewUpdateStatusReader(envOnly(getenv, "GANTRY_UPDATE_STATUS_PATH", "/updates/unraid-update-status.json"))
+	dc.UpdateStatuses = usr.Statuses
+
+	// imagesSrc/removeImagesSrc/pruneImagesSrc default to the real
+	// docker collector and switch entirely to fk's synthetic inventory
+	// in fake-data mode (unlike fakeMetas/fakeDiskMeta above, this is an
+	// exclusive swap, not a merge -- fake-data mode's dev box has no
+	// real docker daemon for dc's own methods to mean anything against).
+	imagesSrc := dc.Images
+	removeImagesSrc := dc.RemoveImages
+	pruneImagesSrc := dc.PruneImages
+	if fk != nil {
+		imagesSrc = fk.Images
+		removeImagesSrc = fk.RemoveImages
+		pruneImagesSrc = fk.PruneImages
+	}
+
+	// containersMaintenanceSrc/removeContainersSrc/pruneContainersSrc are
+	// the container-maintenance analogue of imagesSrc/removeImagesSrc/
+	// pruneImagesSrc immediately above -- same exclusive real/fake swap,
+	// same reasoning.
+	containersMaintenanceSrc := dc.ContainersMaintenance
+	removeContainersSrc := dc.RemoveContainers
+	pruneContainersSrc := dc.PruneContainers
+	if fk != nil {
+		containersMaintenanceSrc = fk.ContainersMaintenance
+		removeContainersSrc = fk.RemoveContainers
+		pruneContainersSrc = fk.PruneContainers
+	}
 
 	// gpuLookup adapts docker's Meta-returning Lookup to the name-only
 	// signature both GPU collectors (DRM fdinfo and nvidia-smi) need for
@@ -235,6 +273,17 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Logs:       dc.StreamLogs,
 		Storage:    buildContainerStorage(dc, ur, st, fakeMetas, fakeDiskMeta, fakeDeviceLabels, fakeSharePlacement, sysRoot),
 		Settings:   settingsAdapter{st: st, cfg: cfg},
+
+		Images:       buildImages(imagesSrc),
+		RemoveImages: buildRemoveImages(removeImagesSrc),
+		PruneImages:  buildPruneImages(pruneImagesSrc),
+
+		ContainersMaintenance: buildContainersMaintenance(containersMaintenanceSrc),
+		RemoveContainers:      buildRemoveContainers(removeContainersSrc),
+		PruneContainers:       buildPruneContainers(pruneContainersSrc),
+
+		ReadOnly:    readOnly,
+		AppendEvent: st.AppendEvent,
 	}).ListenAndServe(runCtx)
 	cancel()
 	wg.Wait()
@@ -349,9 +398,16 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 				Health:         m.Health,
 				Image:          m.Image,
 				Icon:           m.Icon,
+				Created:        metaCreatedUnix(m.Created),
 				ComposeProject: m.ComposeProject,
 				Cpuset:         m.Cpuset,
 				ExitCode:       m.ExitCode,
+				UpdateStatus:   m.UpdateStatus,
+				ChangelogURL:   m.ChangelogURL,
+				ProjectURL:     m.ProjectURL,
+				WebUIURL:       m.WebUIURL,
+				Networks:       convertNetworks(m.Networks),
+				Ports:          convertPorts(m.Ports),
 				Metrics:        map[string]float64{},
 			}
 		}
@@ -402,6 +458,79 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 		}
 		return dto
 	}
+}
+
+// metaCreatedUnix converts a Meta.Created into ContainerDTO's wire form.
+// Go's zero time.Time.Unix() is a large negative number (year 1), not
+// 0 -- guarding IsZero() here is what lets ContainerDTO's own
+// `json:"created,omitempty"` correctly omit an unparsed/absent Created
+// rather than serialize that garbage value.
+func metaCreatedUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// convertNetworks/convertPorts adapt docker.Meta's own Networks/Ports
+// (docker.NetworkInfo/docker.PortInfo) to their wire-tagged DTO
+// counterparts (server.NetworkInfoDTO/server.PortInfoDTO) -- server
+// deliberately doesn't import the docker package (collectors stay
+// mutually decoupled from the HTTP layer, the same reason buildTop/
+// buildContainersList live here rather than in server), so this
+// field-by-field copy is main's job, same as Image/Icon/etc. just above.
+func convertNetworks(in []docker.NetworkInfo) []server.NetworkInfoDTO {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]server.NetworkInfoDTO, len(in))
+	for i, n := range in {
+		out[i] = server.NetworkInfoDTO{Name: n.Name, IP: n.IP}
+	}
+	return out
+}
+
+func convertPorts(in []docker.PortInfo) []server.PortInfoDTO {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]server.PortInfoDTO, len(in))
+	for i, p := range in {
+		out[i] = server.PortInfoDTO{ContainerPort: p.ContainerPort, Proto: p.Proto, HostIP: p.HostIP, HostPort: p.HostPort}
+	}
+	return out
+}
+
+// containerFrameEntities decides which container entities belong in this
+// tick's frame: every name in running is always included; a name that's
+// merely referenced by a live sample gets one more chance, but only if
+// its freshest sample is younger than maxAge seconds AND lookupByName
+// still recognizes the name. Both conditions matter independently: age
+// alone would let a fully-removed container's still-fresh-but-orphaned
+// sample flicker back into view for up to maxAge seconds, and
+// lookupByName alone would let a long-stopped-but-not-removed
+// container's stale metrics linger for as long as its ring happens to
+// still hold data (~15 minutes) instead of the frame's own, much shorter
+// cutoff. Extracted as a pure function so it's testable without a real
+// docker daemon or *store.Store.
+func containerFrameEntities(running map[string]struct{}, sampleAge map[string]int64, maxAge int64, lookupByName func(string) (docker.Meta, bool)) map[string]struct{} {
+	out := make(map[string]struct{}, len(running))
+	for name := range running {
+		out[name] = struct{}{}
+	}
+	for name, age := range sampleAge {
+		if _, already := out[name]; already {
+			continue
+		}
+		if age >= maxAge {
+			continue
+		}
+		if _, known := lookupByName(name); !known {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	return out
 }
 
 // buildContainersList returns the closure wired to server.Options.
@@ -608,6 +737,136 @@ func buildTop(st *store.Store) func(ctx context.Context, kind, metric string, fr
 			out[i] = server.TopRow{Entity: row.Entity, Value: row.Value}
 		}
 		return out, nil
+	}
+}
+
+// buildImages adapts docker.ImagesReport (src is dc.Images in real mode,
+// fk.Images in fake mode -- see run()'s imagesSrc wiring) to
+// server.ImagesDTO for server.Options.Images: a field-by-field copy, the
+// same shape as buildTop above. ImagesDTO.Summary.Note is left zero here
+// -- it's a fixed caveat about the reclaimable_bytes field itself, not
+// data from either source, so the server package's own handler fills it
+// in unconditionally.
+func buildImages(src func(ctx context.Context) (docker.ImagesReport, error)) func(ctx context.Context) (server.ImagesDTO, error) {
+	return func(ctx context.Context) (server.ImagesDTO, error) {
+		report, err := src(ctx)
+		if err != nil {
+			return server.ImagesDTO{}, err
+		}
+		out := server.ImagesDTO{
+			Images: make([]server.ImageInfo, len(report.Images)),
+			Summary: server.ImagesSummary{
+				InUse:            report.Summary.InUse,
+				Unused:           report.Summary.Unused,
+				Dangling:         report.Summary.Dangling,
+				ReclaimableBytes: report.Summary.ReclaimableBytes,
+			},
+		}
+		for i, im := range report.Images {
+			out.Images[i] = server.ImageInfo{
+				ID: im.ID, RepoTags: im.RepoTags, RepoDigests: im.RepoDigests, SizeBytes: im.SizeBytes,
+				Created: im.Created, State: im.State, Containers: im.Containers,
+			}
+		}
+		return out, nil
+	}
+}
+
+// buildRemoveImages adapts []docker.ImageRemoveResult to
+// []server.ImageRemoveResult for server.Options.RemoveImages -- see
+// buildImages.
+func buildRemoveImages(src func(ctx context.Context, ids []string) ([]docker.ImageRemoveResult, error)) func(ctx context.Context, ids []string) ([]server.ImageRemoveResult, error) {
+	return func(ctx context.Context, ids []string) ([]server.ImageRemoveResult, error) {
+		results, err := src(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]server.ImageRemoveResult, len(results))
+		for i, r := range results {
+			out[i] = server.ImageRemoveResult{ID: r.ID, OK: r.OK, Error: r.Error, RepoTags: r.RepoTags, SizeBytes: r.SizeBytes}
+		}
+		return out, nil
+	}
+}
+
+// buildPruneImages adapts docker.ImagePruneResult to
+// server.ImagePruneResult for server.Options.PruneImages -- see
+// buildImages.
+func buildPruneImages(src func(ctx context.Context, mode string) (docker.ImagePruneResult, error)) func(ctx context.Context, mode string) (server.ImagePruneResult, error) {
+	return func(ctx context.Context, mode string) (server.ImagePruneResult, error) {
+		r, err := src(ctx, mode)
+		if err != nil {
+			return server.ImagePruneResult{}, err
+		}
+		deleted := make([]server.DeletedImage, len(r.Deleted))
+		for i, d := range r.Deleted {
+			deleted[i] = server.DeletedImage{ID: d.ID, RepoTags: d.RepoTags, SizeBytes: d.SizeBytes}
+		}
+		return server.ImagePruneResult{Deleted: deleted, ReclaimedBytes: r.ReclaimedBytes, Errors: r.Errors}, nil
+	}
+}
+
+// buildContainersMaintenance adapts docker.ContainerMaintenanceReport
+// (src is dc.ContainersMaintenance in real mode, fk.
+// ContainersMaintenance in fake mode -- see run()'s
+// containersMaintenanceSrc wiring) to server.ContainerMaintenanceDTO for
+// server.Options.ContainersMaintenance -- see buildImages.
+func buildContainersMaintenance(src func(ctx context.Context) (docker.ContainerMaintenanceReport, error)) func(ctx context.Context) (server.ContainerMaintenanceDTO, error) {
+	return func(ctx context.Context) (server.ContainerMaintenanceDTO, error) {
+		report, err := src(ctx)
+		if err != nil {
+			return server.ContainerMaintenanceDTO{}, err
+		}
+		out := server.ContainerMaintenanceDTO{
+			Containers: make([]server.ContainerMaintenanceInfo, len(report.Containers)),
+			Summary: server.ContainerMaintenanceSummary{
+				Exited:  report.Summary.Exited,
+				Created: report.Summary.Created,
+				Dead:    report.Summary.Dead,
+			},
+		}
+		for i, ct := range report.Containers {
+			out.Containers[i] = server.ContainerMaintenanceInfo{
+				ID: ct.ID, Name: ct.Name, Image: ct.Image, State: ct.State,
+				ExitCode: ct.ExitCode, Created: ct.Created, FinishedAt: ct.FinishedAt, Managed: ct.Managed,
+				RestartPolicy: ct.RestartPolicy,
+			}
+		}
+		return out, nil
+	}
+}
+
+// buildRemoveContainers adapts []docker.ContainerRemoveResult to
+// []server.ContainerRemoveResult for server.Options.RemoveContainers --
+// see buildImages/buildRemoveImages.
+func buildRemoveContainers(src func(ctx context.Context, ids []string) ([]docker.ContainerRemoveResult, error)) func(ctx context.Context, ids []string) ([]server.ContainerRemoveResult, error) {
+	return func(ctx context.Context, ids []string) ([]server.ContainerRemoveResult, error) {
+		results, err := src(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]server.ContainerRemoveResult, len(results))
+		for i, r := range results {
+			out[i] = server.ContainerRemoveResult{ID: r.ID, OK: r.OK, Error: r.Error, Name: r.Name, Image: r.Image}
+		}
+		return out, nil
+	}
+}
+
+// buildPruneContainers adapts docker.ContainerPruneResult to
+// server.ContainerPruneResult for server.Options.PruneContainers -- see
+// buildImages/buildPruneImages.
+func buildPruneContainers(src func(ctx context.Context, mode string, olderThanHours int) (docker.ContainerPruneResult, error)) func(ctx context.Context, mode string, olderThanHours int) (server.ContainerPruneResult, error) {
+	return func(ctx context.Context, mode string, olderThanHours int) (server.ContainerPruneResult, error) {
+		r, err := src(ctx, mode, olderThanHours)
+		if err != nil {
+			return server.ContainerPruneResult{}, err
+		}
+		deleted := make([]server.DeletedContainer, len(r.Deleted))
+		for i, d := range r.Deleted {
+			deleted[i] = server.DeletedContainer{ID: d.ID, Name: d.Name, Image: d.Image}
+		}
+		return server.ContainerPruneResult{Deleted: deleted, Errors: r.Errors}, nil
 	}
 }
 

@@ -144,7 +144,12 @@ export const routes: NavItem[] = [
     icon: ICON_CONTAINERS,
     mobileLabel: 'Contain­ers',
   },
-  { name: 'top', hash: '#/top', label: 'Top Consumers', icon: ICON_TOP, mobileLabel: 'Top Consum­ers' },
+  // label is "Metrics" (route/name stay "top"/"#/top" -- only the display
+  // text renamed, once the page stopped being just a leaderboard and
+  // grew a real per-metric chart): short enough on its own that it
+  // needs no mobileLabel soft-hyphen variant, unlike its "Top Consumers"
+  // predecessor.
+  { name: 'top', hash: '#/top', label: 'Metrics', icon: ICON_TOP },
   { name: 'storage', hash: '#/storage', label: 'Storage', icon: ICON_STORAGE },
   { name: 'gpu', hash: '#/gpu', label: 'GPU', icon: ICON_GPU },
   { name: 'events', hash: '#/events', label: 'Events', icon: ICON_EVENTS },

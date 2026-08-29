@@ -10,12 +10,12 @@
 // member reflows every LATER member's color -- the same unavoidable
 // consequence position-based color assignment already has on the
 // Metrics page when its own ranking changes.
-const SERIES_COLOR_COUNT = 8;
+const SERIES_COLOR_COUNT = 10;
 
 // seriesColorVar returns the CSS var() reference for member index `i`
-// (0-based) -- wrapped (not clamped) into tokens.css's own 8-slot
+// (0-based) -- wrapped (not clamped) into tokens.css's own 10-slot
 // categorical palette, though Compare.svelte never actually calls this
-// past index 7: MAX_COMPARE_MEMBERS (compareRoute.ts) already caps how
+// past index 9: MAX_COMPARE_MEMBERS (compareRoute.ts) already caps how
 // many members ever reach a chart/chip in the first place, so the wrap
 // is defensive only.
 export function seriesColorVar(i: number): string {

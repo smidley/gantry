@@ -24,7 +24,7 @@
   import { untrack } from 'svelte';
   import { Tween } from 'svelte/motion';
   import { linear } from 'svelte/easing';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { motion } from '../lib/motion.svelte';
   import { live } from '../lib/sse.svelte';
   import { pushRing } from '../lib/livering';
   import { sumSeriesPoints } from '../lib/metrics';
@@ -67,7 +67,7 @@
   // knownForCharts/chartMembers: the chart/legend-color-eligible subset --
   // filtered to names the live frame actually knows about FIRST, then
   // capped to MAX_COMPARE_MEMBERS, so a stale bookmarked name never
-  // occupies one of the 8 precious chart slots ahead of a real member.
+  // occupies one of the 10 precious chart slots ahead of a real member.
   // Before the first frame has ever landed (live.frameCount === 0) every
   // requested name is provisionally treated as known -- same "don't
   // trust a not-yet-populated frame's absence as a real absence" gate
@@ -81,7 +81,7 @@
 
   // memberColor: chart-eligible members get their assigned series color
   // (position in chartMembers, matching every chart's own series order);
-  // anything past the 8-member cap (or not currently known) gets no
+  // anything past the 10-member cap (or not currently known) gets no
   // assigned color at all -- it isn't drawn on any chart, so a categorical
   // hue there would falsely imply otherwise.
   let memberColor = $derived(new Map(chartMembers.map((name, i) => [name, seriesColorVar(i)])));
@@ -183,7 +183,7 @@
   });
 
   // --- Fetched (non-live) series: one /api/series call per chart member,
-  // same top-8-style request bounding the Metrics page's own hero chart
+  // same top-10-style request bounding the Metrics page's own hero chart
   // uses (fetchedHeroSeries) -- fired together, keyed by member name so
   // pointsFor below can look a member up regardless of which slot it
   // currently occupies.
@@ -320,14 +320,14 @@
   // --- Group totals: always live/current, independent of activeRange
   // (see this file's own module doc) -- a plain sum over EVERY requested
   // member (uncapped: cheap, no network request, just a live.frame read),
-  // so the totals row stays truthful even past the charts' own 8-member
+  // so the totals row stays truthful even past the charts' own 10-member
   // cap.
   let groupTotals = $derived(
     computeGroupTotals(requestedNames, live.frame?.containers ?? {}, resourceScaleMax('mem', live.frame)),
   );
 
   function tweenTo(tween, value) {
-    tween.set(value, { duration: prefersReducedMotion.current ? 0 : live.glideMs, easing: linear });
+    tween.set(value, { duration: motion.reduced ? 0 : live.glideMs, easing: linear });
   }
   let totalCpuPctTween = new Tween(0, { duration: live.glideMs, easing: linear });
   let totalCpuCoresTween = new Tween(0, { duration: live.glideMs, easing: linear });

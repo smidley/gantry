@@ -27,10 +27,10 @@ export interface CoreBudget {
 
 // MAX_NAMED_SEGMENTS caps how many containers get their own named,
 // individually-colored segment before the rest fold into one "Others"
-// bucket -- tokens.css's own categorical palette only has 8 series slots,
-// and a ribbon with 20+ slivers each fighting for a sliver of hue stops
-// being readable well before then anyway.
-export const MAX_NAMED_SEGMENTS = 8;
+// bucket -- tokens.css's own categorical palette only has 10 series
+// slots, and a ribbon with 20+ slivers each fighting for a sliver of hue
+// stops being readable well before then anyway.
+export const MAX_NAMED_SEGMENTS = 10;
 
 const OTHERS_COLOR = 'var(--ink-2)';
 const UNATTRIBUTED_COLOR = 'color-mix(in oklab, var(--ink) 30%, transparent)';

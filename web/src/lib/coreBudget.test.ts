@@ -7,7 +7,7 @@ describe('buildCoreBudget', () => {
     expect(buildCoreBudget(-1, 50, [])).toEqual({ segments: [], freeCores: 0 });
   });
 
-  it('names every container when there are 8 or fewer, sorted desc by cores', () => {
+  it('names every container when there are 10 or fewer, sorted desc by cores', () => {
     const budget = buildCoreBudget(8, 0, [
       { name: 'a', cores: 1 },
       { name: 'b', cores: 3 },
@@ -35,15 +35,15 @@ describe('buildCoreBudget', () => {
     expect(budget.segments.map((s) => s.key)).toEqual(['busy']);
   });
 
-  it('buckets everything past the top 8 into one "Others" segment', () => {
-    const containers = Array.from({ length: 10 }, (_, i) => ({ name: `c${i}`, cores: 10 - i }));
+  it('buckets everything past the top 10 into one "Others" segment', () => {
+    const containers = Array.from({ length: 13 }, (_, i) => ({ name: `c${i}`, cores: 20 - i }));
     const budget = buildCoreBudget(64, 0, containers);
     expect(budget.segments).toHaveLength(MAX_NAMED_SEGMENTS + 1);
     const others = budget.segments[budget.segments.length - 1];
     expect(others.key).toBe('others');
-    expect(others.label).toBe('Others (2)');
-    // c8 (cores=2) + c9 (cores=1)
-    expect(others.cores).toBe(3);
+    expect(others.label).toBe('Others (3)');
+    // c10 (cores=10) + c11 (cores=9) + c12 (cores=8)
+    expect(others.cores).toBe(27);
   });
 
   it('adds an unattributed-host segment for host activity no container accounts for', () => {

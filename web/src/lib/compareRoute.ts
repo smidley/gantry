@@ -16,8 +16,8 @@ import type { ContainerDTO } from './api';
 // charts/fetches series for (see Compare.svelte) -- the same cap, and the
 // same reason, as the Metrics page's own MAX_HERO_LINES: one categorical
 // series color per member, and this app's palette (tokens.css) has
-// exactly 8 (--series-1..8).
-export const MAX_COMPARE_MEMBERS = 8;
+// exactly 10 (--series-1..10).
+export const MAX_COMPARE_MEMBERS = 10;
 
 // buildCompareHash returns the "#/compare/..." hash for a set of
 // container names -- ALWAYS deduplicated and sorted ascending first, so

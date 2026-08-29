@@ -16,8 +16,11 @@
   --ink-2: #52514e;
 
   /* Categorical series slots -- fixed order, never cycled or
-     reassigned by rank. A caller with >8 series buckets the rest into
-     "Other" rather than wrapping back to --series-1. */
+     reassigned by rank. A caller with >10 series buckets the rest into
+     "Other" rather than wrapping back to --series-1. 9/10 (a cyan and a
+     magenta/orchid) fill the two widest gaps left open by the first 8's
+     own OKLCH hue spacing (roughly 209deg and 320deg), not just appended
+     past the end of the hue wheel. */
   --series-1: #2a78d6;
   --series-2: #eb6834;
   --series-3: #1baf7a;
@@ -26,6 +29,8 @@
   --series-6: #008300;
   --series-7: #4a3aa7;
   --series-8: #e34948;
+  --series-9: #008a9a;
+  --series-10: #a355b3;
 
   /* Status colors are reserved for health/severity meaning ONLY --
      always paired with an icon or text label, never used for series
@@ -71,6 +76,8 @@
     --series-6: #008300;
     --series-7: #9085e9;
     --series-8: #e66767;
+    --series-9: #00acc0;
+    --series-10: #bd6ece;
   }
 }
 
@@ -88,4 +95,6 @@
   --series-6: #008300;
   --series-7: #9085e9;
   --series-8: #e66767;
+  --series-9: #00acc0;
+  --series-10: #bd6ece;
 }

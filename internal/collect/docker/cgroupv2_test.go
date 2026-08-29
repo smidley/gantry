@@ -203,6 +203,11 @@ func TestParseCPUSetCount(t *testing.T) {
 		{name: "malformed trailing comma", in: "0-5,", want: 0, ok: false},
 		{name: "malformed inverted range", in: "5-2", want: 0, ok: false},
 		{name: "malformed dangling dash", in: "0-5,-", want: 0, ok: false},
+		{name: "range span just under the materialization guard is allowed", in: "0-65535", want: 65536, ok: true},
+		{name: "range span at the materialization guard is rejected", in: "0-65536", want: 0, ok: false},
+		{name: "grossly oversized range rejected rather than materialized", in: "0-4294967295", want: 0, ok: false},
+		{name: "many disjoint ranges, each under the per-range guard, rejected once their TOTAL crosses it", in: "0-49999,60000-109999", want: 0, ok: false},
+		{name: "disjoint ranges summing to exactly the total guard are allowed", in: "0-32767,40000-72767", want: 65536, ok: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -506,67 +511,113 @@ func TestRecordContainerStatsMemBytesFloorsAtZero(t *testing.T) {
 // own core count (cpuset.cpus.effective defaults to every host core when
 // nothing is pinned, which must read as unlimited, not "restricted to N
 // cores"); when both are set, the tighter of the two applies.
+//
+// hostCores and rawHostCores are deliberately separate params (review
+// follow-up on the container-limits round): hostCores (hostCoresOrNumCPU's
+// value, runtime.NumCPU()-backed when the host collector hasn't ticked)
+// still gates the cpuset-narrowing decision, but only rawHostCores (the
+// host collector's own HostCores(), no fallback) may clamp the final
+// cores figure -- NumCPU() is a fine stand-in for "is this cpuset/quota
+// actually restrictive" but too unreliable a guess to silently overwrite
+// a precise config readout like cpu.alloc_cores. Most cases below set
+// both to the same value (the ordinary case: the host collector has
+// ticked, so rawHostCores IS the fallback value); the two cases at the
+// end pin the split itself.
 func TestEffectiveCPUAllocCores(t *testing.T) {
 	cases := []struct {
-		name      string
-		a         alloc
-		hostCores int
-		wantCores float64
-		wantOK    bool
+		name         string
+		a            alloc
+		hostCores    int
+		rawHostCores int
+		wantCores    float64
+		wantOK       bool
 	}{
 		{
 			name:      "quota only",
 			a:         alloc{CPUQuotaCores: 4.0, HasCPUQuota: true},
-			hostCores: 16, wantCores: 4.0, wantOK: true,
+			hostCores: 16, rawHostCores: 16, wantCores: 4.0, wantOK: true,
 		},
 		{
 			name:      "cpuset pinned below host cores",
 			a:         alloc{CPUSetCores: 9, HasCPUSet: true},
-			hostCores: 16, wantCores: 9.0, wantOK: true,
+			hostCores: 16, rawHostCores: 16, wantCores: 9.0, wantOK: true,
 		},
 		{
 			name:      "cpuset covers every host core is unrestricted",
 			a:         alloc{CPUSetCores: 16, HasCPUSet: true},
-			hostCores: 16, wantCores: 0, wantOK: false,
+			hostCores: 16, rawHostCores: 16, wantCores: 0, wantOK: false,
 		},
 		{
 			name:      "cpuset count exceeding host cores is unrestricted",
 			a:         alloc{CPUSetCores: 20, HasCPUSet: true},
-			hostCores: 16, wantCores: 0, wantOK: false,
+			hostCores: 16, rawHostCores: 16, wantCores: 0, wantOK: false,
 		},
 		{
 			name:      "quota wider than host is clamped to host cores",
 			a:         alloc{CPUQuotaCores: 32.0, HasCPUQuota: true},
-			hostCores: 16, wantCores: 16.0, wantOK: true,
+			hostCores: 16, rawHostCores: 16, wantCores: 16.0, wantOK: true,
 		},
 		{
 			name:      "quota tighter than cpuset: quota wins",
 			a:         alloc{CPUQuotaCores: 4.0, HasCPUQuota: true, CPUSetCores: 9, HasCPUSet: true},
-			hostCores: 16, wantCores: 4.0, wantOK: true,
+			hostCores: 16, rawHostCores: 16, wantCores: 4.0, wantOK: true,
 		},
 		{
 			name:      "cpuset tighter than quota: cpuset wins",
 			a:         alloc{CPUQuotaCores: 10.0, HasCPUQuota: true, CPUSetCores: 9, HasCPUSet: true},
-			hostCores: 16, wantCores: 9.0, wantOK: true,
+			hostCores: 16, rawHostCores: 16, wantCores: 9.0, wantOK: true,
 		},
 		{
 			name:      "neither set is unlimited",
 			a:         alloc{},
-			hostCores: 16, wantCores: 0, wantOK: false,
+			hostCores: 16, rawHostCores: 16, wantCores: 0, wantOK: false,
 		},
 		{
 			name:      "cpuset set but host core count unknown must not restrict",
 			a:         alloc{CPUSetCores: 9, HasCPUSet: true},
-			hostCores: 0, wantCores: 0, wantOK: false,
+			hostCores: 0, rawHostCores: 0, wantCores: 0, wantOK: false,
+		},
+		{
+			name:      "raw host cores unknown skips the clamp even though the narrowing fallback is known",
+			a:         alloc{CPUQuotaCores: 32.0, HasCPUQuota: true},
+			hostCores: 16, rawHostCores: 0, wantCores: 32.0, wantOK: true,
+		},
+		{
+			name:      "clamp uses raw host cores, not the narrowing fallback's own value",
+			a:         alloc{CPUQuotaCores: 32.0, HasCPUQuota: true},
+			hostCores: 4, rawHostCores: 16, wantCores: 16.0, wantOK: true,
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			gotCores, gotOK := effectiveCPUAllocCores(c.a, c.hostCores)
+			gotCores, gotOK := effectiveCPUAllocCores(c.a, c.hostCores, c.rawHostCores)
 			require.Equal(t, c.wantOK, gotOK)
 			require.InDelta(t, c.wantCores, gotCores, 1e-9)
 		})
 	}
+}
+
+// TestRecordContainerStatsCPUAllocClampUsesRawHostCoresNotNumCPUFallback
+// pins the call site's own half of the raw-vs-fallback clamp split
+// (effectiveCPUAllocCores's own tests pin the pure function; this pins
+// that recordContainerStats actually wires c.HostCores() -- not
+// c.hostCoresOrNumCPU() -- into the clamp param). HostCores() returns 0
+// (unknown), so cpu.alloc_cores must come back completely unclamped
+// even though the quota (999999999999... a stand-in for "wider than any
+// real host") would have been clamped to a small number had the
+// NumCPU()-backed fallback leaked into the clamp instead.
+func TestRecordContainerStatsCPUAllocClampUsesRawHostCoresNotNumCPUFallback(t *testing.T) {
+	sink := newFakeSink()
+	c := newStatsCollector(sink)
+	c.HostCores = func() int { return 0 } // raw unknown; hostCoresOrNumCPU() still falls back internally for cpu.pct
+
+	c.recordContainerStats("web", cgStats{
+		Alloc: alloc{CPUQuotaCores: 1_000_000.0, HasCPUQuota: true},
+	}, time.Unix(1000, 0))
+
+	allocCores, ok := sink.value("web", "cpu.alloc_cores")
+	require.True(t, ok)
+	require.Equal(t, 1_000_000.0, allocCores, "an unknown raw host core count must skip the clamp entirely, not clamp to runtime.NumCPU()'s fallback value")
 }
 
 // TestFallbackAllocPrefersAPIPidsLimitOverHostConfig pins the pids

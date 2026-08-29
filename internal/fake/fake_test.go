@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
@@ -442,12 +443,117 @@ func TestMetasReturnsRunningHealthyDemoImagePerFleetMember(t *testing.T) {
 	require.Len(t, seen, len(fleet), "every fleet member must have a distinct name")
 }
 
+// TestMetasGivesAFewContainersUpdateStatusVarietyWithChangelogURL pins
+// the update-badge demo variety Scott's brief asked for: at least one
+// (but not most -- the real-box default is unknown) fake container
+// reports UpdateStatus "available" with a ChangelogURL, AND at least one
+// reports "current" (a container that's already up to date still has a
+// status worth badging, distinct from "no data at all"), so the UI's
+// badge/changelog-link feature has something to show for both states in
+// fake mode without needing a real box.
+func TestMetasGivesAFewContainersUpdateStatusVarietyWithChangelogURL(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	metas := g.Metas()
+
+	var available, current int
+	for _, m := range metas {
+		switch m.UpdateStatus {
+		case "":
+			continue
+		case "available":
+			require.NotEmpty(t, m.ChangelogURL, "%s reports an update available but has no changelog link", m.Name)
+			available++
+		case "current":
+			current++
+		default:
+			t.Fatalf("%s: unexpected UpdateStatus %q", m.Name, m.UpdateStatus)
+		}
+	}
+	require.Greater(t, available, 0, "at least one fake container must demo the update-available badge")
+	require.Greater(t, current, 0, "at least one fake container must demo the already-current badge")
+	require.Less(t, available+current, len(fleet), "most of the fake fleet must stay at no update data at all, matching the real-box default")
+}
+
 // TestMetasIsPureAndStable pins that Metas needs no ticks at all (a
 // freshly constructed Generator answers it immediately) and returns
 // the same content every call.
 func TestMetasIsPureAndStable(t *testing.T) {
 	g := New(&capture{}, nil, 1)
 	require.Equal(t, g.Metas(), g.Metas())
+}
+
+// TestMetasGivesJellyfinNetworkPortsAndWebUIDemoData pins the
+// network/port/webui-link demo variety: without at least one fake
+// container carrying this data, the UI's per-container network/port/
+// webui-launch surfaces have nothing to render in fake mode at all.
+// jellyfin is the fixture: a bridge network with a real IP, a
+// published dual-stack port pair (the shape docker typically emits for
+// one -p), one additional EXPOSEd-but-unpublished port, and a
+// Community-Applications-style webui template placeholder.
+func TestMetasGivesJellyfinNetworkPortsAndWebUIDemoData(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	metas := g.Metas()
+
+	var jellyfin docker.Meta
+	found := false
+	for _, m := range metas {
+		if m.Name == "jellyfin" {
+			jellyfin, found = m, true
+			break
+		}
+	}
+	require.True(t, found)
+
+	require.Equal(t, "http://[IP]:[PORT:8096]/", jellyfin.WebUIURL)
+	require.False(t, jellyfin.HostNet, "jellyfin is the bridge-network demo container, not the host-network one")
+	require.Equal(t, []docker.NetworkInfo{{Name: "bridge", IP: "172.17.0.2"}}, jellyfin.Networks)
+
+	require.Contains(t, jellyfin.Ports, docker.PortInfo{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096})
+	require.Contains(t, jellyfin.Ports, docker.PortInfo{ContainerPort: 8096, Proto: "tcp", HostIP: "::", HostPort: 8096})
+	require.Contains(t, jellyfin.Ports, docker.PortInfo{ContainerPort: 8920, Proto: "tcp"}, "an unpublished (EXPOSEd-only) port must demo alongside the published pair")
+}
+
+// TestMetasGivesPiholeHostNetworkDemoData pins the host-network demo
+// variety: pihole is modeled with --net=host (a common real-box choice
+// for DNS), so the UI's host-network rendering path also has something
+// to exercise in fake mode.
+func TestMetasGivesPiholeHostNetworkDemoData(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	metas := g.Metas()
+
+	var pihole docker.Meta
+	found := false
+	for _, m := range metas {
+		if m.Name == "pihole" {
+			pihole, found = m, true
+			break
+		}
+	}
+	require.True(t, found)
+
+	require.True(t, pihole.HostNet)
+	require.Equal(t, []docker.NetworkInfo{{Name: "host"}}, pihole.Networks)
+	require.Empty(t, pihole.Ports, "a host-network demo container carries no port bindings of its own")
+}
+
+// TestMetasCreatedIsPopulatedForEveryFleetMember pins that every fake
+// container gets a Created timestamp -- ContainerDTO's created field is
+// otherwise silently omitted (omitempty), leaving the UI's age/uptime
+// display with nothing to show for the entire fake fleet. Reuses
+// fakeContainerStartedAt's own instant: this fleet's identity is
+// modeled as never having restarted, so Created and meta.started_at
+// are the same instant.
+func TestMetasCreatedIsPopulatedForEveryFleetMember(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	now := time.Unix(1_000_000, 0)
+	g.Tick(now) // establishes g.boot, which fakeContainerStartedAt anchors to
+
+	metas := g.Metas()
+	require.Len(t, metas, len(fleet))
+	for i, m := range metas {
+		require.False(t, m.Created.IsZero(), "%s must have a non-zero Created timestamp", m.Name)
+		require.Equal(t, fakeContainerStartedAt(now, i), m.Created)
+	}
 }
 
 // TestMetasIncludesPlausibleMounts pins that fake containers carry plausible Mounts.

@@ -29,14 +29,17 @@ const (
 // lifecycle events, and (via cgroupv2.go/apistats.go/net.go) records
 // per-container stats. Name "docker", Interval 2s.
 //
-// CgroupRoot, ProcRoot, MemTotal, HostCores, and DeviceName are injected
-// dependencies with safe production defaults (set here in New); wiring
-// code overrides MemTotal/HostCores/DeviceName with the host collector's
-// own methods so mem.pct, cpu.pct's host-share conversion, and per-device
-// io attribution all work. Until overridden they degrade silently (mem.pct
-// skipped, no device named) rather than error; cpu.pct is the exception --
-// it falls back to runtime.NumCPU() rather than go blank (see
-// recordContainerStats' own doc in cgroupv2.go).
+// CgroupRoot, ProcRoot, MemTotal, HostCores, DeviceName, and
+// UpdateStatuses are injected dependencies with safe production defaults
+// (set here in New); wiring code overrides MemTotal/HostCores/DeviceName
+// with the host collector's own methods so mem.pct, cpu.pct's host-share
+// conversion, and per-device io attribution all work, and UpdateStatuses
+// with an unraid.UpdateStatusReader's Statuses method so Meta.
+// UpdateStatus can join against it. Until overridden they degrade
+// silently (mem.pct skipped, no device named, every UpdateStatus "")
+// rather than error; cpu.pct is the exception -- it falls back to
+// runtime.NumCPU() rather than go blank (see recordContainerStats' own
+// doc in cgroupv2.go).
 type Collector struct {
 	cli      *client.Client
 	imgCli   imagesClient // same value as cli, narrowed -- see imagesClient's own doc
@@ -48,11 +51,12 @@ type Collector struct {
 	reg   *registry
 	rates *collect.RateTracker
 
-	CgroupRoot string
-	ProcRoot   string
-	MemTotal   func() uint64
-	HostCores  func() int
-	DeviceName func(majMin string) (string, bool)
+	CgroupRoot     string
+	ProcRoot       string
+	MemTotal       func() uint64
+	HostCores      func() int
+	DeviceName     func(majMin string) (string, bool)
+	UpdateStatuses func() map[string]string
 
 	lastInventory time.Time
 	eventsOnce    sync.Once
@@ -76,11 +80,12 @@ func New(sink store.MetricSink, events EventSink, evict func(kind, entity string
 		reg:   newRegistry(),
 		rates: collect.NewRateTracker(),
 
-		CgroupRoot: "/host/sys/fs/cgroup",
-		ProcRoot:   "/proc",
-		MemTotal:   func() uint64 { return 0 },
-		HostCores:  func() int { return 0 },
-		DeviceName: func(string) (string, bool) { return "", false },
+		CgroupRoot:     "/host/sys/fs/cgroup",
+		ProcRoot:       "/proc",
+		MemTotal:       func() uint64 { return 0 },
+		HostCores:      func() int { return 0 },
+		DeviceName:     func(string) (string, bool) { return "", false },
+		UpdateStatuses: func() map[string]string { return nil },
 	}
 	if cli != nil {
 		// Not just "imgCli: cli" above: NewClientWithOpts can return a nil
@@ -199,13 +204,19 @@ func (c *Collector) refreshInventory(ctx context.Context, now time.Time) error {
 		return err
 	}
 
+	// Read once per inventory poll, not once per container: the update-
+	// status reader's own file is small and cheap, but Meta itself (and
+	// hence UpdateStatus, which travels with it) is only ever this fresh
+	// anyway, so re-reading it per container would buy no fresher data.
+	statuses := c.UpdateStatuses()
+
 	metas := make([]Meta, 0, len(summaries))
 	for _, s := range summaries {
 		resp, err := c.cli.ContainerInspect(ctx, s.ID)
 		if err != nil {
 			continue
 		}
-		metas = append(metas, metaFromInspect(resp))
+		metas = append(metas, metaFromInspect(resp, statuses))
 	}
 	c.reg.applyInventory(metas, c.events, c.evictContainer)
 	c.recordMeta(metas, now)
@@ -250,15 +261,36 @@ func (c *Collector) recordMeta(metas []Meta, now time.Time) {
 // separate absence check.
 const unraidIconLabel = "net.unraid.docker.icon"
 
-func metaFromInspect(resp container.InspectResponse) Meta {
+// unraidWebUILabel is Community Applications' WebUI-launch-button label.
+// Its value is a template placeholder, not a real URL -- e.g.
+// "http://[IP]:[PORT:8096]/" -- left completely unresolved here; only
+// the browser making the request knows the host to substitute for
+// [IP], so that substitution happens client-side (see ContainerDTO.
+// WebUIURL's own doc for the exact contract the frontend implements).
+const unraidWebUILabel = "net.unraid.docker.webui"
+
+// metaFromInspect builds one container's Meta from its inspect
+// response plus updateStatuses, the unraid-update-status.json reader's
+// current image->status snapshot (nil when no reader is wired, or the
+// file was unreadable this poll -- see joinUpdateStatus). Everything
+// else is derived purely from resp itself: labels (Icon, WebUIURL,
+// ChangelogURL/ProjectURL via changelog.go), Mounts (mountsFromInspect),
+// and NetworkSettings (Networks/Ports via netinfo.go).
+func metaFromInspect(resp container.InspectResponse, updateStatuses map[string]string) Meta {
 	m := Meta{
 		ID:           resp.ID,
 		Name:         normalizeName(resp.Name),
 		RestartCount: resp.RestartCount,
 	}
+	if t, err := time.Parse(time.RFC3339Nano, resp.Created); err == nil {
+		m.Created = t
+	}
 	if resp.Config != nil {
 		m.Image = resp.Config.Image
 		m.Icon = resp.Config.Labels[unraidIconLabel]
+		m.WebUIURL = resp.Config.Labels[unraidWebUILabel]
+		m.ChangelogURL, m.ProjectURL = changelogAndProjectURLs(resp.Config.Labels, m.Image)
+		m.UpdateStatus = joinUpdateStatus(m.Image, updateStatuses)
 	}
 	if resp.HostConfig != nil {
 		m.HostNet = resp.HostConfig.NetworkMode.IsHost()
@@ -275,6 +307,8 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 		}
 	}
 	m.Mounts = mountsFromInspect(resp.Mounts)
+	m.Networks = extractNetworks(m.HostNet, resp.NetworkSettings)
+	m.Ports = extractPorts(resp.NetworkSettings)
 	return m
 }
 
@@ -304,7 +338,7 @@ func allocFromHostConfig(r container.Resources) alloc {
 		a.CPUQuotaCores, a.HasCPUQuota = float64(r.NanoCPUs)/1e9, true
 	case r.CPUQuota > 0:
 		period := r.CPUPeriod
-		if period == 0 {
+		if period <= 0 {
 			period = defaultCPUPeriodUsec
 		}
 		a.CPUQuotaCores, a.HasCPUQuota = float64(r.CPUQuota)/float64(period), true

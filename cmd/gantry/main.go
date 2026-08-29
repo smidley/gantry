@@ -126,6 +126,8 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 
 	dc := docker.New(st, st, st.Live().Evict, dockerSock)
 	wireDockerCollector(dc, host, cgroupRoot)
+	usr := unraid.NewUpdateStatusReader(envOnly(getenv, "GANTRY_UPDATE_STATUS_PATH", "/updates/unraid-update-status.json"))
+	dc.UpdateStatuses = usr.Statuses
 
 	// imagesSrc/removeImagesSrc/pruneImagesSrc default to the real
 	// docker collector and switch entirely to fk's synthetic inventory
@@ -346,11 +348,18 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 		for _, m := range metas {
 			running[m.Name] = struct{}{}
 			dto.Containers[m.Name] = server.ContainerDTO{
-				State:   m.State,
-				Health:  m.Health,
-				Image:   m.Image,
-				Icon:    m.Icon,
-				Metrics: map[string]float64{},
+				State:        m.State,
+				Health:       m.Health,
+				Image:        m.Image,
+				Icon:         m.Icon,
+				Created:      metaCreatedUnix(m.Created),
+				UpdateStatus: m.UpdateStatus,
+				ChangelogURL: m.ChangelogURL,
+				ProjectURL:   m.ProjectURL,
+				WebUIURL:     m.WebUIURL,
+				Networks:     convertNetworks(m.Networks),
+				Ports:        convertPorts(m.Ports),
+				Metrics:      map[string]float64{},
 			}
 		}
 
@@ -421,6 +430,47 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 		}
 		return dto
 	}
+}
+
+// metaCreatedUnix converts a Meta.Created into ContainerDTO's wire form.
+// Go's zero time.Time.Unix() is a large negative number (year 1), not
+// 0 -- guarding IsZero() here is what lets ContainerDTO's own
+// `json:"created,omitempty"` correctly omit an unparsed/absent Created
+// rather than serialize that garbage value.
+func metaCreatedUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// convertNetworks/convertPorts adapt docker.Meta's own Networks/Ports
+// (docker.NetworkInfo/docker.PortInfo) to their wire-tagged DTO
+// counterparts (server.NetworkInfoDTO/server.PortInfoDTO) -- server
+// deliberately doesn't import the docker package (collectors stay
+// mutually decoupled from the HTTP layer, the same reason buildTop/
+// buildContainersList live here rather than in server), so this
+// field-by-field copy is main's job, same as Image/Icon/etc. just above.
+func convertNetworks(in []docker.NetworkInfo) []server.NetworkInfoDTO {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]server.NetworkInfoDTO, len(in))
+	for i, n := range in {
+		out[i] = server.NetworkInfoDTO{Name: n.Name, IP: n.IP}
+	}
+	return out
+}
+
+func convertPorts(in []docker.PortInfo) []server.PortInfoDTO {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]server.PortInfoDTO, len(in))
+	for i, p := range in {
+		out[i] = server.PortInfoDTO{ContainerPort: p.ContainerPort, Proto: p.Proto, HostIP: p.HostIP, HostPort: p.HostPort}
+	}
+	return out
 }
 
 // containerFrameEntities decides which container entities belong in this

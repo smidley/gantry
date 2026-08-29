@@ -439,6 +439,71 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 	require.Equal(t, 4.2, c.Metrics["cpu.pct"])
 }
 
+// TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO pins
+// buildSnapshot's own field-by-field copy of Meta's badge/changelog/
+// network/port fields into ContainerDTO -- the same copy State/Health/
+// Image/Icon already get, just for this round's additions. Each of
+// docker.Meta's own producer functions (metaFromInspect, extractNetworks/
+// extractPorts, changelogAndProjectURLs, joinUpdateStatus) has its own
+// tests pinning the values themselves; this pins that buildSnapshot
+// actually wires them through to the DTO once Meta carries them.
+func TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	created := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{
+			Name: "jellyfin", State: "running", Health: "healthy", Image: "jellyfin/jellyfin:latest",
+			Created:      created,
+			UpdateStatus: "available",
+			ChangelogURL: "https://github.com/jellyfin/jellyfin-packaging/releases",
+			ProjectURL:   "https://jellyfin.org",
+			WebUIURL:     "http://[IP]:[PORT:8096]/",
+			Networks:     []docker.NetworkInfo{{Name: "bridge", IP: "172.17.0.2"}},
+			Ports:        []docker.PortInfo{{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096}},
+		}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+
+	c, ok := snap.Containers["jellyfin"]
+	require.True(t, ok)
+	require.Equal(t, created.Unix(), c.Created)
+	require.Equal(t, "available", c.UpdateStatus)
+	require.Equal(t, "https://github.com/jellyfin/jellyfin-packaging/releases", c.ChangelogURL)
+	require.Equal(t, "https://jellyfin.org", c.ProjectURL)
+	require.Equal(t, "http://[IP]:[PORT:8096]/", c.WebUIURL)
+	require.Equal(t, []server.NetworkInfoDTO{{Name: "bridge", IP: "172.17.0.2"}}, c.Networks)
+	require.Equal(t, []server.PortInfoDTO{{ContainerPort: 8096, Proto: "tcp", HostIP: "0.0.0.0", HostPort: 8096}}, c.Ports)
+}
+
+// TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage pins the zero-time
+// guard: Go's zero time.Time.Unix() is a large negative number (year 1),
+// not 0 -- a container Meta never populated Created (metaFromInspect
+// couldn't parse it, or fake mode doesn't set it) must map to
+// ContainerDTO.Created == 0, not that garbage value.
+func TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "jellyfin", State: "running"}} // Created left at its zero value
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+
+	require.Equal(t, int64(0), snap.Containers["jellyfin"].Created)
+}
+
 // TestBuildSnapshotDropsStaleSampleFromRunningContainer pins the
 // per-sample freshness gate a running container's metrics still need:
 // containerFrameEntities/include only decide whether the ENTITY belongs
@@ -472,6 +537,66 @@ func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
 	_, hasStale := c.Metrics["mem.limit_bytes"]
 	require.False(t, hasStale, "a >containerFrameMaxAge-old sample must not linger just because its container is still running")
 	require.Equal(t, 5e8, c.Metrics["mem.bytes"], "a fresh sibling metric on the same entity must still come through")
+}
+
+// TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary pins
+// the per-sample freshness gate's own boundary (main.go: "nowUnix-
+// sample.TS >= containerFrameMaxAge"): a sample exactly containerFrameMaxAge
+// seconds old must be dropped, not just one older than that -- >=, not >.
+// containerFrameEntities' own boundary (the entity-level cutoff) already
+// has this exact pin; this is the per-sample gate's turn.
+func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().Unix()
+	st.Record(store.SeriesKey{Kind: "container", Entity: "db", Metric: "mem.limit_bytes"}, now-containerFrameMaxAge, 1e9) // exactly at the boundary
+	st.Record(store.SeriesKey{Kind: "container", Entity: "db", Metric: "mem.bytes"}, now-(containerFrameMaxAge-1), 5e8)   // one second younger: must survive
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "db", State: "running"}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+
+	c, ok := snap.Containers["db"]
+	require.True(t, ok)
+	_, hasAtBoundary := c.Metrics["mem.limit_bytes"]
+	require.False(t, hasAtBoundary, "a sample exactly containerFrameMaxAge seconds old must be dropped (>=, not >)")
+	require.Equal(t, 5e8, c.Metrics["mem.bytes"], "a sample one second younger than the boundary must still come through")
+}
+
+// TestBuildSnapshotDropsStaleContainerGPUBusyPct pins main.go's own claim
+// (buildSnapshot's per-sample freshness-gate comment) that the same gate
+// covers container-attributed gpu.*.busy_pct going quiet, not just the
+// mem/cpu-family metrics the other stale-sample test already exercises --
+// gpu.render.busy_pct is one of the four names resourceMetrics' own "gpu"
+// resource family recognizes (api_history.go).
+func TestBuildSnapshotDropsStaleContainerGPUBusyPct(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Now().Unix()
+	st.Record(store.SeriesKey{Kind: "container", Entity: "plex", Metric: "gpu.render.busy_pct"}, now-90, 42.0) // stale: older than containerFrameMaxAge
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "plex", State: "running"}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+
+	c, ok := snap.Containers["plex"]
+	require.True(t, ok)
+	_, hasStale := c.Metrics["gpu.render.busy_pct"]
+	require.False(t, hasStale, "a stale container-attributed gpu.render.busy_pct sample must be dropped, same as any other stale metric on a running container")
 }
 
 // TestBuildSnapshotMergesDiskMetaFromRealAndFake pins the disk_meta

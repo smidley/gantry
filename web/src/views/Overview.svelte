@@ -49,7 +49,7 @@
     etaFromProgress,
     niceCeiling,
   } from '../lib/metrics';
-  import { diskKind, diskUsagePct, sortDiskEntities } from '../lib/disks';
+  import { diskKind, diskTempState, diskUsagePct, sortDiskEntities } from '../lib/disks';
   import { containerRunState, unhealthyContainerNames } from '../lib/containerStatus';
   import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
@@ -180,7 +180,14 @@
   let fleetContainers = $derived(
     containerEntries
       .filter(([, c]) => containerRunState(c.state) !== 'created')
-      .map(([name, c]) => ({ name, state: c.state, health: c.health })),
+      .map(([name, c]) => ({
+        name,
+        state: c.state,
+        health: c.health,
+        icon: c.icon,
+        cpuPct: c.metrics['cpu.pct'],
+        memBytes: c.metrics['mem.bytes'],
+      })),
   );
 
   // total excludes created containers too (runningCount+stoppedCount,
@@ -286,8 +293,19 @@
     const names = sortDiskEntities(Object.keys(disks));
     const out = [];
     for (const slot of names) {
-      const pct = diskUsagePct(disks[slot]);
-      if (pct !== null) out.push({ slot, pct, kind: diskKind(diskMeta[slot], disks[slot]) });
+      const metrics = disks[slot];
+      const pct = diskUsagePct(metrics);
+      if (pct !== null) {
+        out.push({
+          slot,
+          pct,
+          kind: diskKind(diskMeta[slot], metrics),
+          device: diskMeta[slot]?.device,
+          tempState: diskTempState(metrics),
+          usedBytes: metrics['fs.used_bytes'],
+          freeBytes: metrics['fs.free_bytes'],
+        });
+      }
     }
     return out;
   });
@@ -325,6 +343,10 @@
       flagged: calloutBySlot.has(d.slot),
       calloutText: calloutBySlot.get(d.slot),
       kind: d.kind,
+      device: d.device,
+      tempState: d.tempState,
+      usedBytes: d.usedBytes,
+      freeBytes: d.freeBytes,
     }));
   });
 

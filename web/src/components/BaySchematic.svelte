@@ -8,20 +8,23 @@
 
   Fills use the existing --seq-100..--seq-700 ramp (seqStep, shared with
   Storage's own disk-usage bars and the old ArrayCard's pool rows) --
-  zero new colors. Each bar is non-interactive (a `title` + aria-label
-  pairing stands in for per-bar text, since real disk/pool names vary too
-  much in length to reliably abbreviate into the mockup's fixed 2-letter
-  labels without risking a misleading collision) rather than an always-
-  visible label row.
+  zero new colors. Each bar is a real link into #/storage (click-through)
+  with hover AND keyboard-focus revealing a small label below the bars
+  (slot, device, temp -- threshold-colored, matching Storage.svelte's own
+  banding -- and used/total), CoreBudgetRibbon's own hover-label
+  convention, so the strip's richer detail survives for anyone not
+  hovering with a mouse. aria-label alone (title dropped -- the label
+  row below is the real tooltip now) still carries the essential text
+  for anyone using a screen reader.
 
   A flagged bar carries no floating callout text (corrective pass: a
   variable-length string like "95.0% capacity" centered over a 13px bar
   reliably collided with its neighbors). The outline alone marks it
-  visually; the reason lives in the aria-label/title (for anyone
-  hovering or using a screen reader) and, in full, in the "Needs a look"
-  row right above this module -- the flagged unit's own color plus that
-  row's text already carry the information, so nothing here needs to
-  repeat it visibly.
+  visually; the reason lives in the aria-label (for anyone using a
+  screen reader) and, in full, in the "Needs a look" row right above
+  this module -- the flagged unit's own color plus that row's text
+  already carry the information, so nothing here needs to repeat it
+  visibly.
 
   Fill height glides on every pct change (perpetual-glide motion pass --
   previously a bare unanimated style binding, the one live surface the
@@ -35,23 +38,21 @@
   motion) is the one piece that still comes from the shared driver.
 -->
 <script>
-  import { fmtPct } from '../lib/format';
+  import { fmtBytes, fmtPct } from '../lib/format';
   import { seqStep } from '../lib/metrics';
+  import { band, bandToken } from '../lib/thresholds';
   import { prefersReducedMotion } from 'svelte/motion';
   import { live as liveStore } from '../lib/sse.svelte';
 
-  // entries: [{ slot, pct, flagged?: boolean, calloutText?: string,
-  // kind?: DiskKind }] -- pct is a plain 0-100 number (diskUsagePct's own
-  // range); flagged/calloutText are the caller's own anomaly decision,
-  // not derived here. calloutText (when given) folds into this bar's own
-  // title/aria-label rather than rendering as visible text. kind (ask:
-  // "nvme storage vs spinning disk should stand out", later extended to
-  // all four of Storage's own type badges: "these should be color coded
-  // or highlighted differently") draws a distinct, per-kind-colored
-  // top-cap stroke, independent of the flagged outline and the usage-
-  // proportional fill -- a type signal, not a health one. Absent/"hdd"
-  // (the ordinary/majority case) draws no cap at all, same as before
-  // this kind ever existed.
+  // entries: [{ slot, pct, flagged?, calloutText?, kind?, device?,
+  // tempState, usedBytes, freeBytes }] -- pct is a plain 0-100 number
+  // (diskUsagePct's own range); flagged/calloutText are the caller's own
+  // anomaly decision, not derived here. device/tempState/usedBytes/
+  // freeBytes back the hover/focus label only -- the bar itself still
+  // only ever draws pct+kind, unchanged. kind draws a distinct, per-
+  // kind-colored top-cap stroke, independent of the flagged outline and
+  // the usage-proportional fill -- a type signal, not a health one.
+  // Absent/"hdd" (the ordinary/majority case) draws no cap at all.
   let { entries = [] } = $props();
 
   // glideMs: see the module doc above -- the CSS transition on each
@@ -65,6 +66,22 @@
     const base = `${d.slot}: ${fmtPct(d.pct)} used${media}`;
     return d.calloutText ? `${base} — ${d.calloutText}` : base;
   }
+
+  let hoveredSlot = $state(null);
+  let hoveredEntry = $derived(entries.find((d) => d.slot === hoveredSlot) ?? null);
+
+  // tempTint mirrors Storage.svelte's own banding exactly (nvme gets the
+  // hotter-tolerant family) so the same disk reads the same temp color
+  // on both surfaces.
+  function tempTint(d) {
+    if (d.tempState?.kind !== 'reading') return undefined;
+    return bandToken(band(d.kind === 'nvme' ? 'disk.temp.nvme' : 'disk.temp', d.tempState.celsius));
+  }
+  function tempText(d) {
+    if (!d.tempState) return null;
+    if (d.tempState.kind === 'reading') return `${d.tempState.celsius.toFixed(1)}°C`;
+    return d.tempState.kind === 'spun-down' ? 'Spun down' : 'No sensor';
+  }
 </script>
 
 {#if entries.length > 0}
@@ -72,22 +89,41 @@
     <span class="microlabel">Array &middot; {entries.length} member{entries.length === 1 ? '' : 's'}</span>
     <div class="bay-schematic__bars">
       {#each entries as d (d.slot)}
-        <div
+        <a
           class="bay-schematic__bar"
           class:bay-schematic__bar--flag={!!d.flagged}
           class:bay-schematic__bar--ssd={d.kind === 'ssd'}
           class:bay-schematic__bar--nvme={d.kind === 'nvme'}
           class:bay-schematic__bar--usb={d.kind === 'usb'}
-          role="img"
-          title={labelFor(d)}
+          href="#/storage"
           aria-label={labelFor(d)}
+          onmouseenter={() => (hoveredSlot = d.slot)}
+          onmouseleave={() => (hoveredSlot = null)}
+          onfocus={() => (hoveredSlot = d.slot)}
+          onblur={() => (hoveredSlot = null)}
         >
-          <div
+          <span
             class="bay-schematic__fill"
             style={`height: ${Math.min(100, Math.max(0, d.pct))}%; background: ${seqStep(d.pct)}; transition-duration: ${glideMs}ms`}
-          ></div>
-        </div>
+          ></span>
+        </a>
       {/each}
+    </div>
+    <div class="bay-schematic__label" class:bay-schematic__label--visible={!!hoveredEntry}>
+      {#if hoveredEntry}
+        <span>{hoveredEntry.slot}</span>
+        {#if hoveredEntry.device}<span class="bay-schematic__label-muted">{hoveredEntry.device}</span>{/if}
+        {#if tempText(hoveredEntry)}
+          <span class="tabular-nums" style={tempTint(hoveredEntry) ? `color: ${tempTint(hoveredEntry)}` : undefined}>
+            {tempText(hoveredEntry)}
+          </span>
+        {/if}
+        {#if hoveredEntry.usedBytes !== undefined && hoveredEntry.freeBytes !== undefined}
+          <span class="tabular-nums bay-schematic__label-muted">
+            {fmtBytes(hoveredEntry.usedBytes)} / {fmtBytes(hoveredEntry.usedBytes + hoveredEntry.freeBytes)}
+          </span>
+        {/if}
+      {/if}
     </div>
   </div>
 {/if}
@@ -101,20 +137,25 @@
   .bay-schematic__bars {
     display: flex;
     align-items: flex-end;
-    gap: 4px;
-    height: 46px;
+    gap: 6px;
+    height: 130px;
     flex-wrap: wrap;
   }
   .bay-schematic__bar {
     position: relative;
-    width: 13px;
+    width: 22px;
     height: 100%;
     background: color-mix(in oklab, var(--ink) 7%, transparent);
-    border-radius: 1px;
+    border-radius: 2px;
     flex-shrink: 0;
+    display: block;
+  }
+  .bay-schematic__bar:hover,
+  .bay-schematic__bar:focus-visible {
+    filter: brightness(1.1);
   }
   .bay-schematic__bar--flag {
-    outline: 1.5px solid var(--status-warning);
+    outline: 2px solid var(--status-warning);
     outline-offset: 1px;
   }
   /* Type signal, not a health one -- a --series-* token (never a
@@ -124,23 +165,47 @@
      mapping exactly so the same disk reads the same identity on both
      views; hdd (the ordinary/majority case) gets no cap at all. */
   .bay-schematic__bar--ssd {
-    border-top: 2px solid var(--series-3);
+    border-top: 3px solid var(--series-3);
   }
   .bay-schematic__bar--nvme {
-    border-top: 2px solid var(--series-1);
+    border-top: 3px solid var(--series-1);
   }
   .bay-schematic__bar--usb {
-    border-top: 2px solid var(--series-4);
+    border-top: 3px solid var(--series-4);
   }
   .bay-schematic__fill {
     position: absolute;
     bottom: 0;
     left: 0;
     width: 100%;
+    display: block;
     /* duration is inline (transition-duration, above) -- the shared
        driver's own live glideMs, per pct-changing frame. */
     transition-property: height;
     transition-timing-function: linear;
     border-radius: 1px 1px 0 0;
+  }
+  /* Fixed-height label row, always present in layout (opacity-toggled,
+     not conditionally rendered) so the bars' own position never shifts
+     when a hover/focus starts or ends -- CoreBudgetRibbon's own
+     hover-label convention, same as FleetStrip's. */
+  .bay-schematic__label {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    min-height: 1.2rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--ink);
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+  .bay-schematic__label--visible {
+    opacity: 1;
+  }
+  .bay-schematic__label-muted {
+    font-weight: 400;
+    color: var(--ink-2);
   }
 </style>

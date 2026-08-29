@@ -106,9 +106,17 @@
     letter-spacing: normal;
     margin-top: 0.15rem;
   }
+  /* overflow-wrap: a container/image removal's own Detail carries a bare
+     64-hex-character id (docker's own full id has no natural break point
+     -- no spaces, hyphens, or word boundaries at all) -- reproduced live
+     once container.removed/image.removed events existed: the same
+     narrow-viewport overflow this component's own showAbsoluteTime fix
+     already hit once, for the same underlying reason (one unbroken run
+     of characters longer than the card is wide), just a different field. */
   .event-feed-item__detail {
     color: var(--ink-2);
     font-size: 0.85rem;
     margin-top: 0.15rem;
+    overflow-wrap: anywhere;
   }
 </style>

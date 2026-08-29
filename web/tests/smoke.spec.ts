@@ -110,7 +110,7 @@ test('overview: the Top Consumers module metric switcher changes the module and 
 
 // Header compaction (Scott: "lots of wasted space here"): the status
 // band -- headline facts on the left, fleet strip + array schematic on
-// the right -- is a side-by-side row at >=1024px and a plain vertical
+// the right -- is a side-by-side row at >=768px and a plain vertical
 // stack below that, same breakpoint convention as every other
 // desktop/mobile split in this app.
 test('overview: the status band is two columns at desktop width and stacked at mobile', async ({ page }) => {
@@ -135,6 +135,72 @@ test('overview: the status band is two columns at desktop width and stacked at m
   const visualsBoxMobile = await visuals.boundingBox();
   // Stacked: visuals starts at or below where facts ends, not beside it.
   expect(visualsBoxMobile.y).toBeGreaterThanOrEqual(factsBoxMobile.y + factsBoxMobile.height - 4);
+});
+
+// Balance pass (Scott: "sections are arranged oddly with lots of wasted
+// space... odd sizes"): "Needs a look" used to be a separate, full-width
+// block below the whole status band, which only started once the
+// TALLER of the two columns (fleet strip + schematic) finished --
+// leaving a dead gap under the shorter facts column the entire time
+// (confirmed live: a 175px void at 1440px). It now lives INSIDE
+// overview__status-facts, right after the fact lines -- this pins that
+// nesting directly: attention's own left edge and width must match
+// facts' column, not the full band.
+test('overview: needs-a-look sits inside the facts column, not a separate full-width block', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('#/');
+
+  const attention = page.locator('.overview__attention');
+  if ((await attention.count()) === 0) {
+    test.skip(true, 'fake fleet booted all-clear for this run -- nothing to check');
+  }
+
+  const facts = page.locator('.overview__status-facts');
+  const factsBox = await facts.boundingBox();
+  const attentionBox = await attention.boundingBox();
+  expect(factsBox).not.toBeNull();
+  expect(attentionBox).not.toBeNull();
+
+  expect(Math.abs(attentionBox.x - factsBox.x), "attention must share the facts column's own left edge").toBeLessThan(2);
+  expect(
+    attentionBox.width,
+    'attention must be contained in the facts column, not stretch across the full band',
+  ).toBeLessThanOrEqual(factsBox.width + 2);
+});
+
+// Balance pass, second half: the old shared two-column BODY put Top
+// Consumers and the events feed in unrelated columns for no reason
+// tied to either one's own content -- Top Consumers ended up
+// width-starved while the rail's column ran nearly double the other
+// column's height (confirmed live: 1287px vs 659px). Top Consumers and
+// Recent events now share one wide lane, STACKED (never side by side,
+// so they can never fight each other for width), while the rail -- the
+// one module here that's genuinely narrow by nature -- gets its own,
+// narrower lane.
+test('overview: Top Consumers and Recent events share one wide column, wider than the rail\'s own', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('#/');
+
+  const top = page.locator('.overview__top');
+  const events = page.locator('.overview__events');
+  const rail = page.locator('.overview__metrics-rail');
+  await expect(top).toBeVisible();
+  await expect(events).toBeVisible();
+  await expect(rail).toBeVisible();
+
+  const topBox = await top.boundingBox();
+  const eventsBox = await events.boundingBox();
+  const railBox = await rail.boundingBox();
+
+  // Stacked in the same column: same left edge and width, events below top.
+  expect(Math.abs(topBox.x - eventsBox.x)).toBeLessThan(2);
+  expect(Math.abs(topBox.width - eventsBox.width)).toBeLessThan(2);
+  expect(eventsBox.y).toBeGreaterThanOrEqual(topBox.y + topBox.height - 4);
+
+  // The rail sits in its own, narrower lane to the right -- not the
+  // roughly-half-the-body-width column it used to share with events.
+  expect(railBox.x).toBeGreaterThan(topBox.x + topBox.width - 8);
+  expect(railBox.width).toBeLessThan(topBox.width);
 });
 
 // Needs-a-look rows collapsed from a title line plus a separate detail

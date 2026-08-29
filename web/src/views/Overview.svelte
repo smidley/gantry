@@ -19,8 +19,10 @@
   Recent events used to be two separate two-column grids stacked on top
   of each other, which left the headline zone's own column dead below
   the fleet strip whenever the rail (four sparkline tiles) ran taller
-  than it, a common case in the healthy/no-attention state. See
-  overview__body's own doc for the two-independent-column fix.
+  than it, a common case in the healthy/no-attention state. Fixed with
+  two independent flex columns sharing the whole page (superseded by
+  the Balance pass below, which replaced that shared-column split
+  entirely -- see its own doc).
 
   Corrective pass (post-deploy, Scott's own read: "there's lines in the
   middle of text that are not used"): the first cut over-decorated this
@@ -34,12 +36,40 @@
   headline/fleet-strip/facts/callouts/schematic stack was spending a
   full screen height): the status band -- headline's own facts on the
   left, fleet strip + array schematic stacked on the right -- is now a
-  two-column row at >=1024px (overview__status-band), not a single
+  two-column row at >=768px (overview__status-band), not a single
   vertical stack; the schematic itself moved out of the conditional
   attention section into that right column, always visible rather than
   only during a disk anomaly; and each attention row collapsed from a
   title line plus a separate detail line into one inline sentence.
-  Mobile (<1024px) keeps the original vertical stack.
+  Mobile (<768px) keeps the original vertical stack.
+
+  Balance pass (Scott: "the dashboard overview needs some work. sections
+  are arranged oddly with lots of wasted space and some items are not
+  intuitive and odd sizes."): two independent problems, fixed
+  separately. First, the status band's two columns never matched height
+  -- fleet strip + bay schematic routinely ran 150-250px taller than the
+  three plain-text fact lines beside them, and "Needs a look" used to be
+  a THIRD block, full-width, below the whole band -- so it only started
+  once the taller visuals column finished, leaving a dead gap under the
+  short facts column the entire time (confirmed live: a 175px void).
+  Attention now lives inside overview__status-facts, right after the
+  fact lines it explains -- adjacent to the headline it's about, per
+  Scott's own framing, and the gap is gone because there's no longer a
+  full-width block waiting on the taller column. Second,
+  overview__body's shared two-column split (headline-zone+Top Consumers
+  stacked left, rail+events stacked right -- the Density pass above) put
+  Top Consumers and the events feed in unrelated columns for no reason
+  tied to either one's own content: Top Consumers ended up width-
+  starved (labels/bars/values cramped into ~640px) while the rail's own
+  column ran nearly DOUBLE the opposite column's total height, confirmed
+  live at 1287px vs 659px. overview__modules-band replaces that: Top
+  Consumers and Recent events now share one wide lane, stacked (so they
+  never compete for width), and the rail -- four bare label+sparkline
+  rows, the one module that's genuinely narrow by nature -- gets its own
+  dedicated lane instead of an arbitrary 50/50 split. overview__body/
+  col-left/col-right are gone entirely; the status band and modules band
+  are now two independent full-width rows, each free to pick its own
+  column split.
 -->
 <script>
   import { onMount, untrack } from 'svelte';
@@ -431,34 +461,23 @@
   <h1 class="page-title">Overview</h1>
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
-  <div class="overview__body">
-    <div class="overview__col overview__col-left">
-      <div class="overview__headline-zone">
-        <div class="overview__headline-row">
-          <span
-            class="overview__headline-dot"
-            class:overview__headline-dot--pulse={!overviewStatus.ok}
-            style={`background:${statusColor}; color:${statusColor}`}
-            aria-hidden="true"
-          ></span>
-          <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
-        </div>
-        <div class="overview__status-band">
-          <div class="overview__status-facts">
-            <p class="overview__sub-line">{fleetLine}</p>
-            <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
-            {#if hottestSentence}
-              <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
-            {/if}
-          </div>
-          <div class="overview__status-visuals">
-            <FleetStrip containers={fleetContainers} />
-            <BaySchematic entries={baySchematicEntries} />
-            {#if closingLine}
-              <p class="overview__closing-line">{closingLine}</p>
-            {/if}
-          </div>
-        </div>
+  <div class="overview__headline-zone">
+    <div class="overview__headline-row">
+      <span
+        class="overview__headline-dot"
+        class:overview__headline-dot--pulse={!overviewStatus.ok}
+        style={`background:${statusColor}; color:${statusColor}`}
+        aria-hidden="true"
+      ></span>
+      <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
+    </div>
+    <div class="overview__status-band">
+      <div class="overview__status-facts">
+        <p class="overview__sub-line">{fleetLine}</p>
+        <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
+        {#if hottestSentence}
+          <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
+        {/if}
 
         {#if !overviewStatus.ok}
           <section class="overview__attention">
@@ -479,7 +498,18 @@
           </section>
         {/if}
       </div>
+      <div class="overview__status-visuals">
+        <FleetStrip containers={fleetContainers} />
+        <BaySchematic entries={baySchematicEntries} />
+        {#if closingLine}
+          <p class="overview__closing-line">{closingLine}</p>
+        {/if}
+      </div>
+    </div>
+  </div>
 
+  <div class="overview__modules-band">
+    <div class="overview__modules-wide">
       <div class="card overview__top">
         <div class="overview__top-head">
           <span class="microlabel">Top consumers</span>
@@ -511,9 +541,30 @@
           metricKey={topResource}
         />
       </div>
+
+      <div class="card overview__events">
+        <span class="microlabel">Recent events</span>
+        {#if eventsSeedPending}
+          <!-- first loadEvents() call hasn't settled yet -- see eventsSeedPending's own doc -->
+        {:else if events.length === 0}
+          <p class="microlabel overview__events-empty">No events yet.</p>
+        {:else}
+          <div class="overview__events-list">
+            {#each events as event (event.ID)}
+              <div
+                animate:flip={{ duration: feedMotionMs }}
+                in:fly={{ y: -12, duration: feedMotionMs }}
+                out:fade={{ duration: feedMotionMs }}
+              >
+                <EventFeedItem {event} />
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
     </div>
 
-    <div class="overview__col overview__col-right">
+    <div class="overview__modules-narrow">
       <div class="overview__metrics-rail">
         <StatTile
           bare
@@ -558,27 +609,6 @@
           label2="w"
         />
       </div>
-
-      <div class="card overview__events">
-        <span class="microlabel">Recent events</span>
-        {#if eventsSeedPending}
-          <!-- first loadEvents() call hasn't settled yet -- see eventsSeedPending's own doc -->
-        {:else if events.length === 0}
-          <p class="microlabel overview__events-empty">No events yet.</p>
-        {:else}
-          <div class="overview__events-list">
-            {#each events as event (event.ID)}
-              <div
-                animate:flip={{ duration: feedMotionMs }}
-                in:fly={{ y: -12, duration: feedMotionMs }}
-                out:fade={{ duration: feedMotionMs }}
-              >
-                <EventFeedItem {event} />
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
     </div>
   </div>
 
@@ -592,40 +622,36 @@
     gap: 1.25rem;
   }
 
-  /* --- Body: two independent-height columns ------------------------
-
-     A real CSS grid here (as this used to be, in two separate grids --
-     one for headline+rail, another below for Top Consumers+Events)
-     forces each ROW to the height of its tallest column: the rail
-     routinely runs taller than the headline zone (four live-sparkline
-     tiles vs. a few lines of text), which left the headline zone's own
-     column dead below the fleet strip in the healthy state -- reported
-     live, "there's wasted space in the left column." Two plain flex
-     columns have no such row to share: each stacks its own two blocks
-     (headline zone then Top Consumers; rail then Recent events) to
-     its OWN height, so Top Consumers flows straight up against
-     whichever is shorter, and the columns' bottoms are free to differ. */
-
-  .overview__body {
+  /* --- Modules band: Top Consumers + Recent events share one wide
+     lane (stacked, so the two never compete for width -- the Balance
+     pass's own doc, top of file), the rail gets its own narrower lane
+     -- four bare label+sparkline rows are the one module here that's
+     genuinely narrow by nature, not a module that lost a fight for
+     space. Plain flex, same "independent-height columns" reasoning the
+     old overview__body had (no shared grid row to force either lane to
+     the other's height): modules-wide (Top Consumers + Events, ~490px
+     combined) and modules-narrow (the rail, ~660px, four fixed-height
+     sparklines) are never going to match, and don't need to. -------- */
+  .overview__modules-band {
     display: flex;
     align-items: flex-start;
-    gap: 2.5rem;
-    padding-bottom: 1.5rem;
+    gap: 2rem;
   }
-  .overview__col {
+  .overview__modules-wide {
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
+    flex: 1.6 1 0;
     min-width: 0;
   }
-  .overview__col-left {
-    flex: 1.25 1 0;
-  }
-  .overview__col-right {
+  .overview__modules-narrow {
+    display: flex;
+    flex-direction: column;
     flex: 1 1 0;
+    min-width: 0;
   }
   @media (max-width: 47.9375rem) {
-    .overview__body {
+    .overview__modules-band {
       flex-direction: column;
       gap: 1.5rem;
     }
@@ -691,18 +717,24 @@
     }
   }
 
-  /* --- Status band: facts (left) + fleet strip/schematic (right) at
-     >=1024px, one vertical stack below it -- the header-compaction
-     pass. Facts keep a tighter gap than the old headline-subs stack
-     (0.5rem -> 0.35rem): with the fleet strip gone to the right column,
-     these three lines are pure quick-reference text with no visual
-     device between them anymore, so they read better tightened. ---- */
+  /* --- Status band: facts+attention (left) + fleet strip/schematic
+     (right) at >=768px (unified with every other view's own mobile
+     breakpoint, dropped from the header-compaction pass's one-off
+     64rem), one vertical stack below it. overview__status-facts' own
+     gap (0.6rem, the Balance pass) now separates BOTH the three fact
+     lines from each other AND the last of them from "Needs a look"
+     (moved in from a separate full-width block below the band -- see
+     that pass's own doc) -- looser than the header-compaction pass's
+     original 0.35rem (tuned for fact lines alone), tight enough that
+     the three lines still read as one group, loose enough that
+     attention reads as its own paragraph rather than a fourth fact
+     line. ---- */
   .overview__status-band {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
   }
-  @media (min-width: 64rem) {
+  @media (min-width: 48rem) {
     .overview__status-band {
       flex-direction: row;
       align-items: flex-start;
@@ -717,7 +749,7 @@
   .overview__status-facts {
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 0.6rem;
   }
   .overview__status-visuals {
     display: flex;

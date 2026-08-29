@@ -56,6 +56,14 @@ type archetype struct {
 	// Tick skips it outright, same reason as stopped: nothing has ever
 	// run, so there's nothing to synthesize.
 	created bool
+
+	// composeProject models the com.docker.compose.project label a real
+	// docker-compose stack's members all share (see docker.go's
+	// composeProjectLabel) -- "" (the default, most of this fleet) for a
+	// container modeled as standalone. Only the gridmind-* members below
+	// set this, so the Containers view's Groups chip row has a real
+	// multi-container "team" to render in fake mode.
+	composeProject string
 }
 
 var fleet = []archetype{
@@ -86,6 +94,19 @@ var fleet = []archetype{
 	// created's own doc.
 	{name: "duplicati", created: true},
 	{name: "watchtower", created: true},
+
+	// gridmind-*: a four-container docker-compose stack (a small
+	// self-hosted app's api/worker/scheduler/db team), sharing the
+	// "gridmind-cloud" compose project -- fake mode's own multi-detail
+	// compare demo, exercising the Containers view's Groups chip row
+	// (>=2 members sharing a project) end to end. gridmind-db also gets a
+	// memory limit, like postgres above, so the compare page's own
+	// per-member "% of limit" cell has a real limited member to show
+	// alongside the unlimited ones.
+	{name: "gridmind-api", cpuBase: 1.5, cpuAmp: 1, cpuSpike: 0.01, memBytes: 350e6, netScale: 1.2e6, composeProject: "gridmind-cloud"},
+	{name: "gridmind-worker", cpuBase: 3, cpuAmp: 3, cpuSpike: 0.03, memBytes: 500e6, netScale: 3e5, composeProject: "gridmind-cloud"},
+	{name: "gridmind-scheduler", cpuBase: 0.3, cpuAmp: 0.2, cpuSpike: 0.002, memBytes: 120e6, netScale: 2e4, composeProject: "gridmind-cloud"},
+	{name: "gridmind-db", cpuBase: 1, cpuAmp: 0.4, cpuSpike: 0.001, memBytes: 600e6, netScale: 5e4, memLimitBytes: 1e9, composeProject: "gridmind-cloud"},
 }
 
 // diskSpec describes one of the fake array's fixed 8 disks: parity
@@ -618,7 +639,7 @@ func (g *Generator) Metas() []docker.Meta {
 		case a.created:
 			state, health = "created", ""
 		}
-		out[i] = docker.Meta{Name: a.name, State: state, Health: health, Image: "demo/" + a.name + ":latest", Mounts: fakeContainerMounts(a.name)}
+		out[i] = docker.Meta{Name: a.name, State: state, Health: health, Image: "demo/" + a.name + ":latest", ComposeProject: a.composeProject, Mounts: fakeContainerMounts(a.name)}
 	}
 	return out
 }

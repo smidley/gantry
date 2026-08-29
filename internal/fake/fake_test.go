@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
@@ -478,6 +479,31 @@ func TestMetasIncludesPlausibleMounts(t *testing.T) {
 			require.True(t, isUnraidPath, "%s mount source %q must look like a real Unraid path", m.Name, mount.Source)
 		}
 	}
+}
+
+// TestMetasGridmindFamilySharesComposeProject pins the compare view's own
+// fake-mode fixture: the four gridmind-* archetypes must all report the
+// SAME ComposeProject ("gridmind-cloud"), and an unrelated standalone
+// archetype must report none at all -- the Containers view's Groups chip
+// row (>=2 containers sharing a project) needs a real multi-member group
+// to render against in fake mode, and must not see one where there isn't.
+func TestMetasGridmindFamilySharesComposeProject(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	metas := g.Metas()
+
+	byName := map[string]docker.Meta{}
+	for _, m := range metas {
+		byName[m.Name] = m
+	}
+
+	gridmindNames := []string{"gridmind-api", "gridmind-worker", "gridmind-scheduler", "gridmind-db"}
+	for _, name := range gridmindNames {
+		m, ok := byName[name]
+		require.True(t, ok, "%s must be part of the fake fleet", name)
+		require.Equal(t, "gridmind-cloud", m.ComposeProject, "%s must share the gridmind-cloud compose project", name)
+	}
+
+	require.Equal(t, "", byName["jellyfin"].ComposeProject, "a standalone archetype must report no compose project")
 }
 
 // TestTickEmitsContainerDeviceIOSeries pins that fake containers also emit live:io.<dev>.* samples per tick.

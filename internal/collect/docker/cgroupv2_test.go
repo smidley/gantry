@@ -69,7 +69,7 @@ func TestReadCgroupStatsParsesRealShapeFixtures(t *testing.T) {
 	require.Equal(t, alloc{
 		MemLimitBytes: 1073741824, HasMemLimit: true,
 		CPUQuotaCores: 4.0, HasCPUQuota: true,
-		CPUSetCores: 16, HasCPUSet: true,
+		CPUSetCores: 16, CPUSetRaw: "0-15", HasCPUSet: true,
 		PidsLimit: 2048, HasPidsLimit: true,
 	}, cg.Alloc)
 }
@@ -89,7 +89,7 @@ func TestReadCgroupStatsUnlimitedAllocFilesReadAsNoLimit(t *testing.T) {
 
 	cg, err := readCgroupStats(dir)
 	require.NoError(t, err)
-	require.Equal(t, alloc{CPUSetCores: 16, HasCPUSet: true}, cg.Alloc,
+	require.Equal(t, alloc{CPUSetCores: 16, CPUSetRaw: "0-15", HasCPUSet: true}, cg.Alloc,
 		"cpuset still parses (it lists every core, not \"max\"), but every Has* limit flag must be false")
 }
 
@@ -209,6 +209,41 @@ func TestParseCPUSetCount(t *testing.T) {
 			got, ok := parseCPUSetCount(c.in)
 			require.Equal(t, c.ok, ok)
 			require.Equal(t, c.want, got)
+		})
+	}
+}
+
+// TestCPUSetPin pins the Container Detail Limits card's own display
+// string: canonical sorted/deduped/merged ranges regardless of the raw
+// input's own shape (unsorted, overlapping, singles-only), and the
+// "only when it actually narrows below hostCores" gate that keeps an
+// unpinned or fully-unrestricted cpuset from reading as a pin at all --
+// same rule TestEffectiveCPUAllocCores pins for the alloc-cores number.
+func TestCPUSetPin(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw       string
+		hostCores int
+		wantPin   string
+		wantOK    bool
+	}{
+		{name: "mixed ranges and singles narrowed below host", raw: "0-5,13-15", hostCores: 16, wantPin: "0-5, 13-15", wantOK: true},
+		{name: "unsorted input still renders canonically", raw: "13-15,0-5", hostCores: 16, wantPin: "0-5, 13-15", wantOK: true},
+		{name: "overlapping ranges merge into one", raw: "0-3,2-5", hostCores: 16, wantPin: "0-5", wantOK: true},
+		{name: "singles with no ranges", raw: "0,2,4", hostCores: 8, wantPin: "0, 2, 4", wantOK: true},
+		{name: "single core", raw: "3", hostCores: 8, wantPin: "3", wantOK: true},
+		{name: "covers every host core is unrestricted", raw: "0-15", hostCores: 16, wantPin: "", wantOK: false},
+		{name: "count exceeding host cores is unrestricted", raw: "0-19", hostCores: 16, wantPin: "", wantOK: false},
+		{name: "empty raw", raw: "", hostCores: 16, wantPin: "", wantOK: false},
+		{name: "malformed raw", raw: "abc", hostCores: 16, wantPin: "", wantOK: false},
+		{name: "unknown host core count", raw: "0-1", hostCores: 0, wantPin: "", wantOK: false},
+		{name: "negative host core count", raw: "0-1", hostCores: -1, wantPin: "", wantOK: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pin, ok := CPUSetPin(c.raw, c.hostCores)
+			require.Equal(t, c.wantOK, ok)
+			require.Equal(t, c.wantPin, pin)
 		})
 	}
 }

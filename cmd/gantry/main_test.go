@@ -411,6 +411,39 @@ func TestBuildSnapshotPassesThroughComposeProject(t *testing.T) {
 	require.Equal(t, "", snap.Containers["jellyfin"].ComposeProject)
 }
 
+// TestBuildSnapshotPassesThroughCpusetAndExitCode pins Container Detail's
+// two Go passthroughs (the anomaly banner's exit code, the Limits card's
+// cpuset pin) exactly the same "straight through from Meta, no math"
+// shape ComposeProject's own test above already pins -- an unpinned/
+// still-running container must read back empty/zero, not some stale or
+// invented value.
+func TestBuildSnapshotPassesThroughCpusetAndExitCode(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{
+			{Name: "minecraft", State: "running", Health: "healthy", Image: "demo/minecraft:latest", Cpuset: "0-1"},
+			{Name: "vaultwarden", State: "exited", Image: "demo/vaultwarden:latest", ExitCode: 137},
+			{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}, // no pin, never exited
+		}
+	}
+
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil)()
+
+	require.Equal(t, "0-1", snap.Containers["minecraft"].Cpuset)
+	require.Equal(t, 0, snap.Containers["minecraft"].ExitCode)
+	require.Equal(t, 137, snap.Containers["vaultwarden"].ExitCode)
+	require.Equal(t, "", snap.Containers["jellyfin"].Cpuset)
+	require.Equal(t, 0, snap.Containers["jellyfin"].ExitCode)
+}
+
 // TestBuildSnapshotMergesDiskMetaFromRealAndFake pins the disk_meta
 // analogue of the fake-Metas test above: a real box's own unraid
 // collector (ticked against a hand-written disks.ini) and fake mode's

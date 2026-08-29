@@ -36,8 +36,23 @@ type Meta struct {
 	StartedAt      time.Time
 	HostNet        bool
 	RestartCount   int
-	Alloc          alloc
-	Mounts         []MountInfo
+	// Cpuset is the display-ready cpuset pin string ("0-5, 13-15") when
+	// this container's cpuset actually narrows it below the host's own
+	// core count -- "" for an unpinned or unrestricted one (CPUSetPin,
+	// cgroupv2.go). Computed once at inspect time (refreshInventory)
+	// rather than derived from Alloc by every reader, since Alloc alone
+	// can't answer "does this narrow the container" without also knowing
+	// the current host core count. fake.go sets this directly for its own
+	// synthetic pinned demo container, which has no real HostConfig to
+	// derive an Alloc from at all.
+	Cpuset string
+	// ExitCode is docker inspect's State.ExitCode, straight through --
+	// meaningful only once State is "exited" or "dead" (0 while running,
+	// same "always present, contextually interpreted" convention as
+	// State/Health themselves).
+	ExitCode int
+	Alloc    alloc
+	Mounts   []MountInfo
 }
 
 // MountInfo is one container mount, as reported by docker inspect's

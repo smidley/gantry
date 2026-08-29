@@ -350,6 +350,8 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 				Image:          m.Image,
 				Icon:           m.Icon,
 				ComposeProject: m.ComposeProject,
+				Cpuset:         m.Cpuset,
+				ExitCode:       m.ExitCode,
 				Metrics:        map[string]float64{},
 			}
 		}

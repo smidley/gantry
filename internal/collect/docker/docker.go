@@ -201,7 +201,16 @@ func (c *Collector) refreshInventory(ctx context.Context, now time.Time) error {
 		if err != nil {
 			continue
 		}
-		metas = append(metas, metaFromInspect(resp))
+		m := metaFromInspect(resp)
+		// Cpuset: computed here (not inside metaFromInspect, a pure
+		// function of the inspect response alone) because "does this
+		// narrow the container" needs the CURRENT host core count, which
+		// only this method has (hostCoresOrNumCPU) -- see CPUSetPin's own
+		// doc for why an unrestricted cpuset must read as no pin at all.
+		if pin, ok := CPUSetPin(m.Alloc.CPUSetRaw, c.hostCoresOrNumCPU()); ok {
+			m.Cpuset = pin
+		}
+		metas = append(metas, m)
 	}
 	c.reg.applyInventory(metas, c.events, c.evictContainer)
 	c.recordMeta(metas, now)
@@ -270,6 +279,7 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 	if resp.State != nil {
 		m.State = resp.State.Status
 		m.Pid = resp.State.Pid
+		m.ExitCode = resp.State.ExitCode
 		if resp.State.Health != nil {
 			m.Health = resp.State.Health.Status
 		}
@@ -313,7 +323,7 @@ func allocFromHostConfig(r container.Resources) alloc {
 		a.CPUQuotaCores, a.HasCPUQuota = float64(r.CPUQuota)/float64(period), true
 	}
 	if n, ok := parseCPUSetCount(r.CpusetCpus); ok {
-		a.CPUSetCores, a.HasCPUSet = n, true
+		a.CPUSetCores, a.CPUSetRaw, a.HasCPUSet = n, r.CpusetCpus, true
 	}
 	if r.PidsLimit != nil && *r.PidsLimit > 0 {
 		a.PidsLimit, a.HasPidsLimit = uint64(*r.PidsLimit), true

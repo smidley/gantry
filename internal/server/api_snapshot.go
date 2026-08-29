@@ -57,6 +57,15 @@ type ContainerDTO struct {
 	// through -- "" for a container not created via docker compose. The
 	// compare view's Groups chip row (Containers.svelte) groups by this.
 	ComposeProject string `json:"compose_project"`
+	// Cpuset is docker.Meta's own field of the same name, straight
+	// through -- "" for a container with no cpuset pin (or one that
+	// doesn't actually narrow it below the host's own core count). Backs
+	// Container Detail's Limits facts line.
+	Cpuset string `json:"cpuset"`
+	// ExitCode is docker.Meta's own field of the same name, straight
+	// through -- meaningful only once State is "exited"/"dead". Backs
+	// Container Detail's anomaly banner ("Stopped -- exit code 137 ...").
+	ExitCode int `json:"exit_code"`
 }
 
 // ContainerInfo is the /api/containers response shape: inventory facts

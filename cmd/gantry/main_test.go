@@ -381,6 +381,36 @@ func TestBuildSnapshotIncludesStoppedContainerWithEmptyMetrics(t *testing.T) {
 	require.Empty(t, c.Metrics, "no live samples were recorded for it -- Metrics must not be fabricated")
 }
 
+// TestBuildSnapshotPassesThroughComposeProject pins the compare view's own
+// Groups-chip data source: a Meta's ComposeProject (label passthrough,
+// see registry_test.go's TestMetaFromInspectExtractsComposeProjectLabel)
+// must survive into ContainerDTO unchanged, straight alongside Icon --
+// same fakeMetas convention as TestBuildSnapshotIncludesFakeMetasWhenWired
+// above -- and a Meta with no compose project must come through as "",
+// not an absent/zero-value surprise.
+func TestBuildSnapshotPassesThroughComposeProject(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{
+			{Name: "gridmind-api", State: "running", Health: "healthy", Image: "demo/gridmind-api:latest", ComposeProject: "gridmind-cloud"},
+			{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}, // no compose project
+		}
+	}
+
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil)()
+
+	require.Equal(t, "gridmind-cloud", snap.Containers["gridmind-api"].ComposeProject)
+	require.Equal(t, "", snap.Containers["jellyfin"].ComposeProject)
+}
+
 // TestBuildSnapshotMergesDiskMetaFromRealAndFake pins the disk_meta
 // analogue of the fake-Metas test above: a real box's own unraid
 // collector (ticked against a hand-written disks.ini) and fake mode's

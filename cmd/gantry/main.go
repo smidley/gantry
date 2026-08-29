@@ -345,11 +345,12 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 		}
 		for _, m := range metas {
 			dto.Containers[m.Name] = server.ContainerDTO{
-				State:   m.State,
-				Health:  m.Health,
-				Image:   m.Image,
-				Icon:    m.Icon,
-				Metrics: map[string]float64{},
+				State:          m.State,
+				Health:         m.Health,
+				Image:          m.Image,
+				Icon:           m.Icon,
+				ComposeProject: m.ComposeProject,
+				Metrics:        map[string]float64{},
 			}
 		}
 

@@ -53,6 +53,10 @@ type ContainerDTO struct {
 	Image   string             `json:"image"`
 	Icon    string             `json:"icon"`
 	Metrics map[string]float64 `json:"metrics"`
+	// ComposeProject is docker.Meta's own field of the same name, straight
+	// through -- "" for a container not created via docker compose. The
+	// compare view's Groups chip row (Containers.svelte) groups by this.
+	ComposeProject string `json:"compose_project"`
 }
 
 // ContainerInfo is the /api/containers response shape: inventory facts

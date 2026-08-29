@@ -689,6 +689,49 @@ func TestMetaFromInspectIconEmptyWhenLabelAbsent(t *testing.T) {
 	require.Equal(t, "", m.Icon)
 }
 
+// TestMetaFromInspectExtractsComposeProjectLabel pins ComposeProject's
+// extraction from the com.docker.compose.project label docker compose
+// sets on every container it creates -- same hand-built-InspectResponse
+// pattern as TestMetaFromInspectExtractsUnraidIconLabel above.
+func TestMetaFromInspectExtractsComposeProjectLabel(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:    "abc123",
+			Name:  "/gridmind-api",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{
+			Image:  "gridmind/api:latest",
+			Labels: map[string]string{composeProjectLabel: "gridmind-cloud"},
+		},
+	}
+
+	m := metaFromInspect(resp)
+
+	require.Equal(t, "gridmind-cloud", m.ComposeProject)
+}
+
+// TestMetaFromInspectComposeProjectEmptyWhenLabelAbsent pins the fallback
+// half: a container not created via docker compose (anything run
+// standalone, or with no labels at all) comes back with ComposeProject ==
+// "" rather than panicking on a nil Labels map -- the frontend's Groups
+// chip row depends on this being reliably "", not merely absent, so it
+// can tell a compose member apart from a standalone container.
+func TestMetaFromInspectComposeProjectEmptyWhenLabelAbsent(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:    "abc123",
+			Name:  "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{Image: "jellyfin/jellyfin:latest"}, // Labels left nil
+	}
+
+	m := metaFromInspect(resp)
+
+	require.Equal(t, "", m.ComposeProject)
+}
+
 // TestAllocFromHostConfigNanoCPUsToCores pins docker's own units:
 // NanoCPUs is in units of 10^-9 CPUs, so 4e9 is 4.0 cores exactly (the
 // --cpus=4 CLI flag's own compiled-down form).

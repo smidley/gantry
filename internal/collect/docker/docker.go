@@ -246,6 +246,12 @@ func (c *Collector) recordMeta(metas []Meta, now time.Time) {
 // separate absence check.
 const unraidIconLabel = "net.unraid.docker.icon"
 
+// composeProjectLabel is the label docker compose sets on every container
+// it creates, naming the project (stack) it belongs to -- Meta.
+// ComposeProject mirrors unraidIconLabel's own extraction shape exactly
+// below, and inherits the same nil-Labels safety.
+const composeProjectLabel = "com.docker.compose.project"
+
 func metaFromInspect(resp container.InspectResponse) Meta {
 	m := Meta{
 		ID:           resp.ID,
@@ -255,6 +261,7 @@ func metaFromInspect(resp container.InspectResponse) Meta {
 	if resp.Config != nil {
 		m.Image = resp.Config.Image
 		m.Icon = resp.Config.Labels[unraidIconLabel]
+		m.ComposeProject = resp.Config.Labels[composeProjectLabel]
 	}
 	if resp.HostConfig != nil {
 		m.HostNet = resp.HostConfig.NetworkMode.IsHost()

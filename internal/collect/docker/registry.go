@@ -26,12 +26,18 @@ import (
 // (cgroupv2.go), which is fresh every 2s tick.
 type Meta struct {
 	ID, Name, Image, Icon, State, Health string
-	Pid                                  int
-	StartedAt                            time.Time
-	HostNet                              bool
-	RestartCount                         int
-	Alloc                                alloc
-	Mounts                               []MountInfo
+	// ComposeProject is the com.docker.compose.project label docker
+	// compose sets on every container it creates, naming the stack it
+	// belongs to -- "" for a container not created via compose. Extracted
+	// in metaFromInspect exactly like Icon (a label read, nil-Labels-safe,
+	// no separate absence check).
+	ComposeProject string
+	Pid            int
+	StartedAt      time.Time
+	HostNet        bool
+	RestartCount   int
+	Alloc          alloc
+	Mounts         []MountInfo
 }
 
 // MountInfo is one container mount, as reported by docker inspect's

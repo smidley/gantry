@@ -273,6 +273,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Logs:       dc.StreamLogs,
 		Storage:    buildContainerStorage(dc, ur, st, fakeMetas, fakeDiskMeta, fakeDeviceLabels, fakeSharePlacement, sysRoot),
 		Settings:   settingsAdapter{st: st, cfg: cfg},
+		Groups:     groupsAdapter{st: st},
 
 		Images:       buildImages(imagesSrc),
 		RemoveImages: buildRemoveImages(removeImagesSrc),
@@ -883,6 +884,46 @@ func (a settingsAdapter) Set(field string, value int) error {
 		return fmt.Errorf("settings: unknown field %q", field) // unreached: handler only calls Set with its own whitelisted names
 	}
 	return a.st.SettingSet(key, strconv.Itoa(value))
+}
+
+// groupsSettingsKey is the one settings-table row every saved group
+// lives under -- a single JSON-encoded blob, not one row per group
+// (there's no per-field env-override dance to support the way
+// retention's four keys have, so there's no reason to split it up).
+const groupsSettingsKey = "groups"
+
+// groupsAdapter implements server.GroupsIface: unlike settingsAdapter,
+// this talks straight to st.SettingGet/SettingSet with no *config.Config
+// in between -- groups are plain user data, not a tunable with an env
+// var equivalent, so there's nothing for config's env>settings>default
+// precedence to resolve. JSON marshal/unmarshal happens here, in main,
+// the same "server package stays store-shape-agnostic" reasoning
+// buildTop/buildContainersList/settingsAdapter itself already follow.
+type groupsAdapter struct {
+	st *store.Store
+}
+
+func (a groupsAdapter) Get() ([]server.Group, error) {
+	raw, ok, err := a.st.SettingGet(groupsSettingsKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return []server.Group{}, nil
+	}
+	var groups []server.Group
+	if err := json.Unmarshal([]byte(raw), &groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+func (a groupsAdapter) Set(groups []server.Group) error {
+	raw, err := json.Marshal(groups)
+	if err != nil {
+		return err
+	}
+	return a.st.SettingSet(groupsSettingsKey, string(raw))
 }
 
 func healthcheck(getenv func(string) string) error {

@@ -95,6 +95,15 @@ type Options struct {
 	// a write with nowhere to write to — answers 404.
 	Settings SettingsIface
 
+	// Groups backs GET/PUT /api/groups (main wiring points this at a
+	// small adapter over *store.Store, JSON-blob-encoded into the same
+	// generic settings table Settings itself uses — see api_groups.go).
+	// Nil in tests that don't wire one: GET then reports an empty groups
+	// list (a meaningful "empty" here, unlike Logs), and PUT — no
+	// meaningful no-op success for a write with nowhere to write to —
+	// answers 404, same as Settings' own PUT.
+	Groups GroupsIface
+
 	// Images lists every image plus a usage-classification summary for
 	// GET /api/images (main wiring: a small adapter over
 	// docker.Collector.Images in real mode, fake.Generator.Images in
@@ -191,6 +200,8 @@ func New(o Options) *Server {
 	s.mux.Handle("GET /api/containers/{name}/storage", withGzip(http.HandlerFunc(s.handleStorage)))
 	s.mux.Handle("GET /api/settings", withGzip(http.HandlerFunc(s.handleSettingsGet)))
 	s.mux.Handle("PUT /api/settings", withGzip(http.HandlerFunc(s.handleSettingsPut)))
+	s.mux.Handle("GET /api/groups", withGzip(http.HandlerFunc(s.handleGroupsGet)))
+	s.mux.Handle("PUT /api/groups", withGzip(http.HandlerFunc(s.handleGroupsPut)))
 	s.mux.Handle("GET /api/images", withGzip(http.HandlerFunc(s.handleImagesList)))
 	s.mux.Handle("POST /api/images/remove", withGzip(http.HandlerFunc(s.handleImagesRemove)))
 	s.mux.Handle("POST /api/images/prune", withGzip(http.HandlerFunc(s.handleImagesPrune)))

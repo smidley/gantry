@@ -192,6 +192,41 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	drainAndClose(settingsResp2)
 	require.Equal(t, 72, settingsBody2.Retention.R1Hours, "PUT must persist through the real store, visible on the very next GET")
 
+	// /api/groups smoke check: exercises the real groupsAdapter end to
+	// end, same shape as the settings check just above -- groupsAdapter
+	// talks straight to the same *store.Store fake mode already uses for
+	// everything else (there's no separate fake-mode groups store to
+	// diverge from), so this also proves groups persistence works
+	// unconditionally in fake mode, not just for real installs. GET
+	// starts empty (nothing saved yet), and a PUT's new value is visible
+	// on the very next GET.
+	type groupsWire struct {
+		Groups []server.Group `json:"groups"`
+	}
+	groupsResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/groups", port))
+	require.NoError(t, err)
+	var groupsBody groupsWire
+	require.NoError(t, json.NewDecoder(groupsResp.Body).Decode(&groupsBody))
+	drainAndClose(groupsResp)
+	require.Equal(t, http.StatusOK, groupsResp.StatusCode)
+	require.Empty(t, groupsBody.Groups, "nothing saved yet")
+
+	groupsPutReq, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%d/api/groups", port),
+		strings.NewReader(`{"groups":[{"name":"media","members":["jellyfin","sonarr"]}]}`))
+	require.NoError(t, err)
+	groupsPutResp, err := http.DefaultClient.Do(groupsPutReq)
+	require.NoError(t, err)
+	drainAndClose(groupsPutResp)
+	require.Equal(t, http.StatusOK, groupsPutResp.StatusCode)
+
+	groupsResp2, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/groups", port))
+	require.NoError(t, err)
+	var groupsBody2 groupsWire
+	require.NoError(t, json.NewDecoder(groupsResp2.Body).Decode(&groupsBody2))
+	drainAndClose(groupsResp2)
+	require.Equal(t, []server.Group{{Name: "media", Members: []string{"jellyfin", "sonarr"}}}, groupsBody2.Groups,
+		"PUT must persist through the real store, visible on the very next GET")
+
 	// /api/images smoke check: exercises the real fake.Generator-backed
 	// Images/RemoveImages/PruneImages wiring end to end (fake mode has no
 	// real docker daemon, so this is the ONLY way that selection is ever

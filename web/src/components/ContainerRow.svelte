@@ -41,7 +41,13 @@
   // containers together -- their health dots alone differ only by color
   // (serious vs. warning), so that section passes this to also print the
   // real state word, same text the mobile card list already shows.
-  let { name, registerSeedTarget = undefined, showState = false } = $props();
+  //
+  // selected/onToggleSelect (additive -- multi detail view): the compare
+  // checkbox, one per row. Containers.svelte owns the actual selection
+  // Set; this row just reflects/toggles its own membership in it, same
+  // "parent owns the state, row is a dumb reflection of one slice of it"
+  // shape registerSeedTarget already uses for seeding.
+  let { name, registerSeedTarget = undefined, showState = false, selected = false, onToggleSelect } = $props();
 
   let cpuRing = liveRing((f) => f.containers[name]?.metrics['cpu.pct']);
 
@@ -120,11 +126,25 @@
 
 {#if c}
   <tr class="container-row">
+    <td class="container-row__select-cell">
+      <input
+        type="checkbox"
+        class="container-row__select"
+        checked={selected}
+        onchange={onToggleSelect}
+        aria-label={`Compare ${name}`}
+      />
+    </td>
     <td><HealthDot status={containerHealthStatus(c.state, c.health)} label={showState ? c.state : undefined} /></td>
     <td class="container-row__name-cell">
       <a href={`#/containers/${encodeURIComponent(name)}`}>
         <ContainerIcon {name} icon={c.icon} size={20} />
-        <span class="container-row__name-text">{name}</span>
+        <span class="container-row__name-stack">
+          <span class="container-row__name-text">{name}</span>
+          {#if c.compose_project}
+            <span class="container-row__compose-tag">{c.compose_project}</span>
+          {/if}
+        </span>
       </a>
     </td>
     <td class="container-row__cpu-cell">
@@ -169,6 +189,17 @@
        of forcing an overflow. */
     overflow: hidden;
   }
+  .container-row__select-cell {
+    text-align: center;
+  }
+  /* Quiet -- native checkbox, no custom widget: accent-color is the only
+     override, tying its checked state to the same series-1 hue the rest
+     of the app already treats as "the" interactive accent (focus rings,
+     active segmented-control tabs). */
+  .container-row__select {
+    accent-color: var(--series-1);
+    cursor: pointer;
+  }
   .container-row__name-cell a {
     display: flex;
     align-items: center;
@@ -181,11 +212,30 @@
   .container-row__name-cell a:hover {
     text-decoration: underline;
   }
+  /* Stacks the name over its own compose-project tag (present only for a
+     row whose container carries a com.docker.compose.project label) --
+     a second, smaller line rather than crowding the tag onto the name's
+     own line, which the fixed-width name column has little room for. */
+  .container-row__name-stack {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
   .container-row__name-text {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0; /* lets the flex child actually shrink+ellipsis instead of pushing the fixed column wider */
+  }
+  .container-row__compose-tag {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink-2);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 400;
   }
   .container-row__cpu-cell {
     display: flex;

@@ -12,6 +12,8 @@
   import { fmtBytes, fmtPct, fmtRate } from '../lib/format';
   import { seriesPointsToRing } from '../lib/livering';
   import { fetchContainers, fetchSeries } from '../lib/api';
+  import { buildCompareHash } from '../lib/compareRoute';
+  import { composeGroups } from '../lib/composeGroups';
   import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
   import ContainerRow from '../components/ContainerRow.svelte';
@@ -48,6 +50,12 @@
   // is exactly the "flexible, takes the remaining slack" the ask wants
   // for the one column whose content (image tags) varies the most.
   const COLUMNS = [
+    // select (multi detail view): the compare checkbox, quiet and
+    // unsortable -- leftmost, ahead of the health dot, so it reads as
+    // "pick which rows" before "here's their status," matching the
+    // left-to-right order a floating compare bar's own "Compare N ->"
+    // action implies.
+    { key: 'select', label: '', ariaName: 'Compare', sortable: false, width: '1.75rem' },
     { key: 'health', label: 'ST', ariaName: 'Health', sortable: true, width: '2.25rem' },
     { key: 'name', label: 'Name', sortable: true, width: '10.5rem' },
     { key: 'cpu', label: 'CPU', sortable: true, numeric: true, width: '18.5rem' }, // icon+sparkline(220px, flex-shrink:0)+text -- matches ContainerRow's own cpu-cell sizing
@@ -146,6 +154,38 @@
   let sortDir = $state('desc');
   let stoppedExpanded = $state(false);
 
+  // selectedNames: the compare checkbox's own selection, a plain Set
+  // reassigned (not mutated in place) on every toggle -- Svelte 5 runes
+  // need a fresh reference to notice the change, same convention
+  // TopConsumers' own hiddenHeroIdx Set already uses. Persists across a
+  // running<->stopped toggle and a live re-sort alike (it's keyed by
+  // name, independent of either), and is NOT reset by a filter-text
+  // change -- a container filtered out of view stays selected, so
+  // narrowing the filter to check one more teammate doesn't silently
+  // drop the ones already picked.
+  let selectedNames = $state(new Set());
+
+  function toggleSelected(name) {
+    const next = new Set(selectedNames);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    selectedNames = next;
+  }
+
+  function clearSelection() {
+    selectedNames = new Set();
+  }
+
+  let selectedCount = $derived(selectedNames.size);
+  let compareHref = $derived(buildCompareHash([...selectedNames]));
+
+  // composeGroupsList: docker-compose stacks with >=2 currently-known
+  // members -- the Groups chip row's own data. Recomputes on every live
+  // frame (composeGroups is cheap: one pass over the container map), but
+  // its OUTPUT only actually changes when project membership itself
+  // changes, not on ordinary metric ticks.
+  let composeGroupsList = $derived(composeGroups(live.frame?.containers ?? {}));
+
   // nameSetKey is a $derived string that only actually CHANGES value when
   // the container name SET changes (add/remove) -- it recomputes every
   // tick internally, but Svelte 5's push-pull reactivity means a
@@ -226,6 +266,26 @@
 <div class="containers-view">
   <h1 class="page-title">Containers</h1>
 
+  {#if composeGroupsList.length > 0}
+    <!-- Groups: one chip per docker-compose project with >=2 currently-
+         known members -- "I have multiple containers that work together
+         as a team for an app" (Scott's own ask), surfaced up front
+         rather than relying on the fleet happening to share a naming
+         pattern the filter box can search for. Clicking a chip jumps
+         straight into compare, pre-filled with that project's own
+         members (compareRoute.ts's buildCompareHash already sorts them,
+         matching this chip's own canonical member order). -->
+    <div class="containers-view__groups" role="group" aria-label="Compose groups">
+      <span class="microlabel containers-view__groups-label">Groups</span>
+      {#each composeGroupsList as group (group.project)}
+        <a class="containers-view__group-chip" href={buildCompareHash(group.names)}>
+          {group.project}
+          <span class="containers-view__group-count">×{group.names.length}</span>
+        </a>
+      {/each}
+    </div>
+  {/if}
+
   <input
     type="text"
     class="containers-view__filter"
@@ -253,21 +313,32 @@
           <tr>
             {#each COLUMNS as col (col.key)}
               <th class:containers-table__th--numeric={col.numeric}>
-                <button
-                  type="button"
-                  class="containers-table__sort-btn"
-                  onclick={() => setSort(col.key)}
-                  aria-label={sortAriaLabel(col)}
-                >
-                  <span class="microlabel" aria-hidden="true">{col.label}{sortIndicator(col.key)}</span>
-                </button>
+                {#if col.sortable}
+                  <button
+                    type="button"
+                    class="containers-table__sort-btn"
+                    onclick={() => setSort(col.key)}
+                    aria-label={sortAriaLabel(col)}
+                  >
+                    <span class="microlabel" aria-hidden="true">{col.label}{sortIndicator(col.key)}</span>
+                  </button>
+                {:else}
+                  <!-- select: no sort exists for "is this row checked," so
+                       this is a plain, non-interactive (and, since it's
+                       empty, non-visually-meaningful) header cell -- unlike
+                       the icon-only sort BUTTONS this ariaName/sortAriaLabel
+                       machinery exists for, a bare <th> with no control in
+                       it needs no accessible name of its own; each row's
+                       own checkbox already carries its own aria-label. -->
+                  <span class="microlabel" aria-hidden="true">{col.label}</span>
+                {/if}
               </th>
             {/each}
           </tr>
         </thead>
         <tbody>
           {#each runningNames as name (name)}
-            <ContainerRow {name} {registerSeedTarget} />
+            <ContainerRow {name} {registerSeedTarget} selected={selectedNames.has(name)} onToggleSelect={() => toggleSelected(name)} />
           {/each}
         </tbody>
       </table>
@@ -276,25 +347,39 @@
     <!-- Mobile: rail rows instead of table rows, one shared card (same
          "list lives in one card, hairline between rows" convention as
          the disk list/event feed) rather than a stack of same-shape
-         per-container cards. -->
+         per-container cards. The compare checkbox sits OUTSIDE the name/
+         stats link (a sibling, not a nested interactive element) so
+         checking it doesn't also trigger the link's own navigation. -->
     <div class="card containers-view__cards flex md:hidden">
       {#each runningNames as name (name)}
         {@const c = live.frame?.containers?.[name]}
         {#if c}
-          <a class="containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>
-            <div class="containers-view__card-head">
-              <HealthDot status={containerHealthStatus(c.state, c.health)} />
-              <ContainerIcon {name} icon={c.icon} size={20} />
-              <span class="containers-view__card-name">{name}</span>
-            </div>
-            <div class="containers-view__card-stats">
-              <span class="tabular-nums">CPU {fmtPct(c.metrics['cpu.pct'] ?? 0)}</span>
-              <span class="tabular-nums">Mem {fmtBytes(c.metrics['mem.bytes'] ?? 0)}</span>
-              <span class="tabular-nums">
-                Net &darr;{fmtRate(c.metrics['net.rx_bps'] ?? 0)} &uarr;{fmtRate(c.metrics['net.tx_bps'] ?? 0)}
-              </span>
-            </div>
-          </a>
+          <div class="containers-view__card">
+            <input
+              type="checkbox"
+              class="container-row__select"
+              checked={selectedNames.has(name)}
+              onchange={() => toggleSelected(name)}
+              aria-label={`Compare ${name}`}
+            />
+            <a class="containers-view__card-link" href={`#/containers/${encodeURIComponent(name)}`}>
+              <div class="containers-view__card-head">
+                <HealthDot status={containerHealthStatus(c.state, c.health)} />
+                <ContainerIcon {name} icon={c.icon} size={20} />
+                <span class="containers-view__card-name">{name}</span>
+                {#if c.compose_project}
+                  <span class="containers-view__card-compose-tag">{c.compose_project}</span>
+                {/if}
+              </div>
+              <div class="containers-view__card-stats">
+                <span class="tabular-nums">CPU {fmtPct(c.metrics['cpu.pct'] ?? 0)}</span>
+                <span class="tabular-nums">Mem {fmtBytes(c.metrics['mem.bytes'] ?? 0)}</span>
+                <span class="tabular-nums">
+                  Net &darr;{fmtRate(c.metrics['net.rx_bps'] ?? 0)} &uarr;{fmtRate(c.metrics['net.tx_bps'] ?? 0)}
+                </span>
+              </div>
+            </a>
+          </div>
         {/if}
       {/each}
     </div>
@@ -322,7 +407,7 @@
             </colgroup>
             <tbody>
               {#each notRunningNames as name (name)}
-                <ContainerRow {name} {registerSeedTarget} showState />
+                <ContainerRow {name} {registerSeedTarget} showState selected={selectedNames.has(name)} onToggleSelect={() => toggleSelected(name)} />
               {/each}
             </tbody>
           </table>
@@ -331,21 +416,55 @@
           {#each notRunningNames as name (name)}
             {@const c = live.frame?.containers?.[name]}
             {#if c}
-              <a class="containers-view__card" href={`#/containers/${encodeURIComponent(name)}`}>
-                <div class="containers-view__card-head">
-                  <HealthDot status={containerHealthStatus(c.state, c.health)} />
-                  <ContainerIcon {name} icon={c.icon} size={20} />
-                  <span class="containers-view__card-name">{name}</span>
-                </div>
-                <div class="containers-view__card-stats">
-                  <span>{c.state}</span>
-                </div>
-              </a>
+              <div class="containers-view__card">
+                <input
+                  type="checkbox"
+                  class="container-row__select"
+                  checked={selectedNames.has(name)}
+                  onchange={() => toggleSelected(name)}
+                  aria-label={`Compare ${name}`}
+                />
+                <a class="containers-view__card-link" href={`#/containers/${encodeURIComponent(name)}`}>
+                  <div class="containers-view__card-head">
+                    <HealthDot status={containerHealthStatus(c.state, c.health)} />
+                    <ContainerIcon {name} icon={c.icon} size={20} />
+                    <span class="containers-view__card-name">{name}</span>
+                    {#if c.compose_project}
+                      <span class="containers-view__card-compose-tag">{c.compose_project}</span>
+                    {/if}
+                  </div>
+                  <div class="containers-view__card-stats">
+                    <span>{c.state}</span>
+                  </div>
+                </a>
+              </div>
             {/if}
           {/each}
         </div>
       {/if}
     {/if}
+  {/if}
+
+  {#if selectedCount >= 2}
+    <!-- Floating compare bar: appears once >=2 rows are checked (in
+         either section, or the mobile card lists above), regardless of
+         current filter/sort/scroll position -- dismissing clears the
+         selection outright (equivalent to unchecking everything) rather
+         than merely hiding an already-decided bar, so a later re-check
+         starts from a clean slate instead of a bar silently reappearing
+         mid-task. -->
+    <div class="containers-view__compare-bar">
+      <span class="containers-view__compare-count">{selectedCount} selected</span>
+      <a class="containers-view__compare-btn" href={compareHref}>Compare {selectedCount} &rarr;</a>
+      <button
+        type="button"
+        class="containers-view__compare-dismiss"
+        onclick={clearSelection}
+        aria-label="Clear selection"
+      >
+        ✕
+      </button>
+    </div>
   {/if}
 </div>
 
@@ -382,7 +501,7 @@
   .containers-table {
     width: 100%;
     border-collapse: collapse;
-    min-width: 75rem; /* +3rem, matching the cpu column's own growth (15.5rem -> 18.5rem) */
+    min-width: 76.75rem; /* +1.75rem, the new leading select column's own width */
     table-layout: fixed;
   }
   .containers-table thead th {
@@ -425,26 +544,46 @@
   }
   /* Rail row, not a card -- was one .card per container (up to 20+ of
      them stacked); a hairline between rows instead, matching the disk
-     list/event feed convention. */
+     list/event feed convention. A row, not just a link, since the
+     compare checkbox (container-row__select below) is now a sibling of
+     the name/stats link rather than nested inside it -- an <input>
+     nested in an <a> would fire the link's own navigation on every
+     checkbox click too. */
   .containers-view__card {
     padding: 0.75rem 1rem;
     display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    text-decoration: none;
-    color: var(--ink);
+    align-items: flex-start;
+    gap: 0.6rem;
     border-bottom: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
   }
   .containers-view__card:last-child {
     border-bottom: none;
   }
+  .containers-view__card input.container-row__select {
+    margin-top: 0.2rem; /* nudges the checkbox down to the name row's own baseline, not the card's top edge */
+  }
+  .containers-view__card-link {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    text-decoration: none;
+    color: var(--ink);
+  }
   .containers-view__card-head {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    flex-wrap: wrap;
   }
   .containers-view__card-name {
     font-weight: 500;
+  }
+  .containers-view__card-compose-tag {
+    color: var(--ink-2);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
   }
   .containers-view__card-stats {
     display: flex;
@@ -453,5 +592,118 @@
     font-size: 0.8rem;
     color: var(--ink-2);
     font-family: var(--font-mono);
+  }
+  /* Same rule as ContainerRow.svelte's own .container-row__select --
+     duplicated rather than shared, since Svelte scopes each component's
+     <style> block independently and this class is used here (the mobile
+     card's own checkbox) as well as there (the desktop table's). */
+  .container-row__select {
+    accent-color: var(--series-1);
+    cursor: pointer;
+  }
+
+  /* Groups: a quiet chip row, same visual language as the Metrics page's
+     own hero-chart legend chips (colored pill, monospace) minus the
+     color -- a compose project isn't one of this app's 8 categorical
+     series slots, just a label, so these stay a neutral tint rather than
+     borrowing a --series-N hue that would misleadingly suggest a
+     specific chart-line identity before compare has even been opened. */
+  .containers-view__groups {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .containers-view__groups-label {
+    margin-right: 0.15rem;
+  }
+  .containers-view__group-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.25rem 0.6rem;
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--ink) 5%, transparent);
+    color: var(--ink);
+    text-decoration: none;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+  }
+  .containers-view__group-chip:hover {
+    background: color-mix(in oklab, var(--ink) 10%, transparent);
+  }
+  .containers-view__group-count {
+    color: var(--ink-2);
+  }
+
+  /* Floating compare bar: fixed to the viewport (not the page flow), so
+     it stays reachable regardless of scroll position or which section
+     (running/stopped, desktop table/mobile cards) the 2nd checkbox was
+     actually ticked in. Centered at the bottom, full-width-minus-margin
+     on a narrow viewport rather than a fixed pixel width that could
+     overflow it. */
+  .containers-view__compare-bar {
+    position: fixed;
+    left: 50%;
+    /* Clears the fixed mobile TabBar (56px, same clearance Layout.svelte's
+       own .layout__content reserves) plus a little air -- without this
+       the two fixed-bottom elements overlap directly, reproduced live at
+       375px. Desktop (>=768px, no TabBar) reverts to a plain 1.25rem. */
+    bottom: calc(56px + 0.75rem);
+    transform: translateX(-50%);
+    z-index: 11;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 0.6rem 0.6rem 1rem;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    box-shadow: 0 4px 16px color-mix(in oklab, var(--ink) 20%, transparent);
+    max-width: calc(100vw - 2rem);
+  }
+  @media (min-width: 48rem) {
+    .containers-view__compare-bar {
+      bottom: 1.25rem;
+    }
+  }
+  .containers-view__compare-count {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+  /* Tinted-pill treatment, matching every other "active/primary" control
+     in this app (.segmented__btn--active, the Metrics hero's own legend
+     chips) rather than a one-off solid-fill button -- a bold custom
+     color combination has no other precedent anywhere in this codebase. */
+  .containers-view__compare-btn {
+    padding: 0.5rem 1rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--series-1) 45%, transparent);
+    background: color-mix(in oklab, var(--series-1) 18%, transparent);
+    color: var(--series-1);
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+  .containers-view__compare-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--ink-2);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .containers-view__compare-dismiss:hover {
+    background: color-mix(in oklab, var(--ink) 10%, transparent);
+    color: var(--ink);
   }
 </style>

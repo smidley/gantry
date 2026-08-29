@@ -69,6 +69,104 @@ test('metrics: the hero chart legend never exceeds 10 container chips plus the h
   expect(maxCount).toBeGreaterThan(0);
 });
 
+// Fourth report on this same bug class: leaderboard rows left garbled/
+// overlapping (frozen mid-transition), reproducible on both surfaces
+// above via two DIFFERENT triggers. Overview's module hits it (rarely)
+// through rankStability's own eviction+fill split; the Metrics page's
+// own panel has no cap at all (COMPLETE_LIST_LIMIT=500, stableTopN never
+// evicts there), so that was never its mechanism -- switching the
+// resource tab instead swaps metricKey for every row's own each-block
+// key AT ONCE (see TopBarList's own metricKey doc), a much bigger
+// simultaneous add+remove than a single eviction. TopBarList.svelte's
+// fix (animate:flip only -- no in:/out: transition on these rows at all
+// any more) removes the async outro bookkeeping that could get stuck
+// either way, regardless of how many rows enter/leave in the same
+// reconciliation -- this pair hammers both triggers directly (sustained
+// real-tick churn here, rapid resource-tab switching below) instead of
+// waiting on the rare timing either one used to need to actually surface.
+test('overview: leaderboard rows never get stuck mid-transition under sustained churn', async ({ page }) => {
+  test.setTimeout(35_000);
+  await page.goto('#/');
+
+  const list = page.locator('.overview__top .top-bar-list');
+  await expect(list.locator('li').first()).toBeVisible();
+
+  const deadline = Date.now() + 25_000;
+  while (Date.now() < deadline) {
+    const result = await list.evaluate((el) => {
+      const items = Array.from(el.children);
+      const stuckOpacity = items.filter((li) => parseFloat(getComputedStyle(li).opacity) < 0.99).length;
+      // "Stale" means an animation reporting playState "running" well past
+      // when its own configured duration says it should have finished --
+      // not merely "any animation is running right now," which a
+      // perfectly healthy flip would also show for up to ~250ms.
+      const staleAnimations = items.reduce((sum, li) => {
+        const stale = li.getAnimations().filter((a) => {
+          const duration = Number(a.effect?.getTiming?.().duration) || 0;
+          return a.playState === 'running' && Number(a.currentTime) > duration * 2 + 500;
+        });
+        return sum + stale.length;
+      }, 0);
+      return { count: items.length, stuckOpacity, staleAnimations };
+    });
+    expect(result.count, 'row count exceeds the module cap').toBeLessThanOrEqual(5);
+    expect(result.stuckOpacity, 'a row is frozen at partial opacity').toBe(0);
+    expect(result.staleAnimations, 'an animation never finished').toBe(0);
+    await page.waitForTimeout(1000);
+  }
+});
+
+test('metrics: rapid resource-tab switching never leaves the panel with a stuck or duplicated row', async ({ page }) => {
+  test.setTimeout(35_000);
+  await page.goto('#/top');
+
+  const panel = page.locator('.top-consumers__panel .top-bar-list');
+  await expect(panel.locator('li').first()).toBeVisible();
+  const tabs = page.getByRole('tablist', { name: 'Resource' }).getByRole('tab');
+  const tabCount = await tabs.count();
+
+  // Rapid-fire, no settling time between clicks -- every switch swaps
+  // the WHOLE each-block keyspace (metricKey) at once, so this is
+  // specifically trying to catch an add+remove landing in the same
+  // reconciliation as the next one starts.
+  for (let cycle = 0; cycle < 3 * tabCount; cycle++) {
+    await tabs.nth(cycle % tabCount).click();
+    const result = await panel.evaluate((el) => {
+      const items = Array.from(el.children);
+      const names = items.map((li) => li.querySelector('.top-bar-list__name-text')?.textContent ?? '');
+      const stuckOpacity = items.filter((li) => parseFloat(getComputedStyle(li).opacity) < 0.99).length;
+      return { duplicates: names.length - new Set(names).size, stuckOpacity };
+    });
+    expect(result.duplicates, 'duplicate entity after a resource switch').toBe(0);
+    expect(result.stuckOpacity, 'a row is frozen at partial opacity after a resource switch').toBe(0);
+  }
+
+  // One more full pass, this time polling for every flip to actually
+  // settle (rather than a single fixed-delay check) -- a shared CI
+  // runner under load can easily push a real, healthy 250ms flip's own
+  // 'finished' callback out past a fixed few hundred ms with nothing
+  // wrong at all, so this waits UP TO a generous timeout, succeeding
+  // the moment the count reaches 0. A genuinely stuck animation (the
+  // bug this guards against) never reaches 0 no matter how long this
+  // waits, so the generous ceiling only costs time in the already-rare
+  // failure case, never in the healthy one.
+  for (let cycle = 0; cycle < tabCount; cycle++) {
+    await tabs.nth(cycle).click();
+    await expect
+      .poll(
+        () =>
+          panel.evaluate((el) =>
+            Array.from(el.children).reduce(
+              (sum, li) => sum + li.getAnimations().filter((a) => a.playState !== 'finished' && a.playState !== 'idle').length,
+              0,
+            ),
+          ),
+        { message: 'an animation never finished settling after a resource switch', timeout: 5_000 },
+      )
+      .toBe(0);
+  }
+});
+
 // Settings' own "Animations" toggle (Scott's ask: force glides on/off
 // regardless of the OS's own prefers-reduced-motion setting, in case
 // that's part of why a real list reorder read as a hard swap for him --

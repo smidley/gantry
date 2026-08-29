@@ -29,10 +29,11 @@ type Collector struct {
 	dir      string
 	procRoot string
 
-	mu        sync.Mutex
-	version   string              // guarded by mu; set on tickArray, read via Version()
-	poolSlots []string            // guarded by mu; set on tickDisks, read via Slots()
-	diskMeta  map[string]DiskMeta // guarded by mu; set on tickDisks, read via DiskMeta()
+	mu             sync.Mutex
+	version        string                    // guarded by mu; set on tickArray, read via Version()
+	poolSlots      []string                  // guarded by mu; set on tickDisks, read via Slots()
+	diskMeta       map[string]DiskMeta       // guarded by mu; set on tickDisks, read via DiskMeta()
+	sharePlacement map[string]SharePlacement // guarded by mu; set on tickShares, read via SharePlacement()
 
 	havePrevArray bool
 	prevArray     ArrayState
@@ -48,6 +49,7 @@ func New(sink store.MetricSink, events EventSink, dir, procRoot string) *Collect
 		sink: sink, events: events, dir: dir, procRoot: procRoot,
 		prevDiskErrors: make(map[string]float64),
 		diskMeta:       make(map[string]DiskMeta),
+		sharePlacement: make(map[string]SharePlacement),
 	}
 }
 
@@ -93,6 +95,24 @@ func (c *Collector) DiskMeta() map[string]DiskMeta {
 	out := make(map[string]DiskMeta, len(c.diskMeta))
 	for slot, m := range c.diskMeta {
 		out[slot] = m
+	}
+	return out
+}
+
+// SharePlacement returns a snapshot copy of every share's own cache-pool
+// placement, keyed by share name (shares.ini's own section header,
+// unslugged — the same raw name ResolveStoragePath extracts from a
+// mount's /mnt/user/<share>/... source path, so a caller can join the
+// two directly) — a copy, same concurrent-caller reason as DiskMeta().
+// A share with no useCache field at all (shouldn't happen on a real
+// box, but shares.ini is external input) is simply absent, not a
+// zero-value entry.
+func (c *Collector) SharePlacement() map[string]SharePlacement {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]SharePlacement, len(c.sharePlacement))
+	for name, p := range c.sharePlacement {
+		out[name] = p
 	}
 	return out
 }

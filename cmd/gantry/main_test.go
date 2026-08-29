@@ -480,13 +480,14 @@ func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
 	}
 	poolSlots := func() []string { return []string{"cache"} }
 	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	noSharePlacement := func() map[string]unraid.SharePlacement { return nil }
 
 	live := store.NewLive(8)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.read_bps"}, 1000, 123.5)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.write_bps"}, 1000, 45)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, 1000, 4.2) // must not leak into devices
 
-	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, nil, "/unused", live, "jellyfin", 1000)
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, noSharePlacement, nil, nil, "/unused", live, "jellyfin", 1000)
 	require.True(t, ok)
 
 	require.Equal(t, []server.MountDTO{
@@ -494,6 +495,45 @@ func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
 		{Source: "/mnt/cache/transcode", Destination: "/tmp", RW: true, Storage: server.StorageRefDTO{Kind: "pool", Name: "cache"}},
 	}, dto.Mounts)
 	require.Equal(t, []server.DeviceIODTO{{Device: "sda", Label: "sda", ReadBps: 123.5, WriteBps: 45}}, dto.Devices)
+}
+
+// TestContainerStorageJoinsSharePlacementRealAndFakeOverlay pins the new
+// share->cache-pool join: a share sharePlacement (the real collector's
+// own SharePlacement()) knows about gets it straight through, a share
+// only fakeSharePlacement covers still resolves (fake-data mode has no
+// real shares.ini at all), and a mount that isn't kind=share never gets
+// a Placement even if the exact same name happened to appear in the map
+// (Placement is share-only, by construction, not merely by absence).
+func TestContainerStorageJoinsSharePlacementRealAndFakeOverlay(t *testing.T) {
+	lookupMeta := func(name string) (docker.Meta, bool) {
+		return docker.Meta{
+			Name: name,
+			Mounts: []docker.MountInfo{
+				{Source: "/mnt/user/appdata/" + name, Destination: "/config", RW: true},
+				{Source: "/mnt/user/downloads", Destination: "/downloads", RW: true},
+				{Source: "/mnt/cache/appdata", Destination: "/tmp", RW: true}, // pool, not share -- name collides with the share on purpose
+			},
+		}, true
+	}
+	poolSlots := func() []string { return []string{"cache"} }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	sharePlacement := func() map[string]unraid.SharePlacement {
+		return map[string]unraid.SharePlacement{"appdata": {Mode: "yes", Pool: "cache"}}
+	}
+	fakeSharePlacement := func() map[string]unraid.SharePlacement {
+		return map[string]unraid.SharePlacement{"downloads": {Mode: "only", Pool: "rocket_pool"}}
+	}
+
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, sharePlacement, fakeSharePlacement, nil, "/unused", store.NewLive(8), "jellyfin", 1000)
+	require.True(t, ok)
+
+	byDest := map[string]server.MountDTO{}
+	for _, m := range dto.Mounts {
+		byDest[m.Destination] = m
+	}
+	require.Equal(t, &server.SharePlacementDTO{Mode: "yes", Pool: "cache"}, byDest["/config"].Storage.Placement)
+	require.Equal(t, &server.SharePlacementDTO{Mode: "only", Pool: "rocket_pool"}, byDest["/downloads"].Storage.Placement)
+	require.Nil(t, byDest["/tmp"].Storage.Placement, "kind=pool never gets a share Placement, even sharing a name with a real share")
 }
 
 // TestContainerStorageResolvesDeviceLabelsViaDiskMetaJoinAndFakeOverlay
@@ -524,7 +564,8 @@ func TestContainerStorageResolvesDeviceLabelsViaDiskMetaJoinAndFakeOverlay(t *te
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.nvme0n1.read_bps"}, 1000, 2)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.loop2.read_bps"}, 1000, 3)
 
-	dto, ok := containerStorage(lookupMeta, poolSlots, diskMeta, fakeDiskMeta, fakeDeviceLabels, "/unused", live, "jellyfin", 1000)
+	noSharePlacement := func() map[string]unraid.SharePlacement { return nil }
+	dto, ok := containerStorage(lookupMeta, poolSlots, diskMeta, fakeDiskMeta, noSharePlacement, nil, fakeDeviceLabels, "/unused", live, "jellyfin", 1000)
 	require.True(t, ok)
 
 	byDevice := map[string]server.DeviceIODTO{}
@@ -555,11 +596,12 @@ func TestContainerStorageThreadsSysRootIntoDeviceLabelResolution(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "jellyfin"}, true }
 	poolSlots := func() []string { return nil }
 	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	noSharePlacement := func() map[string]unraid.SharePlacement { return nil }
 
 	live := store.NewLive(8)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.loop0.read_bps"}, 1000, 1)
 
-	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, nil, sysRoot, live, "jellyfin", 1000)
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, noSharePlacement, nil, nil, sysRoot, live, "jellyfin", 1000)
 	require.True(t, ok)
 	require.Equal(t, "docker.img", dto.Devices[0].Label)
 }
@@ -571,8 +613,9 @@ func TestContainerStorageUnknownContainerReturnsFalse(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
 	poolSlots := func() []string { return nil }
 	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	noSharePlacement := func() map[string]unraid.SharePlacement { return nil }
 
-	_, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, nil, "/unused", store.NewLive(8), "ghost", 0)
+	_, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, noSharePlacement, nil, nil, "/unused", store.NewLive(8), "ghost", 0)
 	require.False(t, ok)
 }
 
@@ -584,8 +627,9 @@ func TestContainerStorageEmptyMountsAndDevicesAreNonNilSlices(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "bare"}, true }
 	poolSlots := func() []string { return nil }
 	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	noSharePlacement := func() map[string]unraid.SharePlacement { return nil }
 
-	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, nil, "/unused", store.NewLive(8), "bare", 0)
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, noSharePlacement, nil, nil, "/unused", store.NewLive(8), "bare", 0)
 	require.True(t, ok)
 	require.NotNil(t, dto.Mounts)
 	require.Empty(t, dto.Mounts)
@@ -656,7 +700,7 @@ func TestBuildContainerStorageUnknownReturnsFalse(t *testing.T) {
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 
-	_, ok := buildContainerStorage(dc, ur, st, nil, nil, nil, "/unused")("ghost")
+	_, ok := buildContainerStorage(dc, ur, st, nil, nil, nil, nil, "/unused")("ghost")
 	require.False(t, ok)
 }
 
@@ -679,7 +723,7 @@ func TestBuildContainerStorageMergesFakeMetas(t *testing.T) {
 		}}
 	}
 
-	dto, ok := buildContainerStorage(dc, ur, st, fakeMetas, nil, nil, "/unused")("frigate")
+	dto, ok := buildContainerStorage(dc, ur, st, fakeMetas, nil, nil, nil, "/unused")("frigate")
 
 	require.True(t, ok, "a fake-mode container must resolve via fakeMetas, not 404")
 	require.Equal(t, []server.MountDTO{
@@ -697,7 +741,7 @@ func TestBuildContainerStorageNilFakeMetasUnaffected(t *testing.T) {
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 
-	_, ok := buildContainerStorage(dc, ur, st, nil, nil, nil, "/unused")("ghost")
+	_, ok := buildContainerStorage(dc, ur, st, nil, nil, nil, nil, "/unused")("ghost")
 	require.False(t, ok)
 }
 

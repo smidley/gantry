@@ -6,6 +6,7 @@ import {
   recentlyActiveDevices,
   recordDeviceActivity,
   RECENT_IO_WINDOW_MS,
+  sharePlacementText,
   sortMounts,
 } from './containerStorage';
 
@@ -145,5 +146,40 @@ describe('isUnraidOSLoopDevice', () => {
   it('does not flag an ordinary label that merely contains "bz"', () => {
     expect(isUnraidOSLoopDevice('docker.img')).toBe(false);
     expect(isUnraidOSLoopDevice('rocket_pool')).toBe(false);
+  });
+});
+
+describe('sharePlacementText', () => {
+  it('is null with no placement at all', () => {
+    expect(sharePlacementText(undefined)).toBeNull();
+  });
+
+  it('"only" names the pool, with its kind when known', () => {
+    expect(sharePlacementText({ mode: 'only', pool: 'scratch' }, 'nvme')).toBe('→ lives on scratch (nvme)');
+  });
+
+  it('"only" still names the pool with no kind resolved yet', () => {
+    expect(sharePlacementText({ mode: 'only', pool: 'scratch' })).toBe('→ lives on scratch');
+  });
+
+  it('"yes" reads as cache then array, with no pool name needed', () => {
+    expect(sharePlacementText({ mode: 'yes', pool: 'cache' })).toBe('→ cache then array');
+  });
+
+  it('"no" reads as array only', () => {
+    expect(sharePlacementText({ mode: 'no' })).toBe('→ array');
+  });
+
+  it('"prefer" names the pool and notes the array overflow', () => {
+    expect(sharePlacementText({ mode: 'prefer', pool: 'rocket_pool' }, 'nvme')).toBe('→ prefers rocket_pool (nvme), spills to array');
+  });
+
+  it('is null for "only"/"prefer" with no pool name (malformed input)', () => {
+    expect(sharePlacementText({ mode: 'only' })).toBeNull();
+    expect(sharePlacementText({ mode: 'prefer' })).toBeNull();
+  });
+
+  it('is null for an unrecognized mode', () => {
+    expect(sharePlacementText({ mode: 'bogus' })).toBeNull();
   });
 });

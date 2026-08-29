@@ -29,9 +29,10 @@
     normalizeStorageKind,
     recentlyActiveDevices,
     recordDeviceActivity,
+    sharePlacementText,
     sortMounts,
   } from '../lib/containerStorage';
-  import { diskUsagePct } from '../lib/disks';
+  import { diskKind, diskUsagePct } from '../lib/disks';
 
   import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
@@ -320,6 +321,11 @@
   // "no capacity line" for free -- mountCapacitySlot/diskUsagePct both
   // return null rather than a wrong number, see their own docs.
   let diskFrame = $derived(live.frame?.disks ?? {});
+  // diskMetaFrame backs the share-placement note's own pool-kind tint
+  // (diskKind, below) -- same live-frame-not-fetched reasoning as
+  // diskFrame just above, and correctly reads as "kind unknown" (not a
+  // wrong guess) for a pool this frame hasn't reported disk_meta for yet.
+  let diskMetaFrame = $derived(live.frame?.disk_meta ?? {});
 
   let c = $derived(live.frame?.containers?.[name]);
   // isGone: a confirmed "the registry has never heard of this name"
@@ -469,6 +475,9 @@
               {@const kind = normalizeStorageKind(mount.storage.kind)}
               {@const capSlot = mountCapacitySlot(mount)}
               {@const usagePct = capSlot ? diskUsagePct(diskFrame[capSlot]) : null}
+              {@const placementPool = mount.storage.placement?.pool}
+              {@const placementKind = placementPool ? diskKind(diskMetaFrame[placementPool], diskFrame[placementPool]) : null}
+              {@const placementText = sharePlacementText(mount.storage.placement, placementKind)}
               <div class="storage-mount">
                 <span class="storage-mount__dest" title={mount.destination}>{mount.destination}</span>
                 <span class="storage-mount__source-cell">
@@ -476,10 +485,17 @@
                   <span class="storage-mount__source" title={mount.source}>{mount.source}</span>
                 </span>
                 <span class="storage-mount__badge-cell">
-                  <span class="storage-mount__badge storage-mount__badge--{kind}" title={STORAGE_KIND_TITLE[kind]}>
-                    {STORAGE_KIND_LABEL[kind]}{mount.storage.name ? ` · ${mount.storage.name}` : ''}
+                  <span class="storage-mount__badge-row">
+                    <span class="storage-mount__badge storage-mount__badge--{kind}" title={STORAGE_KIND_TITLE[kind]}>
+                      {STORAGE_KIND_LABEL[kind]}{mount.storage.name ? ` · ${mount.storage.name}` : ''}
+                    </span>
+                    {#if !mount.rw}<span class="storage-mount__ro">ro</span>{/if}
                   </span>
-                  {#if !mount.rw}<span class="storage-mount__ro">ro</span>{/if}
+                  {#if placementText}
+                    <span class="storage-mount__placement {placementKind ? `storage-mount__placement--${placementKind}` : ''}">
+                      {placementText}
+                    </span>
+                  {/if}
                 </span>
                 <span class="storage-mount__capacity-cell tabular-nums">
                   {#if usagePct !== null}
@@ -786,12 +802,46 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* Column, not the single row this used to be -- share placement
+     (storage-mount__placement, below) needs its own line under the
+     badge+ro row rather than crowding into it as a third wrapped chip;
+     every OTHER kind's badge-cell is unaffected, it just has nothing to
+     stack under it. */
   .storage-mount__badge-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.2rem;
+    overflow: hidden;
+  }
+  .storage-mount__badge-row {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 0.4rem;
-    overflow: hidden;
+  }
+  /* Share placement (Scott: "you can see that the downloads share is
+     used, but you don't know that the drive it's stored on is the nvme
+     cache drive... we need to connect the dots") -- plain muted text by
+     default (mode "yes"/"no", or "only"/"prefer" onto a pool whose kind
+     isn't known yet), tinted to match the pool's own kind once diskKind
+     resolves it, same three accent colors storage-mount__badge--pool's
+     sibling badges and Storage.svelte's own disk-media badges already
+     use for ssd/nvme/usb -- hdd deliberately stays untinted, same "the
+     ordinary case doesn't need to stand out" rule as everywhere else
+     this vocabulary appears. */
+  .storage-mount__placement {
+    font-size: 0.68rem;
+    color: var(--ink-2);
+  }
+  .storage-mount__placement--ssd {
+    color: var(--series-3);
+  }
+  .storage-mount__placement--nvme {
+    color: var(--series-1);
+  }
+  .storage-mount__placement--usb {
+    color: var(--series-4);
   }
   /* Storage-system badge: same tinted-pill recipe as Storage.svelte's
      own disk media badges (storage-disk__media) -- a neutral chip for

@@ -92,16 +92,21 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// metadata (see fake.Generator.DiskMetas' own doc); fakeDeviceLabels
 	// is buildContainerStorage's own analogue, for the one device kind
 	// fakeDiskMeta's join can't cover (see fake.Generator.DeviceLabels'
-	// own doc).
+	// own doc); fakeSharePlacement is the same overlay again, for the
+	// share->cache-pool join (see fake.Generator.SharePlacements' own
+	// doc) -- real mode never sees a shares.ini in this closure at all,
+	// so there's nothing to overlay onto there either.
 	var fakeMetas func() []docker.Meta
 	var fakeDiskMeta func() map[string]unraid.DiskMeta
 	var fakeDeviceLabels func() map[string]unraid.DeviceLabel
+	var fakeSharePlacement func() map[string]unraid.SharePlacement
 	if cfg.Bool("fake_data", false) {
 		log.Println("fake data mode: synthesizing a demo fleet")
 		fk := fake.New(st, st, time.Now().UnixNano())
 		fakeMetas = fk.Metas
 		fakeDiskMeta = fk.DiskMetas
 		fakeDeviceLabels = fk.DeviceLabels
+		fakeSharePlacement = fk.SharePlacements
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -228,7 +233,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Live:       live,
 		Current:    func() []byte { b, _ := json.Marshal(snapshotFn()); return b },
 		Logs:       dc.StreamLogs,
-		Storage:    buildContainerStorage(dc, ur, st, fakeMetas, fakeDiskMeta, fakeDeviceLabels, sysRoot),
+		Storage:    buildContainerStorage(dc, ur, st, fakeMetas, fakeDiskMeta, fakeDeviceLabels, fakeSharePlacement, sysRoot),
 		Settings:   settingsAdapter{st: st, cfg: cfg},
 	}).ListenAndServe(runCtx)
 	cancel()
@@ -437,6 +442,7 @@ func buildContainerStorage(
 	fakeMetas func() []docker.Meta,
 	fakeDiskMeta func() map[string]unraid.DiskMeta,
 	fakeDeviceLabels func() map[string]unraid.DeviceLabel,
+	fakeSharePlacement func() map[string]unraid.SharePlacement,
 	sysRoot string,
 ) func(name string) (server.StorageDTO, bool) {
 	lookup := dc.LookupByName
@@ -454,7 +460,7 @@ func buildContainerStorage(
 		}
 	}
 	return func(name string) (server.StorageDTO, bool) {
-		return containerStorage(lookup, ur.Slots, ur.DiskMeta, fakeDiskMeta, fakeDeviceLabels, sysRoot, st.Live(), name, time.Now().Unix())
+		return containerStorage(lookup, ur.Slots, ur.DiskMeta, fakeDiskMeta, ur.SharePlacement, fakeSharePlacement, fakeDeviceLabels, sysRoot, st.Live(), name, time.Now().Unix())
 	}
 }
 
@@ -463,6 +469,8 @@ func containerStorage(
 	poolSlots func() []string,
 	diskMeta func() map[string]unraid.DiskMeta,
 	fakeDiskMeta func() map[string]unraid.DiskMeta,
+	sharePlacement func() map[string]unraid.SharePlacement,
+	fakeSharePlacement func() map[string]unraid.SharePlacement,
 	fakeDeviceLabels func() map[string]unraid.DeviceLabel,
 	sysRoot string,
 	live *store.Live,
@@ -474,16 +482,32 @@ func containerStorage(
 		return server.StorageDTO{}, false
 	}
 
+	// placements: real first, fakeSharePlacement's overlay on top -- same
+	// merge order/rationale as knownDevices' disk_meta assembly just below
+	// (and buildSnapshot's own disk_meta merge).
+	placements := sharePlacement()
+	if fakeSharePlacement != nil {
+		for name, p := range fakeSharePlacement() {
+			placements[name] = p
+		}
+	}
+
 	pools := poolSlots()
 	mounts := make([]server.MountDTO, 0, len(meta.Mounts))
 	for _, m := range meta.Mounts {
 		ref := unraid.ResolveStoragePath(m.Source, pools)
-		mounts = append(mounts, server.MountDTO{
+		dto := server.MountDTO{
 			Source:      m.Source,
 			Destination: m.Destination,
 			RW:          m.RW,
 			Storage:     server.StorageRefDTO{Kind: ref.Kind, Name: ref.Name},
-		})
+		}
+		if ref.Kind == "share" {
+			if p, ok := placements[ref.Name]; ok {
+				dto.Storage.Placement = &server.SharePlacementDTO{Mode: p.Mode, Pool: p.Pool}
+			}
+		}
+		mounts = append(mounts, dto)
 	}
 
 	// meta (real) first, fakeDiskMeta's overlay on top -- same merge

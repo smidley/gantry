@@ -111,6 +111,43 @@ export function recentlyActiveDevices<T extends { device: string }>(
   });
 }
 
+export interface SharePlacementLike {
+  mode: string;
+  pool?: string;
+}
+
+// sharePlacementText renders a share's own cache-pool placement as a
+// short, muted sentence -- Scott's own report: "you can see that the
+// downloads share is used, but you don't know that the drive it's
+// stored on is the nvme cache drive... we need to connect the dots."
+// poolKind (additive, optional -- diskKind's own output for the named
+// pool, looked up by the caller off the live frame's disk_meta) folds
+// straight into "only"/"prefer"'s own wording when known; omitted (the
+// pool isn't a currently-present disk/pool slot, or unraid's disk_meta
+// simply hasn't reported on it yet) reads the pool name alone, still
+// useful on its own. null for a mode this function doesn't recognize
+// (shares.ini's own dialect --see unraid.SharePlacement's own doc for
+// the fixed "yes"|"no"|"only"|"prefer" vocabulary -- so this should
+// only ever happen against a future value this build predates), or for
+// "only"/"prefer" with no pool name at all (malformed input; shares.ini
+// always pairs a cache mode with a pool in practice).
+export function sharePlacementText(placement: SharePlacementLike | undefined, poolKind?: string | null): string | null {
+  if (!placement) return null;
+  const poolLabel = (pool: string) => `${pool}${poolKind ? ` (${poolKind})` : ''}`;
+  switch (placement.mode) {
+    case 'only':
+      return placement.pool ? `→ lives on ${poolLabel(placement.pool)}` : null;
+    case 'prefer':
+      return placement.pool ? `→ prefers ${poolLabel(placement.pool)}, spills to array` : null;
+    case 'yes':
+      return '→ cache then array';
+    case 'no':
+      return '→ array';
+    default:
+      return null;
+  }
+}
+
 // isUnraidOSLoopDevice recognizes Unraid's own boot-image loop devices
 // (bzimage/bzroot/bzmodules/bzfirmware -- ResolveDeviceLabel resolves a
 // loop device's label to its backing file's basename, and these are the

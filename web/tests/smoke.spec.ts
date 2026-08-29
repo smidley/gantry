@@ -326,6 +326,44 @@ test('container detail: storage panel renders mounts with kind badges, capacity,
   expect(new Set(writeXs).size).toBe(1);
 });
 
+// Share->disk placement (Scott: "you can see that the downloads share
+// is used, but you don't know that the drive it's stored on is the
+// nvme cache drive... we need to connect the dots"): fake mode pins the
+// appdata share (every fleet member's /config mount) to rocket_pool,
+// the fake fleet's own NVMe pool (fake.Generator.SharePlacements' own
+// doc), so the mount that already read "Share · appdata" now also names
+// which drive that share actually lives on, tinted to match rocket_
+// pool's own kind badge elsewhere on this same page.
+test('container detail: a share mount shows which cache pool it lives on, tinted by that pool\'s own kind', async ({
+  page,
+}) => {
+  await page.goto('#/containers/jellyfin');
+
+  const configMount = page
+    .locator('.storage-mount')
+    .filter({ has: page.locator('.storage-mount__dest', { hasText: /^\/config$/ }) });
+  const placement = configMount.locator('.storage-mount__placement');
+
+  await expect(placement).toHaveText('→ lives on rocket_pool (nvme)');
+  await expect(placement).toHaveClass(/storage-mount__placement--nvme/);
+
+  // Tinted to match, not merely present: the SAME color rocket_pool's
+  // own NVMe kind badge already renders with in the Live IO section
+  // below (poolRow's own storage-device__kind, see the test above).
+  const placementColor = await placement.evaluate((el) => getComputedStyle(el).color);
+  const nvmeBadgeColor = await page
+    .locator('.storage-device__kind', { hasText: 'NVMe' })
+    .evaluate((el) => getComputedStyle(el).color);
+  expect(placementColor).toBe(nvmeBadgeColor);
+
+  // A non-share mount never gets a placement line, even one backed by
+  // the very pool the share above resolved to.
+  const mediaMount = page
+    .locator('.storage-mount')
+    .filter({ has: page.locator('.storage-mount__dest', { hasText: /^\/media$/ }) });
+  await expect(mediaMount.locator('.storage-mount__placement')).toHaveCount(0);
+});
+
 // Live IO noise rule (recentlyActiveDevices/recordDeviceActivity, lib/
 // containerStorage.ts): fake mode's own devices are always active
 // (fake.go's Tick never zeroes them), so exercising "never had any IO"

@@ -636,6 +636,18 @@ func (g *Generator) DeviceLabels() map[string]unraid.DeviceLabel {
 	return map[string]unraid.DeviceLabel{"loop2": {Label: "docker.img"}}
 }
 
+// SharePlacements is DiskMetas' share-placement analogue: fakeContainerMounts
+// gives every fleet member an /mnt/user/appdata/<name> share mount, and
+// this pins that ONE share to rocket_pool -- the fake fleet's own NVMe
+// pool (disks' own doc) -- so the storage panel has a real "share ->
+// cache pool -> pool kind" chain to resolve end to end in fake mode, the
+// same scenario that prompted this feature (Scott: "you can see that
+// the downloads share is used, but you don't know that the drive it's
+// stored on is the nvme cache drive").
+func (g *Generator) SharePlacements() map[string]unraid.SharePlacement {
+	return map[string]unraid.SharePlacement{"appdata": {Mode: "only", Pool: "rocket_pool"}}
+}
+
 // Run ticks until ctx is done. clock defaults to time.Now when nil.
 func (g *Generator) Run(ctx context.Context, interval time.Duration, clock func() time.Time) {
 	if clock == nil {

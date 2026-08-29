@@ -40,6 +40,26 @@ type MountDTO struct {
 type StorageRefDTO struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
+	// Placement (additive, optional -- kind=share only) names the pool a
+	// share is actually stored on, so a mount that only ever showed "the
+	// downloads share is used" can also answer "which drive is that share
+	// ON" (Scott: "we need to connect the dots"). nil for a non-share
+	// mount, or a share whose shares.ini section has no useCache field at
+	// all -- omitted from the response entirely (omitempty), not a
+	// zero-value object, so a caller can tell "unknown" apart from a real
+	// (if unlikely) empty mode string.
+	Placement *SharePlacementDTO `json:"placement,omitempty"`
+}
+
+// SharePlacementDTO mirrors unraid.SharePlacement: Mode is useCache's own
+// wire value ("yes" | "no" | "only" | "prefer") verbatim, straight
+// through with no relabeling -- the frontend's own copy for each mode
+// lives in containerStorage.ts, not here. Pool is cachePool's own pool
+// name, omitted (never "") when Mode is "no" (see unraid.SharePlacement.
+// Pool's own doc for why "no" never carries one).
+type SharePlacementDTO struct {
+	Mode string `json:"mode"`
+	Pool string `json:"pool,omitempty"`
 }
 
 // DeviceIODTO is this container's current IO rate against one backing

@@ -68,13 +68,21 @@ export interface GantryEvent {
   Detail: string;
 }
 
+// SharePlacementDTO mirrors api_storage.go's own SharePlacementDTO: mode
+// is useCache's own wire value ("yes" | "no" | "only" | "prefer"); pool
+// is absent (not "") when mode is "no" -- see its Go doc for why.
+export interface SharePlacementDTO {
+  mode: string;
+  pool?: string;
+}
+
 // StorageMountDTO/StorageDeviceDTO/StorageDTO mirror internal/server/
 // api_storage.go's MountDTO/DeviceIODTO/StorageDTO exactly.
 export interface StorageMountDTO {
   source: string;
   destination: string;
   rw: boolean;
-  storage: { kind: string; name: string };
+  storage: { kind: string; name: string; placement?: SharePlacementDTO };
 }
 
 export interface StorageDeviceDTO {

@@ -1,9 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { containerHealthStatus, containerRunState, partitionContainerNames } from './containerStatus';
+import {
+  containerHealthStatus,
+  containerRunState,
+  partitionContainerNames,
+  unhealthyContainerNames,
+} from './containerStatus';
 
 describe('containerHealthStatus', () => {
-  it('reports unhealthy as critical regardless of state', () => {
+  it('reports a running container with unhealthy health as critical', () => {
     expect(containerHealthStatus('running', 'unhealthy')).toBe('critical');
+  });
+
+  it('reports an exited container as serious even with a stale "unhealthy" health string', () => {
+    // Docker never clears health on stop -- an exited container that was
+    // unhealthy while it ran keeps reporting health=unhealthy forever.
+    // That must NOT read as critical (Scott: stopped containers showing
+    // up red as "needs a look").
+    expect(containerHealthStatus('exited', 'unhealthy')).toBe('serious');
+    expect(containerHealthStatus('dead', 'unhealthy')).toBe('serious');
   });
 
   it('reports a running container with no/healthy healthcheck as good', () => {
@@ -63,5 +77,33 @@ describe('partitionContainerNames', () => {
   it('treats a name missing from the containers map as stopped rather than throwing', () => {
     const p = partitionContainerNames(['ghost'], containers);
     expect(p.stopped).toEqual(['ghost']);
+  });
+});
+
+describe('unhealthyContainerNames', () => {
+  it('includes a running container reporting unhealthy', () => {
+    const names = unhealthyContainerNames({ sonarr: { state: 'running', health: 'unhealthy' } });
+    expect(names).toEqual(['sonarr']);
+  });
+
+  it('excludes an exited container even with a stale "unhealthy" health string', () => {
+    const names = unhealthyContainerNames({
+      sonarr: { state: 'running', health: 'unhealthy' },
+      radarr: { state: 'exited', health: 'unhealthy' },
+    });
+    expect(names).toEqual(['sonarr']);
+  });
+
+  it('excludes a running container with healthy/no healthcheck', () => {
+    const names = unhealthyContainerNames({ sonarr: { state: 'running', health: 'healthy' } });
+    expect(names).toEqual([]);
+  });
+
+  it('sorts by name', () => {
+    const names = unhealthyContainerNames({
+      radarr: { state: 'running', health: 'unhealthy' },
+      sonarr: { state: 'running', health: 'unhealthy' },
+    });
+    expect(names).toEqual(['radarr', 'sonarr']);
   });
 });

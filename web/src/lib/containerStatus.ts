@@ -8,8 +8,11 @@
 export type HealthStatus = 'good' | 'warning' | 'serious' | 'critical';
 
 export function containerHealthStatus(state: string, health: string): HealthStatus {
-  if (health === 'unhealthy') return 'critical';
-  if (state === 'running') return health === 'starting' ? 'warning' : 'good';
+  // Docker never clears health on stop, so an exited container can still
+  // carry a stale "unhealthy" from when it was running -- state must
+  // gate health, not the other way around, or a stopped container reads
+  // as critical.
+  if (state === 'running') return health === 'unhealthy' ? 'critical' : health === 'starting' ? 'warning' : 'good';
   if (state === 'exited' || state === 'dead') return 'serious';
   // created, restarting, paused, or any other transitional/unrecognized
   // state -- worth a second look, but not yet a confirmed problem.
@@ -32,6 +35,20 @@ export function containerRunState(state: string): ContainerRunState {
   if (state === 'running') return 'running';
   if (state === 'created') return 'created';
   return 'stopped';
+}
+
+// unhealthyContainerNames lists every RUNNING container reporting
+// health=unhealthy, sorted by name -- Overview's own attention module
+// feeds this straight into overviewStatus.ts's unhealthyNames input. A
+// stopped container is excluded even when its health string still says
+// "unhealthy" (docker doesn't clear it on exit, see containerHealthStatus
+// above) -- it's already covered by the aggregated "stopped" anomaly,
+// not a second, red, per-container one.
+export function unhealthyContainerNames(containers: Record<string, { state: string; health: string }>): string[] {
+  return Object.entries(containers)
+    .filter(([, c]) => c.state === 'running' && c.health === 'unhealthy')
+    .map(([name]) => name)
+    .sort();
 }
 
 export interface ContainerNamePartition {

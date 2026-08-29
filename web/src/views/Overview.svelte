@@ -50,7 +50,7 @@
     niceCeiling,
   } from '../lib/metrics';
   import { diskKind, diskUsagePct, sortDiskEntities } from '../lib/disks';
-  import { containerRunState } from '../lib/containerStatus';
+  import { containerRunState, unhealthyContainerNames } from '../lib/containerStatus';
   import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
   import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, fleetSentence, worstSeverity } from '../lib/overviewStatus';
@@ -176,12 +176,7 @@
   let containerEntries = $derived(Object.entries(live.frame?.containers ?? {}));
   let runningCount = $derived(containerEntries.filter(([, c]) => containerRunState(c.state) === 'running').length);
   let stoppedCount = $derived(containerEntries.filter(([, c]) => containerRunState(c.state) === 'stopped').length);
-  let unhealthyNames = $derived(
-    containerEntries
-      .filter(([, c]) => c.health === 'unhealthy')
-      .map(([name]) => name)
-      .sort(),
-  );
+  let unhealthyNames = $derived(unhealthyContainerNames(live.frame?.containers ?? {}));
   let fleetContainers = $derived(
     containerEntries
       .filter(([, c]) => containerRunState(c.state) !== 'created')

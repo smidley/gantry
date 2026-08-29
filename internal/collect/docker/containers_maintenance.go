@@ -314,6 +314,34 @@ type containersClient interface {
 	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
 }
 
+// containersInspectFanOutTimeout bounds ContainersMaintenance's own
+// per-exited-container ContainerInspect fan-out to this long IN TOTAL,
+// across every inspect the call makes, not per-inspect -- a daemon
+// under load, or an exited-container count well past a typical box's
+// handful, could otherwise leave GET /api/containers/maintenance
+// hanging for as long as N sequential inspects take, with nothing
+// capping N. A var, not a const, so a test can shrink it: an
+// already-cancelled/expired parent context propagates into
+// context.WithTimeout's child immediately, giving a deterministic way
+// to pin the "deadline already blew" path without ever sleeping for
+// real (see the timeout test's own doc).
+var containersInspectFanOutTimeout = 10 * time.Second
+
+// containersInspectFanOutCap bounds the same fan-out by COUNT, on top of
+// containersInspectFanOutTimeout's bound by TIME -- an unusually large
+// exited-container count could still blow through many inspects well
+// inside 10s each, so the two bounds are independent; neither covers
+// for the other.
+//
+// Both degrade the SAME way: an exited container past either bound
+// simply keeps its zero-value ExitCode/FinishedAt/RestartPolicy, exactly
+// like a single failed inspect already does (see the loop's own
+// tolerance below) -- and, combined with selectPruneTargets' own
+// nil-FinishedAt skip (see its doc), a container that misses enrichment
+// this way is never mistaken for "old enough to prune" by an active age
+// filter, only ever left out of an age-filtered sweep entirely.
+const containersInspectFanOutCap = 50
+
 // ContainersMaintenance lists every non-running container (ContainerList
 // All:true, filtered/shaped by classifyContainers), then enriches each
 // "exited" entry's ExitCode/FinishedAt via one ContainerInspect apiece --
@@ -322,6 +350,11 @@ type containersClient interface {
 // inspected: neither field means anything for a container that never
 // ran (created) or that the daemon itself couldn't clean up (dead), so
 // spending an API call per container on every poll would be pure waste.
+//
+// The enrichment fan-out itself is bounded by both
+// containersInspectFanOutTimeout (shared across every inspect this call
+// makes) and containersInspectFanOutCap (a hard count) -- see their own
+// docs for why both exist independently and how they degrade.
 //
 // A failed inspect (the container vanished between ContainerList and
 // ContainerInspect, or any other transient error) is tolerated exactly
@@ -338,11 +371,18 @@ func (c *Collector) ContainersMaintenance(ctx context.Context) (ContainerMainten
 	}
 
 	report := classifyContainers(cts)
+	inspectCtx, cancel := context.WithTimeout(ctx, containersInspectFanOutTimeout)
+	defer cancel()
+	inspected := 0
 	for i := range report.Containers {
 		if report.Containers[i].State != container.StateExited {
 			continue
 		}
-		insp, err := c.ctrCli.ContainerInspect(ctx, report.Containers[i].ID)
+		if inspected >= containersInspectFanOutCap || inspectCtx.Err() != nil {
+			break // beyond either bound -- the rest degrade to unenriched
+		}
+		inspected++
+		insp, err := c.ctrCli.ContainerInspect(inspectCtx, report.Containers[i].ID)
 		// ContainerJSONBase is a nil-able embedded pointer (InspectResponse's
 		// own definition) -- checked before insp.State, which is a promoted
 		// field through it: reading insp.State first would itself panic

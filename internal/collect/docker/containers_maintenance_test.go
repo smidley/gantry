@@ -521,6 +521,89 @@ func TestContainersMaintenanceCreatedNeverGetsRestartPolicy(t *testing.T) {
 	require.Empty(t, report.Containers[0].RestartPolicy)
 }
 
+// TestContainersMaintenanceCapsInspectFanOutLeavingRestUnenriched pins
+// C3's count bound: an unusually large exited-container count must not
+// turn one GET /api/containers/maintenance into an unbounded number of
+// sequential ContainerInspect calls. Entries beyond the cap simply keep
+// their zero-value enrichment fields, the same tolerance a single failed
+// inspect already gets.
+func TestContainersMaintenanceCapsInspectFanOutLeavingRestUnenriched(t *testing.T) {
+	const n = containersInspectFanOutCap + 1
+	cts := make([]container.Summary, n)
+	inspectReturn := map[string]container.InspectResponse{}
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("exited%02d", i)
+		cts[i] = summaryOfState(id, id, "exited")
+		inspectReturn[id] = inspectWithState(0, "2024-12-24T00:00:00Z")
+	}
+	fc := &fakeContainersClient{containerListReturn: cts, inspectReturn: inspectReturn}
+	c := &Collector{ctrCli: fc}
+
+	report, err := c.ContainersMaintenance(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, fc.inspectCalls, containersInspectFanOutCap, "the fan-out must stop at the cap, never inspect every exited container unconditionally")
+	enriched := 0
+	for _, ct := range report.Containers {
+		if ct.ExitCode != nil {
+			enriched++
+		}
+	}
+	require.Equal(t, containersInspectFanOutCap, enriched, "entries past the cap must keep their zero-value ExitCode, not fail the request")
+}
+
+// TestContainersMaintenanceStopsEnrichingOnceDeadlineExpires pins C3's
+// time bound: the fan-out shares a single deadline across every inspect
+// it makes, not one per call. An already-cancelled parent ctx propagates
+// into context.WithTimeout's child immediately, giving a deterministic,
+// non-flaky way to pin "the deadline already blew" without ever sleeping
+// for real in a test.
+func TestContainersMaintenanceStopsEnrichingOnceDeadlineExpires(t *testing.T) {
+	fc := &fakeContainersClient{
+		containerListReturn: []container.Summary{
+			summaryOfState("exited1", "one", "exited"),
+			summaryOfState("exited2", "two", "exited"),
+		},
+		inspectReturn: map[string]container.InspectResponse{
+			"exited1": inspectWithState(0, "2024-12-24T00:00:00Z"),
+			"exited2": inspectWithState(0, "2024-12-24T00:00:00Z"),
+		},
+	}
+	c := &Collector{ctrCli: fc}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	report, err := c.ContainersMaintenance(ctx)
+
+	require.NoError(t, err, "a blown enrichment deadline must degrade to unenriched entries, never fail the whole request")
+	require.Empty(t, fc.inspectCalls, "no inspect should run once the shared enrichment deadline has already expired")
+	require.Nil(t, report.Containers[0].ExitCode)
+	require.Nil(t, report.Containers[1].ExitCode)
+}
+
+// TestPruneContainersSkipsExitedWithUnenrichedFinishedAtUnderAgeFilter
+// pins the interaction between C1 and C3: however enrichment failed to
+// populate FinishedAt for an exited container -- a single inspect error,
+// a blown fan-out deadline, or the count cap -- the exact same "no
+// trustworthy timestamp" shape reaches selectPruneTargets, which must
+// skip it under any active age filter rather than ever guessing from
+// Created. This test reaches that shape the simplest way (no
+// inspectReturn entry at all), but the guarantee is general: an
+// age-filtered prune must never delete an exited container it never
+// actually got to enrich.
+func TestPruneContainersSkipsExitedWithUnenrichedFinishedAtUnderAgeFilter(t *testing.T) {
+	fc := &fakeContainersClient{
+		containerListReturn: []container.Summary{summaryOfState("exited1", "one", "exited")},
+	}
+	c := &Collector{ctrCli: fc}
+
+	result, err := c.PruneContainers(context.Background(), "exited", 24)
+
+	require.NoError(t, err)
+	require.Empty(t, result.Deleted, "an exited container with no trustworthy FinishedAt must never be pruned by an age filter, however old its Created timestamp looks")
+	require.Empty(t, fc.removeIDs)
+}
+
 // TestRemoveContainersCallsContainerRemoveWithForceFalseAndRemoveVolumesFalse
 // pins bullet 2's two non-negotiable options at the real wrapper: never
 // forced past a running conflict, and volumes -- actual data -- are

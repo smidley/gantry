@@ -11,6 +11,7 @@ export type RouteName =
   | 'overview'
   | 'containers'
   | 'container-detail'
+  | 'compare'
   | 'top'
   | 'storage'
   | 'gpu'
@@ -34,6 +35,21 @@ const routeDefs: RouteDef[] = [
   { name: 'overview', pattern: [] },
   { name: 'containers', pattern: ['containers'] },
   { name: 'container-detail', pattern: ['containers', ':name'] },
+  // compare's own ":names" capture holds the RAW comma-joined segment
+  // (e.g. "jellyfin,plex") after this loop's ordinary single-decode pass
+  // -- lib/compareRoute.ts's parseCompareNames splits it the rest of the
+  // way; see that file's own doc for why a second decode per name isn't
+  // needed (every real docker container name is already restricted to a
+  // charset with no comma in it). A bare "#/compare" (or "#/compare/",
+  // its own trailing slash reducing to the same zero-segment tail --
+  // filtered out above like every other route's) has no :names segment
+  // at all -- same two-pattern shape as "top"/"top/:resource" above --
+  // so it still routes to the Compare view (params.names undefined,
+  // parseCompareNames(undefined) === []) rather than falling through to
+  // not-found: Compare's own "no containers selected" hint is the
+  // sensible landing for it, not a dead end.
+  { name: 'compare', pattern: ['compare'] },
+  { name: 'compare', pattern: ['compare', ':names'] },
   { name: 'top', pattern: ['top'] },
   // Overview's compact Top Consumers switcher deep-links "View all" to
   // the SAME resource, e.g. "#/top/mem" -- a second pattern for the same

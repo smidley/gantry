@@ -28,6 +28,22 @@ describe('parseHash', () => {
     expect(parseHash('#/top/mem')).toEqual({ name: 'top', params: { resource: 'mem' } });
   });
 
+  it('parses a compare route, capturing the raw comma-joined names segment', () => {
+    expect(parseHash('#/compare/jellyfin,plex')).toEqual({
+      name: 'compare',
+      params: { names: 'jellyfin,plex' },
+    });
+  });
+
+  it('parses a compare route with a single name', () => {
+    expect(parseHash('#/compare/jellyfin')).toEqual({ name: 'compare', params: { names: 'jellyfin' } });
+  });
+
+  it('parses a bare compare route (no names at all) rather than falling through to not-found', () => {
+    expect(parseHash('#/compare')).toEqual({ name: 'compare', params: {} });
+    expect(parseHash('#/compare/')).toEqual({ name: 'compare', params: {} });
+  });
+
   it('URL-decodes a name param', () => {
     expect(parseHash('#/containers/my%20app')).toEqual({
       name: 'container-detail',

@@ -10,6 +10,11 @@ export interface ContainerDTO {
   health: string;
   image: string;
   icon: string;
+  // compose_project is docker.Meta's own ComposeProject, straight through
+  // (server's api_snapshot.go) -- "" for a container not created via
+  // docker compose. Backs the Containers view's Groups chip row and the
+  // compare view (lib/composeGroups.ts).
+  compose_project: string;
   metrics: Record<string, number>;
 }
 

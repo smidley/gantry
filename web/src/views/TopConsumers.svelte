@@ -19,7 +19,7 @@
   import { onMount, untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
-  import { seriesPointsToRing } from '../lib/livering';
+  import { pushRing, seriesPointsToRing } from '../lib/livering';
   import { fetchSeries, fetchSnapshot, fetchTop } from '../lib/api';
   import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
   import { keysByPattern, niceCeiling, sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
@@ -30,6 +30,7 @@
     isTopResource,
     reduceSeriesPoints,
     resourceDirectionKeys,
+    resourceMetricKeys,
     resourceScaleMax,
     TOP_RESOURCES,
     topFromFrame,
@@ -38,6 +39,7 @@
   import TopBarList from '../components/TopBarList.svelte';
   import TimeChart from '../components/TimeChart.svelte';
   import CoreBudgetRibbon from '../components/CoreBudgetRibbon.svelte';
+  import ContainerIcon from '../components/ContainerIcon.svelte';
 
   // initialResource: App.svelte's route table passes $route.params.resource
   // straight through (the "#/top/:resource" pattern -- see router.ts),
@@ -85,6 +87,19 @@
   // fleet size (matches the backend's own topSumFetchLimit's reasoning).
   const COMPLETE_LIST_LIMIT = 500;
   const LIVE_WINDOW_SEC = 900;
+
+  // MAX_HERO_LINES: the hero chart's own top-N cut ("Instead of showing
+  // the containers all together in a horizontal bar... show them as
+  // lines on the main line graph with different colors"), independent of
+  // COMPLETE_LIST_LIMIT above -- the ranked list below stays complete,
+  // only the CHART bounds itself, both because a legend/line count much
+  // past this stops being readable and because Now mode backs every
+  // line with its own live ring (heroSlots below) and a fetched window
+  // backs every line with its own /api/series request -- 8 is exactly
+  // the categorical --series-1..8 palette's own size (tokens.css), so
+  // every line gets a real, distinct hue with nothing left to bucket
+  // into an "Other."
+  const MAX_HERO_LINES = 8;
 
   let resource = $state(untrack(() => (isTopResource(initialResource) ? initialResource : 'cpu')));
   let windowKey = $state('now');
@@ -260,38 +275,212 @@
     return () => controller.abort();
   });
 
-  let headerChartSeries = $derived.by(() => {
-    if (!hasHostTotal) return [];
+  // hostReferencePoints is the hero chart's own muted reference line --
+  // the SAME host-level rings/fetched totals the old single-host-line
+  // chart used, just read as one combined [ts,val][] series regardless
+  // of window: net/io sum their own down+up (or read+write) rings
+  // point-by-point (sumSeriesPoints, the same helper the fetched-window
+  // host total already summed its two component fetches with above).
+  // gpu is deliberately absent (falls through to []) -- see this file's
+  // own module doc for why gpu never gets a host total at all.
+  function hostReferencePoints() {
     if (windowKey === 'now') {
       switch (resource) {
         case 'cpu':
-          return [{ label: 'CPU', points: cpuTotalRing.points, colorVar: '--series-1' }];
+          return cpuTotalRing.points;
         case 'mem':
-          return [{ label: 'Memory', points: memUsedRing.points, colorVar: '--series-1' }];
+          return memUsedRing.points;
         case 'net':
-          return [
-            { label: 'Down', points: netRxRing.points, colorVar: '--series-1' },
-            { label: 'Up', points: netTxRing.points, colorVar: '--series-4' },
-          ];
+          return sumSeriesPoints([netRxRing.points, netTxRing.points]);
         case 'io':
-          return [
-            { label: 'Read', points: ioReadRing.points, colorVar: '--series-1' },
-            { label: 'Write', points: ioWriteRing.points, colorVar: '--series-4' },
-          ];
+          return sumSeriesPoints([ioReadRing.points, ioWriteRing.points]);
         default:
           return [];
       }
     }
     if (!fetchedHostTotal) return [];
-    if (fetchedHostTotal.points2) {
-      const [labelA, labelB] = CHART_DIRECTION_LABELS[resource] ?? ['A', 'B'];
-      return [
-        { label: labelA, points: fetchedHostTotal.points, colorVar: '--series-1' },
-        { label: labelB, points: fetchedHostTotal.points2, colorVar: '--series-4' },
-      ];
+    return fetchedHostTotal.points2 ? sumSeriesPoints([fetchedHostTotal.points, fetchedHostTotal.points2]) : fetchedHostTotal.points;
+  }
+
+  // --- Hero chart: top containers as lines, not bars ----------------------
+  //
+  // "Instead of showing the containers all together in a horizontal
+  // bar for their consumption, show them as lines on the main line
+  // graph with different colors. This same behavior should be done for
+  // each metric type." The ranked bars below (TopBarList) stay exactly
+  // as they were -- they're this chart's own legend data, not replaced
+  // by it.
+  //
+  // heroSlots: MAX_HERO_LINES fixed ring buffers for Now mode, one PER
+  // RANK SLOT rather than per container -- rings can't be created
+  // dynamically for an arbitrary, changing set of container names (see
+  // liveRing's own "call once per metric from a component's own
+  // top-level script" contract); a fixed pool sized to the chart's own
+  // cap, read by rank each tick, is the same shape the header rings
+  // above already use ("created unconditionally... which ones actually
+  // get READ is a display-time decision"). A slot's points reset the
+  // instant its assigned entity changes -- otherwise a reassignment
+  // (one container falling out of the top-N as another climbs in) would
+  // paste one container's history directly onto another's, reading as
+  // an impossible instant jump.
+  function makeHeroSlot() {
+    let sum = $state([]);
+    let dirA = $state([]);
+    let dirB = $state([]);
+    let assigned = null;
+    return {
+      get points() {
+        return sum;
+      },
+      get directionPoints() {
+        return [dirA, dirB];
+      },
+      tick(ts, entity, value, a, b) {
+        if (entity !== assigned) {
+          assigned = entity;
+          sum = [];
+          dirA = [];
+          dirB = [];
+        }
+        if (entity === null || value === undefined) return;
+        // untrack: tick() runs from inside the driving $effect below, which
+        // must depend on live.frame/heroTopNow ONLY -- reading sum/dirA/dirB
+        // here (as pushRing's own first argument) would otherwise ALSO
+        // register them as that effect's dependencies, and the write right
+        // back to them on the next line would then re-dirty it, forever
+        // (effect_update_depth_exceeded, reproduced live) -- the exact
+        // self-referential loop livering.svelte.ts's own liveRing() already
+        // documents and untracks for the identical reason.
+        sum = untrack(() => pushRing(sum, ts, value, LIVE_WINDOW_SEC));
+        if (a !== undefined) dirA = untrack(() => pushRing(dirA, ts, a, LIVE_WINDOW_SEC));
+        if (b !== undefined) dirB = untrack(() => pushRing(dirB, ts, b, LIVE_WINDOW_SEC));
+      },
+    };
+  }
+  const heroSlots = Array.from({ length: MAX_HERO_LINES }, () => makeHeroSlot());
+
+  // heroTopNow: the top MAX_HERO_LINES entries of nowRows -- the exact
+  // same ranking (and, for net/io, the exact same row.direction pair)
+  // the ranked list below reads, just cut shorter for the chart.
+  let heroTopNow = $derived(nowRows.slice(0, MAX_HERO_LINES));
+
+  $effect(() => {
+    if (windowKey !== 'now') return;
+    const frame = live.frame;
+    if (!frame) return;
+    const top = heroTopNow;
+    for (let i = 0; i < MAX_HERO_LINES; i++) {
+      const row = top[i];
+      heroSlots[i].tick(frame.ts, row?.entity ?? null, row?.value, row?.direction?.[0], row?.direction?.[1]);
     }
-    return [{ label: RESOURCE_LABEL[resource], points: fetchedHostTotal.points, colorVar: '--series-1' }];
   });
+
+  // fetchedHeroSeries (history windows only): one /api/series call per
+  // top-MAX_HERO_LINES entity, chained off fetchedRows (so it always
+  // fetches for the SAME ranking the list below just resolved, never a
+  // stale or a not-yet-ranked set) rather than duplicating fetchTop's
+  // own ranking logic. Aborts and re-fires on every fetchedRows change,
+  // same stale-response guard as the rows/host-total effect above.
+  let fetchedHeroSeries = $state([]);
+
+  $effect(() => {
+    if (windowKey === 'now') {
+      fetchedHeroSeries = [];
+      return;
+    }
+    const entities = fetchedRows.slice(0, MAX_HERO_LINES).map((r) => r.entity);
+    if (entities.length === 0) {
+      fetchedHeroSeries = [];
+      return;
+    }
+    const seconds = { '1h': 3600, '24h': 86400, '7d': 7 * 86400 }[windowKey];
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - seconds;
+    const metrics = resourceMetricKeys(resource);
+    const controller = new AbortController();
+    Promise.all(
+      entities.map((entity) =>
+        fetchSeries({ kind: 'container', entity, metrics, from, to, signal: controller.signal }).then((results) => ({ entity, results })),
+      ),
+    )
+      .then((perEntity) => {
+        fetchedHeroSeries = perEntity;
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // superseded by a newer fetchedRows
+        fetchedHeroSeries = [];
+      });
+    return () => controller.abort();
+  });
+
+  // heroSeries unifies both windows into the one shape TimeChart/the
+  // legend chips read: {entity, label, points, colorVar, width?, dash?,
+  // directionPoints?, directionLabels?}. entity is null only for the
+  // trailing host-reference line (its own chip renders "Host total"
+  // with no ContainerIcon). Colors are assigned by CHART POSITION
+  // (index), not by entity identity -- same "color follows the
+  // leaderboard's own rank, not a stable per-entity hash" rule
+  // TopBarList's bars already use, since a categorical hue is only
+  // meaningful for as long as an entity holds a top-N slot at all.
+  let heroSeries = $derived.by(() => {
+    const rowDirLabels = ROW_DIRECTION_LABELS[resource];
+    let lines;
+    if (windowKey === 'now') {
+      lines = heroTopNow.map((row, i) => ({
+        entity: row.entity,
+        label: row.entity,
+        points: heroSlots[i].points,
+        colorVar: `--series-${i + 1}`,
+        ...(isDirectional ? { directionPoints: heroSlots[i].directionPoints, directionLabels: rowDirLabels } : {}),
+      }));
+    } else {
+      const [keyA, keyB] = isDirectional ? resourceMetricKeys(resource) : [];
+      lines = fetchedHeroSeries.map((entry, i) => {
+        const byMetric = {};
+        for (const r of entry.results) byMetric[r.metric] = r.points;
+        if (isDirectional) {
+          const ptsA = byMetric[keyA] ?? [];
+          const ptsB = byMetric[keyB] ?? [];
+          return {
+            entity: entry.entity,
+            label: entry.entity,
+            points: sumSeriesPoints([ptsA, ptsB]),
+            colorVar: `--series-${i + 1}`,
+            directionPoints: [ptsA, ptsB],
+            directionLabels: rowDirLabels,
+          };
+        }
+        return { entity: entry.entity, label: entry.entity, points: byMetric[resourceMetricKeys(resource)[0]] ?? [], colorVar: `--series-${i + 1}` };
+      });
+    }
+    if (hasHostTotal) {
+      const hostPoints = hostReferencePoints();
+      if (hostPoints.length > 0) {
+        lines = [...lines, { entity: null, label: 'Host total', points: hostPoints, colorVar: '--ink-2', width: 1, dash: [4, 4] }];
+      }
+    }
+    return lines;
+  });
+
+  let heroChart = $state(undefined);
+  let hiddenHeroIdx = $state(new Set());
+
+  // A resource/window switch is a new chart context -- any per-line
+  // hide from the OLD one shouldn't silently carry over onto whatever
+  // now occupies that same chip position.
+  $effect(() => {
+    resource;
+    windowKey;
+    hiddenHeroIdx = new Set();
+  });
+
+  function toggleHeroLine(i) {
+    const next = new Set(hiddenHeroIdx);
+    if (next.has(i)) next.delete(i);
+    else next.add(i);
+    hiddenHeroIdx = next;
+    heroChart?.toggleSeries(i + 1);
+  }
 
   // hostTotal: the header's own {value, direction?}, whichever window is
   // active -- live-computed for Now, the fetched result otherwise.
@@ -313,6 +502,12 @@
   );
 
   let containerRows = $derived(windowKey === 'now' ? nowRows : fetchedRows);
+
+  // heroCapped: whether the ranked list actually has MORE entities than
+  // the chart is showing -- drives the quiet "showing the top N" note,
+  // never shown for a small fleet where the cap never actually bound
+  // anything.
+  let heroCapped = $derived(containerRows.length > MAX_HERO_LINES);
 
   // unattributedRow: host total minus the COMPLETE container list's own
   // sum, clamped >=0 -- "only where host history exists" per hostTotal
@@ -359,7 +554,7 @@
 </script>
 
 <div class="top-consumers">
-  <h1 class="page-title">Top Consumers</h1>
+  <h1 class="page-title">Metrics</h1>
 
   <div class="top-consumers__controls">
     <div class="segmented" role="tablist" aria-label="Resource">
@@ -420,36 +615,73 @@
     </p>
   {/if}
 
-  {#if hasHostTotal && hostTotal}
+  {#if (hasHostTotal && hostTotal) || heroSeries.length > 0}
     <div class="card top-consumers__header">
-      <div class="top-consumers__header-head">
-        <span class="microlabel">{RESOURCE_LABEL[resource]} &middot; host total</span>
-        {#if isDirectional && hostTotal.direction}
-          <div class="top-consumers__header-values">
-            <span class="top-consumers__header-value" style="color: var(--series-1)">
-              {ROW_DIRECTION_LABELS[resource]?.[0]} {FORMATTERS[resource](hostTotal.direction[0])}
-            </span>
-            <span class="top-consumers__header-value" style="color: var(--series-4)">
-              {ROW_DIRECTION_LABELS[resource]?.[1]} {FORMATTERS[resource](hostTotal.direction[1])}
-            </span>
-          </div>
-        {:else}
-          <span class="top-consumers__header-value">{FORMATTERS[resource](hostTotal.value)}</span>
-        {/if}
-      </div>
+      {#if hasHostTotal && hostTotal}
+        <div class="top-consumers__header-head">
+          <span class="microlabel">{RESOURCE_LABEL[resource]} &middot; host total</span>
+          {#if isDirectional && hostTotal.direction}
+            <div class="top-consumers__header-values">
+              <span class="top-consumers__header-value" style="color: var(--series-1)">
+                {ROW_DIRECTION_LABELS[resource]?.[0]} {FORMATTERS[resource](hostTotal.direction[0])}
+              </span>
+              <span class="top-consumers__header-value" style="color: var(--series-4)">
+                {ROW_DIRECTION_LABELS[resource]?.[1]} {FORMATTERS[resource](hostTotal.direction[1])}
+              </span>
+            </div>
+          {:else}
+            <span class="top-consumers__header-value">{FORMATTERS[resource](hostTotal.value)}</span>
+          {/if}
+        </div>
+      {:else}
+        <span class="microlabel">{TOP_RESOURCES.find((r) => r.key === resource)?.label} &middot; per container</span>
+      {/if}
       {#if scaleCeilingLabel}
         <p class="microlabel top-consumers__scale">{scaleCeilingLabel}</p>
       {/if}
       {#if showRibbon}
         <CoreBudgetRibbon {hostCores} segments={coreBudget.segments} freeCores={coreBudget.freeCores} icons={coreBudgetIcons} />
       {/if}
-      {#if headerChartSeries.length > 0}
-        <TimeChart series={headerChartSeries} formatValue={FORMATTERS[resource]} live={windowKey === 'now'} height={260} />
+      {#if heroSeries.length > 0}
+        <TimeChart
+          bind:this={heroChart}
+          series={heroSeries}
+          formatValue={FORMATTERS[resource]}
+          live={windowKey === 'now'}
+          height={260}
+          showLegend={false}
+        />
+        <div class="top-consumers__legend" role="group" aria-label="Chart lines">
+          {#each heroSeries as s, i (s.entity ?? '__host')}
+            <button
+              type="button"
+              class="top-consumers__chip"
+              class:top-consumers__chip--off={hiddenHeroIdx.has(i)}
+              style="--chip-color: var({s.colorVar})"
+              aria-pressed={!hiddenHeroIdx.has(i)}
+              aria-label={`${s.entity ?? 'Host total'} line, click to ${hiddenHeroIdx.has(i) ? 'show' : 'hide'}`}
+              onmouseenter={() => heroChart?.focusSeries(i + 1)}
+              onmouseleave={() => heroChart?.focusSeries(null)}
+              onclick={() => toggleHeroLine(i)}
+            >
+              {#if s.entity}
+                <ContainerIcon name={s.entity} icon={coreBudgetIcons[s.entity]} size={14} />
+              {:else}
+                <span class="top-consumers__chip-swatch"></span>
+              {/if}
+              <span>{s.entity ?? 'Host total'}</span>
+            </button>
+          {/each}
+        </div>
+        {#if heroCapped}
+          <p class="microlabel top-consumers__cap-note">Chart shows the top {MAX_HERO_LINES} by usage &mdash; the full list continues below.</p>
+        {/if}
       {/if}
     </div>
   {/if}
 
   <div class="card top-consumers__panel">
+    <span class="microlabel top-consumers__panel-label">Top Consumers</span>
     {#if failed}
       <p class="microlabel top-consumers__error">Couldn't load this window. Try again shortly.</p>
     {:else if loading}
@@ -521,12 +753,63 @@
   }
   .top-consumers__panel {
     padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .top-consumers__panel-label {
+    margin: 0;
   }
   .top-consumers__error {
     margin: 0;
     color: var(--status-warning);
   }
   .top-consumers__loading {
+    margin: 0;
+  }
+  /* Legend chips: the hero chart's own external legend (uPlot's built-in
+     one is off, showLegend={false} -- see TimeChart's own doc), tied to
+     the SAME top-N list the ranked bars below read. Chip order matches
+     the chart's own series order (rank, then the host-total line last),
+     not a name sort -- rank IS the chip row's own meaning here. */
+  .top-consumers__legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .top-consumers__chip {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 0.55rem;
+    border: 1px solid color-mix(in oklab, var(--chip-color) 45%, transparent);
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--chip-color) 12%, transparent);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    cursor: pointer;
+    transition:
+      opacity 150ms ease,
+      background-color 150ms ease;
+  }
+  .top-consumers__chip:hover {
+    background: color-mix(in oklab, var(--chip-color) 22%, transparent);
+  }
+  /* A toggled-off line's chip stays legible (never the dashed-out,
+     near-invisible treatment a disabled control would get) -- it's a
+     live, click-to-restore choice, not an unavailable option. */
+  .top-consumers__chip--off {
+    opacity: 0.45;
+  }
+  .top-consumers__chip-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 2px;
+    border-top: 2px dashed var(--chip-color);
+    flex-shrink: 0;
+  }
+  .top-consumers__cap-note {
     margin: 0;
   }
 </style>

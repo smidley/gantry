@@ -40,7 +40,39 @@
   // SSE-tick this chart has always done. A caller passes true only for
   // its OWN live range (e.g. `live={activeRange === 'live'}`) -- a
   // fetched/historical range must stay exactly as static as it is today.
-  let { series = [], unit = '', height = 220, markers = [], syncKey = undefined, formatValue = undefined, live = false } = $props();
+  // showLegend (additive, optional, default true): the Metrics page's own
+  // multi-line hero (up to 9 series -- top-8 containers + a muted host
+  // total) drives an external legend of its own (icon+name chips tied to
+  // the ranked list below, see TopConsumers.svelte), so uPlot's plain
+  // text-table legend would just be a second, redundant one underneath
+  // it. Every other caller (ContainerDetail, GPU, ...) has no chip row
+  // of its own and keeps relying on this one exactly as before.
+  //
+  // focusSeries/toggleSeries (exported, additive) are the hero's own
+  // hook for driving THAT external legend's hover/click straight into
+  // uPlot's already-built-in per-series dimming/hide, rather than
+  // reimplementing either: uPlot indexes series from 1 (0 is the shared
+  // x-axis), matching `series`'s own array position + 1 -- callers pass
+  // that same 1-based index back in.
+  let {
+    series = [],
+    unit = '',
+    height = 220,
+    markers = [],
+    syncKey = undefined,
+    formatValue = undefined,
+    live = false,
+    showLegend = true,
+  } = $props();
+
+  export function focusSeries(idx) {
+    chart?.setSeries(idx, { focus: idx !== null });
+  }
+
+  export function toggleSeries(idx) {
+    if (!chart) return;
+    chart.setSeries(idx, { show: !chart.series[idx]?.show });
+  }
 
   // FOCUS_DIM_ALPHA/FOCUS_PROX_PX (hover-scrub design's "per-series
   // focus"): uPlot's own built-in cursor.focus mechanism handles this
@@ -218,6 +250,32 @@
     ctx.restore();
   }
 
+  // directionDetail (additive, optional -- the Metrics hero's own
+  // directional resources): a series can carry directionPoints ([RingPoint[],
+  // RingPoint[]], its down/up or read/write pair -- the SAME two values
+  // the drawn line itself sums together) plus directionLabels for the
+  // short prefix each side renders with (['↓','↑'], ['r','w'], matching
+  // TopBarList's own ROW_DIRECTION_LABELS convention). Rendering only the
+  // sum on the line but the full split in the tooltip keeps the chart
+  // itself readable at up to 9 lines while a hover still answers "how
+  // much of this was download vs. upload" -- exactly topFromFrame's own
+  // row.direction, just looked up at the hovered instant instead of now.
+  // Looked up by exact timestamp match (points are ring buffers, already
+  // sorted ascending) rather than aligned into uPlot's own data arrays --
+  // it's tooltip-only, never drawn, so it doesn't need to live on the
+  // same shared x-axis buildAlignedData computes for the real series.
+  function directionDetail(s, ts) {
+    if (!s.directionPoints || ts == null) return undefined;
+    const [ptsA, ptsB] = s.directionPoints;
+    const valueAt = (pts) => pts.find((p) => p[0] === ts)?.[1];
+    const a = valueAt(ptsA);
+    const b = valueAt(ptsB);
+    if (a === undefined && b === undefined) return undefined;
+    const fmt = (v) => (v === undefined ? '—' : formatValue ? formatValue(v) : v);
+    const [labelA, labelB] = s.directionLabels ?? ['A', 'B'];
+    return `${labelA} ${fmt(a)} · ${labelB} ${fmt(b)}`;
+  }
+
   // handleCursor is a uPlot "setCursor" hook: recomputes the tooltip
   // (crosshair values for every series at the hovered index) and
   // which marker, if any, the cursor is close enough to for a hover
@@ -248,6 +306,7 @@
                 label: s.label,
                 color: resolveToken(s.colorVar),
                 value: raw == null ? null : formatValue ? formatValue(raw) : raw,
+                detail: directionDetail(s, u.data[0][idx]),
               };
             }),
           };
@@ -313,7 +372,8 @@
           ...series.map((s) => ({
             label: s.label,
             stroke: resolveToken(s.colorVar),
-            width: 2,
+            width: s.width ?? 2,
+            dash: s.dash,
             points: { show: false },
           })),
         ],
@@ -323,7 +383,7 @@
           ...(syncKey ? { sync: { key: syncKey } } : {}),
         },
         focus: { alpha: FOCUS_DIM_ALPHA },
-        legend: { show: series.length >= 2 },
+        legend: { show: showLegend && series.length >= 2 },
         hooks: {
           draw: [drawMarkers],
           setCursor: [handleCursor],
@@ -340,10 +400,11 @@
   // change never needs more than the setData path below).
   function currentShape() {
     return {
-      series: series.map((s) => ({ label: s.label, colorVar: s.colorVar })),
+      series: series.map((s) => ({ label: s.label, colorVar: s.colorVar, width: s.width, dash: s.dash })),
       theme: theme.resolved,
       unit,
       hasFormatValue: !!formatValue,
+      showLegend,
     };
   }
 
@@ -463,6 +524,9 @@
             {row.value ?? '—'}{!formatValue && unit && row.value !== null ? ` ${unit}` : ''}
           </span>
         </div>
+        {#if row.detail}
+          <div class="time-chart__tooltip-detail tabular-nums">{row.detail}</div>
+        {/if}
       {/each}
     </div>
   {/if}
@@ -511,6 +575,11 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
+  }
+  .time-chart__tooltip-detail {
+    margin: 0 0 0 1.15rem; /* aligns under the row's own label, past the swatch */
+    color: var(--ink-2);
+    font-size: 0.68rem;
   }
   .time-chart__swatch {
     display: inline-block;

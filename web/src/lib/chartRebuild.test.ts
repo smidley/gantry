@@ -57,6 +57,17 @@ describe('needsRebuild', () => {
     // which is the whole point: the caller's setData path handles it.
     expect(needsRebuild(base, { ...base })).toBe(false);
   });
+
+  it('rebuilds when a series width or dash changes -- the Metrics hero\'s dashed host line', () => {
+    const withDash: ChartShape = { ...base, series: [{ ...base.series[0], width: 1, dash: [4, 4] }] };
+    expect(needsRebuild(base, withDash)).toBe(true);
+    expect(needsRebuild(withDash, { ...withDash })).toBe(false);
+    expect(needsRebuild(withDash, { ...base, series: [{ ...base.series[0], width: 1, dash: [2, 2] }] })).toBe(true);
+  });
+
+  it('rebuilds when showLegend flips', () => {
+    expect(needsRebuild(base, { ...base, showLegend: false })).toBe(true);
+  });
 });
 
 describe('sameSeriesShape', () => {

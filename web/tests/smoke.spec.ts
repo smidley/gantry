@@ -9,7 +9,7 @@ const ROUTES: { hash: string; h1: string }[] = [
   { hash: '#/', h1: 'Overview' },
   { hash: '#/containers', h1: 'Containers' },
   { hash: '#/containers/jellyfin', h1: 'jellyfin' },
-  { hash: '#/top', h1: 'Top Consumers' },
+  { hash: '#/top', h1: 'Metrics' },
   { hash: '#/storage', h1: 'Storage' },
   { hash: '#/gpu', h1: 'GPU' },
   { hash: '#/events', h1: 'Events' },
@@ -461,6 +461,16 @@ test('top consumers: switching window from Now to 1h renders without erroring', 
   // freshly-started store that may not have an hour of history yet.
   await expect(page.locator('.top-consumers__error')).toHaveCount(0);
   await expect(page.locator('.top-bar-list__row, .top-bar-list__empty').first()).toBeVisible();
+
+  // If the window actually has rows (real store history), the hero
+  // chart's own per-container /api/series fetches must have populated a
+  // legend too, not just the ranked bars -- proves the fetched-window
+  // path (as opposed to Now's live rings) actually wires up.
+  const rowCount = await page.locator('.top-bar-list__row').count();
+  if (rowCount > 0) {
+    await expect(page.locator('.top-consumers__header canvas')).toBeVisible();
+    await expect.poll(() => page.locator('.top-consumers__chip').count()).toBeGreaterThan(0);
+  }
 });
 
 // Metric breakdown pages: an Overview rail tile deep-links into its own
@@ -483,12 +493,53 @@ test('overview: a rail tile deep-links to its own metric breakdown page', async 
   await expect(page.getByRole('tab', { name: 'Memory', exact: true })).toHaveAttribute('aria-selected', 'true');
 });
 
-test('top consumers: cpu breakdown page shows a host-total header with a live chart', async ({ page }) => {
+test('top consumers: cpu breakdown page shows a host-total header with a live multi-line chart and a legend', async ({
+  page,
+}) => {
   await page.goto('#/top/cpu');
 
   await expect(page.locator('.top-consumers__header')).toBeVisible();
   await expect(page.locator('.top-consumers__header-value')).toHaveText(/^\d+\.\d%$/);
   await expect(page.locator('.top-consumers__header canvas')).toBeVisible();
+
+  // The hero chart's own legend: up to 8 container chips + a trailing
+  // "Host total" reference chip, in the SAME order as the ranked list
+  // below (both read the same top-N ranking).
+  const chips = page.locator('.top-consumers__chip');
+  await expect.poll(() => chips.count()).toBeGreaterThan(1);
+  await expect(chips.last()).toHaveText('Host total');
+  const chipCount = await chips.count();
+  expect(chipCount).toBeLessThanOrEqual(9); // top 8 containers + host total
+
+  const firstChipName = (await chips.first().textContent())?.trim();
+  const firstRowName = await page.locator('.top-bar-list__name-text').first().textContent();
+  expect(firstChipName).toContain(firstRowName?.trim());
+
+  // uPlot's own built-in legend is suppressed (showLegend={false}) --
+  // the chip row above is the only legend, not a second, redundant one.
+  await expect(page.locator('.top-consumers__header .u-legend')).toHaveCount(0);
+});
+
+test('top consumers: clicking a legend chip toggles it, hovering focuses it, without erroring', async ({ page }) => {
+  await page.goto('#/top/cpu');
+  const firstChip = page.locator('.top-consumers__chip').first();
+  await expect(firstChip).toBeVisible();
+
+  await firstChip.hover();
+  await firstChip.click();
+  await expect(firstChip).toHaveClass(/top-consumers__chip--off/);
+  await expect(firstChip).toHaveAttribute('aria-pressed', 'false');
+
+  await firstChip.click();
+  await expect(firstChip).not.toHaveClass(/top-consumers__chip--off/);
+});
+
+test('top consumers: the ranked-list card is labeled "Top Consumers" under the renamed "Metrics" page', async ({
+  page,
+}) => {
+  await page.goto('#/top/cpu');
+  await expect(page.locator('h1.page-title')).toHaveText('Metrics');
+  await expect(page.locator('.top-consumers__panel-label')).toHaveText('Top Consumers');
 });
 
 test('top consumers: the cpu breakdown list is complete (not top-5) and ends with an unattributed row', async ({
@@ -526,12 +577,24 @@ test('top consumers: network breakdown pairs down/up in the header and on every 
   await expect(firstRow.locator('.top-bar-list__value').nth(1)).toContainText('↑');
 });
 
-test('top consumers: gpu breakdown has no host-total header or unattributed row', async ({ page }) => {
+test('top consumers: gpu breakdown has no host-total VALUE or unattributed row, but still gets the per-container hero chart', async ({
+  page,
+}) => {
   await page.goto('#/top/gpu');
 
   await expect(page.locator('.top-bar-list__row, .top-bar-list__empty').first()).toBeVisible();
-  await expect(page.locator('.top-consumers__header')).toHaveCount(0);
   await expect(page.locator('.top-bar-list__row', { hasText: 'Unattributed' })).toHaveCount(0);
+
+  // gpu gets no whole-machine number (topFromFrame.ts's own doc: a
+  // busy_pct is inherently per-engine/per-device) -- the header card
+  // itself still renders, chart-only, whenever at least one container
+  // has GPU activity (fake mode's jellyfin always does).
+  const header = page.locator('.top-consumers__header');
+  await expect(header).toBeVisible();
+  await expect(header.locator('.top-consumers__header-value')).toHaveCount(0);
+  await expect(header).toContainText('GPU');
+  await expect(header).toContainText('per container');
+  await expect(header.locator('canvas')).toBeVisible();
 });
 
 // Core-budget ribbon: the CPU breakdown page's own hero, live only. Math

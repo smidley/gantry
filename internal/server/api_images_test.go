@@ -166,6 +166,22 @@ func TestImagesConfirmHeaderValueIsCaseSensitive(t *testing.T) {
 	require.Equal(t, http.StatusPreconditionRequired, resp.StatusCode)
 }
 
+// TestImagesRemoveWrongConfirmValueFromContainersIsRejected is
+// TestContainersRemoveWrongConfirmValueIsRejected's converse: the
+// containers-scoped confirm value must not also satisfy the images
+// route, the same way images' own value must not satisfy containers --
+// see containersConfirmValue's own doc for why the value is
+// resource-scoped in the first place.
+func TestImagesRemoveWrongConfirmValueFromContainersIsRejected(t *testing.T) {
+	s := New(Options{Version: "test-1", Started: time.Now()})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := postImages(t, ts.URL+"/api/images/remove", `{"ids":["`+fmt.Sprintf("%064x", 1)+`"]}`, "containers")
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusPreconditionRequired, resp.StatusCode, "the containers confirm value must not also satisfy the images route")
+}
+
 // TestImagesOptionsMethodNeverReachesHandler pins F7: net/http's own
 // ServeMux (Go 1.22+ method-specific patterns) 405s any method the
 // route wasn't registered for, including OPTIONS -- confirmed here

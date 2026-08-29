@@ -42,6 +42,24 @@ type archetype struct {
 	memLimitBytes float64
 	cpuAllocCores float64
 
+	// cpusetRaw is minecraft's own pin, in the same raw core-list syntax
+	// docker.CPUSetPin parses ("0-1") -- kept separate from cpuAllocCores
+	// above (which drives the cpu.alloc_cores/alloc_pct METRICS a cpuset
+	// pin also implies) since this one demos the Go passthrough of the
+	// actual pinned core ids for display, not a number.
+	cpusetRaw string
+
+	// exitCode models docker inspect's State.ExitCode for a stopped
+	// archetype -- 0 (the zero value, "clean exit") for prowlarr, a
+	// plausible OOM-kill code for vaultwarden, so the anomaly banner's
+	// exit-code table has both a mundane and a dramatic stopped demo.
+	exitCode int
+
+	// unhealthy models a RUNNING container whose healthcheck is
+	// currently failing -- the one fleet member the anomaly banner's
+	// primary "why does this need me" scenario demos end to end.
+	unhealthy bool
+
 	// stopped models a container the user turned off on purpose --
 	// Metas() reports it State "exited" (no Health), and Tick skips it
 	// outright (a stopped container has no live stats to synthesize),
@@ -78,15 +96,22 @@ var fleet = []archetype{
 	{name: "postgres", cpuBase: 2, cpuAmp: 0.5, cpuSpike: 0.001, memBytes: 1.2e9, netScale: 1e5, memLimitBytes: 1.7e9},
 	{name: "redis", cpuBase: 0.5, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 200e6, netScale: 8e4},
 	{name: "homeassistant", cpuBase: 3, cpuAmp: 1, cpuSpike: 0.005, memBytes: 700e6, netScale: 1e5},
-	{name: "grafana", cpuBase: 1, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 250e6, netScale: 6e4},
+	// grafana: the unhealthy demo container (its healthcheck is modeled
+	// as permanently failing) -- Container Detail's anomaly "why" banner
+	// needs one currently-unhealthy fleet member to demo against; see
+	// unhealthyEventFired's own doc for the matching events-feed evidence.
+	{name: "grafana", cpuBase: 1, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 250e6, netScale: 6e4, unhealthy: true},
 	{name: "pihole", cpuBase: 0.5, cpuAmp: 0.3, cpuSpike: 0.001, memBytes: 120e6, netScale: 4e4},
 	{name: "nginx", cpuBase: 0.3, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 80e6, netScale: 5e5},
-	{name: "vaultwarden", cpuBase: 0.2, cpuAmp: 0.1, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4, stopped: true},
+	// vaultwarden's exitCode 137 (SIGKILL/OOM-likely) gives the anomaly
+	// banner's exit-code table a dramatic stopped demo alongside
+	// prowlarr's own plain, code-0 "stopped cleanly" one below.
+	{name: "vaultwarden", cpuBase: 0.2, cpuAmp: 0.1, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4, stopped: true, exitCode: 137},
 	{name: "immich", cpuBase: 5, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.5e9, netScale: 1e6},
 	{name: "paperless", cpuBase: 1, cpuAmp: 2, cpuSpike: 0.01, memBytes: 400e6, netScale: 8e4},
 	{name: "gitea", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 300e6, netScale: 6e4},
 	// minecraft: the cpuset-pinned demo container (pinned to 2 of the fake host's 8 cores).
-	{name: "minecraft", cpuBase: 8, cpuAmp: 5, cpuSpike: 0.01, memBytes: 2.5e9, netScale: 3e5, cpuAllocCores: 2.0},
+	{name: "minecraft", cpuBase: 8, cpuAmp: 5, cpuSpike: 0.01, memBytes: 2.5e9, netScale: 3e5, cpuAllocCores: 2.0, cpusetRaw: "0-1"},
 	{name: "frigate", cpuBase: 12, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.1e9, netScale: 5e6},
 	{name: "unifi-controller", cpuBase: 2, cpuAmp: 1, cpuSpike: 0.005, memBytes: 900e6, netScale: 2e5},
 	// duplicati/watchtower: the fleet's two never-started demo containers
@@ -175,6 +200,14 @@ const (
 	// runtime.NumCPU()/proc-stat count.
 	fakeHostCores = 8
 
+	// fakeHostMemBytes is the demo box's assumed total RAM (32GiB, a
+	// plausible home-server figure) -- Tick divides each container's own
+	// mem.bytes by this to synthesize mem.pct (host-share memory), the
+	// per-container analogue of cpu.pct above. The real collector derives
+	// this the same way (cgroupv2.go, off the host collector's MemTotal),
+	// just from an actual /proc/meminfo read instead of a fixed constant.
+	fakeHostMemBytes = 32e9
+
 	// fakePidsLimit is pids.max on every fake container, matching the
 	// real-box default (docker's own pids.max, seen on every container
 	// regardless of any other limit) -- unlike memLimitBytes/
@@ -215,6 +248,13 @@ const (
 	restartContainer = "sonarr"
 	oomContainer     = "minecraft"
 
+	// unhealthyContainer is grafana (see its own archetype.unhealthy
+	// doc) -- the anomaly banner's evidence list needs at least one
+	// real container.health event to point to, fired once near boot
+	// (unhealthyEventFired) since Metas() already reports it unhealthy
+	// from the very first snapshot, with no later transition to catch.
+	unhealthyContainer = "grafana"
+
 	// gpuEntity is the fake GPU device's kind="gpu" entity name.
 	gpuEntity = "gpu0"
 	// jellyfinBurstChance/MinTicks/MaxTicks give jellyfin's GPU usage a
@@ -246,6 +286,7 @@ type Generator struct {
 	parityStarted       bool
 	parityFinished      bool
 	diskErrorsFired     bool
+	unhealthyEventFired bool
 
 	// jellyfinBurstTicks counts down a GPU-usage burst in progress; 0
 	// means idle and eligible to roll a new burst.
@@ -327,6 +368,7 @@ func (g *Generator) Tick(now time.Time) {
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "cpu.pct"}, ts, cpuPct)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "cpu.cores"}, ts, cpuCores)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "mem.bytes"}, ts, mem)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "mem.pct"}, ts, 100*mem/fakeHostMemBytes)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "net.rx_bps"}, ts, rx)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "net.tx_bps"}, ts, tx)
 
@@ -579,6 +621,14 @@ func (g *Generator) emitSelf(ts int64) {
 // real 2s cadence, or in this file's own tests) fires only the latest
 // one, not a backfill of every skipped boundary.
 func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
+	// unhealthyContainer's own health.flip: fires exactly once, on the
+	// very first tick (elapsed==0) -- unlike the restart/OOM schedules
+	// below, there's no later boundary to catch it on, since Metas()
+	// reports it unhealthy unconditionally from the start.
+	if !g.unhealthyEventFired {
+		g.unhealthyEventFired = true
+		g.appendEvent(ts, store.Event{Kind: "container.health", Entity: unhealthyContainer, Severity: "warning", Detail: "unhealthy"})
+	}
 	if b := int64(elapsed / restartEvery); b > g.lastRestartBoundary {
 		g.lastRestartBoundary = b
 		g.appendEvent(ts, store.Event{
@@ -638,8 +688,23 @@ func (g *Generator) Metas() []docker.Meta {
 			state, health = "exited", ""
 		case a.created:
 			state, health = "created", ""
+		case a.unhealthy:
+			health = "unhealthy"
 		}
-		out[i] = docker.Meta{Name: a.name, State: state, Health: health, Image: "demo/" + a.name + ":latest", ComposeProject: a.composeProject, Mounts: fakeContainerMounts(a.name)}
+		m := docker.Meta{
+			Name: a.name, State: state, Health: health, Image: "demo/" + a.name + ":latest",
+			ComposeProject: a.composeProject, Mounts: fakeContainerMounts(a.name), ExitCode: a.exitCode,
+		}
+		// Cpuset: docker.CPUSetPin, not a literal, so fake mode's own
+		// "narrows below host" gate can never drift from the real
+		// collector's (see its own doc) -- this package can't construct
+		// docker's unexported `alloc` type to set m.Alloc directly the
+		// way a real inspect would, so the pin is computed straight from
+		// the archetype's raw string instead.
+		if pin, ok := docker.CPUSetPin(a.cpusetRaw, fakeHostCores); ok {
+			m.Cpuset = pin
+		}
+		out[i] = m
 	}
 	return out
 }

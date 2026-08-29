@@ -450,6 +450,9 @@ func TestMetasReturnsRunningHealthyDemoImagePerFleetMember(t *testing.T) {
 		case a.created:
 			require.Equal(t, "created", m.State, "%s is modeled created (never started)", a.name)
 			require.Equal(t, "", m.Health, "%s: a created container has no health status", a.name)
+		case a.unhealthy:
+			require.Equal(t, "running", m.State, "%s is modeled running", a.name)
+			require.Equal(t, "unhealthy", m.Health, "%s is modeled running but failing its healthcheck", a.name)
 		default:
 			require.Equal(t, "running", m.State, "%s is modeled running", a.name)
 			require.Equal(t, "healthy", m.Health, "%s is modeled running", a.name)

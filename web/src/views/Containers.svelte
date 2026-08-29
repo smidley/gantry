@@ -50,7 +50,7 @@
   const COLUMNS = [
     { key: 'health', label: 'ST', ariaName: 'Health', sortable: true, width: '2.25rem' },
     { key: 'name', label: 'Name', sortable: true, width: '10.5rem' },
-    { key: 'cpu', label: 'CPU', sortable: true, numeric: true, width: '15.5rem' }, // icon+sparkline(170px, flex-shrink:0)+text -- matches ContainerRow's own cpu-cell sizing
+    { key: 'cpu', label: 'CPU', sortable: true, numeric: true, width: '18.5rem' }, // icon+sparkline(220px, flex-shrink:0)+text -- matches ContainerRow's own cpu-cell sizing
     { key: 'mem', label: 'Mem', sortable: true, numeric: true, width: '9rem' }, // e.g. "888.8 MiB (88.8%)"
     { key: 'net', label: 'Net', sortable: true, numeric: true, width: '7.5rem' }, // stacked "↓ 888.8 KB/s" / "↑ 888.8 KB/s"
     { key: 'io', label: 'IO', sortable: true, numeric: true, width: '7.5rem' }, // stacked "r 888.8 KB/s" / "w 888.8 KB/s"
@@ -382,7 +382,7 @@
   .containers-table {
     width: 100%;
     border-collapse: collapse;
-    min-width: 72rem;
+    min-width: 75rem; /* +3rem, matching the cpu column's own growth (15.5rem -> 18.5rem) */
     table-layout: fixed;
   }
   .containers-table thead th {

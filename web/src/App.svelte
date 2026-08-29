@@ -12,6 +12,7 @@
   import Overview from './views/Overview.svelte';
   import Containers from './views/Containers.svelte';
   import ContainerDetail from './views/ContainerDetail.svelte';
+  import Compare from './views/Compare.svelte';
   import TopConsumers from './views/TopConsumers.svelte';
   import Storage from './views/Storage.svelte';
   import GPU from './views/GPU.svelte';
@@ -44,6 +45,8 @@
     {#key $route.params.name}
       <ContainerDetail name={$route.params.name} />
     {/key}
+  {:else if $route.name === 'compare'}
+    <Compare names={$route.params.names} />
   {:else if $route.name === 'top'}
     <TopConsumers initialResource={$route.params.resource} />
   {:else if $route.name === 'storage'}

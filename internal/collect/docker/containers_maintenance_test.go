@@ -368,6 +368,16 @@ func inspectWithState(exitCode int, finishedAt string) container.InspectResponse
 	}}
 }
 
+// inspectWithRestartPolicy is inspectWithState plus a HostConfig
+// carrying the given restart policy name -- used only by the
+// RestartPolicy enrichment tests below, which don't care about
+// ExitCode/FinishedAt.
+func inspectWithRestartPolicy(name container.RestartPolicyMode) container.InspectResponse {
+	insp := inspectWithState(0, "2024-12-24T00:00:00Z")
+	insp.HostConfig = &container.HostConfig{RestartPolicy: container.RestartPolicy{Name: name}}
+	return insp
+}
+
 // TestContainersMaintenanceEnrichesExitedWithExitCodeAndFinishedAtViaInspect
 // pins the split the spec calls out explicitly: ExitCode/FinishedAt
 // aren't on ContainerList's own Summary type, so ContainersMaintenance
@@ -455,6 +465,60 @@ func TestContainersMaintenanceZeroTimeFinishedAtLeftUnset(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, report.Containers[0].ExitCode, "ExitCode enrichment is independent of FinishedAt's own validity")
 	require.Nil(t, report.Containers[0].FinishedAt, "a Go zero-time FinishedAt must never be stored, or any age filter could treat this container as infinitely old")
+}
+
+// TestContainersMaintenanceEnrichesExitedWithRestartPolicyFromInspect pins
+// C2: a real example (Scott's own box) is an exited container with
+// restart=unless-stopped, which reads as ordinary garbage in the
+// maintenance list but is actually a service that would come right back
+// -- the UI needs the same restart-policy value ContainerInspect's own
+// HostConfig carries to be able to warn about it.
+func TestContainersMaintenanceEnrichesExitedWithRestartPolicyFromInspect(t *testing.T) {
+	fc := &fakeContainersClient{
+		containerListReturn: []container.Summary{summaryOfState("exited1", "one", "exited")},
+		inspectReturn:       map[string]container.InspectResponse{"exited1": inspectWithRestartPolicy(container.RestartPolicyUnlessStopped)},
+	}
+	c := &Collector{ctrCli: fc}
+
+	report, err := c.ContainersMaintenance(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, "unless-stopped", report.Containers[0].RestartPolicy)
+}
+
+// TestContainersMaintenanceRestartPolicyEmptyWhenDisabled pins the "empty
+// when 'no'/none" half of RestartPolicy's own contract: docker's own
+// RestartPolicyMode "no" must surface as "", the same as a container
+// with no restart policy configured at all, never as the literal string
+// "no".
+func TestContainersMaintenanceRestartPolicyEmptyWhenDisabled(t *testing.T) {
+	fc := &fakeContainersClient{
+		containerListReturn: []container.Summary{summaryOfState("exited1", "one", "exited")},
+		inspectReturn:       map[string]container.InspectResponse{"exited1": inspectWithRestartPolicy(container.RestartPolicyDisabled)},
+	}
+	c := &Collector{ctrCli: fc}
+
+	report, err := c.ContainersMaintenance(context.Background())
+
+	require.NoError(t, err)
+	require.Empty(t, report.Containers[0].RestartPolicy)
+}
+
+// TestContainersMaintenanceCreatedNeverGetsRestartPolicy pins the other
+// half: a created container is never inspected at all (see
+// ContainersMaintenance's own doc), so RestartPolicy must stay at its
+// zero value just like ExitCode/FinishedAt do for the same reason.
+func TestContainersMaintenanceCreatedNeverGetsRestartPolicy(t *testing.T) {
+	fc := &fakeContainersClient{
+		containerListReturn: []container.Summary{summaryOfState("created1", "one", "created")},
+	}
+	c := &Collector{ctrCli: fc}
+
+	report, err := c.ContainersMaintenance(context.Background())
+
+	require.NoError(t, err)
+	require.Empty(t, fc.inspectCalls)
+	require.Empty(t, report.Containers[0].RestartPolicy)
 }
 
 // TestRemoveContainersCallsContainerRemoveWithForceFalseAndRemoveVolumesFalse

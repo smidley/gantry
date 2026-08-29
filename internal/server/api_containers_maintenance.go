@@ -24,16 +24,25 @@ import (
 // own doc) -- omitempty on a pointer omits exactly the nil case, unlike
 // a plain int/int64 where 0 is itself a real, common exit code/timestamp
 // and could never be told apart from "not populated".
+//
+// RestartPolicy carries the same exited/enrichment-only scoping as
+// ExitCode/FinishedAt, but as a plain omitempty string: "" already means
+// "not configured" with nothing else it could be confused with, so
+// there's no pointer needed here the way ExitCode's real zero value
+// forces one. Lets the UI warn before removing an exited container that
+// would actually come right back (always/unless-stopped/on-failure),
+// the same way Managed warns about a dockerman/compose-owned one.
 type ContainerMaintenanceInfo struct {
-	ID         string `json:"id"`
-	FullID     string `json:"full_id"`
-	Name       string `json:"name"`
-	Image      string `json:"image"`
-	State      string `json:"state"`
-	ExitCode   *int   `json:"exit_code,omitempty"`
-	Created    int64  `json:"created"`
-	FinishedAt *int64 `json:"finished_at,omitempty"`
-	Managed    string `json:"managed,omitempty"`
+	ID            string `json:"id"`
+	FullID        string `json:"full_id"`
+	Name          string `json:"name"`
+	Image         string `json:"image"`
+	State         string `json:"state"`
+	ExitCode      *int   `json:"exit_code,omitempty"`
+	Created       int64  `json:"created"`
+	FinishedAt    *int64 `json:"finished_at,omitempty"`
+	Managed       string `json:"managed,omitempty"`
+	RestartPolicy string `json:"restart_policy,omitempty"`
 }
 
 // ContainerMaintenanceSummary is GET /api/containers/maintenance's

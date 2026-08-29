@@ -28,15 +28,26 @@ import (
 // value, when absent: an exit code of 0 is a real, common value (a clean
 // exit), so a plain int/omitempty pairing could never tell "exited
 // cleanly" apart from "not populated".
+//
+// RestartPolicy is populated the same way (exited-only, enrichment-only)
+// but as a plain string, not a pointer: unlike ExitCode, there's no real
+// value that collides with "absent" -- "" already means "no restart
+// policy configured" (docker's own RestartPolicyMode "no", or the type's
+// own zero value), so there's nothing a pointer would ever need to
+// disambiguate. Exists so the UI can warn before removing an exited
+// container a restart policy (always/unless-stopped/on-failure) would
+// otherwise bring back on its own -- the same "probably don't mean to"
+// warning Managed already gives for a dockerman/compose-owned one.
 type ContainerMaintenanceInfo struct {
-	ID         string
-	Name       string
-	Image      string
-	State      string
-	ExitCode   *int
-	Created    int64
-	FinishedAt *int64
-	Managed    string
+	ID            string
+	Name          string
+	Image         string
+	State         string
+	ExitCode      *int
+	Created       int64
+	FinishedAt    *int64
+	Managed       string
+	RestartPolicy string
 }
 
 // ContainerMaintenanceSummary is GET /api/containers/maintenance's
@@ -351,6 +362,13 @@ func (c *Collector) ContainersMaintenance(ctx context.Context) (ContainerMainten
 		if t, err := time.Parse(time.RFC3339Nano, insp.State.FinishedAt); err == nil && !t.IsZero() {
 			ts := t.Unix()
 			report.Containers[i].FinishedAt = &ts
+		}
+		// IsNone covers both RestartPolicyMode "no" and HostConfig's own
+		// zero value ("") -- either way that's "not configured", which
+		// RestartPolicy's own doc promises surfaces as "", never the
+		// literal string "no".
+		if insp.HostConfig != nil && !insp.HostConfig.RestartPolicy.IsNone() {
+			report.Containers[i].RestartPolicy = string(insp.HostConfig.RestartPolicy.Name)
 		}
 	}
 	return report, nil

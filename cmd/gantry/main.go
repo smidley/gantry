@@ -702,6 +702,7 @@ func buildContainersMaintenance(src func(ctx context.Context) (docker.ContainerM
 			out.Containers[i] = server.ContainerMaintenanceInfo{
 				ID: ct.ID, Name: ct.Name, Image: ct.Image, State: ct.State,
 				ExitCode: ct.ExitCode, Created: ct.Created, FinishedAt: ct.FinishedAt, Managed: ct.Managed,
+				RestartPolicy: ct.RestartPolicy,
 			}
 		}
 		return out, nil

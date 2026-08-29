@@ -14,6 +14,7 @@
   import { fetchContainers, fetchSeries } from '../lib/api';
   import { buildCompareHash } from '../lib/compareRoute';
   import { composeGroups } from '../lib/composeGroups';
+  import { groups } from '../lib/groups.svelte';
   import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
   import ContainerRow from '../components/ContainerRow.svelte';
@@ -132,6 +133,10 @@
   }
 
   onMount(() => {
+    groups.ensureLoaded();
+  });
+
+  onMount(() => {
     const controller = new AbortController();
     fetchContainers()
       .then((containers) => {
@@ -185,6 +190,30 @@
   // its OUTPUT only actually changes when project membership itself
   // changes, not on ordinary metric ticks.
   let composeGroupsList = $derived(composeGroups(live.frame?.containers ?? {}));
+
+  // Custom group management: editingGroupName names the ONE custom-group
+  // chip (if any) currently swapped for its inline rename/delete editor
+  // -- at most one at a time, plain view-local state (not persisted,
+  // not shared with groups.svelte's own store).
+  let editingGroupName = $state(null);
+  let editingNameInput = $state('');
+
+  function openEditGroup(name) {
+    editingGroupName = name;
+    editingNameInput = name;
+  }
+  function cancelEditGroup() {
+    editingGroupName = null;
+  }
+  async function submitRenameGroup(oldName) {
+    const newName = editingNameInput.trim();
+    if (newName && newName !== oldName) await groups.rename(oldName, newName);
+    editingGroupName = null;
+  }
+  async function deleteGroup(name) {
+    await groups.remove(name);
+    editingGroupName = null;
+  }
 
   // nameSetKey is a $derived string that only actually CHANGES value when
   // the container name SET changes (add/remove) -- it recomputes every
@@ -266,22 +295,79 @@
 <div class="containers-view">
   <h1 class="page-title">Containers</h1>
 
-  {#if composeGroupsList.length > 0}
+  {#if composeGroupsList.length > 0 || groups.list.length > 0}
     <!-- Groups: one chip per docker-compose project with >=2 currently-
-         known members -- "I have multiple containers that work together
-         as a team for an app" (Scott's own ask), surfaced up front
+         known members, PLUS one per saved custom group (Scott's own
+         ask: "make a way for a user to group certain containers
+         together for easy compare") -- "I have multiple containers
+         that work together as a team for an app," surfaced up front
          rather than relying on the fleet happening to share a naming
          pattern the filter box can search for. Clicking a chip jumps
-         straight into compare, pre-filled with that project's own
-         members (compareRoute.ts's buildCompareHash already sorts them,
-         matching this chip's own canonical member order). -->
-    <div class="containers-view__groups" role="group" aria-label="Compose groups">
+         straight into compare, pre-filled with that group's own members
+         (compareRoute.ts's buildCompareHash already sorts them,
+         matching a compose chip's own canonical member order -- a
+         custom group's member order is whatever it was saved with).
+         Custom chips carry a small bookmark glyph (subtle distinction
+         from a derived compose chip, Scott's own suggestion) plus a
+         trailing ⋯ that swaps the chip for a tiny rename/delete editor
+         -- deleting a group never touches the containers it named. -->
+    <div class="containers-view__groups" role="group" aria-label="Groups">
       <span class="microlabel containers-view__groups-label">Groups</span>
       {#each composeGroupsList as group (group.project)}
         <a class="containers-view__group-chip" href={buildCompareHash(group.names)}>
           {group.project}
           <span class="containers-view__group-count">×{group.names.length}</span>
         </a>
+      {/each}
+      {#each groups.list as g (g.name)}
+        {#if editingGroupName === g.name}
+          <form
+            class="containers-view__group-chip containers-view__group-chip--editing"
+            onsubmit={(e) => {
+              e.preventDefault();
+              submitRenameGroup(g.name);
+            }}
+          >
+            <input
+              type="text"
+              class="containers-view__group-edit-input"
+              bind:value={editingNameInput}
+              aria-label={`Rename group ${g.name}`}
+              onkeydown={(e) => {
+                if (e.key === 'Escape') cancelEditGroup();
+              }}
+            />
+            <button type="submit" class="containers-view__group-edit-btn" aria-label="Save name" title="Save">&check;</button>
+            <button
+              type="button"
+              class="containers-view__group-edit-btn"
+              onclick={() => deleteGroup(g.name)}
+              aria-label={`Delete group ${g.name}`}
+              title="Delete"
+            >
+              &#128465;
+            </button>
+            <button type="button" class="containers-view__group-edit-btn" onclick={cancelEditGroup} aria-label="Cancel" title="Cancel"
+              >&times;</button
+            >
+          </form>
+        {:else}
+          <span class="containers-view__group-chip containers-view__group-chip--custom">
+            <a class="containers-view__group-chip-link" href={buildCompareHash(g.members)}>
+              <span class="containers-view__group-bookmark" aria-hidden="true">&#128278;</span>
+              {g.name}
+              <span class="containers-view__group-count">×{g.members.length}</span>
+            </a>
+            <button
+              type="button"
+              class="containers-view__group-manage"
+              onclick={() => openEditGroup(g.name)}
+              aria-label={`Manage group ${g.name}`}
+            >
+              &#8943;
+            </button>
+          </span>
+        {/if}
       {/each}
     </div>
   {/if}
@@ -635,6 +721,84 @@
   }
   .containers-view__group-count {
     color: var(--ink-2);
+  }
+
+  /* Custom groups (Scott's own ask): same pill, but it's now a <span>
+     wrapping a link PLUS a manage button rather than a bare <a> -- the
+     hover/background/border above still apply unchanged; only the
+     trailing edge tightens to make room for the manage button, the
+     same asymmetric-padding trick compare__chip uses for its own
+     trailing remove-x. The bookmark glyph is the one subtle visual
+     tell apart from a derived compose chip (no color, no bolder
+     border -- still a quiet chip, just not a plain one). */
+  .containers-view__group-chip--custom {
+    padding: 0.25rem 0.4rem 0.25rem 0.6rem;
+  }
+  .containers-view__group-chip-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    color: inherit;
+    text-decoration: none;
+  }
+  .containers-view__group-bookmark {
+    font-size: 0.7rem;
+    opacity: 0.8;
+  }
+  .containers-view__group-manage {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--ink-2);
+    cursor: pointer;
+    font-size: 0.7rem;
+    flex-shrink: 0;
+  }
+  .containers-view__group-manage:hover {
+    background: color-mix(in oklab, var(--ink) 12%, transparent);
+    color: var(--ink);
+  }
+
+  /* Editing: the same chip swaps its link+manage-button content for a
+     tiny inline rename/delete form -- still one pill, not a popover,
+     keeping this light (no floating-panel positioning to get wrong). */
+  .containers-view__group-chip--editing {
+    padding: 0.2rem 0.4rem;
+    gap: 0.35rem;
+  }
+  .containers-view__group-edit-input {
+    min-height: 22px;
+    padding: 0 0.4rem;
+    border-radius: 4px;
+    border: 1px solid color-mix(in oklab, var(--ink) 20%, transparent);
+    background: var(--surface);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    width: 8rem;
+  }
+  .containers-view__group-edit-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--ink-2);
+    cursor: pointer;
+    font-size: 0.75rem;
+    flex-shrink: 0;
+  }
+  .containers-view__group-edit-btn:hover {
+    background: color-mix(in oklab, var(--ink) 12%, transparent);
+    color: var(--ink);
   }
 
   /* Floating compare bar: fixed to the viewport (not the page flow), so

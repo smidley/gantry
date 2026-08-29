@@ -34,6 +34,7 @@
   import { buildCompareHash, knownCompareNames, MAX_COMPARE_MEMBERS, parseCompareNames } from '../lib/compareRoute';
   import { seriesColorVar } from '../lib/compareColors';
   import { computeGroupTotals } from '../lib/compareTotals';
+  import { groups } from '../lib/groups.svelte';
   import ContainerIcon from '../components/ContainerIcon.svelte';
   import TimeChart from '../components/TimeChart.svelte';
   import CompareMemberRow from '../components/CompareMemberRow.svelte';
@@ -88,6 +89,33 @@
 
   function removeHref(name) {
     return buildCompareHash(requestedNames.filter((n) => n !== name));
+  }
+
+  // --- Save as group: persists the currently-requested member set
+  // (requestedNames -- every member in the URL, uncapped by
+  // MAX_COMPARE_MEMBERS, the same set the header's own chips/totals
+  // read) as a named group via groups.svelte's shared store, so it
+  // shows up as a chip in the Containers view's own Groups row. -------
+  let saveGroupOpen = $state(false);
+  let saveGroupName = $state('');
+  let saveGroupSaved = $state(false);
+
+  function openSaveGroup() {
+    saveGroupName = '';
+    saveGroupSaved = false;
+    saveGroupOpen = true;
+  }
+  function cancelSaveGroup() {
+    saveGroupOpen = false;
+  }
+  async function submitSaveGroup() {
+    const name = saveGroupName.trim();
+    if (!name) return;
+    const ok = await groups.saveAsGroup(name, requestedNames);
+    if (ok) {
+      saveGroupOpen = false;
+      saveGroupSaved = true;
+    }
   }
 
   // --- Live ring slots: a fixed pool of MAX_COMPARE_MEMBERS, same "can't
@@ -383,6 +411,37 @@
         {/each}
       </div>
 
+      <div class="compare__save-group">
+        {#if saveGroupOpen}
+          <form
+            class="compare__save-group-form"
+            onsubmit={(e) => {
+              e.preventDefault();
+              submitSaveGroup();
+            }}
+          >
+            <input
+              type="text"
+              class="compare__save-group-input"
+              placeholder="Group name…"
+              bind:value={saveGroupName}
+              aria-label="Group name"
+              onkeydown={(e) => {
+                if (e.key === 'Escape') cancelSaveGroup();
+              }}
+            />
+            <button type="submit" class="compare__save-group-btn" disabled={groups.saving || !saveGroupName.trim()}>
+              {groups.saving ? 'Saving…' : 'Save'}
+            </button>
+            <button type="button" class="compare__save-group-cancel" onclick={cancelSaveGroup}>Cancel</button>
+          </form>
+        {:else}
+          <button type="button" class="compare__save-group-open" onclick={openSaveGroup}>Save as group&hellip;</button>
+          {#if saveGroupSaved}<span class="microlabel compare__save-group-success">Saved.</span>{/if}
+        {/if}
+        {#if groups.saveError}<span class="microlabel compare__save-group-error">{groups.saveError}</span>{/if}
+      </div>
+
       <div class="compare__totals" role="group" aria-label="Group totals">
         <span class="microlabel compare__totals-label">Group totals</span>
         <div class="compare__totals-grid">
@@ -549,6 +608,72 @@
   .compare__chip-remove:hover {
     background: color-mix(in oklab, var(--ink) 12%, transparent);
     color: var(--ink);
+  }
+  .compare__save-group {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-height: 28px;
+  }
+  /* Plain understated text button (matches overview__top-link/
+     compare__hint-link's own treatment), not a bordered pill -- this is
+     a secondary action, not a peer of the member chips above it. */
+  .compare__save-group-open {
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--series-1);
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .compare__save-group-open:hover {
+    text-decoration: underline;
+  }
+  .compare__save-group-form {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .compare__save-group-input {
+    min-height: 28px;
+    padding: 0 0.6rem;
+    border-radius: 6px;
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 0.82rem;
+    width: 12rem;
+  }
+  .compare__save-group-btn {
+    min-height: 28px;
+    padding: 0 0.75rem;
+    border-radius: 6px;
+    border: 1px solid var(--series-1);
+    background: color-mix(in oklab, var(--series-1) 15%, transparent);
+    color: var(--series-1);
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .compare__save-group-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .compare__save-group-cancel {
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--ink-2);
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .compare__save-group-cancel:hover {
+    color: var(--ink);
+  }
+  .compare__save-group-success {
+    color: var(--status-good);
+  }
+  .compare__save-group-error {
+    color: var(--status-warning);
   }
   .compare__totals {
     display: flex;

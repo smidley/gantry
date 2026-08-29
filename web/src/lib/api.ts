@@ -155,6 +155,18 @@ export interface SettingsResponse {
   env_overridden: string[];
 }
 
+// Group mirrors server.Group -- one user-defined, named set of
+// container names (api_groups.go), the custom counterpart to
+// composeGroups.ts's own docker-compose-derived groups.
+export interface Group {
+  name: string;
+  members: string[];
+}
+
+export interface GroupsResponse {
+  groups: Group[];
+}
+
 export type TopResource = 'cpu' | 'mem' | 'net' | 'io' | 'gpu';
 export type TopWindow = 'now' | '1h' | '24h' | '7d';
 export type TopAgg = 'avg' | 'peak';
@@ -312,6 +324,31 @@ export async function putSettings(retention: RetentionSettings): Promise<Setting
     // vs. a success), not by the key name alone.
     err.envOverridden = body.env_overridden;
     throw err;
+  }
+  return body;
+}
+
+export function fetchGroups(): Promise<GroupsResponse> {
+  return getJSON<GroupsResponse>('/api/groups');
+}
+
+// putGroups replaces the entire saved groups list -- no per-group
+// create/rename/delete route, matching GroupsIface.Set's own
+// whole-document-replace contract server-side (api_groups.go). Throws
+// a plain Error carrying the server's own message (e.g. "duplicate
+// group name") on a non-2xx response -- unlike putSettings, the server
+// never attaches per-field detail here (validateGroups returns one
+// combined message, not a field map), so there's nothing extra to
+// preserve on the thrown error.
+export async function putGroups(groups: Group[]): Promise<GroupsResponse> {
+  const res = await fetch('/api/groups', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groups }),
+  });
+  const body = (await res.json()) as GroupsResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `PUT /api/groups: ${res.status} ${res.statusText}`);
   }
   return body;
 }

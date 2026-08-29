@@ -69,12 +69,34 @@
   that's still present to its new position; transition:fade covers a row
   actually entering/leaving the list (a container crossing onto or off
   the leaderboard). Both collapse to 0 under prefers-reduced-motion.
+
+  graceRows (live only, see topFromFrame's own doc) is why this actually
+  animates instead of "visibly doing nothing": topFromFrame's top-N cut
+  has no memory, so a container hovering right at the cutoff crosses it
+  on nearly every tick, and a key that LEAVES `rows` then comes straight
+  BACK next tick makes Svelte link the new intro to the still-running
+  outro as its "counterpart" (so a reversed transition resumes smoothly
+  instead of jumping) -- but the resumed duration is `configured * |t2 -
+  t1|`, and t1 here is the counterpart's own barely-progressed position,
+  so it rounds to ~0: an instant, invisible pop instead of a fade, and
+  the row never cleanly finishes its outro either, leaking an
+  invisible opacity:0 `<li>` that piles up for the rest of the page's
+  life (confirmed live: accumulating stale Animation objects on rows
+  that were never removed). graceRows keeps a briefly-dropped entity in
+  `displayRows` (frozen at its last value) for one extra tick instead of
+  handing it straight to Svelte as a real removal, so a boundary flicker
+  never reaches the transition system as an outro+intro pair at all --
+  the same "don't let a flicker at the edge look like two events" fix
+  shape as reorderByLastDisplayedValue's own doc, just for MEMBERSHIP
+  instead of RANK. The events feed's own animate:flip+transition:fade
+  (Overview.svelte/Events.svelte) never needed this: it only ever grows
+  one row at a time, with no value-threshold cutoff to bounce across.
 -->
 <script>
   import { flip } from 'svelte/animate';
   import { fade } from 'svelte/transition';
   import { prefersReducedMotion } from 'svelte/motion';
-  import { reorderByLastDisplayedValue } from '../lib/topFromFrame';
+  import { reorderByLastDisplayedValue, withGracePeriod } from '../lib/topFromFrame';
   import TopBarRow from './TopBarRow.svelte';
 
   // FLIP_DURATION_MS: modest, per the ask -- long enough to read as a
@@ -98,9 +120,12 @@
   let flipDuration = $derived(prefersReducedMotion.current ? 0 : FLIP_DURATION_MS);
 
   const previousValues = new Map();
+  const graceState = { lastSeenRow: new Map(), lastPresentTick: new Map(), tick: 0 };
   let displayRows = $state([]);
   $effect(() => {
-    displayRows = live ? reorderByLastDisplayedValue(rows, previousValues, metricKey) : rows;
+    displayRows = live
+      ? reorderByLastDisplayedValue(withGracePeriod(rows, graceState, metricKey), previousValues, metricKey)
+      : rows;
   });
 </script>
 

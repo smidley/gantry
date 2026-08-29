@@ -12,6 +12,7 @@ import {
   TOP_RESOURCES,
   topFromFrame,
   unattributedValue,
+  withGracePeriod,
 } from './topFromFrame';
 import type { SnapshotDTO } from './api';
 
@@ -387,6 +388,75 @@ describe('reorderByLastDisplayedValue', () => {
       'mem',
     );
     expect(rows.map((r) => r.entity)).toEqual(['b', 'a']);
+  });
+});
+
+describe('withGracePeriod', () => {
+  function freshState() {
+    return { lastSeenRow: new Map(), lastPresentTick: new Map(), tick: 0 };
+  }
+
+  it('passes rows through unchanged when nothing has dropped out', () => {
+    const state = freshState();
+    const rows = [
+      { entity: 'a', value: 1 },
+      { entity: 'b', value: 2 },
+    ];
+    expect(withGracePeriod(rows, state, 'cpu')).toEqual(rows);
+  });
+
+  it('keeps a row that just dropped out visible, at its last known value, for one more call', () => {
+    const state = freshState();
+    withGracePeriod([{ entity: 'a', value: 10 }, { entity: 'b', value: 5 }], state, 'cpu');
+    // Tick 2: 'a' falls out of the top-N the caller computed.
+    const tick2 = withGracePeriod([{ entity: 'b', value: 5 }], state, 'cpu');
+    expect(tick2).toEqual([
+      { entity: 'b', value: 5 },
+      { entity: 'a', value: 10 }, // graced -- last known value, not dropped
+    ]);
+  });
+
+  it('a flicker that recovers on the very next call never actually leaves', () => {
+    const state = freshState();
+    withGracePeriod([{ entity: 'a', value: 10 }, { entity: 'b', value: 5 }], state, 'cpu');
+    withGracePeriod([{ entity: 'b', value: 5 }], state, 'cpu'); // a dips below the cutoff
+    // Tick 3: 'a' is back in the caller's own top-N -- it was never
+    // dropped from the grace bookkeeping, so this is a plain pass-through,
+    // not a "re-add" the {#each} block would see as a fresh key.
+    const tick3 = withGracePeriod([{ entity: 'a', value: 12 }, { entity: 'b', value: 5 }], state, 'cpu');
+    expect(tick3).toEqual([
+      { entity: 'a', value: 12 },
+      { entity: 'b', value: 5 },
+    ]);
+  });
+
+  it('truly forgets a row once its grace window elapses', () => {
+    const state = freshState();
+    withGracePeriod([{ entity: 'a', value: 10 }, { entity: 'b', value: 5 }], state, 'cpu');
+    const tick2 = withGracePeriod([{ entity: 'b', value: 5 }], state, 'cpu');
+    expect(tick2.map((r) => r.entity)).toEqual(['b', 'a']); // still graced
+    const tick3 = withGracePeriod([{ entity: 'b', value: 5 }], state, 'cpu');
+    expect(tick3.map((r) => r.entity)).toEqual(['b']); // grace window (1 tick) elapsed
+  });
+
+  it('keys grace bookkeeping by metric too, mirroring reorderByLastDisplayedValue', () => {
+    const state = freshState();
+    withGracePeriod([{ entity: 'a', value: 10 }], state, 'cpu');
+    // A DIFFERENT metric has never seen 'a' drop out of anything -- no
+    // grace row should appear under 'mem'.
+    const rows = withGracePeriod([{ entity: 'b', value: 5 }], state, 'mem');
+    expect(rows.map((r) => r.entity)).toEqual(['b']);
+  });
+
+  it('respects a custom graceTicks window', () => {
+    const state = freshState();
+    withGracePeriod([{ entity: 'a', value: 10 }], state, 'cpu', 2);
+    const tick2 = withGracePeriod([], state, 'cpu', 2);
+    const tick3 = withGracePeriod([], state, 'cpu', 2);
+    const tick4 = withGracePeriod([], state, 'cpu', 2);
+    expect(tick2.map((r) => r.entity)).toEqual(['a']);
+    expect(tick3.map((r) => r.entity)).toEqual(['a']);
+    expect(tick4.map((r) => r.entity)).toEqual([]); // 2-tick window elapsed
   });
 });
 

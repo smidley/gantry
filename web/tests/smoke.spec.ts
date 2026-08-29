@@ -108,6 +108,107 @@ test('overview: the Top Consumers module metric switcher changes the module and 
   await expect(page.getByRole('tab', { name: 'Memory', exact: true })).toHaveAttribute('aria-selected', 'true');
 });
 
+// Header compaction (Scott: "lots of wasted space here"): the status
+// band -- headline facts on the left, fleet strip + array schematic on
+// the right -- is a side-by-side row at >=1024px and a plain vertical
+// stack below that, same breakpoint convention as every other
+// desktop/mobile split in this app.
+test('overview: the status band is two columns at desktop width and stacked at mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('#/');
+
+  const facts = page.locator('.overview__status-facts');
+  const visuals = page.locator('.overview__status-visuals');
+  await expect(facts).toBeVisible();
+  await expect(visuals).toBeVisible();
+
+  const factsBox = await facts.boundingBox();
+  const visualsBox = await visuals.boundingBox();
+  expect(factsBox).not.toBeNull();
+  expect(visualsBox).not.toBeNull();
+  // Side by side: roughly the same top, visuals strictly to the right.
+  expect(Math.abs(factsBox.y - visualsBox.y)).toBeLessThan(8);
+  expect(visualsBox.x).toBeGreaterThan(factsBox.x + factsBox.width - 8);
+
+  await page.setViewportSize({ width: 375, height: 800 });
+  const factsBoxMobile = await facts.boundingBox();
+  const visualsBoxMobile = await visuals.boundingBox();
+  // Stacked: visuals starts at or below where facts ends, not beside it.
+  expect(visualsBoxMobile.y).toBeGreaterThanOrEqual(factsBoxMobile.y + factsBoxMobile.height - 4);
+});
+
+// Needs-a-look rows collapsed from a title line plus a separate detail
+// line into one inline sentence -- every row is a single flex line
+// (overview__attn-line), never a taller two-line block, regardless of
+// which anomaly happens to be active for a given fake-fleet run.
+test('overview: needs-a-look rows render as one line, not a title line over a detail line', async ({ page }) => {
+  await page.goto('#/');
+
+  const attention = page.locator('.overview__attention');
+  if ((await attention.count()) === 0) {
+    test.skip(true, 'fake fleet booted all-clear for this run -- nothing to check');
+  }
+
+  const lines = page.locator('.overview__attn-line');
+  await expect(lines.first()).toBeVisible();
+  const count = await lines.count();
+  for (let i = 0; i < count; i++) {
+    const box = await lines.nth(i).boundingBox();
+    // One line of this app's body text is comfortably under 30px tall;
+    // the old title+detail stack ran closer to 45-50px.
+    expect(box.height, `row ${i} looks like a two-line stack`).toBeLessThan(30);
+  }
+});
+
+// Bay schematic: now always part of the status band's right column
+// (previously only shown during a disk anomaly), bigger, with a hover/
+// focus label (slot, device, temp, used/total) and a real click-through
+// into #/storage -- the header-compaction + array-visualization passes.
+test('overview: the bay schematic is always visible, shows a hover/focus detail label, and links to storage', async ({
+  page,
+}) => {
+  await page.goto('#/');
+
+  const bars = page.locator('.bay-schematic__bar');
+  await expect(bars.first()).toBeVisible();
+  await expect(bars.first()).toHaveAttribute('href', '#/storage');
+
+  const label = page.locator('.bay-schematic__label');
+  await expect(label).not.toHaveClass(/bay-schematic__label--visible/);
+  await bars.first().hover();
+  await expect(label).toHaveClass(/bay-schematic__label--visible/);
+  // slot name, device, and a used/total byte pair -- the richer detail
+  // a hover now carries that the bar's own aria-label already had in
+  // short form.
+  await expect(label).toContainText('/');
+
+  await bars.first().focus();
+  await expect(label).toHaveClass(/bay-schematic__label--visible/);
+
+  await bars.first().click();
+  await expect(page).toHaveURL(/#\/storage$/);
+});
+
+// Fleet heat + tooltip (Scott: "make it earn its space" + "should say
+// the container name and show its icon as you mouse over it"): a
+// hover or keyboard focus on any unit reveals name/CPU/mem, previously
+// only present as an aria-label with nothing for a sighted user.
+test('overview: hovering or focusing a fleet unit reveals its name, CPU, and memory', async ({ page }) => {
+  await page.goto('#/');
+
+  const firstUnit = page.locator('.fleet-strip .fleet-unit').first();
+  await expect(firstUnit).toBeVisible();
+  const label = page.locator('.fleet-strip__label');
+  await expect(label).not.toHaveClass(/fleet-strip__label--visible/);
+
+  await firstUnit.hover();
+  await expect(label).toHaveClass(/fleet-strip__label--visible/);
+  await expect(label).toHaveText(/\d+\.\d%/); // a live CPU percentage
+
+  await firstUnit.focus();
+  await expect(label).toHaveClass(/fleet-strip__label--visible/);
+});
+
 test('containers: clicking a header sorts the table', async ({ page }) => {
   await page.goto('#/containers');
 
@@ -824,6 +925,78 @@ test('storage: a disk over the capacity threshold renders its number banded, one
   await expect(underThreshold).toBeVisible();
   const underColor = await underThreshold.evaluate((el) => getComputedStyle(el).color);
   expect(underColor).toBe(inkColor);
+});
+
+// Storage header chart (Scott: "a graph that can switch between disk
+// io, storage used, and temperature... each line... a separate
+// drive"): a segmented IO/Used/Temp switcher over a per-drive TimeChart
+// and a kind-tinted legend, reusing the Metrics page's own hero-chart
+// interaction pattern. pageerror is collected for the whole test --
+// this is the regression guard for a real bug this feature shipped
+// with (every line missing its own `label`, so TimeChart's tooltip --
+// keyed by row.label -- collapsed every row onto one shared `undefined`
+// key the instant a hover first populated it: each_key_duplicate).
+test('storage: the header chart switches metrics/windows and its legend toggles lines without erroring', async ({
+  page,
+}) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (err) => pageErrors.push(err.message));
+
+  await page.goto('#/storage');
+
+  const chart = page.locator('.storage-chart');
+  await expect(chart).toBeVisible();
+  await expect(chart.locator('.microlabel').first()).toHaveText('IO by drive');
+  await expect(chart.locator('canvas')).toBeVisible();
+
+  const usedTab = chart.getByRole('tab', { name: 'Used', exact: true });
+  await usedTab.click();
+  await expect(usedTab).toHaveAttribute('aria-selected', 'true');
+  await expect(chart.locator('.microlabel').first()).toHaveText('Used by drive');
+
+  const tempTab = chart.getByRole('tab', { name: 'Temp', exact: true });
+  await tempTab.click();
+  await expect(chart.locator('.microlabel').first()).toHaveText('Temp by drive');
+
+  await chart.getByRole('button', { name: '1h', exact: true }).click();
+  await expect(chart.locator('.storage-chart__error')).toHaveCount(0, { timeout: 10_000 });
+  await chart.getByRole('button', { name: 'Now', exact: true }).click();
+
+  // Legend: at least one chip starts visible (a pool/parity always
+  // does) and at least one starts hidden (12+ lines calm) for the fake
+  // fleet's 8-disk array; clicking a chip flips its own state.
+  const chips = chart.locator('.storage-chart__chip');
+  await expect.poll(() => chips.count()).toBeGreaterThan(1);
+  const offChips = chart.locator('.storage-chart__chip.storage-chart__chip--off');
+  const onChips = chart.locator('.storage-chart__chip:not(.storage-chart__chip--off)');
+  await expect.poll(() => offChips.count()).toBeGreaterThan(0);
+  await expect.poll(() => onChips.count()).toBeGreaterThan(0);
+
+  const firstChip = chips.first();
+  const wasOff = (await firstChip.getAttribute('aria-pressed')) === 'false';
+  await firstChip.hover();
+  await firstChip.click();
+  await expect(firstChip).toHaveAttribute('aria-pressed', wasOff ? 'true' : 'false');
+  await firstChip.click();
+  await expect(firstChip).toHaveAttribute('aria-pressed', wasOff ? 'false' : 'true');
+
+  // Hovering the chart itself pins a tooltip listing only the currently
+  // visible lines (never a hidden one) -- expect.poll rather than a
+  // single assertion since the live chart keeps re-rendering under the
+  // cursor every tick, and this is the exact interaction that used to
+  // throw each_key_duplicate (see the test's own doc above). uPlot
+  // layers its own cursor-tracking overlay (.u-over) directly on top of
+  // the canvas -- that's the real hit target, not the canvas itself.
+  await chart.locator('.u-over').hover();
+  const tooltipRows = page.locator('.time-chart__tooltip .time-chart__tooltip-row');
+  await expect.poll(() => tooltipRows.count(), { timeout: 10_000 }).toBeGreaterThan(0);
+  const [visibleChipNames, tooltipText] = await Promise.all([onChips.allTextContents(), tooltipRows.allTextContents()]);
+  await expect(tooltipRows).toHaveCount(visibleChipNames.length);
+  for (const name of visibleChipNames) {
+    expect(tooltipText.some((row) => row.includes(name.trim()))).toBe(true);
+  }
+
+  expect(pageErrors, `uncaught page errors: ${pageErrors.join('\n')}`).toEqual([]);
 });
 
 // Clickable events (eventHref, lib/eventHref.ts): mocked rather than

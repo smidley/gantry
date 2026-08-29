@@ -12,6 +12,7 @@ describe('parseHash', () => {
     expect(parseHash('#/containers')).toEqual({ name: 'containers', params: {} });
     expect(parseHash('#/top')).toEqual({ name: 'top', params: {} });
     expect(parseHash('#/storage')).toEqual({ name: 'storage', params: {} });
+    expect(parseHash('#/maintenance')).toEqual({ name: 'maintenance', params: {} });
     expect(parseHash('#/gpu')).toEqual({ name: 'gpu', params: {} });
     expect(parseHash('#/events')).toEqual({ name: 'events', params: {} });
     expect(parseHash('#/settings')).toEqual({ name: 'settings', params: {} });

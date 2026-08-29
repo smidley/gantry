@@ -14,6 +14,7 @@ export type RouteName =
   | 'compare'
   | 'top'
   | 'storage'
+  | 'maintenance'
   | 'gpu'
   | 'events'
   | 'settings'
@@ -58,6 +59,7 @@ const routeDefs: RouteDef[] = [
   // and every other param anywhere in this table is already a segment).
   { name: 'top', pattern: ['top', ':resource'] },
   { name: 'storage', pattern: ['storage'] },
+  { name: 'maintenance', pattern: ['maintenance'] },
   { name: 'gpu', pattern: ['gpu'] },
   { name: 'events', pattern: ['events'] },
   { name: 'settings', pattern: ['settings'] },
@@ -137,6 +139,12 @@ const ICON_TOP = strokeIcon('<path d="M4 20V10"/><path d="M12 20V4"/><path d="M2
 const ICON_STORAGE = strokeIcon(
   '<rect x="3" y="3" width="18" height="7" rx="1.5"/><rect x="3" y="14" width="18" height="7" rx="1.5"/><circle cx="7" cy="6.5" r="0.8" fill="currentColor" stroke="none"/><circle cx="7" cy="17.5" r="0.8" fill="currentColor" stroke="none"/>',
 );
+// ICON_MAINTENANCE: two open sockets on a shaft -- a plain wrench
+// abstraction (fill:none from strokeIcon already renders each circle as
+// a ring, not a disk), picked over a trash-can glyph so the nav itself
+// reads as "upkeep," not "delete" -- the page's own destructive weight
+// lives in its confirm dialogs, not the icon that gets you there.
+const ICON_MAINTENANCE = strokeIcon('<circle cx="6.5" cy="6.5" r="3.25"/><circle cx="17.5" cy="17.5" r="3.25"/><path d="M8.8 8.8l6.4 6.4"/>');
 const ICON_GPU = strokeIcon(
   '<rect x="4" y="6" width="16" height="12" rx="1.5"/><path d="M8 2v4M16 2v4M8 18v4M16 18v4M2 9h2M2 15h2M20 9h2M20 15h2"/>',
 );
@@ -147,10 +155,11 @@ const ICON_SETTINGS = strokeIcon(
   '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>',
 );
 
-// routes is the single nav table -- 7 entries for Phase 3 (Alerts, the
-// spec's 7th view, arrives with Phase 4's alerting engine; the 8th
-// route below, container-detail, is reached by clicking a container
-// row rather than through nav).
+// routes is the single nav table -- 8 entries (Alerts, the original
+// spec's 7th view, arrives with Phase 4's alerting engine; Maintenance is
+// new, outside that original count; container-detail is reached by
+// clicking a container row rather than through nav, so it's never in
+// this table at all).
 export const routes: NavItem[] = [
   { name: 'overview', hash: '#/', label: 'Overview', icon: ICON_OVERVIEW },
   {
@@ -167,6 +176,13 @@ export const routes: NavItem[] = [
   // predecessor.
   { name: 'top', hash: '#/top', label: 'Metrics', icon: ICON_TOP },
   { name: 'storage', hash: '#/storage', label: 'Storage', icon: ICON_STORAGE },
+  {
+    name: 'maintenance',
+    hash: '#/maintenance',
+    label: 'Maintenance',
+    icon: ICON_MAINTENANCE,
+    mobileLabel: 'Mainte­nance',
+  },
   { name: 'gpu', hash: '#/gpu', label: 'GPU', icon: ICON_GPU },
   { name: 'events', hash: '#/events', label: 'Events', icon: ICON_EVENTS },
   { name: 'settings', hash: '#/settings', label: 'Settings', icon: ICON_SETTINGS },

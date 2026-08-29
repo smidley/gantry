@@ -15,6 +15,7 @@
   import Compare from './views/Compare.svelte';
   import TopConsumers from './views/TopConsumers.svelte';
   import Storage from './views/Storage.svelte';
+  import Maintenance from './views/Maintenance.svelte';
   import GPU from './views/GPU.svelte';
   import Events from './views/Events.svelte';
   import Settings from './views/Settings.svelte';
@@ -51,6 +52,8 @@
     <TopConsumers initialResource={$route.params.resource} />
   {:else if $route.name === 'storage'}
     <Storage />
+  {:else if $route.name === 'maintenance'}
+    <Maintenance />
   {:else if $route.name === 'gpu'}
     <GPU />
   {:else if $route.name === 'events'}

@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>gantry</Name>
+  <Repository>ghcr.io/smidley/gantry:latest</Repository>
+  <Registry>https://github.com/smidley/gantry/pkgs/container/gantry</Registry>
+  <Network>bridge</Network>
+  <MyIP></MyIP>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/smidley/gantry/issues</Support>
+  <Project>https://github.com/smidley/gantry</Project>
+  <Overview>Gantry is a Docker and server monitor built for Unraid. One container, zero configuration -- install it, open the web UI, and the dashboard is already live.
+
+Every mount below is pre-filled so a stock install needs no edits. All of them are read-only except two: the notifications mount (so Gantry can hand alerts to Unraid's own notification center) and the config mount (Gantry's own small SQLite database). Gantry never issues docker commands, never writes to /sys, and never touches your array configuration -- it only reads.
+
+Extra Parameters add --pid=host (so Gantry can see host-side process info for accurate per-container GPU and resource attribution) and --cap-add=SYS_PTRACE (needed to read other containers' /proc/&lt;pid&gt;/fdinfo). Every other Linux capability is dropped with --cap-drop=ALL; the container does not run --privileged and does not use host networking.
+
+Optional, host-level: Unraid ships PSI (Pressure Stall Information) compiled in but disabled. Adding psi=1 to your flash boot device's syslinux append line and rebooting lets Gantry record fuller CPU/memory/IO stall metrics. Nothing to configure on the container itself -- see the PSI note below and docs/psi.md in the repo.
+
+Optional, GPU: if you pass --runtime=nvidia (add it to Extra Parameters) and set NVIDIA_VISIBLE_DEVICES below, Gantry shows per-container GPU utilization. Without it, the GPU panel just shows a plain "not available" hint -- never an error.</Overview>
+  <Category>Tools: Network:Management</Category>
+  <WebUI>http://[IP]:[PORT:8380]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/smidley/gantry/main/template/gantry.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/smidley/gantry/main/template/gantry-icon.png</Icon>
+  <ExtraParams>--pid=host --cap-add=SYS_PTRACE --cap-drop=ALL</ExtraParams>
+  <DateInstalled></DateInstalled>
+  <DonateText></DonateText>
+  <DonateLink></DonateLink>
+  <Requires></Requires>
+  <Config Name="WebUI Port" Target="8380" Default="8380" Mode="tcp" Description="The Gantry web UI. After the container starts, open http://&lt;your-unraid-ip&gt;:8380/." Type="Port" Display="always" Required="true" Mask="false">8380</Config>
+  <Config Name="Docker Socket" Target="/var/run/docker.sock" Default="/var/run/docker.sock" Mode="ro" Description="Read-only. Lets Gantry list containers and read their stats, health, logs, and start/stop/health events. Gantry never issues docker commands through this socket -- it only reads." Type="Path" Display="always" Required="true" Mask="false">/var/run/docker.sock</Config>
+  <Config Name="Host Sysfs" Target="/host/sys" Default="/sys" Mode="ro" Description="Read-only. Gives Gantry hwmon sensor readings (fan speed, voltages, temperatures), GPU/DRM info, and the cgroup v2 fast path for per-container accounting. Gantry never writes to /sys." Type="Path" Display="always" Required="true" Mask="false">/sys</Config>
+  <Config Name="Unraid State" Target="/unraid" Default="/var/local/emhttp" Mode="ro" Description="Read-only. The same emhttp state files the Unraid webGUI itself reads -- array status, parity check progress, disk and pool assignments, and shares. Gantry never modifies your array configuration through this mount." Type="Path" Display="always" Required="true" Mask="false">/var/local/emhttp</Config>
+  <Config Name="Notifications" Target="/notify" Default="/tmp/notifications" Mode="rw" Description="Read-write -- the only other read-write mount besides Config below. Gantry drops alert notifications here so they show up in Unraid's own notification center (and anywhere you already route Unraid notifications: email, Pushover, Discord, etc). If this mount is missing or unwritable, Gantry keeps running; it just can't deliver Unraid-native alerts, and the Alerts view says so plainly instead of failing silently." Type="Path" Display="always" Required="true" Mask="false">/tmp/notifications</Config>
+  <Config Name="Update Status" Target="/updates/unraid-update-status.json" Default="/var/lib/docker/unraid-update-status.json" Mode="ro" Description="Read-only and optional. Unraid's own record of which containers have an update available. If this file doesn't exist on your system, or you remove this mount, Gantry simply won't show update-available flags -- nothing else is affected. Safe to delete if Docker Manager complains about it." Type="Path" Display="always" Required="false" Mask="false">/var/lib/docker/unraid-update-status.json</Config>
+  <Config Name="Config" Target="/config" Default="/mnt/user/appdata/gantry" Mode="rw" Description="Read-write. Gantry's own SQLite database and settings -- the only place it stores anything persistent. This is the second of the two read-write mounts; everything else above is read-only." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/gantry</Config>
+  <Config Name="PSI (host boot flag, optional)" Target="" Default="" Mode="" Description="Not a container setting -- a host kernel feature. Unraid ships Pressure Stall Information compiled in but disabled by default. To enable it: Main -&gt; your Flash boot device -&gt; Syslinux configuration -&gt; add psi=1 to the append line -&gt; reboot. Gantry then records fuller CPU/memory/IO stall metrics automatically, no container change needed. See docs/psi.md in the repo. Leave this alone if you're not sure -- Gantry works fine without it." Type="Label" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="NVIDIA_VISIBLE_DEVICES" Target="NVIDIA_VISIBLE_DEVICES" Default="" Mode="" Description="Optional, only if you have an Nvidia GPU passed through with the Nvidia Driver plugin. Set to all, and also add --runtime=nvidia to Extra Parameters above, to enable per-container GPU utilization. Leave both blank/absent for a CPU-only box -- the GPU panel shows a plain enable hint, never an error." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="GANTRY_READ_ONLY" Target="GANTRY_READ_ONLY" Default="" Mode="" Description="Off by default. Set to 1 to make Gantry's write-capable paths (docker mutations, webhook-target configuration) refuse to run -- a kill switch for anyone who wants a strictly read-only monitor. Leave blank for normal use." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+</Container>

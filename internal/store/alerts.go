@@ -97,6 +97,34 @@ func (s *Store) UpsertAlertRule(r AlertRule) error {
 	return err
 }
 
+// ReplaceAlertRules replaces the entire alert_rules table with rules, in
+// one transaction. This is a mechanical whole-document replace only --
+// it does not enforce "a builtin rule can't be removed" or any other
+// business rule; that validation is the caller's job (Task 8's PUT
+// /api/alerts/rules handler, the same division of labor /api/groups
+// already uses between its store method and its route).
+func (s *Store) ReplaceAlertRules(rules []AlertRule) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM alert_rules`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	for _, r := range rules {
+		if _, err := tx.Exec(`INSERT INTO alert_rules (`+alertRuleColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Name, r.Enabled, r.Builtin, r.Type, r.Kind, r.EntityGlob, r.EntityClass, r.Metric, r.Op,
+			r.Threshold, r.ClearThreshold, r.WarnThreshold, r.CriticalThreshold, r.BandFamily,
+			r.ForSeconds, r.ClearSeconds, r.EventKinds, r.MinSeverity, r.ClearEventKinds,
+			r.ClearMaxSeverity, r.Severity, r.Channels, r.RenotifyHours, r.UpdatedAt); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // AlertInstance is one row of alert_instances -- one field per column, in
 // schema order.
 type AlertInstance struct {
@@ -323,32 +351,4 @@ func (s *Store) LastDeliveries(ctx context.Context, limit int) ([]Delivery, erro
 		out = append(out, d)
 	}
 	return out, rows.Err()
-}
-
-// ReplaceAlertRules replaces the entire alert_rules table with rules, in
-// one transaction. This is a mechanical whole-document replace only --
-// it does not enforce "a builtin rule can't be removed" or any other
-// business rule; that validation is the caller's job (Task 8's PUT
-// /api/alerts/rules handler, the same division of labor /api/groups
-// already uses between its store method and its route).
-func (s *Store) ReplaceAlertRules(rules []AlertRule) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM alert_rules`); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	for _, r := range rules {
-		if _, err := tx.Exec(`INSERT INTO alert_rules (`+alertRuleColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Name, r.Enabled, r.Builtin, r.Type, r.Kind, r.EntityGlob, r.EntityClass, r.Metric, r.Op,
-			r.Threshold, r.ClearThreshold, r.WarnThreshold, r.CriticalThreshold, r.BandFamily,
-			r.ForSeconds, r.ClearSeconds, r.EventKinds, r.MinSeverity, r.ClearEventKinds,
-			r.ClearMaxSeverity, r.Severity, r.Channels, r.RenotifyHours, r.UpdatedAt); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-	}
-	return tx.Commit()
 }

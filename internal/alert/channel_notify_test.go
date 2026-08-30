@@ -149,6 +149,28 @@ func TestNotifyChannelSendResolvedPrefixesSubjectAndForcesNormalImportance(t *te
 	require.Contains(t, body, "importance=normal")
 }
 
+// TestNotifyChannelSendRenotifySameShapeAsFired pins the third named
+// phase's exact rendering: renotify is still a firing alert repeating
+// itself, so unlike "resolved" it gets no prefix and no importance
+// override -- the golden-ish trio is fired/resolved (above) and this.
+func TestNotifyChannelSendRenotifySameShapeAsFired(t *testing.T) {
+	dir := t.TempDir()
+	c := NewNotifyChannel(dir, nil, nil)
+	n := AlertNotification{
+		Phase:    "renotify",
+		Rule:     store.AlertRule{ID: "disk-temp-high", Name: "Disk temperature high", Severity: "warning"},
+		Instance: store.AlertInstance{Entity: "disk3"},
+		Summary:  "disk3 is at 58.0 C (over 55.0 C for 10 minutes)",
+	}
+	res := c.Send(context.Background(), n)
+	require.True(t, res.OK)
+	body := readOneNotifyFile(t, dir)
+	require.Contains(t, body, "subject=Disk temperature high — disk3")
+	require.Contains(t, body, "description=disk3 is at 58.0 C (over 55.0 C for 10 minutes)")
+	require.Contains(t, body, "importance=warning")
+	require.NotContains(t, body, "Resolved:")
+}
+
 func TestNotifyChannelSendSubjectOverrideBypassesRuleEntityConstruction(t *testing.T) {
 	dir := t.TempDir()
 	c := NewNotifyChannel(dir, nil, nil)

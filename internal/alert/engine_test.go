@@ -901,6 +901,60 @@ func TestBootSeedingRunsOnlyOnce(t *testing.T) {
 	require.Equal(t, 1, st.activeCount())
 }
 
+// TestBootSeedingRetriesUntilFleetIsNonEmpty pins F3: a slow docker probe
+// can leave Fleet() returning nothing on the engine's very first tick
+// (t+10s can easily beat the first inventory poll). Latching "seeded"
+// on that empty read would permanently skip the one thing boot seeding
+// exists for -- a container already unhealthy before Gantry started,
+// which no new event will ever arrive to report. Seeding must keep
+// retrying every tick until Fleet() actually reports something.
+func TestBootSeedingRetriesUntilFleetIsNonEmpty(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := unhealthyRule()
+	st := newFakeStore(rule)
+	calls := 0
+	fleet := func() []FleetMember {
+		calls++
+		if calls == 1 {
+			return nil // slow probe: nothing yet on the first tick
+		}
+		return []FleetMember{{Name: "sonarr", State: "running", Health: "unhealthy"}}
+	}
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet, nil, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background())) // empty fleet: must not latch "seeded"
+	require.Equal(t, 0, st.activeCount(), "nothing to seed from an empty fleet")
+
+	require.NoError(t, eng.Tick(context.Background())) // fleet now populated: seeding must retry and fire
+	require.Equal(t, 2, calls)
+	inst := st.soleActive(t)
+	require.Equal(t, "sonarr", inst.Entity)
+	require.Equal(t, "firing", inst.State)
+
+	// And now that a real seed happened, it must still run only once.
+	calls = 0
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, 0, calls, "seeding must not retry once it has actually run")
+}
+
+// TestBootSeedingEmptyFleetDoesNotDelayEventCursorClamp guards the F3
+// refactor itself: decoupling the seed-retry latch from the one-time
+// event-cursor clamp must not delay the cursor -- it still has to clamp
+// on the very first tick regardless of the fleet, or a still-empty fleet
+// tick would replay the entire events table as fresh alerts (see
+// TestEventCursorStartsAtMaxEventIDNoReplayOfPreexistingEvents).
+func TestBootSeedingEmptyFleetDoesNotDelayEventCursorClamp(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := unhealthyRule()
+	st := newFakeStore(rule)
+	st.events = []store.Event{{ID: 1, TS: now - 100, Kind: "container.health", Entity: "sonarr", Severity: "warning"}}
+	fleet := func() []FleetMember { return nil } // stays empty for this whole test
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet, nil, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, 0, st.activeCount(), "the pre-existing event must not replay as a fresh alert")
+}
+
 // --- Run loop --------------------------------------------------------------
 
 func TestRunStopsOnContextCancelWithoutBlocking(t *testing.T) {

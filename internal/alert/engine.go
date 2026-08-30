@@ -62,8 +62,17 @@ type Engine struct {
 	Dispatch func(AlertNotification)
 	Clock    func() time.Time
 
-	booted      bool
+	// cursorSet latches once, on the engine's true first Tick, independent
+	// of booted below: the event cursor must clamp to MaxEventID right
+	// away regardless of whether the fleet is ready yet, or a still-empty
+	// first tick would replay the whole events table as fresh alerts.
+	cursorSet   bool
 	eventCursor int64
+
+	// booted latches once bootSeed has actually run against a non-empty
+	// Fleet() (or Fleet is nil, meaning one is never coming) -- see
+	// bootSeed's own doc for why an empty read must not latch this.
+	booted bool
 
 	// missingSince tracks, per firing threshold instance id, the tick a
 	// series was first observed absent from Match. There is no schema
@@ -151,13 +160,15 @@ func (e *Engine) Tick(ctx context.Context) error {
 		e.resolveDisabled(inst, now)
 	}
 
-	if !e.booted {
-		e.bootSeed(ruleByID, activeIdx, silences, now)
+	if !e.cursorSet {
 		cursor, err := e.Store.MaxEventID(ctx)
 		if err != nil {
 			return fmt.Errorf("alert engine: max event id: %w", err)
 		}
 		e.eventCursor = cursor
+		e.cursorSet = true
+	}
+	if !e.booted && e.bootSeed(ruleByID, activeIdx, silences, now) {
 		e.booted = true
 	}
 
@@ -180,27 +191,40 @@ func (e *Engine) resolveDisabled(inst store.AlertInstance, now int64) {
 	}
 }
 
-// bootSeed runs once, on the engine's first Tick: an event rule can only
-// ever see events appended after this process started, so a container
-// that was already unhealthy before boot would otherwise never alert.
-// This walks the current fleet and feeds a synthetic container.health
-// event through the exact same per-rule matching processEvent uses for a
-// real one -- it is never appended to the events table (nothing
-// "happened" just now) and never advances the cursor, but the resulting
-// alert.fired IS real: the condition is real and ongoing, Gantry just
-// noticed it late.
-func (e *Engine) bootSeed(ruleByID map[string]store.AlertRule, activeIdx map[instanceKey]store.AlertInstance, silences []store.Silence, now int64) {
+// bootSeed runs on every tick until it can report done=true: an event
+// rule can only ever see events appended after this process started, so
+// a container that was already unhealthy before boot would otherwise
+// never alert. This walks the current fleet and feeds a synthetic
+// container.health event through the exact same per-rule matching
+// processEvent uses for a real one -- it is never appended to the events
+// table (nothing "happened" just now) and never advances the cursor, but
+// the resulting alert.fired IS real: the condition is real and ongoing,
+// Gantry just noticed it late.
+//
+// done is false when Fleet() itself reports nothing yet: the docker
+// collector's first inventory poll can easily lag the engine's own first
+// tick (t+10s), and latching "seeded" on that empty read would silently
+// skip the one case boot seeding exists for -- Tick retries every
+// subsequent tick until Fleet() actually reports something (F3). A nil
+// Fleet is different: there is no fleet-following capability coming,
+// ever, so that's done immediately.
+func (e *Engine) bootSeed(ruleByID map[string]store.AlertRule, activeIdx map[instanceKey]store.AlertInstance, silences []store.Silence, now int64) (done bool) {
 	if e.Fleet == nil {
-		return
+		return true
+	}
+	members := e.Fleet()
+	if len(members) == 0 {
+		return false
 	}
 	eventRules := enabledEventRules(ruleByID)
-	for _, m := range e.Fleet() {
+	for _, m := range members {
 		if m.State != "running" || m.Health != "unhealthy" {
 			continue
 		}
 		ev := store.Event{Kind: "container.health", Entity: m.Name, Severity: "warning", Detail: "unhealthy at boot"}
 		e.processEvent(ev, eventRules, activeIdx, silences, now)
 	}
+	return true
 }
 
 func enabledEventRules(ruleByID map[string]store.AlertRule) []store.AlertRule {

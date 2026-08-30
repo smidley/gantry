@@ -275,14 +275,13 @@ func (e *Engine) tickThresholds(rules []store.AlertRule, activeIdx map[instanceK
 	}
 }
 
-// evalThresholdRule evaluates one rule against every entity it could
-// plausibly need to: entities currently reporting the metric that match
-// entity_glob/entity_class, UNIONED with entities already carrying an
-// active instance for this rule regardless of current scope. The union's
-// second half matters: a rule edit that narrows entity_glob must still
-// be able to resolve (via clearing or no-data) an instance that fell out
-// of the new scope, never leave it firing forever because nothing
-// revisits it.
+// evalThresholdRule evaluates one rule against every in-scope entity
+// (currently reporting the metric AND matching entity_glob/entity_class),
+// then separately resolves any active instance whose entity no longer
+// matches -- a rule edit that narrows entity_glob/entity_class must not
+// leave a stray instance firing forever just because its own metric
+// keeps reporting a breaching value on its own terms (see
+// resolveOutOfScope; F6).
 //
 // Wrapped in its own recover: a single malformed rule (bad data flowing
 // into a glob or a ClassOf callback) must never take the rest of the
@@ -295,25 +294,60 @@ func (e *Engine) evalThresholdRule(r store.AlertRule, byEntity map[string][]stor
 		}
 	}()
 
-	candidates := map[string]struct{}{}
-	for entity := range byEntity {
+	matchesScope := func(entity string) bool {
 		class := ""
 		if e.ClassOf != nil {
 			class = e.ClassOf(r.Kind, entity)
 		}
-		if MatchEntity(r.EntityGlob, entity) && MatchClass(r.EntityClass, class) {
+		return MatchEntity(r.EntityGlob, entity) && MatchClass(r.EntityClass, class)
+	}
+
+	// Scope is a property of the entity, checked independently of whether
+	// it has data THIS tick -- an active instance with no current window
+	// data (byEntity lacks the key) is "absent", handled below by
+	// evalThresholdEntity's own grace period, not "out of scope" just for
+	// having nothing to report right now. Deriving scope from byEntity's
+	// keys instead of checking the entity directly would conflate the
+	// two and resolve an absent-but-still-in-scope instance immediately,
+	// skipping no-data's timer entirely.
+	candidates := map[string]struct{}{}
+	for entity := range byEntity {
+		if matchesScope(entity) {
 			candidates[entity] = struct{}{}
 		}
 	}
-	for k := range activeIdx {
-		if k.RuleID == r.ID {
-			candidates[k.Entity] = struct{}{}
+	for k, inst := range activeIdx {
+		if k.RuleID != r.ID {
+			continue
 		}
+		if !matchesScope(k.Entity) {
+			e.resolveOutOfScope(inst, r, now, silences, activeIdx)
+			continue
+		}
+		candidates[k.Entity] = struct{}{}
 	}
 
 	for entity := range candidates {
 		e.evalThresholdEntity(r, entity, byEntity[entity], oldestByEntity[entity], activeIdx, silences, now)
 	}
+}
+
+// resolveOutOfScope resolves any-state -> resolved(out-of-scope): a rule
+// edit narrowed entity_glob/entity_class and this instance's entity no
+// longer matches. Neither the ordinary crossing check nor no-data ever
+// trigger for an entity still reporting its own value on its own terms,
+// so without this an out-of-scope stray that's still breaching would
+// fire forever -- nothing else ever revisits it. Pending resolves
+// silently (it never fired, matching resolveSilent's doctrine); firing
+// resolves with the usual event and dispatched notice, since unlike
+// rule-disabled the RULE itself is still very much active for everyone
+// else -- this one instance's own history should say why IT closed.
+func (e *Engine) resolveOutOfScope(inst store.AlertInstance, r store.AlertRule, now int64, silences []store.Silence, activeIdx map[instanceKey]store.AlertInstance) {
+	if inst.State == "pending" {
+		e.resolveSilent(inst, now, "out-of-scope", activeIdx)
+		return
+	}
+	e.resolveNotify(inst, r, now, "out-of-scope", silences, activeIdx)
 }
 
 func (e *Engine) evalThresholdEntity(r store.AlertRule, entity string, samples []store.Sample, oldest int64, activeIdx map[instanceKey]store.AlertInstance, silences []store.Silence, now int64) {

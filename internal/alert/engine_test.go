@@ -639,6 +639,99 @@ func TestEntityGlobScopingMatrix(t *testing.T) {
 	require.Equal(t, "jellyfin", active[0].Entity)
 }
 
+// --- narrowed scope strands a still-breaching stray (F6) ------------------
+
+// TestNarrowedGlobResolvesStillBreachingFiringStrayOutOfScope pins F6: an
+// active FIRING instance whose entity no longer matches the rule's
+// CURRENT entity_glob must resolve even though it's still numerically
+// breaching. evalThresholdRule's union keeps evaluating a stray (its own
+// doc says so, "must still be able to resolve"), but the ordinary
+// crossing/no-data checks never trigger for an entity that keeps
+// reporting a breaching value on its own terms -- without an explicit
+// out-of-scope resolve, that promise is broken and it fires forever.
+func TestNarrowedGlobResolvesStillBreachingFiringStrayOutOfScope(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := cpuRule()
+	rule.Kind, rule.Metric, rule.EntityGlob = "container", "cpu.total", "jelly*" // narrowed after plex started firing
+	st := newFakeStore(rule)
+	id, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: rule.ID, Kind: "container", Entity: "plex", Metric: rule.Metric, State: "firing",
+		Severity: rule.Severity, Value: 90, Threshold: rule.Threshold, StartedAt: now - 300, FiredAt: now - 300,
+	})
+	require.NoError(t, err)
+
+	mr := newMatchRouter()
+	mr.set("container", "cpu.total", "plex", flat(now, 10, 11, 90)) // still breaching, still reporting
+	var notes []string
+	eng := newEngine(st, mr.fn, nil, nil, func(n AlertNotification) { notes = append(notes, n.Phase) }, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background()))
+
+	inst := st.instances[id]
+	require.Equal(t, "resolved", inst.State)
+	require.Equal(t, "out-of-scope", inst.ResolveReason)
+	require.Contains(t, st.eventKinds(), "alert.resolved")
+	require.Equal(t, []string{"resolved"}, notes)
+}
+
+// TestNarrowedGlobResolvesPendingStrayOutOfScopeSilently pins the pending
+// half: a stray that never fired resolves with no event and no dispatch,
+// matching resolveSilent's doctrine everywhere else in this file.
+func TestNarrowedGlobResolvesPendingStrayOutOfScopeSilently(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := cpuRule()
+	rule.Kind, rule.Metric, rule.EntityGlob = "container", "cpu.total", "jelly*"
+	st := newFakeStore(rule)
+	id, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: rule.ID, Kind: "container", Entity: "plex", Metric: rule.Metric, State: "pending",
+		Severity: rule.Severity, Value: 90, Threshold: rule.Threshold, StartedAt: now - 10,
+	})
+	require.NoError(t, err)
+
+	mr := newMatchRouter()
+	mr.set("container", "cpu.total", "plex", flat(now, 10, 3, 90)) // still breaching, short window
+	dispatched := 0
+	eng := newEngine(st, mr.fn, nil, nil, func(AlertNotification) { dispatched++ }, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background()))
+
+	inst := st.instances[id]
+	require.Equal(t, "resolved", inst.State)
+	require.Equal(t, "out-of-scope", inst.ResolveReason)
+	require.Empty(t, st.events, "a pending stray that never fired produces no event")
+	require.Equal(t, 0, dispatched)
+}
+
+// TestNarrowedClassResolvesStillBreachingStrayOutOfScope pins the same
+// behavior off entity_class rather than entity_glob: a disk that stops
+// matching a newly-added "!nvme" restriction resolves out-of-scope too.
+func TestNarrowedClassResolvesStillBreachingStrayOutOfScope(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := diskTempRule() // EntityClass "!nvme"
+	st := newFakeStore(rule)
+	id, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: rule.ID, Kind: "disk", Entity: "nvme1", Metric: rule.Metric, State: "firing",
+		Severity: rule.Severity, Value: 90, Threshold: rule.Threshold, StartedAt: now - 300, FiredAt: now - 300,
+	})
+	require.NoError(t, err)
+
+	mr := newMatchRouter()
+	mr.set("disk", "temp.c", "nvme1", flat(now, 10, 11, 90)) // still hot, still reporting
+	classOf := func(kind, entity string) string {
+		if kind == "disk" && entity == "nvme1" {
+			return "nvme" // now excluded by the rule's "!nvme"
+		}
+		return "hdd"
+	}
+	eng := newEngine(st, mr.fn, classOf, nil, nil, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background()))
+
+	inst := st.instances[id]
+	require.Equal(t, "resolved", inst.State)
+	require.Equal(t, "out-of-scope", inst.ResolveReason)
+}
+
 // --- panic isolation ---------------------------------------------------
 
 func TestPanicInOneRuleDoesNotAbortOtherRules(t *testing.T) {

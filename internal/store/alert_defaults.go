@@ -11,7 +11,8 @@ package store
 // health's own warning/alert calls in docker/registry.go, not a second
 // layer of string parsing here).
 //
-// Two deliberate traps, both from the plan:
+// A few deliberate traps -- the first three from the plan, the last
+// from later hardening against real-box false positives:
 //   - array-stopped uses op "<" on the 1/0 array.started metric rather
 //     than an array.state event rule: array.state only fires on a
 //     transition, so a box that booted with the array already stopped

@@ -642,6 +642,13 @@ func (d *Dispatcher) trackFlap(n AlertNotification, now int64) {
 func (d *Dispatcher) silenceFlapping(n AlertNotification, now int64) {
 	if d.Store != nil {
 		d.record(func() {
+			// Entity is written exactly as dispatched -- and for a host-kind
+			// rule that's "", which engine.go's silenced() reads as "any
+			// entity": the silence scopes RULE-WIDE. Identical in effect for
+			// today's host rules (a single instance whose entity IS ""), but
+			// if a multi-entity kind ever dispatches empty entities, this
+			// silence would mute the rule's other entities too -- revisit the
+			// scoping here before that exists.
 			if _, err := d.Store.AddSilence(store.Silence{
 				RuleID: n.Rule.ID, Entity: n.Instance.Entity, Until: now + flapSilenceSeconds,
 				Reason: "flapping", CreatedAt: now,

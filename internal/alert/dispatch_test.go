@@ -430,6 +430,36 @@ func TestDispatcherFlapGuardWindowIsRollingNotFixed(t *testing.T) {
 	require.Empty(t, st.silencesSnapshot(), "the first, now-expired cycle must not count toward the threshold")
 }
 
+// TestDispatcherFlapSilenceForHostRuleScopesRuleWide pins the
+// empty-entity contract end to end: a host-kind rule dispatches with
+// Instance.Entity == "", the flap guard writes the silence with that
+// entity verbatim, and engine.go's silenced() treats Entity == "" as
+// "any entity" -- so the silence covers the whole rule. Correct for
+// today's host rules (one instance, entity ""), and the assertion
+// against a hypothetical named entity is here to trip loudly if a
+// multi-entity kind ever starts dispatching empty entities.
+func TestDispatcherFlapSilenceForHostRuleScopesRuleWide(t *testing.T) {
+	clock := newTestClock(1_800_000_000)
+	notify := newFakeChannel("notify")
+	st := &fakeDeliveryStore{}
+	d := NewDispatcher(st, []Channel{notify}, clock.Now, nil)
+	t.Cleanup(d.Stop)
+
+	tripFlap(d, "host-cpu-high", "")
+
+	require.Eventually(t, func() bool { return len(st.silencesSnapshot()) == 1 }, time.Second, 5*time.Millisecond)
+	sil := st.silencesSnapshot()[0]
+	require.Equal(t, "host-cpu-high", sil.RuleID)
+	require.Equal(t, "", sil.Entity, "the silence carries the entity exactly as dispatched")
+
+	require.True(t, silenced([]store.Silence{sil}, "host-cpu-high", ""),
+		"the host rule's own (single) instance is silenced")
+	require.True(t, silenced([]store.Silence{sil}, "host-cpu-high", "some-other-entity"),
+		"Entity == \"\" scopes the silence to the WHOLE rule -- any entity it might ever dispatch")
+	require.False(t, silenced([]store.Silence{sil}, "another-rule", ""),
+		"other rules stay unaffected")
+}
+
 // tripFlap drives (ruleID, entity) through flapThreshold fires so the
 // flap guard trips on the last one.
 func tripFlap(d *Dispatcher, ruleID, entity string) {

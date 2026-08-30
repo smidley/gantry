@@ -329,7 +329,11 @@ func (e *Engine) evalThresholdEntity(r store.AlertRule, entity string, samples [
 			return
 		}
 		inst.Value = value
-		e.maybeRenotify(&inst, r, now, silences)
+		if inst.NotifyCount == 0 {
+			e.catchUpSilencedFire(&inst, r, now, silences)
+		} else {
+			e.maybeRenotify(&inst, r, now, silences)
+		}
 		e.upsert(&inst, activeIdx)
 	}
 }
@@ -371,6 +375,26 @@ func (e *Engine) maybeRenotify(inst *store.AlertInstance, r store.AlertRule, now
 	inst.NotifyCount++
 	if e.Dispatch != nil {
 		e.Dispatch(AlertNotification{Phase: "renotify", Instance: *inst, Rule: r, Summary: inst.Summary})
+	}
+}
+
+// catchUpSilencedFire dispatches the "fired" notification a silenced fire
+// never sent: fire() leaves NotifyCount at 0 for an instance that started
+// firing while silenced, and maybeRenotify only ever re-notifies an
+// instance that already notified once -- at renotify_hours<=0 (6 of the
+// 12 builtins) it never will. Without this, an alert born during a
+// silence stays firing forever with nobody ever told. The first tick the
+// silence no longer covers it, this treats it exactly like a fresh fire:
+// stamp bookkeeping and dispatch phase "fired". A tick that's STILL
+// silenced no-ops, same as fire() itself.
+func (e *Engine) catchUpSilencedFire(inst *store.AlertInstance, r store.AlertRule, now int64, silences []store.Silence) {
+	if silenced(silences, r.ID, inst.Entity) {
+		return
+	}
+	inst.LastNotifiedAt = now
+	inst.NotifyCount++
+	if e.Dispatch != nil {
+		e.Dispatch(AlertNotification{Phase: "fired", Instance: *inst, Rule: r, Summary: inst.Summary})
 	}
 }
 

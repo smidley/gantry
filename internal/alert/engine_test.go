@@ -427,6 +427,47 @@ func TestSilenceSuppressesDispatchButNotTheStateTransition(t *testing.T) {
 	require.Equal(t, 0, dispatched, "but dispatch is suppressed")
 }
 
+// TestSilencedFireDispatchesExactlyOnceOnFirstUnsilencedTick pins F2: a
+// rule with renotify_hours<=0 (6 of the 12 builtins, including cpuRule's
+// own shape) that starts firing while silenced leaves NotifyCount at 0
+// forever under the old code -- maybeRenotify only ever re-notifies an
+// instance that already notified once, and it no-ops outright at
+// renotify_hours<=0 regardless. The first tick the silence no longer
+// covers it must dispatch the "fired" notification that was suppressed,
+// exactly once, and never again afterward.
+func TestSilencedFireDispatchesExactlyOnceOnFirstUnsilencedTick(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := cpuRule() // RenotifyHours defaults to 0
+	st := newFakeStore(rule)
+	st.silences = []store.Silence{{RuleID: rule.ID, Entity: "", Until: now + 3600}}
+	mr := newMatchRouter()
+	mr.set("host", "cpu.total", "", flat(now, 10, 11, 90)) // window already covered: fires immediately, silenced
+	var notes []string
+	eng := newEngine(st, mr.fn, nil, nil, func(n AlertNotification) { notes = append(notes, n.Phase) }, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background()))
+	inst := st.soleActive(t)
+	require.Equal(t, "firing", inst.State)
+	require.Equal(t, int64(0), inst.NotifyCount, "silenced fire must not stamp notify bookkeeping")
+	require.Empty(t, notes, "silenced fire must not dispatch")
+
+	// Silence lapses (the real Store's Silences() simply excludes an
+	// expired row; the fake mirrors that by the caller clearing it).
+	st.silences = nil
+	mr.set("host", "cpu.total", "", flat(now+10, 10, 12, 90))
+	require.NoError(t, eng.Tick(context.Background()))
+
+	inst = st.instances[inst.ID]
+	require.Equal(t, "firing", inst.State)
+	require.Equal(t, int64(1), inst.NotifyCount)
+	require.Equal(t, []string{"fired"}, notes, "exactly one dispatch, on the first unsilenced tick")
+
+	// Further holding ticks with renotify_hours<=0 must stay silent.
+	mr.set("host", "cpu.total", "", flat(now+20, 10, 13, 90))
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, []string{"fired"}, notes, "renotify_hours<=0 must not dispatch again")
+}
+
 func TestSilenceEmptyRuleAndEntityMeansAny(t *testing.T) {
 	require.True(t, silenced([]store.Silence{{RuleID: "", Entity: ""}}, "any-rule", "any-entity"))
 	require.True(t, silenced([]store.Silence{{RuleID: "r1", Entity: ""}}, "r1", "whatever"))

@@ -73,6 +73,16 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		}
 	}()
 
+	// Seeded before anything else touches alert_rules: an id already
+	// present (a prior boot's seed, possibly since edited or disabled)
+	// is left untouched; only an id genuinely absent -- first boot, or a
+	// default introduced by a later upgrade -- gets inserted. There is
+	// no alert engine yet to gate this on (Task 4); "before the engine's
+	// first tick" is trivially satisfied by seeding at boot.
+	if err := st.SeedAlertRules(store.DefaultAlertRules()); err != nil {
+		return fmt.Errorf("seed alert rules: %w", err)
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 

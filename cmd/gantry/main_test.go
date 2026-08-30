@@ -1057,6 +1057,55 @@ func TestRunReturnsOnBindFailure(t *testing.T) {
 	}
 }
 
+// TestRunSeedsDefaultAlertRulesAtBoot pins main.go's wiring of
+// store.SeedAlertRules(store.DefaultAlertRules()) into run(): after a
+// full boot and graceful shutdown, the on-disk DB carries all twelve
+// builtin rules. Re-opening the same db path only after run() has fully
+// returned (rather than querying through some new endpoint) avoids
+// racing the single-writer handle run() itself still owns while live --
+// there is no /api/alerts/* route yet (Task 8), so this is the only way
+// to observe main's seed call at all.
+func TestRunSeedsDefaultAlertRulesAtBoot(t *testing.T) {
+	port := freePort(t)
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+	env := map[string]string{
+		"GANTRY_PORT":    fmt.Sprint(port),
+		"GANTRY_DB_PATH": dbPath,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+
+	st, err := store.Open(dbPath, nil)
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+
+	rules, err := st.AlertRules(context.Background())
+	require.NoError(t, err)
+	require.Len(t, rules, 12, "main.go must seed all twelve default alert rules at boot")
+	for _, r := range rules {
+		require.True(t, r.Builtin)
+		require.True(t, r.Enabled)
+	}
+}
+
 // TestWireDockerCollectorPinsHostCoresToHostCollector pins main.go's own
 // dc.HostCores wiring: it must be the host collector's own NumCPU method
 // (the /proc/stat-derived, cpuset-immune count), not some other int-

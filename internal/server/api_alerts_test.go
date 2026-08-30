@@ -860,6 +860,28 @@ func TestAlertsWebhooksPutEnvLockedRemovalReturns409(t *testing.T) {
 	require.Empty(t, fw.replaceCalls)
 }
 
+// TestAlertsWebhooksPutEnvLockedWithNoExistingEnvTargetReturns409 is the
+// fix-round gap: envLocked can be true while Targets() doesn't (yet, or
+// ever, in this adapter's own boot sequence) report an "env" row --
+// currentByID["env"] then reads ok=false, and the old code only ever
+// compared against `want` when ok was true, so a submitted "env" row
+// sailed through unchecked and its URL/Enabled/TimeoutS got written
+// as if GANTRY_WEBHOOK_URL had never been set at all. envLocked=true
+// must mean those three fields are never settable from this endpoint,
+// existing row or not.
+func TestAlertsWebhooksPutEnvLockedWithNoExistingEnvTargetReturns409(t *testing.T) {
+	fw := &fakeWebhooks{envLocked: true} // no "env" row in targets yet
+	s := New(Options{Version: "test-1", Started: time.Now(), Webhooks: fw})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := doAlertsRequest(t, http.MethodPut, ts.URL+"/api/alerts/webhooks",
+		`{"targets":[{"id":"env","name":"Environment","url":"https://client-supplied.example.com/hook","enabled":true,"timeout_s":10}]}`)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	require.Empty(t, fw.replaceCalls)
+}
+
 // TestAlertsWebhooksPutEnvLockedIdenticalWriteIsAllowed pins the other
 // half of the settings-style contract: resubmitting the env target
 // UNCHANGED (only editing something env doesn't control, like the

@@ -646,7 +646,10 @@ func (s *Server) handleAlertsWebhooksGet(w http.ResponseWriter, r *http.Request)
 // three fields 409s naming it; one that resubmits it unchanged for
 // those three (editing only its header, say) is accepted -- the same
 // "differing write 409s, identical write no-ops" contract Settings' PUT
-// documents.
+// documents. envLocked with no current "env" row to compare against
+// (Targets() hasn't reported one yet) also 409s outright on any
+// submitted "env" row -- there's no "unchanged" to allow when there's
+// nothing on record to match.
 func (s *Server) handleAlertsWebhooksPut(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Webhooks == nil {
 		writeError(w, http.StatusNotFound, "webhooks unavailable")
@@ -690,11 +693,15 @@ func (s *Server) handleAlertsWebhooksPut(w http.ResponseWriter, r *http.Request)
 
 		if t.ID == "env" {
 			envSubmitted = true
-			if want, ok := currentByID["env"]; envLocked && ok {
-				if t.URL != want.URL || t.Enabled != want.Enabled || t.TimeoutS != want.TimeoutS {
-					writeError(w, http.StatusConflict, `webhook target "env" is set by GANTRY_WEBHOOK_URL and cannot be changed here`)
-					return
-				}
+			want, ok := currentByID["env"]
+			// envLocked && !ok: GANTRY_WEBHOOK_URL is set but Targets()
+			// doesn't (yet) report an "env" row to compare against -- with
+			// nothing to diff, there's no submitted value that can be
+			// "identical", so it must always 409 rather than fall through
+			// unchecked (see this handler's own doc).
+			if envLocked && (!ok || t.URL != want.URL || t.Enabled != want.Enabled || t.TimeoutS != want.TimeoutS) {
+				writeError(w, http.StatusConflict, `webhook target "env" is set by GANTRY_WEBHOOK_URL and cannot be changed here`)
+				return
 			}
 		}
 		resolved[i] = t

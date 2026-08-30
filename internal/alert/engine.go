@@ -83,6 +83,20 @@ type Engine struct {
 	// bootSeed's own doc for why an empty read must not latch this.
 	booted bool
 
+	// startedAt is this Engine's own construction time (Unix seconds),
+	// stamped once in New() -- main.go builds exactly one Engine per
+	// process, so this doubles as "process start" for every practical
+	// purpose. Its only reader is resolveRestarted's backlog check:
+	// nothing this process itself ever fires can carry a FiredAt earlier
+	// than this (fire()/fireEvent() always stamp it from e.Clock()), so
+	// an instance that does can only be backlog from a binary that
+	// predates that fix. No explicit reset needed -- the check is
+	// self-expiring: every instance this process fires from here on
+	// carries FiredAt >= startedAt by construction, so the first post-
+	// upgrade tick already stops matching anything but the true
+	// pre-existing backlog.
+	startedAt int64
+
 	// missingSince tracks, per firing threshold instance id, the tick a
 	// series was first observed absent from Match. There is no schema
 	// column for this -- alert_instances has nothing like "last seen" --
@@ -102,6 +116,7 @@ func New(st Store, match func(kind, metric string, since int64) (map[string][]st
 	return &Engine{
 		Store: st, Match: match, ClassOf: classOf, Fleet: fleet, Dispatch: dispatch, Clock: clock,
 		missingSince: make(map[int64]int64),
+		startedAt:    clock().Unix(),
 	}
 }
 
@@ -210,29 +225,31 @@ func (e *Engine) resolveDisabled(inst store.AlertInstance, now int64) {
 }
 
 // resolveRestarted resolves any-state -> resolved("restarted"): a churn-
-// probation rule's (for_seconds > 0) active instance whose entity
-// Fleet() now shows running again -- see tickEvents' own probation
-// sweep for the "a running entity proves this was routine churn"
-// rationale. Mirrors resolveDisabled's any-state shape exactly: a
-// pending instance never fired, so it gets neither event nor dispatch
-// (resolveSilent's doctrine); a firing instance's own history should
-// still show why it closed, so it gets the alert.resolved event -- just
-// never a dispatched notification, the same "don't also page them"
-// reasoning resolveDisabled applies to a rule someone just turned off,
-// applied here to "this was already noise, and it must never become
-// MORE noise" (fix 4's backlog of already-delivered junk alerts).
-func (e *Engine) resolveRestarted(inst store.AlertInstance, now int64, activeIdx map[instanceKey]store.AlertInstance) {
-	delete(e.missingSince, inst.ID)
-	if err := e.Store.ResolveAlertInstance(inst.ID, now, "restarted"); err != nil {
-		log.Printf("alert engine: resolve instance %d (%s/%s) as restarted: %v", inst.ID, inst.RuleID, inst.Entity, err)
-	}
-	delete(activeIdx, keyOf(inst))
+// probation rule's active instance whose entity Fleet() now shows
+// running again -- see tickEvents' own probation sweep for the "a
+// running entity proves this was routine churn" rationale. Pending
+// resolves silently, same as resolveOutOfScope's identical split: it
+// never fired, so there's nothing to announce recovery from
+// (resolveSilent's doctrine). Firing routes through resolveNotify so a
+// delivered fire's closure reaches the tray like any other resolved
+// alert -- the old any-state-silent behavior meant an alert that DID
+// page someone, then restarted, just vanished with no resolved notice
+// at all. The one exception: an instance whose FiredAt predates this
+// Engine's own startedAt can only be backlog, already delivered by a
+// binary from before this fix existed (fix 4's own backlog of junk
+// alerts) -- that one call is forced to skip Dispatch, the same way a
+// silenced pair would, without touching silences for anyone else this
+// tick. Self-expiring: see startedAt's own doc for why this stops
+// matching anything past the first post-upgrade tick.
+func (e *Engine) resolveRestarted(inst store.AlertInstance, r store.AlertRule, now int64, silences []store.Silence, activeIdx map[instanceKey]store.AlertInstance) {
 	if inst.State == "pending" {
+		e.resolveSilent(inst, now, "restarted", activeIdx)
 		return
 	}
-	if _, err := e.Store.AppendEvent(store.Event{Kind: "alert.resolved", Entity: inst.Entity, Severity: "info", Detail: inst.Entity + " restarted"}); err != nil {
-		log.Printf("alert engine: append alert.resolved event: %v", err)
+	if inst.FiredAt < e.startedAt {
+		silences = append(silences, store.Silence{RuleID: r.ID, Entity: inst.Entity})
 	}
+	e.resolveNotify(inst, r, now, "restarted", silences, activeIdx)
 }
 
 // bootSeed runs on every tick until it can report done=true: an event
@@ -713,7 +730,7 @@ func (e *Engine) tickEvents(ctx context.Context, ruleByID map[string]store.Alert
 			// backlog) -- either way it resolves right here, never
 			// through the ordinary sustain/renotify/timeout path below.
 			if m, live := fleetByName[inst.Entity]; live && m.State == "running" {
-				e.resolveRestarted(inst, now, activeIdx)
+				e.resolveRestarted(inst, r, now, silences, activeIdx)
 				continue
 			}
 			if inst.State == "pending" {

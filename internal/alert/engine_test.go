@@ -1249,6 +1249,59 @@ func TestForSecondsSetOnContainerUnhealthyDoesNotArmChurnProbation(t *testing.T)
 	require.Equal(t, []string{"fired"}, notes, "no resolved notification -- it never resolved")
 }
 
+// TestChurnProbationFiringInstanceRestartedDispatchesResolvedNotification
+// pins the other half of the resolveRestarted fix: unlike a pending
+// instance (which never fired, so a silent resolve has nothing to
+// announce), a FIRING instance that already delivered a notification
+// must have its closure delivered too once Fleet() proves the restart
+// -- otherwise the tray shows an alert that fired and simply never says
+// it's over. FiredAt here lands well after this Engine's own
+// construction, so the one-time backlog exception
+// (TestChurnProbationRetroactivelyResolvesAlreadyFiringBacklogInstance's
+// own scenario) does not apply.
+func TestChurnProbationFiringInstanceRestartedDispatchesResolvedNotification(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := exitNonzeroRule()
+	st := newFakeStore(rule)
+	running := false
+	fleet := func() []FleetMember {
+		state := "exited"
+		if running {
+			state = "running"
+		}
+		return []FleetMember{{Name: "sonarr", State: state}}
+	}
+	var notes []string
+	clk := &clockAt{t: now}
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet,
+		func(n AlertNotification) { notes = append(notes, n.Phase) }, clk.now)
+	require.NoError(t, eng.Tick(context.Background())) // boot tick -- this Engine's startedAt latches to `now` here
+
+	st.events = []store.Event{{ID: 1, TS: now, Kind: "container.die", Entity: "sonarr", Severity: "warning", Detail: "exit code 137"}}
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, "pending", st.soleActive(t).State)
+
+	// No restart within the window: promotes to firing and delivers,
+	// FiredAt well after startedAt.
+	clk.t = now + 121
+	require.NoError(t, eng.Tick(context.Background()))
+	inst := st.soleActive(t)
+	require.Equal(t, "firing", inst.State)
+	require.Equal(t, []string{"fired"}, notes)
+
+	// The container comes back later, after the alert already fired and
+	// delivered.
+	running = true
+	clk.t = now + 200
+	require.NoError(t, eng.Tick(context.Background()))
+
+	active, _ := st.ActiveAlertInstances(context.Background())
+	require.Empty(t, active, "still resolves once Fleet() shows it running again")
+	require.Equal(t, "restarted", st.instances[inst.ID].ResolveReason)
+	require.Equal(t, []string{"fired", "resolved"}, notes, "a delivered fire's closure must reach the tray too")
+	require.Contains(t, st.eventKinds(), "alert.resolved")
+}
+
 // --- event rule catch-up / renotify sweep ------------------------------
 
 // TestEventRuleCatchesUpSilencedFireOnceSilenceLifts pins N1: the

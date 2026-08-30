@@ -1207,6 +1207,48 @@ func TestChurnProbationDoesNotAffectBootSeedingOfOtherEventRules(t *testing.T) {
 	require.Equal(t, "firing", active[0].State, "boot-seeding must still fire immediately, unaffected by an unrelated probation-enabled rule")
 }
 
+// TestForSecondsSetOnContainerUnhealthyDoesNotArmChurnProbation pins the
+// fix for a column-overload bug: churnProbationRules, not a bare
+// for_seconds > 0 check, is what decides whether a currently-running
+// entity means "routine restart." Before this registry existed, a user
+// simply tuning "how long unhealthy before firing" on container-
+// unhealthy would have armed the exact fleet-running check
+// resolveRestarted uses -- but running is container-unhealthy's own
+// NORMAL state for the entire time it's firing, so it would insta-
+// resolve as "restarted" on literally the next tick. container-
+// unhealthy is not in churnProbationRules, so for_seconds here must
+// stay inert: boot-seeding fires it immediately (never pending), and it
+// survives a later tick with the entity still reading running+
+// unhealthy.
+func TestForSecondsSetOnContainerUnhealthyDoesNotArmChurnProbation(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := unhealthyRule()
+	rule.ForSeconds = 30 // the user edit the bug report names -- must have zero effect here
+	st := newFakeStore(rule)
+	clk := &clockAt{t: now}
+	fleet := func() []FleetMember {
+		return []FleetMember{{Name: "sonarr", State: "running", Health: "unhealthy"}}
+	}
+	var notes []string
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet,
+		func(n AlertNotification) { notes = append(notes, n.Phase) }, clk.now)
+
+	require.NoError(t, eng.Tick(context.Background())) // boot tick
+
+	inst := st.soleActive(t)
+	require.Equal(t, "firing", inst.State, "boot-seeding must still fire immediately, not enter pending")
+	require.Equal(t, []string{"fired"}, notes)
+
+	// Still running+unhealthy a tick later -- the exact condition that
+	// would insta-resolve a REAL probation rule as "restarted".
+	clk.t = now + 60
+	require.NoError(t, eng.Tick(context.Background()))
+
+	inst = st.soleActive(t)
+	require.Equal(t, "firing", inst.State, "must not resolve as restarted just because the entity reads running")
+	require.Equal(t, []string{"fired"}, notes, "no resolved notification -- it never resolved")
+}
+
 // --- event rule catch-up / renotify sweep ------------------------------
 
 // TestEventRuleCatchesUpSilencedFireOnceSilenceLifts pins N1: the

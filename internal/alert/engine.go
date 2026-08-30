@@ -626,6 +626,24 @@ func Silenced(silences []store.Silence, ruleID, entity string) bool {
 
 // --- event rules -------------------------------------------------------
 
+// churnProbationRules names the event rule ids where for_seconds means
+// "churn probation" (processEventForRule's pending-first fire, plus
+// tickEvents' own resolveRestarted/promote-to-firing sweep below) rather
+// than nothing at all -- an explicit opt-in registry, mirroring
+// sustainedEventRules just below for a different overload of a shared
+// column. for_seconds > 0 alone is not a safe enough signal: container-
+// unhealthy's own entity is expected to read State=="running" for the
+// ENTIRE time it's unhealthy -- that's its normal firing condition, not
+// evidence of a restart -- so a user simply tuning "how long unhealthy
+// before firing" on it would otherwise arm the exact fleet-running check
+// resolveRestarted uses to detect routine churn, insta-resolving the
+// alert as "restarted" on literally the next tick. Only container-exit-
+// nonzero actually wants this: after a container dies, "is it running
+// again" really is the routine-churn signal probation exists to catch.
+var churnProbationRules = map[string]bool{
+	"container-exit-nonzero": true,
+}
+
 // sustainedEventRules maps an event rule id to a predicate asking "is the
 // live condition that fired this instance still true right now, per
 // Fleet()". Most event rules are true point-in-time occurrences -- a
@@ -687,7 +705,7 @@ func (e *Engine) tickEvents(ctx context.Context, ruleByID map[string]store.Alert
 			continue
 		}
 
-		if r.ForSeconds > 0 {
+		if churnProbationRules[r.ID] && r.ForSeconds > 0 {
 			// Churn probation: a currently-running entity proves this
 			// was routine churn, whether inst is a freshly pending
 			// instance still inside its own window or an already-
@@ -788,7 +806,7 @@ func (e *Engine) processEventForRule(r store.AlertRule, ev store.Event, activeId
 		RuleID: r.ID, Kind: r.Kind, Entity: ev.Entity, Severity: r.Severity,
 		Summary: summarizeEvent(ev), StartedAt: now,
 	}
-	if r.ForSeconds > 0 {
+	if churnProbationRules[r.ID] && r.ForSeconds > 0 {
 		// Churn probation (container-exit-nonzero): a fresh match
 		// doesn't fire yet -- see tickEvents' own sweep for the fleet-
 		// running check that either resolves this silently as

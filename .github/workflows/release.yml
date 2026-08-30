@@ -1,0 +1,123 @@
+name: release
+
+# Publishes ghcr.io/smidley/gantry on every vMAJOR.MINOR.PATCH[-pre] tag.
+# The gate job re-runs ci.yml's own jobs (test + ui) against the TAGGED
+# commit -- a green run on main is not proof a given tag is good, since
+# a tag can point anywhere. Nothing here can push an image unless that
+# gate is green first.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: gate (ci.yml against the tag)
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: build, publish, release
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # A hyphenated suffix (v0.1.0-rc1) marks a semver pre-release; used
+      # below both to keep it off :latest and to mark the GitHub Release
+      # itself a pre-release.
+      - name: Determine release kind
+        id: relkind
+        run: |
+          if [[ "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # images.source/version/revision (plus title/description/url/
+      # created/licenses) land on the pushed image via labels: below --
+      # Gantry's own changelogAndProjectURLs already reads source/url off
+      # every OTHER container it inspects, so this makes Gantry legible
+      # to itself the same way.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      # Belt-and-suspenders on top of metadata-action's own latest=auto:
+      # fail the run outright if a pre-release tag ever produced a
+      # :latest entry, rather than trust that silently.
+      - name: Guard latest against a pre-release tag
+        run: |
+          if [ "${{ steps.relkind.outputs.is_prerelease }}" = "true" ]; then
+            if printf '%s' "${{ steps.meta.outputs.tags }}" | grep -q ':latest$'; then
+              echo "::error::${{ github.ref_name }} is a pre-release tag; it must not move :latest"
+              exit 1
+            fi
+          fi
+
+      # Stage 1 of the Dockerfile builds webdist (the Svelte app) inside
+      # the image itself -- no setup-node and no `make web` needed here.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # CHANGELOG.md is seeded ahead of the tag that will one day cite it
+      # (see the file's own header) -- extract this version's section
+      # verbatim rather than let a human retype release notes.
+      - name: Extract this version's CHANGELOG section
+        id: changelog
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v want="[$ver]" '
+            BEGIN { capture = 0 }
+            /^## \[/ {
+              if (capture) exit
+              if (index($0, want) > 0) capture = 1
+              next
+            }
+            capture { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          if [ ! -s "$RUNNER_TEMP/release-notes.md" ]; then
+            echo "::warning::no CHANGELOG.md section for $GITHUB_REF_NAME -- release body falls back to GitHub's auto-generated notes"
+          fi
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          prerelease: ${{ steps.relkind.outputs.is_prerelease }}
+          body_path: ${{ runner.temp }}/release-notes.md
+          generate_release_notes: true

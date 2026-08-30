@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call: # lets release.yml re-run this exact suite against a tag
 
 jobs:
   test:

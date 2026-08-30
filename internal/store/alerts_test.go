@@ -107,22 +107,97 @@ func TestUpsertAlertRuleUpdatesExistingRowOnConflict(t *testing.T) {
 	require.False(t, got[0].Enabled)
 }
 
-// TestReplaceAlertRulesWholeDocumentReplace pins ReplaceAlertRules' own
-// contract ("one tx, whole-document replace" -- Task 8's /api/groups-style
-// PUT semantics): the rules present after the call are exactly the ones
-// passed in, not a merge with whatever was there before.
-func TestReplaceAlertRulesWholeDocumentReplace(t *testing.T) {
-	s := newTestStore(t, nil)
-	require.NoError(t, s.UpsertAlertRule(fullRule("old-rule-1")))
-	require.NoError(t, s.UpsertAlertRule(fullRule("old-rule-2")))
+// userRule is fullRule with Builtin forced false -- fullRule defaults to
+// Builtin: true, which is the wrong fixture for anything exercising
+// ReplaceAlertRules' user-rule-only whole-document-replace semantics.
+func userRule(id string) AlertRule {
+	r := fullRule(id)
+	r.Builtin = false
+	return r
+}
 
-	replacement := fullRule("new-rule")
+// TestReplaceAlertRulesReplacesUserRules pins ReplaceAlertRules' own
+// contract for the rules it actually manages ("one tx, whole-document
+// replace" -- Task 8's /api/groups-style PUT semantics, scoped to
+// builtin=0 rows): the user rules present after the call are exactly the
+// ones passed in, not a merge with whatever user rules were there
+// before.
+func TestReplaceAlertRulesReplacesUserRules(t *testing.T) {
+	s := newTestStore(t, nil)
+	require.NoError(t, s.UpsertAlertRule(userRule("old-rule-1")))
+	require.NoError(t, s.UpsertAlertRule(userRule("old-rule-2")))
+
+	replacement := userRule("new-rule")
 	require.NoError(t, s.ReplaceAlertRules([]AlertRule{replacement}))
 
 	got, err := s.AlertRules(context.Background())
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, "new-rule", got[0].ID)
+}
+
+// TestReplaceAlertRulesWithEmptyKeepsBuiltins is the Task 3 regression
+// guard: a builtin rule is disable-only, never deletable, so replacing
+// the whole document with an empty set must clear every user rule (the
+// part ReplaceAlertRules does manage) while leaving builtins physically
+// in the table -- not wiped and reinserted, just untouched.
+func TestReplaceAlertRulesWithEmptyKeepsBuiltins(t *testing.T) {
+	s := newTestStore(t, nil)
+	builtin := fullRule("host-cpu-high") // Builtin: true
+	require.NoError(t, s.UpsertAlertRule(builtin))
+	require.NoError(t, s.UpsertAlertRule(userRule("user-rule-1")))
+
+	require.NoError(t, s.ReplaceAlertRules(nil))
+
+	got, err := s.AlertRules(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, builtin, got[0], "the builtin row must survive completely untouched")
+}
+
+// TestReplaceAlertRulesBuiltinAbsentFromReplacementSetSurvives covers the
+// general case, not just the empty-set special case above: a non-empty
+// replacement payload that simply never mentions an existing builtin's
+// id must still leave that builtin in place, alongside whatever user
+// rules the payload does carry.
+func TestReplaceAlertRulesBuiltinAbsentFromReplacementSetSurvives(t *testing.T) {
+	s := newTestStore(t, nil)
+	builtin := fullRule("host-mem-high")
+	require.NoError(t, s.UpsertAlertRule(builtin))
+	require.NoError(t, s.UpsertAlertRule(userRule("old-user-rule")))
+
+	require.NoError(t, s.ReplaceAlertRules([]AlertRule{userRule("new-user-rule")}))
+
+	got, err := s.AlertRules(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	ids := []string{got[0].ID, got[1].ID}
+	require.Contains(t, ids, "host-mem-high", "the builtin absent from the replacement set must survive")
+	require.Contains(t, ids, "new-user-rule")
+	require.NotContains(t, ids, "old-user-rule")
+}
+
+// TestReplaceAlertRulesIgnoresBuiltinFlaggedIncomingRows is the
+// structural half of the Task 3 fix: even when the incoming payload
+// explicitly carries a row for an existing builtin's id -- e.g. a client
+// that fetched, edited, and PUT back the whole document -- that row must
+// be skipped, not used to insert or overwrite. Editing a builtin is
+// UpsertAlertRule's job (the rule-editor path), never
+// ReplaceAlertRules'.
+func TestReplaceAlertRulesIgnoresBuiltinFlaggedIncomingRows(t *testing.T) {
+	s := newTestStore(t, nil)
+	original := fullRule("host-cpu-high")
+	require.NoError(t, s.UpsertAlertRule(original))
+
+	tampered := original
+	tampered.Threshold = 999
+	tampered.Enabled = false
+	require.NoError(t, s.ReplaceAlertRules([]AlertRule{tampered}))
+
+	got, err := s.AlertRules(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, original, got[0], "a builtin-flagged incoming row must be ignored, not applied")
 }
 
 // fullInstance mirrors fullRule's reasoning: every field gets a distinct

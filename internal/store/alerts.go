@@ -100,22 +100,30 @@ func (s *Store) UpsertAlertRule(r AlertRule) error {
 	return err
 }
 
-// ReplaceAlertRules replaces the entire alert_rules table with rules, in
-// one transaction. This is a mechanical whole-document replace only --
-// it does not enforce "a builtin rule can't be removed" or any other
-// business rule; that validation is the caller's job (Task 8's PUT
-// /api/alerts/rules handler, the same division of labor /api/groups
-// already uses between its store method and its route).
+// ReplaceAlertRules replaces every user (builtin=0) rule with rules, in
+// one transaction -- a mechanical whole-document replace for the rules
+// it manages, still not enforcing anything richer than that (further
+// validation is the caller's job: Task 8's PUT /api/alerts/rules
+// handler, the same division of labor /api/groups already uses between
+// its store method and its route). A builtin rule is disable-only and
+// never deletable (see alert_rules.builtin in 003_alerts.sql), so this
+// is a store-level guarantee, not just a UI convention: builtin rows are
+// never touched by the delete, and any builtin-flagged row present in
+// rules is silently skipped rather than inserted or used to overwrite --
+// editing a builtin is UpsertAlertRule's job.
 func (s *Store) ReplaceAlertRules(rules []AlertRule) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM alert_rules`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM alert_rules WHERE builtin = 0`); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
 	for _, r := range rules {
+		if r.Builtin {
+			continue
+		}
 		if _, err := tx.Exec(`INSERT INTO alert_rules (`+alertRuleColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			r.ID, r.Name, r.Enabled, r.Builtin, r.Type, r.Kind, r.EntityGlob, r.EntityClass, r.Metric, r.Op,
 			r.Threshold, r.ClearThreshold, r.WarnThreshold, r.CriticalThreshold, r.BandFamily,

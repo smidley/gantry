@@ -83,12 +83,65 @@ func TestValidateRuleRejectsUnknownSeverity(t *testing.T) {
 	require.Error(t, ValidateRule(r))
 }
 
+// Kind "disk" (15s cadence): the per-kind provable-span check (F5, below)
+// would allow up to 6735s here, so this pins the separate, still-lower
+// flat sanity cap specifically -- validThreshold()'s default Kind "host"
+// would hit the tighter 898s per-kind cap first and test the wrong thing.
 func TestValidateRuleRejectsForSecondsOverHourCap(t *testing.T) {
 	r := validThreshold()
+	r.Kind = "disk"
 	r.ForSeconds = 3601
 	require.Error(t, ValidateRule(r))
 	r.ForSeconds = 3600
 	require.NoError(t, ValidateRule(r))
+}
+
+// TestValidateRuleRejectsForSecondsBeyondTheRingsProvableSpanForFastCadenceKinds
+// pins F5: DefaultRingCap (450) samples spaced 2s apart (host/container/
+// gpu's own collector cadence) span at most (450-1)*2 = 898s between the
+// oldest and newest -- one second more than that and
+// EvaluateThreshold's coverage check can never be satisfied, no matter
+// how long the rule has actually been sustained. The existing flat
+// for_seconds>3600 cap doesn't catch this: 3600 > 898.
+func TestValidateRuleRejectsForSecondsBeyondTheRingsProvableSpanForFastCadenceKinds(t *testing.T) {
+	for _, kind := range []string{"host", "container", "gpu"} {
+		r := validThreshold()
+		r.Kind = kind
+		r.ForSeconds = 898
+		require.NoError(t, ValidateRule(r), "kind %q at the 898s boundary must validate", kind)
+
+		r.ForSeconds = 899
+		err := ValidateRule(r)
+		require.Error(t, err, "kind %q one second past the boundary must be rejected", kind)
+		require.Contains(t, err.Error(), "898", "error should name the max for kind %q", kind)
+	}
+}
+
+// TestValidateRuleForSecondsCapForSlowCadenceKindsStaysAtTheHourCap pins
+// that the new per-kind check can only ever tighten the existing flat
+// for_seconds>3600 cap, never loosen it: disk/unraid's own 15s cadence
+// can provably cover well past an hour ((450-1)*15 = 6735s), but the
+// pre-existing hour cap still binds first for these kinds.
+func TestValidateRuleForSecondsCapForSlowCadenceKindsStaysAtTheHourCap(t *testing.T) {
+	for _, kind := range []string{"disk", "unraid"} {
+		r := validThreshold()
+		r.Kind = kind
+		r.ForSeconds = 3600
+		require.NoError(t, ValidateRule(r), "kind %q at the existing hour cap must still validate", kind)
+	}
+}
+
+// TestValidateRuleForSecondsCapFallsBackConservativelyForUnknownKind pins
+// the fallback for a kind this package doesn't otherwise know about: the
+// fastest known cadence (2s), the tightest and safest bound available
+// when the real cadence is unknown.
+func TestValidateRuleForSecondsCapFallsBackConservativelyForUnknownKind(t *testing.T) {
+	r := validThreshold()
+	r.Kind = "some-future-kind"
+	r.ForSeconds = 898
+	require.NoError(t, ValidateRule(r))
+	r.ForSeconds = 899
+	require.Error(t, ValidateRule(r))
 }
 
 func TestValidateRuleRejectsEqualThresholdAndClearWhenClearSecondsPositive(t *testing.T) {

@@ -43,6 +43,37 @@ func MatchClass(spec, class string) bool {
 	return class == spec
 }
 
+// kindSampleIntervalSeconds is a conservative map of each entity kind's
+// own collector cadence (internal/collect/{host,docker,gpu,pressure,
+// unraid}'s tickInterval consts), duplicated here rather than imported --
+// importing collect from alert would invert the dependency, and this
+// package stays free of I/O. host/container/gpu record at 2s; disk/
+// unraid (the unraid collector's own single 15s tick) at 15s. A kind not
+// listed here falls back to the fastest cadence, the tightest and safest
+// bound when the real one isn't known.
+var kindSampleIntervalSeconds = map[string]int64{
+	"host":      2,
+	"container": 2,
+	"gpu":       2,
+	"disk":      15,
+	"unraid":    15,
+}
+
+// maxProvableWindowSeconds is the longest span a full ring of
+// store.DefaultRingCap samples at this kind's own cadence can ever prove
+// coverage for. N samples spaced `interval` seconds apart cover
+// (N-1)*interval seconds between the oldest and the newest, not N*
+// interval -- one second more than that and EvaluateThreshold's coverage
+// check (oldest > breachStart) can never be satisfied, no matter how
+// long the rule has actually been sustained (see F5).
+func maxProvableWindowSeconds(kind string) int64 {
+	interval, ok := kindSampleIntervalSeconds[kind]
+	if !ok {
+		interval = 2
+	}
+	return (store.DefaultRingCap - 1) * interval
+}
+
 // validBandFamilies mirrors thresholds.ts' six display-band families
 // (Task 12 unifies them; until that frontend file exists this branch's
 // own alert_defaults.go is the source of truth for the exact six names --
@@ -99,6 +130,11 @@ func ValidateRule(r store.AlertRule) error {
 	// fresh next tick rather than accumulating into a permanent stall.
 	if r.Type == "threshold" && r.Threshold == r.ClearThreshold && r.ClearSeconds > 0 {
 		return fmt.Errorf("alert rule %q: threshold and clear_threshold must differ when clear_seconds > 0", r.ID)
+	}
+	if r.Type == "threshold" {
+		if max := maxProvableWindowSeconds(r.Kind); r.ForSeconds > max {
+			return fmt.Errorf("alert rule %q: for_seconds %d exceeds %ds, the longest window a %q ring can prove coverage for", r.ID, r.ForSeconds, max, r.Kind)
+		}
 	}
 	if r.ForSeconds > 3600 {
 		return fmt.Errorf("alert rule %q: for_seconds %d exceeds the 3600s cap", r.ID, r.ForSeconds)

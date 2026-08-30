@@ -589,10 +589,12 @@ func silenced(silences []store.Silence, ruleID, entity string) bool {
 // --- event rules -------------------------------------------------------
 
 // tickEvents reads events since the cursor, matches each against every
-// enabled event rule, then separately sweeps active event-rule instances
-// for a clear-event-independent timeout -- an instance with no matching
-// clear_event_kinds configured (or one that just never saw a matching
-// event) still has to auto-resolve eventually.
+// enabled event rule, then separately sweeps active event-rule instances:
+// catching up a silenced fire or renotifying exactly like the threshold
+// sweep at evalThresholdEntity:406-410, then the clear-event-independent
+// timeout -- an instance with no matching clear_event_kinds configured
+// (or one that just never saw a matching event) still has to auto-resolve
+// eventually.
 func (e *Engine) tickEvents(ctx context.Context, ruleByID map[string]store.AlertRule, activeIdx map[instanceKey]store.AlertInstance, silences []store.Silence, now int64) {
 	events, err := e.Store.QueryEventsSince(ctx, e.eventCursor, 0)
 	if err != nil {
@@ -610,7 +612,17 @@ func (e *Engine) tickEvents(ctx context.Context, ruleByID map[string]store.Alert
 
 	for k, inst := range activeIdx {
 		r, ok := ruleByID[k.RuleID]
-		if !ok || r.Type != "event" || r.ClearSeconds <= 0 {
+		if !ok || r.Type != "event" {
+			continue
+		}
+		if inst.NotifyCount == 0 {
+			e.catchUpSilencedFire(&inst, r, now, silences)
+		} else {
+			e.maybeRenotify(&inst, r, now, silences)
+		}
+		e.upsert(&inst, activeIdx)
+
+		if r.ClearSeconds <= 0 {
 			continue
 		}
 		if now-inst.FiredAt >= r.ClearSeconds {

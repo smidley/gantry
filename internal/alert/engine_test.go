@@ -1038,6 +1038,80 @@ func TestEventRuleDuplicateMatchDoesNotCreateSecondActiveInstance(t *testing.T) 
 	require.Equal(t, 1, st.activeCount())
 }
 
+// --- event rule catch-up / renotify sweep ------------------------------
+
+// TestEventRuleCatchesUpSilencedFireOnceSilenceLifts pins N1: the
+// tickEvents sweep only ever checked the clear_seconds timeout, so an
+// event-rule instance born while silenced (NotifyCount left at 0, the
+// same silenced path processEventForRule shares with fire()) stayed
+// firing with nobody ever told, forever, even after the silence lifted
+// -- nothing else ever revisited it. Mirrors
+// TestSilencedFireDispatchesExactlyOnceOnFirstUnsilencedTick's
+// threshold-side proof of the same F2 fix, for the event path.
+func TestEventRuleCatchesUpSilencedFireOnceSilenceLifts(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := unhealthyRule() // RenotifyHours defaults to 0
+	st := newFakeStore(rule)
+	st.silences = []store.Silence{{RuleID: rule.ID, Entity: "", Until: now + 3600}}
+	var notes []string
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil,
+		func(n AlertNotification) { notes = append(notes, n.Phase) }, func() time.Time { return time.Unix(now, 0) })
+	require.NoError(t, eng.Tick(context.Background())) // boot tick: no events yet, cursor clamps
+
+	st.events = []store.Event{{ID: 1, TS: now, Kind: "container.health", Entity: "sonarr", Severity: "warning", Detail: "unhealthy"}}
+	require.NoError(t, eng.Tick(context.Background()))
+
+	inst := st.soleActive(t)
+	require.Equal(t, "firing", inst.State)
+	require.Equal(t, int64(0), inst.NotifyCount, "silenced fire must not stamp notify bookkeeping")
+	require.Empty(t, notes, "silenced fire must not dispatch")
+
+	// Silence lapses (the real Store's Silences() simply excludes an
+	// expired row; the fake mirrors that by the caller clearing it).
+	st.silences = nil
+	require.NoError(t, eng.Tick(context.Background()))
+
+	inst = st.instances[inst.ID]
+	require.Equal(t, "firing", inst.State)
+	require.Equal(t, int64(1), inst.NotifyCount)
+	require.Equal(t, []string{"fired"}, notes, "exactly one dispatch, on the first unsilenced tick")
+
+	// Further holding ticks with renotify_hours<=0 must stay silent.
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, []string{"fired"}, notes, "renotify_hours<=0 must not dispatch again")
+}
+
+// TestEventRuleCatchUpDoesNotAlsoRenotifySameTick guards the sweep's
+// NotifyCount==0 ? catchUpSilencedFire : maybeRenotify pair being an
+// if/else, not two independent calls. LastNotifiedAt sits at its zero
+// value for as long as NotifyCount==0, so once the silence lifts,
+// maybeRenotify's own "not yet due" check (now - LastNotifiedAt against
+// renotify_hours) would ALSO look satisfied, purely because `now` is a
+// realistic Unix timestamp and LastNotifiedAt is still 0 -- a rule with
+// renotify_hours > 0 (container-unhealthy's real default is 24) makes
+// that trap live. Catch-up must win alone: exactly one "fired", never a
+// same-tick "renotify" too.
+func TestEventRuleCatchUpDoesNotAlsoRenotifySameTick(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := unhealthyRule()
+	rule.RenotifyHours = 24
+	st := newFakeStore(rule)
+	st.silences = []store.Silence{{RuleID: rule.ID, Entity: "", Until: now + 3600}}
+	var notes []string
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil,
+		func(n AlertNotification) { notes = append(notes, n.Phase) }, func() time.Time { return time.Unix(now, 0) })
+	require.NoError(t, eng.Tick(context.Background())) // boot tick
+
+	st.events = []store.Event{{ID: 1, TS: now, Kind: "container.health", Entity: "sonarr", Severity: "warning", Detail: "unhealthy"}}
+	require.NoError(t, eng.Tick(context.Background())) // created while silenced: NotifyCount 0, LastNotifiedAt 0
+
+	st.silences = nil
+	require.NoError(t, eng.Tick(context.Background()))
+
+	require.Equal(t, []string{"fired"}, notes, "catch-up must not also renotify in the same pass")
+	require.Equal(t, int64(1), st.soleActive(t).NotifyCount)
+}
+
 // --- event cursor: boot clamp + no replay ------------------------------
 
 // TestEventCursorStartsAtMaxEventIDNoReplayOfPreexistingEvents pins the

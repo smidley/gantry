@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -347,4 +348,77 @@ func TestLastDeliveriesOrdersNewestFirstAndRespectsLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	require.Equal(t, []int64{3000, 2000}, []int64{got[0].TS, got[1].TS})
+}
+
+// TestQueryEventsSinceReturnsRowsStrictlyAfterCursorOrderedAscending pins
+// the event-rule cursor's basic shape: strictly greater than afterID,
+// ascending, respecting limit.
+func TestQueryEventsSinceReturnsRowsStrictlyAfterCursorOrderedAscending(t *testing.T) {
+	s := newTestStore(t, nil)
+	var ids []int64
+	for _, kind := range []string{"container.start", "container.die", "container.oom"} {
+		id, err := s.AppendEvent(Event{Kind: kind, Entity: "e"})
+		require.NoError(t, err)
+		ids = append(ids, id)
+	}
+
+	got, err := s.QueryEventsSince(context.Background(), ids[0], 100)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, []int64{ids[1], ids[2]}, []int64{got[0].ID, got[1].ID})
+
+	limited, err := s.QueryEventsSince(context.Background(), 0, 1)
+	require.NoError(t, err)
+	require.Len(t, limited, 1)
+	require.Equal(t, ids[0], limited[0].ID)
+}
+
+// TestQueryEventsSinceCursorAcrossTiedTimestampsMissesNothing is the
+// exact scenario QueryEventsSince's own doc comment (Task 1's plan)
+// exists for: three events sharing one ts, walked by id cursor two pages
+// at a time, must all come back exactly once with none skipped and none
+// duplicated -- proving the cursor really is id-based, not ts-based (ts
+// is not monotonic across an NTP step; rowid is).
+func TestQueryEventsSinceCursorAcrossTiedTimestampsMissesNothing(t *testing.T) {
+	s := newTestStore(t, func() time.Time { return at("12:00:00") })
+	var ids []int64
+	for i := 0; i < 3; i++ {
+		id, err := s.AppendEvent(Event{Kind: fmt.Sprintf("k%d", i), Entity: "e"})
+		require.NoError(t, err)
+		ids = append(ids, id)
+	}
+
+	firstPage, err := s.QueryEventsSince(context.Background(), 0, 2)
+	require.NoError(t, err)
+	require.Len(t, firstPage, 2)
+
+	secondPage, err := s.QueryEventsSince(context.Background(), firstPage[len(firstPage)-1].ID, 2)
+	require.NoError(t, err)
+	require.Len(t, secondPage, 1)
+
+	var seen []int64
+	for _, e := range append(firstPage, secondPage...) {
+		seen = append(seen, e.ID)
+	}
+	require.ElementsMatch(t, ids, seen, "all three must appear exactly once across the two cursor calls")
+}
+
+// TestMaxEventIDIsZeroWhenEmptyThenTracksTheHighestID pins the boot-time
+// cursor seed (Task 4 starts an event rule's cursor at MaxEventID so a
+// restart doesn't replay the whole events table as fresh alerts).
+func TestMaxEventIDIsZeroWhenEmptyThenTracksTheHighestID(t *testing.T) {
+	s := newTestStore(t, nil)
+	id0, err := s.MaxEventID(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int64(0), id0)
+
+	var lastID int64
+	for i := 0; i < 5; i++ {
+		lastID, err = s.AppendEvent(Event{Kind: "container.start", Entity: "e"})
+		require.NoError(t, err)
+	}
+
+	got, err := s.MaxEventID(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, lastID, got)
 }

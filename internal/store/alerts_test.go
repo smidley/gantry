@@ -50,6 +50,15 @@ func TestAlertsMigrationCreatesSchema(t *testing.T) {
 	var n int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_alert_active'`).Scan(&n))
 	require.Equal(t, 1, n)
+
+	// idx_alert_instances_resolved backs AlertHistory's filter/sort and
+	// pruneAlerts' age cutoff, both of which key on resolved_at; the
+	// plan's original started_at index was never actually queried by
+	// either and is gone.
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_alert_instances_resolved'`).Scan(&n))
+	require.Equal(t, 1, n, "missing idx_alert_instances_resolved")
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_alert_instances_started'`).Scan(&n))
+	require.Equal(t, 0, n, "orphaned idx_alert_instances_started should have been dropped")
 }
 
 // TestUpsertAlertRuleRoundTripsEveryField pins the full column set

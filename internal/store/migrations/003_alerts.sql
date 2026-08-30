@@ -39,6 +39,9 @@ CREATE TABLE alert_rules (
     clear_threshold   REAL NOT NULL DEFAULT 0,   -- hysteresis EXIT boundary (engine-only)
     warn_threshold    REAL NOT NULL DEFAULT 0,   -- display band only, never fires
     critical_threshold REAL NOT NULL DEFAULT 0,  -- display band only; 0 = family has no 4th tier
+                                                  -- (no critical tier), and MUST map to undefined
+                                                  -- client-side (Task 12), never rendered as a
+                                                  -- real 0.0 boundary
     band_family       TEXT NOT NULL DEFAULT '',  -- thresholds.ts MetricFamily this rule drives; '' = none
     for_seconds       INTEGER NOT NULL DEFAULT 0,
     clear_seconds     INTEGER NOT NULL DEFAULT 0,
@@ -72,7 +75,12 @@ CREATE TABLE alert_instances (
 );
 -- One ACTIVE instance per (rule, entity), enforced by the DB, not by engine bookkeeping.
 CREATE UNIQUE INDEX idx_alert_active ON alert_instances (rule_id, entity) WHERE resolved_at = 0;
-CREATE INDEX idx_alert_instances_started ON alert_instances (started_at);
+-- Indexed on resolved_at, not started_at: AlertHistory filters and sorts
+-- on resolved_at, and pruneAlerts' age cutoff (maintain.go) keys on it
+-- too. started_at was the plan's original spec but no query shape in
+-- the actual implementation ever keys on it, so it was a dead index --
+-- dropped rather than kept alongside this one.
+CREATE INDEX idx_alert_instances_resolved ON alert_instances (resolved_at);
 
 CREATE TABLE alert_silences (
     id         INTEGER PRIMARY KEY,

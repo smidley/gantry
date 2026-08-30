@@ -274,3 +274,48 @@ func TestAlertHistoryRespectsFromToAndLimit(t *testing.T) {
 	require.Len(t, limited, 2)
 	require.Equal(t, int64(4000), limited[0].ResolvedAt, "newest first, limit keeps the two newest")
 }
+
+// TestAddSilenceRoundTripsEveryField pins AddSilence/Silences end to end.
+func TestAddSilenceRoundTripsEveryField(t *testing.T) {
+	s := newTestStore(t, nil)
+	want := Silence{RuleID: "disk-temp-high", Entity: "disk3", Reason: "known-hot-week", Until: 2000, CreatedAt: 1000}
+	id, err := s.AddSilence(want)
+	require.NoError(t, err)
+	require.Greater(t, id, int64(0))
+	want.ID = id
+
+	got, err := s.Silences(context.Background(), 1500) // now < until: not expired
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, want, got[0])
+}
+
+// TestSilencesExcludesExpired pins the read-side half of expiry (Maintain
+// prunes expired rows separately -- this proves a call in between the two
+// still never sees one).
+func TestSilencesExcludesExpired(t *testing.T) {
+	s := newTestStore(t, nil)
+	expiredID, err := s.AddSilence(Silence{RuleID: "r1", Until: 1000, CreatedAt: 0})
+	require.NoError(t, err)
+	activeID, err := s.AddSilence(Silence{RuleID: "r2", Until: 3000, CreatedAt: 0})
+	require.NoError(t, err)
+
+	got, err := s.Silences(context.Background(), 2000)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, activeID, got[0].ID)
+	require.NotEqual(t, expiredID, got[0].ID)
+}
+
+// TestDeleteSilenceRemovesRow pins the "lift a silence" API path (Task 10's
+// Alerts view "lift" control).
+func TestDeleteSilenceRemovesRow(t *testing.T) {
+	s := newTestStore(t, nil)
+	id, err := s.AddSilence(Silence{RuleID: "r1", Until: 3000, CreatedAt: 0})
+	require.NoError(t, err)
+	require.NoError(t, s.DeleteSilence(id))
+
+	got, err := s.Silences(context.Background(), 0)
+	require.NoError(t, err)
+	require.Empty(t, got)
+}

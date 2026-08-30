@@ -221,6 +221,59 @@ func (s *Store) AlertHistory(ctx context.Context, from, to int64, limit int) ([]
 	return out, rows.Err()
 }
 
+// Silence mutes dispatch (not evaluation -- an active instance under a
+// silence still transitions state, see engine.go's Task 4 lifecycle
+// table) for a rule, an entity, or both, until Until.
+type Silence struct {
+	ID        int64
+	RuleID    string
+	Entity    string
+	Reason    string
+	Until     int64
+	CreatedAt int64
+}
+
+// Silences returns every silence whose Until is still in the future
+// relative to now -- an already-expired row is excluded from the read
+// even before Maintain gets around to pruning it (see pruneAlerts in
+// maintain.go).
+func (s *Store) Silences(ctx context.Context, now int64) ([]Silence, error) {
+	rows, err := s.readDB.QueryContext(ctx,
+		`SELECT id, rule_id, entity, reason, until, created_at FROM alert_silences WHERE until > ? ORDER BY until`, now)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Silence
+	for rows.Next() {
+		var sil Silence
+		if err := rows.Scan(&sil.ID, &sil.RuleID, &sil.Entity, &sil.Reason, &sil.Until, &sil.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sil)
+	}
+	return out, rows.Err()
+}
+
+// AddSilence inserts a new silence and returns its generated id.
+func (s *Store) AddSilence(sil Silence) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO alert_silences (rule_id, entity, until, reason, created_at) VALUES (?,?,?,?,?)`,
+		sil.RuleID, sil.Entity, sil.Until, sil.Reason, sil.CreatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// DeleteSilence lifts a silence early (Task 10's Alerts view "lift"
+// control) -- a no-op, not an error, if id doesn't exist (already lifted,
+// or already pruned as expired).
+func (s *Store) DeleteSilence(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM alert_silences WHERE id=?`, id)
+	return err
+}
+
 // ReplaceAlertRules replaces the entire alert_rules table with rules, in
 // one transaction. This is a mechanical whole-document replace only --
 // it does not enforce "a builtin rule can't be removed" or any other

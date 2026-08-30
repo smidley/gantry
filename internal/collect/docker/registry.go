@@ -311,7 +311,7 @@ func translateEvent(msg events.Message, name string) (store.Event, bool) {
 	case msg.Action == events.ActionDie:
 		exitCode := msg.Actor.Attributes["exitCode"]
 		sev := "info"
-		if exitCode != "" && exitCode != "0" {
+		if exitCode != "" && exitCode != "0" && exitCode != "143" {
 			sev = "warning"
 		}
 		return store.Event{Kind: "container.die", Entity: name, Severity: sev, Detail: "exit code " + exitCode}, true

@@ -302,6 +302,17 @@ func TestApplyEventTranslatesStart(t *testing.T) {
 	require.Equal(t, store.Event{Kind: "container.start", Entity: "web", Severity: "info"}, got[0])
 }
 
+// TestApplyEventDieSeverityOnExitCode pins the exit-code -> severity
+// table, including the one deliberate exception: 143 (SIGTERM, docker
+// stop's own graceful-stop convention) reads as "info" like a clean 0
+// exit, not "warning" -- a planned stop/restart (Unraid's Appdata Backup
+// plugin and the CA auto-update plugin both stop-then-restart every
+// container on their own overnight schedule) must not read as a problem
+// just because the exit code happens to be nonzero. 137 (SIGKILL -- a
+// forced kill after the container ignored SIGTERM, or an OOM) and any
+// other nonzero code stay "warning": alert/engine.go's churn-probation
+// window on container-exit-nonzero is the second line of defense for a
+// 137 that's ALSO routine (a slow container force-killed mid-backup).
 func TestApplyEventDieSeverityOnExitCode(t *testing.T) {
 	r := newRegistry()
 	sink := &fakeEventSink{}
@@ -309,11 +320,15 @@ func TestApplyEventDieSeverityOnExitCode(t *testing.T) {
 
 	r.applyEvent(msg(events.ActionDie, "abc", map[string]string{"name": "/web", "exitCode": "1"}), sink, ev.evict)
 	r.applyEvent(msg(events.ActionDie, "abc", map[string]string{"name": "/web", "exitCode": "0"}), sink, ev.evict)
+	r.applyEvent(msg(events.ActionDie, "abc", map[string]string{"name": "/web", "exitCode": "143"}), sink, ev.evict)
+	r.applyEvent(msg(events.ActionDie, "abc", map[string]string{"name": "/web", "exitCode": "137"}), sink, ev.evict)
 
 	got := sink.snapshot()
-	require.Len(t, got, 2)
+	require.Len(t, got, 4)
 	require.Equal(t, store.Event{Kind: "container.die", Entity: "web", Severity: "warning", Detail: "exit code 1"}, got[0])
 	require.Equal(t, store.Event{Kind: "container.die", Entity: "web", Severity: "info", Detail: "exit code 0"}, got[1])
+	require.Equal(t, store.Event{Kind: "container.die", Entity: "web", Severity: "info", Detail: "exit code 143"}, got[2], "SIGTERM: a graceful stop by convention, not a problem")
+	require.Equal(t, store.Event{Kind: "container.die", Entity: "web", Severity: "warning", Detail: "exit code 137"}, got[3], "SIGKILL: might be a forced kill or an OOM, stays a warning")
 }
 
 func TestApplyEventOOMIsAlertSeverity(t *testing.T) {

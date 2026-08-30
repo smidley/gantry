@@ -20,8 +20,9 @@ package store
 //     or health-string parsing of their own -- min_severity alone does
 //     the predicate work, because docker/registry.go's diffEvents/
 //     translateEvent already assign container.die severity "warning"
-//     only for a nonzero exit and container.health severity "warning"
-//     only for "unhealthy". The one honest gap: diffEvents' 10s poll
+//     only for a nonzero exit (143/SIGTERM excepted -- a graceful stop
+//     by convention, stays "info" like 0) and container.health severity
+//     "warning" only for "unhealthy". The one honest gap: diffEvents' 10s poll
 //     path emits container.die at severity "info" with no exit code
 //     when the event-stream path has a gap, so a die caught only by the
 //     poll never clears this rule's floor -- degradation, not a bug.

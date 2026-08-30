@@ -1192,6 +1192,15 @@ func TestBootSeedingDoesNotFireForStoppedContainerWithStaleUnhealthy(t *testing.
 	require.Equal(t, 0, st.activeCount(), "a stopped container's stale unhealthy status must not seed an alert")
 }
 
+// TestBootSeedingRunsOnlyOnce pins F3's own guarantee: seeding itself --
+// the synthetic container.health event that creates the instance -- must
+// never repeat. Fleet() is no longer a pure boot-seeding signal, though:
+// tickEvents' own sustain sweep (N2) reads it every tick too, for
+// exactly this rule (container-unhealthy), so the raw call count climbs
+// by one per tick even after booting -- 3 calls over 2 ticks here: 1
+// from boot-seeding on tick one, plus 1 from the sweep on each of the
+// two ticks. What must NOT happen is a second SEED, which the event/
+// instance counts below would catch regardless of the call count.
 func TestBootSeedingRunsOnlyOnce(t *testing.T) {
 	now := int64(2_000_000_000)
 	rule := unhealthyRule()
@@ -1205,8 +1214,9 @@ func TestBootSeedingRunsOnlyOnce(t *testing.T) {
 
 	require.NoError(t, eng.Tick(context.Background()))
 	require.NoError(t, eng.Tick(context.Background()))
-	require.Equal(t, 1, calls, "boot seeding must run exactly once per engine lifetime")
-	require.Equal(t, 1, st.activeCount())
+	require.Equal(t, 3, calls, "1 boot-seed read + 1 sustain-sweep read per tick")
+	require.Equal(t, 1, st.activeCount(), "seeding must not have run twice")
+	require.Equal(t, []string{"alert.fired"}, st.eventKinds(), "and must not have appended a second alert.fired")
 }
 
 // TestBootSeedingRetriesUntilFleetIsNonEmpty pins F3: a slow docker probe
@@ -1216,15 +1226,21 @@ func TestBootSeedingRunsOnlyOnce(t *testing.T) {
 // exists for -- a container already unhealthy before Gantry started,
 // which no new event will ever arrive to report. Seeding must keep
 // retrying every tick until Fleet() actually reports something.
+//
+// The probe's readiness is a bool flipped between Tick() calls, not a
+// raw call-count branch: tickEvents' own sustain sweep (N2) now also
+// calls Fleet() every tick, so a call-counted branch would flip mid-tick
+// once both call sites are live, before the test can observe either one.
 func TestBootSeedingRetriesUntilFleetIsNonEmpty(t *testing.T) {
 	now := int64(2_000_000_000)
 	rule := unhealthyRule()
 	st := newFakeStore(rule)
+	ready := false
 	calls := 0
 	fleet := func() []FleetMember {
 		calls++
-		if calls == 1 {
-			return nil // slow probe: nothing yet on the first tick
+		if !ready {
+			return nil // slow probe: nothing yet
 		}
 		return []FleetMember{{Name: "sonarr", State: "running", Health: "unhealthy"}}
 	}
@@ -1233,16 +1249,19 @@ func TestBootSeedingRetriesUntilFleetIsNonEmpty(t *testing.T) {
 	require.NoError(t, eng.Tick(context.Background())) // empty fleet: must not latch "seeded"
 	require.Equal(t, 0, st.activeCount(), "nothing to seed from an empty fleet")
 
+	ready = true
 	require.NoError(t, eng.Tick(context.Background())) // fleet now populated: seeding must retry and fire
-	require.Equal(t, 2, calls)
 	inst := st.soleActive(t)
 	require.Equal(t, "sonarr", inst.Entity)
 	require.Equal(t, "firing", inst.State)
 
-	// And now that a real seed happened, it must still run only once.
-	calls = 0
+	// And now that a real seed happened, boot seeding itself must still
+	// run only once: further ticks only feed the sustain sweep's own
+	// steady one-Fleet()-read-per-tick cadence, never a second seed pass.
+	callsBefore := calls
 	require.NoError(t, eng.Tick(context.Background()))
-	require.Equal(t, 0, calls, "seeding must not retry once it has actually run")
+	require.Equal(t, callsBefore+1, calls, "only the sustain sweep should read Fleet() now that boot seeding is done")
+	require.Equal(t, 1, st.activeCount(), "seeding must not have created a duplicate instance")
 }
 
 // TestBootSeedingEmptyFleetDoesNotDelayEventCursorClamp guards the F3
@@ -1261,6 +1280,142 @@ func TestBootSeedingEmptyFleetDoesNotDelayEventCursorClamp(t *testing.T) {
 
 	require.NoError(t, eng.Tick(context.Background()))
 	require.Equal(t, 0, st.activeCount(), "the pre-existing event must not replay as a fresh alert")
+}
+
+// --- sustained event conditions (container-unhealthy) ------------------
+
+// unhealthyRuleWithRenotify mirrors the real container-unhealthy default
+// exactly (see store.DefaultAlertRules): clear_seconds=6h, renotify_
+// hours=24h -- the numbers N2 exists to make coherent.
+func unhealthyRuleWithRenotify() store.AlertRule {
+	r := unhealthyRule()
+	r.RenotifyHours = 24
+	return r
+}
+
+// TestSustainedUnhealthyStaysFiringPastClearSecondsAndRenotifiesAt24h
+// pins N2's preferred fix: container-unhealthy's clear_seconds (6h) is
+// shorter than its renotify_hours (24h), so under the old code the
+// timeout always resolved it before a renotify could ever fire -- a
+// container STILL unhealthy at 6h got silently resolved out from under
+// an ongoing problem. Fleet() confirming the condition every tick now
+// re-anchors the fallback timeout, and the 24h renotify (measured off
+// LastNotifiedAt, untouched by that refresh) fires right on schedule.
+func TestSustainedUnhealthyStaysFiringPastClearSecondsAndRenotifiesAt24h(t *testing.T) {
+	const t0 = int64(2_000_000_000)
+	rule := unhealthyRuleWithRenotify() // ClearSeconds 21600, RenotifyHours 24
+	st := newFakeStore(rule)
+	clk := &clockAt{t: t0}
+	fleet := func() []FleetMember {
+		return []FleetMember{{Name: "sonarr", State: "running", Health: "unhealthy"}}
+	}
+	var notes []string
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet,
+		func(n AlertNotification) { notes = append(notes, n.Phase) }, clk.now)
+	require.NoError(t, eng.Tick(context.Background())) // boot seeding fires it off the fleet read
+
+	require.Equal(t, "firing", st.soleActive(t).State)
+	require.Equal(t, []string{"fired"}, notes)
+
+	// Past the old 6h clear_seconds boundary: still sustained per
+	// Fleet(), so the fallback timeout must not have fired.
+	clk.t = t0 + 21600 + 100
+	require.NoError(t, eng.Tick(context.Background()))
+	inst := st.soleActive(t)
+	require.Equal(t, "firing", inst.State, "still unhealthy: must not resolve")
+	require.Equal(t, int64(1), inst.NotifyCount, "not yet 24h since the fire: no renotify due")
+
+	// Cross 24h total since the original fire: renotify fires, still firing.
+	clk.t = t0 + 24*3600 + 10
+	require.NoError(t, eng.Tick(context.Background()))
+	inst = st.soleActive(t)
+	require.Equal(t, "firing", inst.State)
+	require.Equal(t, int64(2), inst.NotifyCount)
+	require.Equal(t, []string{"fired", "renotify"}, notes)
+}
+
+// TestSustainedUnhealthyResolvesClearSecondsAfterConditionActuallyEnds is
+// N2's other half: once Fleet() stops confirming the container
+// unhealthy, the refresh stops and the fallback timeout counts
+// clear_seconds from the LAST tick the condition was actually seen --
+// not from whenever the collector's own clearing event happens to
+// arrive (it may never, which is the whole point of a fallback), and
+// not never.
+func TestSustainedUnhealthyResolvesClearSecondsAfterConditionActuallyEnds(t *testing.T) {
+	const t0 = int64(2_000_000_000)
+	rule := unhealthyRuleWithRenotify()
+	st := newFakeStore(rule)
+	clk := &clockAt{t: t0}
+	unhealthy := true
+	fleet := func() []FleetMember {
+		health := "unhealthy"
+		if !unhealthy {
+			health = "healthy"
+		}
+		return []FleetMember{{Name: "sonarr", State: "running", Health: health}}
+	}
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet, nil, clk.now)
+	require.NoError(t, eng.Tick(context.Background())) // t0: boot seeding fires it, FiredAt=t0
+	require.Equal(t, "firing", st.soleActive(t).State)
+
+	clk.t = t0 + 3600 // last tick the condition is still confirmed live: FiredAt refreshes to t0+3600
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, "firing", st.soleActive(t).State)
+	require.Equal(t, t0+3600, st.soleActive(t).FiredAt, "refreshed while still unhealthy")
+
+	// Condition ends now, with no clearing event ever arriving -- the
+	// case the fallback timeout exists for. From here FiredAt is frozen:
+	// no more refreshes.
+	unhealthy = false
+	clk.t = t0 + 3600 + 21600 - 10
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, "firing", st.soleActive(t).State, "not yet clear_seconds since the last confirmed-unhealthy tick")
+	require.Equal(t, t0+3600, st.soleActive(t).FiredAt, "frozen: Fleet() no longer confirms it, so no more refreshes")
+
+	clk.t = t0 + 3600 + 21600 + 10
+	require.NoError(t, eng.Tick(context.Background()))
+	active, _ := st.ActiveAlertInstances(context.Background())
+	require.Empty(t, active, "clear_seconds after the condition actually ended: now it resolves")
+	for _, i := range st.instances {
+		require.Equal(t, "timeout", i.ResolveReason)
+	}
+}
+
+// TestNonSustainedEventRuleIgnoresFleetAndTimesOutNormally guards
+// sustainedEventRules' narrow scope: a true point-in-time event rule
+// (container-oom here, standing in for oom/exit/disk-errors/parity-
+// errors) must keep its plain clear_seconds-from-the-firing-event
+// semantics even when Fleet() happens to describe the same entity in
+// whatever shape a sustain predicate would otherwise match against --
+// there is no predicate registered for this rule id, so Fleet() is
+// never even consulted for it.
+func TestNonSustainedEventRuleIgnoresFleetAndTimesOutNormally(t *testing.T) {
+	rule := store.AlertRule{
+		ID: "container-oom", Enabled: true, Type: "event", Kind: "container", EntityGlob: "*",
+		EventKinds: "container.oom", MinSeverity: "alert", ClearSeconds: 100, Severity: "alert",
+	}
+	st := newFakeStore(rule)
+	clk := &clockAt{t: 2_000_000_000}
+	fleet := func() []FleetMember {
+		// Looks exactly like a live container-unhealthy condition would --
+		// irrelevant here, since container-oom has no sustain predicate.
+		return []FleetMember{{Name: "sonarr", State: "running", Health: "unhealthy"}}
+	}
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet, nil, clk.now)
+	require.NoError(t, eng.Tick(context.Background())) // boot tick
+
+	st.events = []store.Event{{ID: 1, TS: clk.t, Kind: "container.oom", Entity: "sonarr", Severity: "alert"}}
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, "firing", st.soleActive(t).State)
+
+	clk.t += 90
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, "firing", st.soleActive(t).State, "not yet clear_seconds")
+
+	clk.t += 20
+	require.NoError(t, eng.Tick(context.Background()))
+	active, _ := st.ActiveAlertInstances(context.Background())
+	require.Empty(t, active, "clear_seconds from the ORIGINAL event, unaffected by Fleet()")
 }
 
 // --- Run loop --------------------------------------------------------------

@@ -588,10 +588,34 @@ func silenced(silences []store.Silence, ruleID, entity string) bool {
 
 // --- event rules -------------------------------------------------------
 
+// sustainedEventRules maps an event rule id to a predicate asking "is the
+// live condition that fired this instance still true right now, per
+// Fleet()". Most event rules are true point-in-time occurrences -- a
+// container died, OOM'd, a parity check finished with errors -- where
+// clear_seconds counted from the one event that started them is already
+// the complete recovery signal (see the rule split documented at
+// DefaultAlertRules). container-unhealthy is not: Health stays
+// "unhealthy" for as long as the underlying condition holds, and while
+// the collector's own container.health "healthy" event is the fast path
+// out (see matchesClear), a missed clear -- container removed mid-
+// unhealthy, a restart losing the transition -- would otherwise leave
+// clear_seconds counting from the ORIGINAL unhealthy event, silently
+// resolving a container Fleet() still shows as broken. tickEvents'
+// sweep refreshes FiredAt every tick a listed predicate still matches,
+// re-anchoring the fallback timeout to "since last confirmed live"
+// instead; StartedAt is untouched, so the instance's true age is still
+// recoverable. The other four builtin event rules (oom/exit/disk-
+// errors/parity-errors) deliberately have no entry: they're point
+// events with nothing analogous to refresh against.
+var sustainedEventRules = map[string]func(FleetMember) bool{
+	"container-unhealthy": func(m FleetMember) bool { return m.State == "running" && m.Health == "unhealthy" },
+}
+
 // tickEvents reads events since the cursor, matches each against every
 // enabled event rule, then separately sweeps active event-rule instances:
-// catching up a silenced fire or renotifying exactly like the threshold
-// sweep at evalThresholdEntity:406-410, then the clear-event-independent
+// refreshing any sustained condition's clear anchor, catching up a
+// silenced fire or renotifying exactly like the threshold sweep at
+// evalThresholdEntity:406-410, and finally the clear-event-independent
 // timeout -- an instance with no matching clear_event_kinds configured
 // (or one that just never saw a matching event) still has to auto-resolve
 // eventually.
@@ -610,10 +634,24 @@ func (e *Engine) tickEvents(ctx context.Context, ruleByID map[string]store.Alert
 		}
 	}
 
+	var fleetByName map[string]FleetMember
+	if e.Fleet != nil {
+		members := e.Fleet()
+		fleetByName = make(map[string]FleetMember, len(members))
+		for _, m := range members {
+			fleetByName[m.Name] = m
+		}
+	}
+
 	for k, inst := range activeIdx {
 		r, ok := ruleByID[k.RuleID]
 		if !ok || r.Type != "event" {
 			continue
+		}
+		if sustained, tracked := sustainedEventRules[r.ID]; tracked {
+			if m, live := fleetByName[inst.Entity]; live && sustained(m) {
+				inst.FiredAt = now
+			}
 		}
 		if inst.NotifyCount == 0 {
 			e.catchUpSilencedFire(&inst, r, now, silences)

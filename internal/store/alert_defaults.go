@@ -25,6 +25,18 @@ package store
 //     path emits container.die at severity "info" with no exit code
 //     when the event-stream path has a gap, so a die caught only by the
 //     poll never clears this rule's floor -- degradation, not a bug.
+//   - container-unhealthy is the one event rule below that the engine
+//     treats as a live, ongoing condition rather than a point-in-time
+//     occurrence (alert/engine.go's sustainedEventRules): clear_seconds
+//     (6h) is deliberately shorter than renotify_hours (24h), coherent
+//     only because the engine refreshes the clear timeout's anchor every
+//     tick Fleet() still reports the container unhealthy -- without
+//     that, the timeout would resolve a still-broken container hours
+//     before a renotify could ever fire. The other four event rules
+//     (container-oom, container-exit-nonzero, disk-errors, parity-
+//     errors) are true point events: clear_seconds counted from the one
+//     event that started them is already the correct, complete recovery
+//     signal, no sustain tracking needed.
 //
 // UpdatedAt is left 0 on every rule; SeedAlertRules stamps it at insert
 // time, the same way AppendEvent/AddSilence stamp their own timestamp
@@ -92,6 +104,10 @@ func DefaultAlertRules() []AlertRule {
 			ForSeconds: 300, ClearSeconds: 60, Severity: "alert", RenotifyHours: 24,
 		},
 		{
+			// Sustained condition, not a point event -- see the doc
+			// comment above and alert/engine.go's sustainedEventRules:
+			// clear_seconds here is a fallback, refreshed every tick
+			// Fleet() still confirms the container unhealthy.
 			ID: "container-unhealthy", Name: "Container unhealthy", Enabled: true, Builtin: true,
 			Type: "event", Kind: "container", EntityGlob: "*",
 			EventKinds: "container.health", MinSeverity: "warning",

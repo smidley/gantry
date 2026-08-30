@@ -42,10 +42,19 @@ type FleetMember struct {
 // lower-level dynamix-file shape a future notify channel would translate
 // this into.
 type AlertNotification struct {
-	Phase    string // "fired" | "resolved" | "renotify"
+	Phase    string // "fired" | "resolved" | "renotify" | "flapping" | "throttled"
 	Instance store.AlertInstance
 	Rule     store.AlertRule
 	Summary  string
+
+	// Subject overrides a channel's default "<rule name> — <entity>"
+	// line. The engine never sets this -- every notification it
+	// dispatches has a real Rule and Instance to build a subject from.
+	// It exists for the Dispatcher's own synthetic system notifications
+	// (dispatch.go's coalesced notify-spool throttle summary), which
+	// speak for many rule/entity pairs at once and have no single one to
+	// name.
+	Subject string
 }
 
 // Engine evaluates every enabled alert rule on its own cadence, driving

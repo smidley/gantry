@@ -630,6 +630,19 @@ func (e *Engine) processEvent(ev store.Event, eventRules []store.AlertRule, acti
 // processEventForRule is wrapped in its own recover for the same reason
 // evalThresholdRule is: one rule's bad data (or a ClassOf panic) must not
 // take the rest of this event, or any other rule, down with it.
+//
+// Deliberately does not gate on r.Kind (F11): unlike a threshold rule,
+// where Kind picks which metric ring gets read at all, an event rule's
+// eligibility is fully decided by matchesFire (EventKinds + MinSeverity)
+// below, then EntityGlob/EntityClass. A dot-namespaced event kind like
+// "container.health" or "disk.errors" already names its own entity
+// domain unambiguously, so gating on Kind too would be redundant for
+// every well-formed rule -- and actively wrong for parity-errors
+// specifically (Kind "unraid", EventKinds "parity.finish": "parity" is
+// Unraid's own event vocabulary, not literally the string "unraid").
+// Kind still matters here for two things: it rides onto the created
+// instance, and it's the kind ClassOf(r.Kind, ev.Entity) is called with
+// for entity_class matching just below.
 func (e *Engine) processEventForRule(r store.AlertRule, ev store.Event, activeIdx map[instanceKey]store.AlertInstance, silences []store.Silence, now int64) {
 	defer func() {
 		if p := recover(); p != nil {

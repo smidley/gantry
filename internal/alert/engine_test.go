@@ -944,6 +944,29 @@ func TestEventRuleFiresImmediatelyOnMatchingEvent(t *testing.T) {
 	require.Equal(t, []string{"fired"}, notes)
 }
 
+// TestEventRuleMatchingIgnoresKindByDesign pins F11's resolution: an
+// event rule's Kind rides onto the created instance and feeds
+// ClassOf-based class matching, but it does NOT gate which events reach
+// the rule at all -- EventKinds already does that job precisely. A rule
+// whose Kind has nothing to do with its EventKinds' real domain still
+// matches normally.
+func TestEventRuleMatchingIgnoresKindByDesign(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := unhealthyRule() // EventKinds: "container.health"
+	rule.Kind = "totally-unrelated-kind"
+	st := newFakeStore(rule)
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+	require.NoError(t, eng.Tick(context.Background())) // boot tick
+
+	st.events = []store.Event{{ID: 1, TS: now, Kind: "container.health", Entity: "sonarr", Severity: "warning", Detail: "unhealthy"}}
+	require.NoError(t, eng.Tick(context.Background()))
+
+	inst := st.soleActive(t)
+	require.Equal(t, "firing", inst.State, "EventKinds alone gates matching; r.Kind does not, by design")
+	require.Equal(t, "sonarr", inst.Entity)
+	require.Equal(t, "totally-unrelated-kind", inst.Kind, "Kind still rides onto the created instance as metadata")
+}
+
 func TestEventRuleIgnoresEventBelowMinSeverityFloor(t *testing.T) {
 	now := int64(2_000_000_000)
 	rule := unhealthyRule() // MinSeverity: warning

@@ -91,7 +91,13 @@ var validBandFamilies = map[string]bool{
 // ValidateRule checks the invariants the store schema can't express on
 // its own. It does not check id/name non-emptiness or entity_glob/
 // entity_class syntax -- MatchEntity/MatchClass already treat any string
-// as a well-formed pattern, so there is nothing to reject there.
+// as a well-formed pattern, so there is nothing to reject there. Nor does
+// it check that an event rule's Kind agrees with its EventKinds (F11):
+// scoping which events reach an event rule is EventKinds' job alone (a
+// dot-namespaced event kind like "container.health" or "parity.finish"
+// already names its own entity domain unambiguously) -- see
+// processEventForRule's own doc for why deriving that from Kind instead
+// would either be redundant or actively wrong.
 func ValidateRule(r store.AlertRule) error {
 	switch r.Type {
 	case "threshold", "event":

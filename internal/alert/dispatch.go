@@ -62,7 +62,7 @@ const (
 	throttleWindowSeconds = 3600
 
 	flapWindowSeconds  = 3600 // per-(rule,entity) flap guard's rolling window
-	flapThreshold       = 4    // fire/resolve cycles within the window that trips it
+	flapThreshold      = 4    // fire/resolve cycles within the window that trips it
 	flapSilenceSeconds = 3600 // auto-silence duration once tripped
 
 	defaultChannelQueueCap = 256

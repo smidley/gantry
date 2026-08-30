@@ -15,11 +15,12 @@
   import { motion } from '../lib/motion.svelte';
   import { live } from '../lib/sse.svelte';
   import { fetchEvents, fetchSeries } from '../lib/api';
-  import { pushRing } from '../lib/livering';
+  import { appendAfterSeed, mergeSeed, pushRing, seriesPointsToRing } from '../lib/livering';
   import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtRelTime } from '../lib/format';
   import { etaFromProgress, parityIsRunning, seqStep, sharesFromMetrics, sumSeriesPoints } from '../lib/metrics';
+  import { seriesColorVar } from '../lib/compareColors';
   import {
-    defaultDiskChartVisible,
+    diskChartDash,
     diskKind,
     diskRole,
     diskTempState,
@@ -55,15 +56,23 @@
   // "Have a graph that can switch between disk IO, storage used, and
   // temperature. Each line on the chart should be a separate drive."
   // Reuses the Metrics page's own multi-line hero pattern (TopConsumers.
-  // svelte: legend chips, focus-on-hover, click-to-toggle) -- the legend
-  // here is kind-tinted (ssd/nvme/usb accent colors, hdd a plain muted
-  // line) rather than per-container-icon, since a drive's identity is
-  // its slot name, not an icon.
+  // svelte: legend chips, focus-on-hover, click-to-toggle) plus its own
+  // live-seed history fix (heroSlots' seed()/resetAssignment(), mirrored
+  // below by makeDiskSlot) -- every drive is visible from mount (Scott's
+  // own follow-up ask: no default-hidden set, "one /api/series per drive
+  // per metric on the ring tier is cheap"), each with its own categorical
+  // line color by SLOT POSITION (seriesColorVar, same "color follows
+  // position" rule Compare/the hero chart already use), not the kind
+  // tint the legend used to draw its whole chip in -- the kind tint is
+  // demoted to a small accent dot on the chip instead (diskKind's own
+  // ssd/nvme/usb/hdd read), since a categorical hue is the thing that
+  // actually tells two same-kind drives (disk1 vs disk2) apart, while
+  // kind is still worth a quiet secondary glance.
   //
   // diskio has no per-disk-ENTITY series of its own (host.go's real
   // per-device counters, and fake.go's own mirror of that shape, are
   // both host-scoped and keyed by raw device name -- see fake.go's own
-  // emitDisks doc) -- CHART_IO_KEYS below joins back to a slot via
+  // emitDisks doc) -- ioForSlot/seedDiskSlot below join back to a slot via
   // disk_meta[slot].device, the same join any other real-mode consumer
   // of this data would need.
   const CHART_METRICS = [
@@ -82,27 +91,25 @@
   const CHART_LIVE_WINDOW_SEC = 900;
   // KIND_COLOR_VAR mirrors BaySchematic/Storage's own per-kind mapping
   // exactly (ssd/nvme/usb get an accent color, hdd -- the ordinary/
-  // majority case -- gets no override there; a LINE needs some stroke
-  // color regardless, so hdd draws in a plain muted ink tone here,
-  // "calm, not a rainbow" for what's typically the biggest group).
+  // majority case -- gets no override there). No longer the LINE's own
+  // color (see the header chart doc above) -- kept as the legend chip's
+  // small kind-accent dot instead, hdd's plain --ink-2 reading as "no
+  // accent" there too, same "calm, not a rainbow" precedent.
   const KIND_COLOR_VAR = { ssd: '--series-3', nvme: '--series-1', usb: '--series-4' };
   function kindColorVar(kind) {
     return KIND_COLOR_VAR[kind] ?? '--ink-2';
   }
-  // DISK_CHART_ACTIVE_BPS: the "any drive with recent IO" default-
-  // visibility threshold (combined read+write) -- generous enough that
-  // an ordinarily-quiet data disk's own small tick-to-tick jitter never
-  // crosses it, low enough that a genuinely active drive reliably does.
-  const DISK_CHART_ACTIVE_BPS = 500_000;
 
   let chartMetric = $state('io');
   let chartWindow = $state('now');
   let chartInstance = $state(undefined);
 
-  // hiddenSlots: null until seeded once (see the effect below) -- kept
-  // separate from "empty Set" so seeding can tell "haven't decided yet"
-  // apart from "decided, and nothing happens to be hidden."
-  let hiddenSlots = $state(null);
+  // hiddenSlots: every drive starts visible (Scott's own follow-up ask --
+  // no default-hidden set at all, pools/parity/"has recent IO" special-
+  // casing dropped entirely). A plain empty Set, not the null-sentinel
+  // this used to need to distinguish "haven't decided defaults yet" from
+  // "decided, nothing's hidden" -- there's no decision left to defer.
+  let hiddenSlots = $state(new Set());
 
   // MAX_CHART_DISKS: a fixed ring pool, sized well above any array this
   // app is likely to see (Scott's own "12 members" plus headroom) --
@@ -120,6 +127,15 @@
     let used = $state([]);
     let temp = $state([]);
     let assigned = null;
+    // Three independent seeded flags, not heroSlot's single one -- io/
+    // used/temp are three separate TAB VIEWS a caller switches between
+    // (this chart's own CHART_METRICS switcher), not one resource's own
+    // sum-plus-direction-breakdown the way heroSlot's sum/dirA/dirB
+    // always travel together. Each gates only its own group's tick()
+    // append rule, exactly like heroSlot's `seeded` gates its one group.
+    let ioSeeded = false;
+    let usedSeeded = false;
+    let tempSeeded = false;
     return {
       get ioPoints() {
         return ioSum;
@@ -133,6 +149,64 @@
       get tempPoints() {
         return temp;
       },
+      // seededFor reports whether THIS slot has already been seeded for
+      // `metric` -- the driving seed effect below reads this to skip a
+      // drive/metric combo that's already covered, so a metric-tab
+      // switch back to one already seeded earlier doesn't refire a
+      // redundant fetch, and a toggle-OFF/toggle-ON of an UNRELATED
+      // drive doesn't either.
+      seededFor(metric) {
+        if (metric === 'io') return ioSeeded;
+        if (metric === 'used') return usedSeeded;
+        return tempSeeded;
+      },
+      // resetAssignment blanks this slot back to its pre-mount state --
+      // mirrors heroSlot's own (TopConsumers.svelte), for the same
+      // reason: nothing here actually calls it today (disk-slot
+      // reassignment is array-topology-change-rare, not the constant
+      // top-N churn heroSlot resets for), but tick()'s own reassignment
+      // branch below needs the identical "blank everything, including
+      // every seeded flag" logic, so it's factored out once rather than
+      // duplicated between the two call sites.
+      resetAssignment() {
+        assigned = null;
+        ioSum = [];
+        ioA = [];
+        ioB = [];
+        used = [];
+        temp = [];
+        ioSeeded = false;
+        usedSeeded = false;
+        tempSeeded = false;
+      },
+      // seedIO/seedUsed/seedTemp fold one /api/series ring-tier fetch in
+      // as this slot's own initial contents for that one group --
+      // mergeSeed's usual base-plus-already-live-held merge (livering.ts's
+      // own doc), same shape as heroSlot's single seed() method, just
+      // one per independent group instead of one covering all of them.
+      seedIO(sumPoints, aPoints, bPoints) {
+        const heldSum = untrack(() => ioSum);
+        const merged = mergeSeed(heldSum, sumPoints, CHART_LIVE_WINDOW_SEC);
+        if (merged === heldSum) return; // empty/no-op seed -- see mergeSeed's own doc
+        ioSeeded = true;
+        ioSum = merged;
+        ioA = mergeSeed(untrack(() => ioA), aPoints, CHART_LIVE_WINDOW_SEC);
+        ioB = mergeSeed(untrack(() => ioB), bPoints, CHART_LIVE_WINDOW_SEC);
+      },
+      seedUsed(points) {
+        const held = untrack(() => used);
+        const merged = mergeSeed(held, points, CHART_LIVE_WINDOW_SEC);
+        if (merged === held) return;
+        usedSeeded = true;
+        used = merged;
+      },
+      seedTemp(points) {
+        const held = untrack(() => temp);
+        const merged = mergeSeed(held, points, CHART_LIVE_WINDOW_SEC);
+        if (merged === held) return;
+        tempSeeded = true;
+        temp = merged;
+      },
       tick(tickTs, slot, ioRead, ioWrite, usedPct, tempC) {
         if (slot !== assigned) {
           assigned = slot;
@@ -141,17 +215,34 @@
           ioB = [];
           used = [];
           temp = [];
+          ioSeeded = false;
+          usedSeeded = false;
+          tempSeeded = false;
         }
         if (slot === null) return;
         if (ioRead !== undefined || ioWrite !== undefined) {
           const r = ioRead ?? 0;
           const w = ioWrite ?? 0;
-          ioSum = untrack(() => pushRing(ioSum, tickTs, r + w, CHART_LIVE_WINDOW_SEC));
-          ioA = untrack(() => pushRing(ioA, tickTs, r, CHART_LIVE_WINDOW_SEC));
-          ioB = untrack(() => pushRing(ioB, tickTs, w, CHART_LIVE_WINDOW_SEC));
+          ioSum = untrack(() =>
+            ioSeeded ? appendAfterSeed(ioSum, tickTs, r + w, CHART_LIVE_WINDOW_SEC) : pushRing(ioSum, tickTs, r + w, CHART_LIVE_WINDOW_SEC),
+          );
+          ioA = untrack(() =>
+            ioSeeded ? appendAfterSeed(ioA, tickTs, r, CHART_LIVE_WINDOW_SEC) : pushRing(ioA, tickTs, r, CHART_LIVE_WINDOW_SEC),
+          );
+          ioB = untrack(() =>
+            ioSeeded ? appendAfterSeed(ioB, tickTs, w, CHART_LIVE_WINDOW_SEC) : pushRing(ioB, tickTs, w, CHART_LIVE_WINDOW_SEC),
+          );
         }
-        if (usedPct !== undefined) used = untrack(() => pushRing(used, tickTs, usedPct, CHART_LIVE_WINDOW_SEC));
-        if (tempC !== undefined) temp = untrack(() => pushRing(temp, tickTs, tempC, CHART_LIVE_WINDOW_SEC));
+        if (usedPct !== undefined) {
+          used = untrack(() =>
+            usedSeeded ? appendAfterSeed(used, tickTs, usedPct, CHART_LIVE_WINDOW_SEC) : pushRing(used, tickTs, usedPct, CHART_LIVE_WINDOW_SEC),
+          );
+        }
+        if (tempC !== undefined) {
+          temp = untrack(() =>
+            tempSeeded ? appendAfterSeed(temp, tickTs, tempC, CHART_LIVE_WINDOW_SEC) : pushRing(temp, tickTs, tempC, CHART_LIVE_WINDOW_SEC),
+          );
+        }
       },
     };
   }
@@ -185,26 +276,131 @@
     }
   });
 
-  // Seeds the legend's own starting visibility exactly once, off
-  // whatever the live frame first reports -- see defaultDiskChartVisible's
-  // own doc. Every run after the first is a one-line no-op (the guard
-  // returns before reading anything else), so this effect stops costing
-  // anything at all once seeded.
-  $effect(() => {
-    if (hiddenSlots !== null) return;
-    const frame = live.frame;
-    if (!frame || diskNames.length === 0) return;
-    const next = new Set();
-    for (const slot of diskNames) {
-      const [read, write] = ioForSlot(frame, slot);
-      const hasRecentIO = (read ?? 0) + (write ?? 0) > DISK_CHART_ACTIVE_BPS;
-      if (!defaultDiskChartVisible(slot, hasRecentIO)) next.add(slot);
+  // diskSeedControllers/abortDiskSeed: one AbortController per DRIVE's own
+  // in-flight seed fetch (Map, slot name -> controller) -- same ad hoc
+  // shape as TopConsumers' heroSeedControllers, for the identical reason:
+  // a seed fires per-drive from inside the effect below rather than from
+  // one single per-resource effect, so there's no one shared controller
+  // to reuse. abortDiskSeed cancels slot `slot`'s own pending fetch, if
+  // any, before a fresh one for the same slot supersedes it.
+  const diskSeedControllers = new Map();
+  function abortDiskSeed(slot) {
+    diskSeedControllers.get(slot)?.abort();
+    diskSeedControllers.delete(slot);
+  }
+  onMount(() => {
+    return () => {
+      for (const slot of diskSeedControllers.keys()) abortDiskSeed(slot);
+    };
+  });
+
+  // seedDiskSlot fetches ring `i` (drive `slot`)'s own ring-tier history
+  // for JUST the currently-active chart metric -- "seed only the
+  // CURRENTLY selected [metric]'s own ring(s), cheap, re-seed on switch"
+  // is the same rule the Metrics page's own header rings use for their
+  // resource switch (TopConsumers.svelte) -- io/used/temp here are three
+  // independent tabs, not one resource's own always-together direction
+  // breakdown the way heroSlot's single per-assignment seed covers, so
+  // there's no reason to fetch all three up front when only one is ever
+  // on screen at a time.
+  function seedDiskSlot(i, slot, metric) {
+    abortDiskSeed(slot);
+    const controller = new AbortController();
+    diskSeedControllers.set(slot, controller);
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - CHART_LIVE_WINDOW_SEC;
+    if (metric === 'io') {
+      const device = diskMeta[slot]?.device;
+      if (device === undefined) {
+        // No device join yet for this slot -- nothing to ask /api/series
+        // for; tick() above will pick it up live once disk_meta catches
+        // up, same as it always has.
+        diskSeedControllers.delete(slot);
+        return;
+      }
+      const readKey = `diskio.${device}.read_bps`;
+      const writeKey = `diskio.${device}.write_bps`;
+      fetchSeries({ kind: 'host', entity: '', metrics: [readKey, writeKey], from, to, signal: controller.signal })
+        .then((results) => {
+          diskSeedControllers.delete(slot);
+          const byMetric = {};
+          for (const r of results) byMetric[r.metric] = r.points;
+          const ptsA = byMetric[readKey] ?? [];
+          const ptsB = byMetric[writeKey] ?? [];
+          diskSlotRings[i].seedIO(sumSeriesPoints([ptsA, ptsB]), seriesPointsToRing(ptsA), seriesPointsToRing(ptsB));
+        })
+        .catch((err) => {
+          if (err?.name === 'AbortError') return; // superseded -- a fresh reassignment or metric switch beat this back
+          diskSeedControllers.delete(slot);
+        });
+      return;
     }
-    hiddenSlots = next;
+    if (metric === 'used') {
+      fetchSeries({ kind: 'disk', entity: slot, metrics: ['fs.used_bytes', 'fs.free_bytes'], from, to, signal: controller.signal })
+        .then((results) => {
+          diskSeedControllers.delete(slot);
+          const byMetric = {};
+          for (const r of results) byMetric[r.metric] = r.points;
+          diskSlotRings[i].seedUsed(diskUsagePctSeries(byMetric['fs.used_bytes'] ?? [], byMetric['fs.free_bytes'] ?? []));
+        })
+        .catch((err) => {
+          if (err?.name === 'AbortError') return;
+          diskSeedControllers.delete(slot);
+        });
+      return;
+    }
+    fetchSeries({ kind: 'disk', entity: slot, metrics: ['temp.c'], from, to, signal: controller.signal })
+      .then((results) => {
+        diskSeedControllers.delete(slot);
+        diskSlotRings[i].seedTemp(seriesPointsToRing(results[0]?.points ?? []));
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return;
+        diskSeedControllers.delete(slot);
+      });
+  }
+
+  // Drives seedDiskSlot: fires it for every VISIBLE drive that hasn't
+  // already been seeded for the CURRENTLY active metric -- covers a
+  // fresh mount (nothing's seeded yet), a metric-tab switch (the newly-
+  // active metric's ring starts cold for every drive until this runs),
+  // and a legend toggle-ON (a drive that was hidden becomes visible, and
+  // -- being new to this metric -- hasn't been seeded either). A
+  // toggle-OFF changes hiddenSlots too (same Set-swap convention as
+  // every other toggle in this app) but touches nothing here: every
+  // OTHER drive's own seededFor(metric) is already true, so the loop is
+  // a no-op for all of them.
+  //
+  // diskNames is read TRACKED here, deliberately NOT untrack()'d the way
+  // fetchedDiskSeries' own effect below reads it -- that effect's own
+  // trigger (chartWindow) only ever changes from an explicit click, well
+  // after the live frame has already arrived, so untracking diskNames
+  // there costs nothing. This effect's own trigger needs to cover the
+  // page's very FIRST mount too, which can land before live.frame has
+  // delivered anything at all (diskNames still []): an untracked read
+  // would run this loop once against that empty list and then never get
+  // a reason to run again once real disks show up, since none of
+  // chartMetric/chartWindow/hiddenSlots change on their own just because
+  // a frame arrived. Tracking diskNames means this reruns every ~2s tick
+  // for as long as the page is open (same as TopConsumers' own hero-tick
+  // effect always has) -- harmless: seededFor(metric)'s own cheap
+  // boolean check turns every rerun after the real seed into a no-op
+  // loop over up to MAX_CHART_DISKS flags, no fetch involved.
+  $effect(() => {
+    if (chartWindow !== 'now') return;
+    const metric = chartMetric;
+    const hidden = hiddenSlots;
+    const names = diskNames;
+    for (let i = 0; i < names.length && i < MAX_CHART_DISKS; i++) {
+      const slot = names[i];
+      if (hidden.has(slot)) continue;
+      if (diskSlotRings[i].seededFor(metric)) continue;
+      seedDiskSlot(i, slot, metric);
+    }
   });
 
   function toggleChartSlot(slot) {
-    const next = new Set(hiddenSlots ?? []);
+    const next = new Set(hiddenSlots);
     if (next.has(slot)) next.delete(slot);
     else next.add(slot);
     hiddenSlots = next;
@@ -297,13 +493,19 @@
   // below is what actually reaches TimeChart) -- the legend renders off
   // this full list so a toggled-off chip stays visible to toggle back
   // on. entity/kind never change with chartMetric/chartWindow; points/
-  // directionPoints do.
+  // directionPoints do. colorVar/dash/kindColor are all position-only
+  // (seriesColorVar/diskChartDash(i), kindColorVar(kind)) -- see the
+  // header chart's own doc above for why the LINE's identity moved from
+  // kind to slot position, with kind demoted to kindColor's small legend
+  // accent.
   let chartSeriesAll = $derived.by(() => {
     const metric = chartMetric;
     const w = chartWindow;
     return diskNames.map((slot, i) => {
       const kind = diskKind(diskMeta[slot], disks[slot]);
-      const colorVar = kindColorVar(kind);
+      const colorVar = seriesColorVar(i);
+      const dash = diskChartDash(i);
+      const kindColor = kindColorVar(kind);
       // label: TimeChart's own tooltip keys each row by `label` (see its
       // {#each tooltip.rows as row (row.label)}) -- every series here
       // must carry one, or every row shares the same undefined key the
@@ -311,15 +513,19 @@
       // reproduced live on first hover).
       if (w === 'now') {
         const ring = diskSlotRings[i];
-        if (metric === 'io') return { slot, label: slot, colorVar, points: ring.ioPoints, directionPoints: ring.ioDirection, directionLabels: ['r', 'w'] };
-        if (metric === 'used') return { slot, label: slot, colorVar, points: ring.usedPoints };
-        return { slot, label: slot, colorVar, points: ring.tempPoints };
+        if (metric === 'io') {
+          return { slot, label: slot, colorVar, dash, kindColor, points: ring.ioPoints, directionPoints: ring.ioDirection, directionLabels: ['r', 'w'] };
+        }
+        if (metric === 'used') return { slot, label: slot, colorVar, dash, kindColor, points: ring.usedPoints };
+        return { slot, label: slot, colorVar, dash, kindColor, points: ring.tempPoints };
       }
       const fetched = fetchedDiskSeries[slot];
-      if (!fetched) return { slot, label: slot, colorVar, points: [] };
-      if (metric === 'io') return { slot, label: slot, colorVar, points: fetched.ioSum, directionPoints: [fetched.ioA, fetched.ioB], directionLabels: ['r', 'w'] };
-      if (metric === 'used') return { slot, label: slot, colorVar, points: fetched.used };
-      return { slot, label: slot, colorVar, points: fetched.temp };
+      if (!fetched) return { slot, label: slot, colorVar, dash, kindColor, points: [] };
+      if (metric === 'io') {
+        return { slot, label: slot, colorVar, dash, kindColor, points: fetched.ioSum, directionPoints: [fetched.ioA, fetched.ioB], directionLabels: ['r', 'w'] };
+      }
+      if (metric === 'used') return { slot, label: slot, colorVar, dash, kindColor, points: fetched.used };
+      return { slot, label: slot, colorVar, dash, kindColor, points: fetched.temp };
     });
   });
 
@@ -329,9 +535,7 @@
   // mechanism) so a hidden line is also absent from the hover tooltip,
   // not just undrawn -- "scrub pins all VISIBLE lines," never a toggled-
   // off one.
-  let visibleChartSeries = $derived(
-    hiddenSlots === null ? chartSeriesAll : chartSeriesAll.filter((s) => !hiddenSlots.has(s.slot)),
-  );
+  let visibleChartSeries = $derived(chartSeriesAll.filter((s) => !hiddenSlots.has(s.slot)));
   let chartLabel = $derived(`${CHART_METRICS.find((m) => m.key === chartMetric)?.label} by drive`);
 
   // glideMs: the perpetual-glide motion pass's own shared duration
@@ -514,18 +718,19 @@
       />
       <div class="storage-chart__legend" role="group" aria-label="Chart drives">
         {#each chartSeriesAll as s (s.slot)}
-          {@const hidden = hiddenSlots?.has(s.slot) ?? false}
+          {@const hidden = hiddenSlots.has(s.slot)}
           <button
             type="button"
             class="storage-chart__chip"
             class:storage-chart__chip--off={hidden}
-            style={`--chip-color: var(${s.colorVar})`}
+            style={`--chip-color: var(${s.colorVar}); --chip-kind-color: var(${s.kindColor})`}
             aria-pressed={!hidden}
             aria-label={`${s.slot} line, click to ${hidden ? 'show' : 'hide'}`}
             onmouseenter={() => focusChartSlot(s.slot)}
             onmouseleave={() => focusChartSlot(null)}
             onclick={() => toggleChartSlot(s.slot)}
           >
+            <span class="storage-chart__chip-kind" aria-hidden="true"></span>
             {s.slot}
           </button>
         {/each}
@@ -742,14 +947,20 @@
     color: var(--status-warning);
   }
   /* Legend chips: same shape/interaction as the Metrics page's own hero
-     chart (top-consumers__chip) -- kind-tinted rather than icon+name,
-     since a drive's identity is its slot name, not a container icon. */
+     chart (top-consumers__chip) -- --chip-color is the LINE's own
+     per-position categorical hue now (colorVar, chartSeriesAll), not a
+     kind tint; kind (--chip-kind-color) is demoted to the small dot
+     below, since a drive's identity is its slot name plus its line
+     color, not a container icon. */
   .storage-chart__legend {
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem;
   }
   .storage-chart__chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
     padding: 0.25rem 0.55rem;
     border: 1px solid color-mix(in oklab, var(--chip-color) 45%, transparent);
     border-radius: 999px;
@@ -764,6 +975,18 @@
   }
   .storage-chart__chip:hover {
     background: color-mix(in oklab, var(--chip-color) 22%, transparent);
+  }
+  /* The kind-accent dot: a quiet secondary read (ssd/nvme/usb tinted,
+     hdd's plain --ink-2 reading as "no accent" -- same "calm, not a
+     rainbow" precedent storage-disk__media--hdd already sets) alongside
+     the chip's own per-position line color. */
+  .storage-chart__chip-kind {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--chip-kind-color);
+    flex-shrink: 0;
   }
   /* A toggled-off line's chip stays legible (never the near-invisible
      disabled treatment) -- it's a live, click-to-restore choice. */

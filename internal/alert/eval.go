@@ -99,7 +99,8 @@ func allCross(samples []store.Sample, op string, threshold float64) bool {
 // its own, independent coverage + emptiness check: it's usually shorter
 // than the fire window (so this second check is normally a no-op) but a
 // rule may configure it longer, and a partially-covered clear window must
-// never be trusted either.
+// never be trusted either. ClearSeconds==0 skips all of that: it means
+// "clear on the latest observation alone", not a window of width zero.
 func EvaluateThreshold(r store.AlertRule, samples []store.Sample, oldest, now int64) (Verdict, float64) {
 	var latest float64
 	if n := len(samples); n > 0 {
@@ -116,6 +117,22 @@ func EvaluateThreshold(r store.AlertRule, samples []store.Sample, oldest, now in
 	}
 	if allCross(breachWindow, r.Op, r.Threshold) {
 		return VerdictBreaching, latest
+	}
+
+	// clear_seconds==0 means "clear immediately on the latest observation",
+	// not "a window of width zero": windowSince(samples, now) would only
+	// ever be non-empty when a sample lands on exactly now, which real,
+	// phase-misaligned collection essentially never does (see
+	// engine_live_test.go) -- that read as VerdictInsufficient forever,
+	// so a clear_seconds=0 rule could never clear. There's no window to
+	// cover here, so the ring-coverage check above doesn't apply either;
+	// breachWindow being non-empty already proved samples has at least
+	// one entry, which is all a single-observation check needs.
+	if r.ClearSeconds == 0 {
+		if crosses(clearOp(r.Op), latest, r.ClearThreshold) {
+			return VerdictClearing, latest
+		}
+		return VerdictHolding, latest
 	}
 
 	clearStart := now - r.ClearSeconds

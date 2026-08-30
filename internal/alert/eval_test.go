@@ -96,6 +96,55 @@ func TestEvaluateThresholdUnknownSeriesIsInsufficient(t *testing.T) {
 	require.Equal(t, 0.0, val)
 }
 
+// --- clear_seconds == 0: "clear immediately on the latest observation" (F4) ---
+//
+// A zero-width clear window can't be evaluated the sustained-for way --
+// windowSince(samples, now-0) is only ever non-empty when a sample lands
+// on exactly `now`, which real, phase-misaligned data essentially never
+// does (see engine_live_test.go). clear_seconds=0 instead means "check
+// only the latest sample", bypassing the ring-coverage requirement
+// entirely: by the time this is reached, the breach-window check has
+// already proven samples is non-empty.
+//
+// Every fixture below deliberately ends 2s before `now`, not exactly on
+// it -- series()'s own convention lands the latest sample exactly at now,
+// which would make windowSince(samples, now) accidentally non-empty and
+// hide the very bug these tests exist to pin (the F7 lesson, applied
+// here at the pure-evaluator level too).
+
+func TestEvaluateThresholdClearSecondsZeroClearsOnLatestSampleBelowClearThreshold(t *testing.T) {
+	r := store.AlertRule{Op: ">", Threshold: 85, ClearThreshold: 70, ForSeconds: 600, ClearSeconds: 0}
+	s := series(now-2, 60, 11, 90)
+	s[len(s)-1].Val = 60 // only the latest observation actually recovered
+	v, val := EvaluateThreshold(r, s, s[0].TS, now)
+	require.Equal(t, VerdictClearing, v)
+	require.Equal(t, 60.0, val)
+}
+
+func TestEvaluateThresholdClearSecondsZeroHoldsWhenLatestSampleStillAboveClearThreshold(t *testing.T) {
+	r := store.AlertRule{Op: ">", Threshold: 85, ClearThreshold: 70, ForSeconds: 600, ClearSeconds: 0}
+	s := series(now-2, 60, 11, 78) // below fire threshold throughout, never dipped under clear threshold
+	v, _ := EvaluateThreshold(r, s, s[0].TS, now)
+	require.Equal(t, VerdictHolding, v)
+}
+
+func TestEvaluateThresholdClearSecondsZeroLessThanOpChecksLatestSampleOnly(t *testing.T) {
+	r := store.AlertRule{Op: "<", Threshold: 1, ClearThreshold: 0, ForSeconds: 300, ClearSeconds: 0}
+	s := series(now-2, 60, 6, 0) // array stopped throughout
+	s[len(s)-1].Val = 1          // array just started again, this instant
+	v, val := EvaluateThreshold(r, s, s[0].TS, now)
+	require.Equal(t, VerdictClearing, v)
+	require.Equal(t, 1.0, val)
+}
+
+func TestEvaluateThresholdClearSecondsZeroLessThanOpHoldsWhenLatestSampleStillZero(t *testing.T) {
+	r := store.AlertRule{Op: "<", Threshold: 1, ClearThreshold: 0, ForSeconds: 300, ClearSeconds: 0}
+	s := series(now-2, 60, 6, 0)
+	s[1].Val = 1 // breaks the sustained breach inside the fire window, without touching the latest sample
+	v, _ := EvaluateThreshold(r, s, s[0].TS, now)
+	require.Equal(t, VerdictHolding, v)
+}
+
 // TestEvaluateThresholdSustainedForBoundary pins the exact tick boundary
 // at the pure-evaluator level: N-1 ticks of history (90s covered, a 100s
 // window) is Insufficient; the Nth tick (100s covered) fires. The

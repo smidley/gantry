@@ -88,13 +88,15 @@ func ValidateRule(r store.AlertRule) error {
 	if r.Type == "event" && r.EventKinds == "" {
 		return fmt.Errorf("alert rule %q: event rule needs event_kinds", r.ID)
 	}
-	// Equal thresholds with a live clear window would strand a value
-	// sitting exactly at the boundary: strict comparison (thresholds.ts'
-	// documented "on a threshold reads as the band below it") means it
-	// never breaches AND never clears, an instance that can only leave
-	// firing by the rule being disabled. clear_seconds==0 is exempted --
-	// that shape doesn't evaluate a clear window at all (see
-	// EvaluateThreshold), so there's no boundary to strand anything on.
+	// Equal thresholds with a live sustained-for clear window would strand
+	// a value sitting exactly at the boundary: strict comparison
+	// (thresholds.ts' documented "on a threshold reads as the band below
+	// it") means it never breaches AND never clears for the window's
+	// entire duration, an instance that can only leave firing by the rule
+	// being disabled. clear_seconds==0 is exempted -- that shape checks
+	// only the single latest sample on every tick (see EvaluateThreshold),
+	// never a sustained window, so an exact tie there is re-evaluated
+	// fresh next tick rather than accumulating into a permanent stall.
 	if r.Type == "threshold" && r.Threshold == r.ClearThreshold && r.ClearSeconds > 0 {
 		return fmt.Errorf("alert rule %q: threshold and clear_threshold must differ when clear_seconds > 0", r.ID)
 	}

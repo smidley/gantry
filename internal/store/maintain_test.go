@@ -30,10 +30,11 @@ func TestMaintainFlushesBeforeDownsampling(t *testing.T) {
 }
 
 // TestMaintainPrunesAlertTablesButLeavesActiveInstancesAlone pins
-// pruneAlerts' three cutoffs in one pass: resolved instances past ret.R2
-// (the same knob PruneOnce uses for samples_10m), deliveries past a
-// fixed 7 days, and silences whose until has already passed -- while an
-// active instance (resolved_at = 0) survives regardless of how old its
+// pruneAlerts' cutoffs in one pass: resolved instances past ret.R2 (the
+// same knob PruneOnce uses for samples_10m), deliveries past a fixed 7
+// days, and silences past a fixed 7 days from their own until (not from
+// the moment they expire -- see silenceRetention) -- while an active
+// instance (resolved_at = 0) survives regardless of how old its
 // started_at is, since the age filter only ever looks at resolved_at.
 func TestMaintainPrunesAlertTablesButLeavesActiveInstancesAlone(t *testing.T) {
 	s := newTestStore(t, nil)
@@ -57,9 +58,14 @@ func TestMaintainPrunesAlertTablesButLeavesActiveInstancesAlone(t *testing.T) {
 	require.NoError(t, s.RecordDelivery(Delivery{InstanceID: oldResolvedID, TS: nowUnix - 7*24*3600 - 100, Channel: "notify", Phase: "fired", OK: true}))
 	require.NoError(t, s.RecordDelivery(Delivery{InstanceID: recentResolvedID, TS: nowUnix - 100, Channel: "notify", Phase: "fired", OK: true}))
 
-	expiredSilenceID, err := s.AddSilence(Silence{RuleID: "r1", Until: nowUnix - 100})
+	// Mirrors the instance/delivery pairing above: one silence expired
+	// long enough ago to be pruned, one expired recently enough to still
+	// be kept as "why didn't I get paged" evidence, one not expired yet.
+	longExpiredSilenceID, err := s.AddSilence(Silence{RuleID: "r1", Until: nowUnix - int64(silenceRetention.Seconds()) - 100})
 	require.NoError(t, err)
-	activeSilenceID, err := s.AddSilence(Silence{RuleID: "r2", Until: nowUnix + 100})
+	recentlyExpiredSilenceID, err := s.AddSilence(Silence{RuleID: "r2", Until: nowUnix - 100})
+	require.NoError(t, err)
+	activeSilenceID, err := s.AddSilence(Silence{RuleID: "r3", Until: nowUnix + 100})
 	require.NoError(t, err)
 
 	require.NoError(t, s.Maintain(context.Background(), now, ret))
@@ -74,8 +80,34 @@ func TestMaintainPrunesAlertTablesButLeavesActiveInstancesAlone(t *testing.T) {
 
 	remainingSilences, err := allSilenceIDs(s)
 	require.NoError(t, err)
-	require.ElementsMatch(t, []int64{activeSilenceID}, remainingSilences)
-	require.NotContains(t, remainingSilences, expiredSilenceID)
+	require.ElementsMatch(t, []int64{recentlyExpiredSilenceID, activeSilenceID}, remainingSilences,
+		"a silence expired under 7 days ago is kept as paging evidence; only one expired over 7 days ago is pruned")
+	require.NotContains(t, remainingSilences, longExpiredSilenceID)
+}
+
+// TestMaintainKeepsRecentlyExpiredSilenceButSilencesExcludesItFromReads
+// is the read-side half of the same guarantee: pruneAlerts keeps an
+// expired silence around for silenceRetention as "why didn't I get
+// paged" evidence, but Silences() must still never hand it back to a
+// live caller (Task 4's engine, the Alerts view's active-silences list)
+// just because it hasn't been physically deleted yet.
+func TestMaintainKeepsRecentlyExpiredSilenceButSilencesExcludesItFromReads(t *testing.T) {
+	s := newTestStore(t, nil)
+	now := at("12:00:00")
+	nowUnix := now.Unix()
+
+	id, err := s.AddSilence(Silence{RuleID: "r1", Until: nowUnix - 100})
+	require.NoError(t, err)
+
+	require.NoError(t, s.Maintain(context.Background(), now, DefaultRetention()))
+
+	remaining, err := allSilenceIDs(s)
+	require.NoError(t, err)
+	require.Contains(t, remaining, id, "recently expired silence must still be on disk as evidence")
+
+	got, err := s.Silences(context.Background(), nowUnix)
+	require.NoError(t, err)
+	require.Empty(t, got, "Silences() must exclude an expired silence from reads even while pruneAlerts still keeps it on disk")
 }
 
 func allAlertInstanceIDs(s *Store) ([]int64, error) {

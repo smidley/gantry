@@ -45,6 +45,13 @@ type NvidiaCollector struct {
 	procRoot string
 	lookup   func(id string) (name string, ok bool)
 
+	// SysRoot is where the host's /sys is mounted (default "/host/sys",
+	// overridden by main wiring after New -- see docker.Collector's
+	// CgroupRoot for the same pattern) -- Probe reads it to tell "no
+	// Nvidia GPU on this box at all" apart from "GPU present, nvidia-smi
+	// isn't" (see Probe's own doc).
+	SysRoot string
+
 	loggedHW sync.Once
 }
 
@@ -56,20 +63,36 @@ var _ collect.Collector = (*NvidiaCollector)(nil)
 // host-bucketed — v1 has no meaningful "host GPU process" series for
 // compute-apps (contrast the DRM path, which does bucket host clients).
 func NewNvidia(sink store.MetricSink, procRoot string, lookup func(string) (string, bool)) *NvidiaCollector {
-	return &NvidiaCollector{sink: sink, procRoot: procRoot, lookup: lookup}
+	return &NvidiaCollector{sink: sink, procRoot: procRoot, lookup: lookup, SysRoot: "/host/sys"}
 }
 
 func (c *NvidiaCollector) Name() string            { return "nvidia" }
 func (c *NvidiaCollector) Interval() time.Duration { return nvidiaTickInterval }
 
-// Probe looks for nvidia-smi on PATH. Its absence isn't an error — most
-// boxes have no Nvidia GPU — so Detail explains the opt-in toggle rather
-// than describing a mount to fix.
+// Probe looks for nvidia-smi on PATH. Absence splits into two distinct
+// cases (Scott's own report: "I don't have an nvidia GPU, so this
+// shouldn't be showing up for me" -- the SourcesBanner hint was showing
+// regardless): no Nvidia GPU detected on this box at all (hasPCIVendor
+// scans sysRoot/bus/pci/devices for vendor 0x10de) is Status.
+// NotApplicable — nothing to fix, so the banner should stay silent (see
+// its own doc) — while a genuine Nvidia GPU with no working nvidia-smi
+// integration keeps today's existing, actionable Detail unchanged.
 func (c *NvidiaCollector) Probe(context.Context) collect.Status {
 	if _, err := exec.LookPath("nvidia-smi"); err != nil {
+		if !hasPCIVendor(c.SysRoot, nvidiaVendorID) {
+			return collect.Status{Available: false, NotApplicable: true, Detail: "no NVIDIA GPU detected"}
+		}
 		return collect.Status{Available: false, Detail: "no nvidia-smi on PATH — add --runtime=nvidia and NVIDIA_VISIBLE_DEVICES=all to the container to enable"}
 	}
 	return collect.Status{Available: true}
+}
+
+// GPUMeta returns nvidiaEntity's own fixed vendor+driver -- known
+// outright (this collector only ever runs against Nvidia hardware, by
+// construction) rather than needing the sysfs vendor lookup the DRM
+// path's own per-pdev entities do (collector.go's own GPUMeta/EntityMeta).
+func (c *NvidiaCollector) GPUMeta() map[string]EntityMeta {
+	return map[string]EntityMeta{nvidiaEntity: {Vendor: "NVIDIA", Driver: "nvidia"}}
 }
 
 // Tick queries host GPU utilization/memory (hard requirement — a failure

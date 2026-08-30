@@ -83,7 +83,7 @@ func wantDefaultAlertRules() map[string]AlertRule {
 			ID: "container-exit-nonzero", Name: "Container exited nonzero", Enabled: true, Builtin: true,
 			Type: "event", Kind: "container", EntityGlob: "*",
 			EventKinds: "container.die", MinSeverity: "warning",
-			ClearSeconds: 3600, Severity: "warning",
+			ForSeconds: 120, ClearSeconds: 3600, Severity: "warning",
 		},
 		"disk-errors": {
 			ID: "disk-errors", Name: "Disk errors", Enabled: true, Builtin: true,
@@ -117,7 +117,7 @@ func byID(rules []AlertRule) map[string]AlertRule {
 // field drifted from the plan's table.
 func TestDefaultAlertRulesExactValues(t *testing.T) {
 	want := wantDefaultAlertRules()
-	got := byID(DefaultAlertRules())
+	got := byID(DefaultAlertRules(false))
 
 	require.Len(t, got, len(want), "must be exactly the twelve defaults, no more, no fewer")
 	for id, w := range want {
@@ -131,7 +131,7 @@ func TestDefaultAlertRulesExactValues(t *testing.T) {
 // collision silently shrinking the set (byID would otherwise mask a
 // duplicate by just overwriting the map entry).
 func TestDefaultAlertRulesHasTwelveUniqueIDs(t *testing.T) {
-	rules := DefaultAlertRules()
+	rules := DefaultAlertRules(false)
 	require.Len(t, rules, 12)
 	seen := make(map[string]bool, len(rules))
 	for _, r := range rules {
@@ -145,7 +145,7 @@ func TestDefaultAlertRulesHasTwelveUniqueIDs(t *testing.T) {
 // SeedAlertRules call.
 func TestSeedAlertRulesInsertsAllDefaultsOnFreshDB(t *testing.T) {
 	s := newTestStore(t, nil)
-	require.NoError(t, s.SeedAlertRules(DefaultAlertRules()))
+	require.NoError(t, s.SeedAlertRules(DefaultAlertRules(false)))
 
 	got, err := s.AlertRules(context.Background())
 	require.NoError(t, err)
@@ -161,8 +161,8 @@ func TestSeedAlertRulesInsertsAllDefaultsOnFreshDB(t *testing.T) {
 // Task 5's own stated test.
 func TestSeedAlertRulesIsIdempotent(t *testing.T) {
 	s := newTestStore(t, nil)
-	require.NoError(t, s.SeedAlertRules(DefaultAlertRules()))
-	require.NoError(t, s.SeedAlertRules(DefaultAlertRules()))
+	require.NoError(t, s.SeedAlertRules(DefaultAlertRules(false)))
+	require.NoError(t, s.SeedAlertRules(DefaultAlertRules(false)))
 
 	got, err := s.AlertRules(context.Background())
 	require.NoError(t, err)
@@ -175,7 +175,7 @@ func TestSeedAlertRulesIsIdempotent(t *testing.T) {
 // the user left it (edited, disabled, or both).
 func TestSeedAlertRulesNeverOverwritesAnEditedOrDisabledBuiltin(t *testing.T) {
 	s := newTestStore(t, nil)
-	require.NoError(t, s.SeedAlertRules(DefaultAlertRules()))
+	require.NoError(t, s.SeedAlertRules(DefaultAlertRules(false)))
 
 	rules, err := s.AlertRules(context.Background())
 	require.NoError(t, err)
@@ -184,7 +184,7 @@ func TestSeedAlertRulesNeverOverwritesAnEditedOrDisabledBuiltin(t *testing.T) {
 	edited.Threshold = 999
 	require.NoError(t, s.UpsertAlertRule(edited))
 
-	require.NoError(t, s.SeedAlertRules(DefaultAlertRules()))
+	require.NoError(t, s.SeedAlertRules(DefaultAlertRules(false)))
 
 	got, err := s.AlertRules(context.Background())
 	require.NoError(t, err)
@@ -200,7 +200,7 @@ func TestSeedAlertRulesNeverOverwritesAnEditedOrDisabledBuiltin(t *testing.T) {
 // -- while an already-seeded, already-edited row is left untouched.
 func TestSeedAlertRulesInsertsANewlyAddedDefaultOnNextBoot(t *testing.T) {
 	s := newTestStore(t, nil)
-	all := DefaultAlertRules()
+	all := DefaultAlertRules(false)
 	upgradeIntroduced := all[len(all)-1] // "parity-errors": absent from the "old" install below
 	oldInstall := all[:len(all)-1]
 
@@ -225,4 +225,34 @@ func TestSeedAlertRulesInsertsANewlyAddedDefaultOnNextBoot(t *testing.T) {
 	require.Equal(t, upgradeIntroduced.ClearSeconds, newRow.ClearSeconds)
 	require.Equal(t, upgradeIntroduced.Severity, newRow.Severity)
 	require.Equal(t, 999.0, byID(got)["host-cpu-high"].Threshold, "an already-seeded edited rule must survive the same boot untouched")
+}
+
+// TestDefaultAlertRulesFastCompressesThresholdWindowsOnly pins Task 9's
+// fake-mode contract: fast=true rewrites every THRESHOLD rule's
+// for_seconds/clear_seconds to 60/60, leaves every other field --
+// including an event rule's own ClearSeconds timeout -- byte-identical
+// to fast=false, so the demo fires against the exact same numbers
+// thresholds.ts's bands show, just sustained for less real time.
+func TestDefaultAlertRulesFastCompressesThresholdWindowsOnly(t *testing.T) {
+	slow := byID(DefaultAlertRules(false))
+	fast := byID(DefaultAlertRules(true))
+	require.Len(t, fast, len(slow))
+
+	for id, s := range slow {
+		f, ok := fast[id]
+		require.True(t, ok, "fast mode must seed the same rule set, missing %q", id)
+
+		if s.Type == "threshold" {
+			require.Equal(t, int64(60), f.ForSeconds, "rule %q: fast mode must compress for_seconds to 60", id)
+			require.Equal(t, int64(60), f.ClearSeconds, "rule %q: fast mode must compress clear_seconds to 60", id)
+			// Everything else about a threshold rule -- the numbers that
+			// decide WHAT breaches, not how long it must sustain -- is
+			// untouched: zero out just the two compressed fields and the
+			// rest must compare equal.
+			f.ForSeconds, f.ClearSeconds = s.ForSeconds, s.ClearSeconds
+			require.Equal(t, s, f, "rule %q: fast mode must not change anything but the two window fields", id)
+		} else {
+			require.Equal(t, s, f, "rule %q: fast mode must leave event rules completely untouched (their ClearSeconds is a timeout, not a sustained-for window)", id)
+		}
+	}
 }

@@ -18,9 +18,11 @@ import (
 
 	"github.com/smidley/gantry/internal/alert"
 	"github.com/smidley/gantry/internal/collect/docker"
+	"github.com/smidley/gantry/internal/collect/gpu"
 	"github.com/smidley/gantry/internal/collect/host"
 	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/config"
+	"github.com/smidley/gantry/internal/fake"
 	"github.com/smidley/gantry/internal/server"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
@@ -192,6 +194,41 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	require.NoError(t, json.NewDecoder(settingsResp2.Body).Decode(&settingsBody2))
 	drainAndClose(settingsResp2)
 	require.Equal(t, 72, settingsBody2.Retention.R1Hours, "PUT must persist through the real store, visible on the very next GET")
+
+	// /api/groups smoke check: exercises the real groupsAdapter end to
+	// end, same shape as the settings check just above -- groupsAdapter
+	// talks straight to the same *store.Store fake mode already uses for
+	// everything else (there's no separate fake-mode groups store to
+	// diverge from), so this also proves groups persistence works
+	// unconditionally in fake mode, not just for real installs. GET
+	// starts empty (nothing saved yet), and a PUT's new value is visible
+	// on the very next GET.
+	type groupsWire struct {
+		Groups []server.Group `json:"groups"`
+	}
+	groupsResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/groups", port))
+	require.NoError(t, err)
+	var groupsBody groupsWire
+	require.NoError(t, json.NewDecoder(groupsResp.Body).Decode(&groupsBody))
+	drainAndClose(groupsResp)
+	require.Equal(t, http.StatusOK, groupsResp.StatusCode)
+	require.Empty(t, groupsBody.Groups, "nothing saved yet")
+
+	groupsPutReq, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%d/api/groups", port),
+		strings.NewReader(`{"groups":[{"name":"media","members":["jellyfin","sonarr"]}]}`))
+	require.NoError(t, err)
+	groupsPutResp, err := http.DefaultClient.Do(groupsPutReq)
+	require.NoError(t, err)
+	drainAndClose(groupsPutResp)
+	require.Equal(t, http.StatusOK, groupsPutResp.StatusCode)
+
+	groupsResp2, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/groups", port))
+	require.NoError(t, err)
+	var groupsBody2 groupsWire
+	require.NoError(t, json.NewDecoder(groupsResp2.Body).Decode(&groupsBody2))
+	drainAndClose(groupsResp2)
+	require.Equal(t, []server.Group{{Name: "media", Members: []string{"jellyfin", "sonarr"}}}, groupsBody2.Groups,
+		"PUT must persist through the real store, visible on the very next GET")
 
 	// /api/images smoke check: exercises the real fake.Generator-backed
 	// Images/RemoveImages/PruneImages wiring end to end (fake mode has no
@@ -489,9 +526,11 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
@@ -506,11 +545,12 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	require.Equal(t, 0.0, snap.Unraid["array"]["parity.progress_pct"])
 	require.Len(t, snap.Unraid, 2)
 
-	// jellyfin is neither running (dc never ticked) nor known by name
-	// (dc's registry has never seen it) -- its ancient (year-1970) sample
-	// must not resurrect it into the frame. This is the buildSnapshot-level
-	// half of the stopped-container filter pin; containerFrameEntities'
-	// own tests (below) exercise the freshness/lookup rule directly.
+	// jellyfin is unknown to dc's registry (never ticked, and no fakeMetas
+	// wired here) -- its ancient (year-1970) sample must not resurrect it
+	// into the frame just because a sample happens to exist. See
+	// TestBuildSnapshotIncludesStoppedContainerWithEmptyMetrics below for
+	// the flip side: a container the registry DOES know about, but isn't
+	// running, must still appear.
 	_, stillPresent := snap.Containers["jellyfin"]
 	require.False(t, stillPresent, "a container dc doesn't know about must not appear in the frame")
 
@@ -540,12 +580,14 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 	fakeMetas := func() []docker.Meta {
 		return []docker.Meta{{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
 
 	require.Empty(t, dc.Running(), "dc's own registry never saw this container -- the fix must not depend on it")
 	c, ok := snap.Containers["jellyfin"]
@@ -571,6 +613,8 @@ func TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO(t *testing.T
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 	created := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
 	fakeMetas := func() []docker.Meta {
@@ -586,7 +630,7 @@ func TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO(t *testing.T
 		}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["jellyfin"]
 	require.True(t, ok)
@@ -611,21 +655,24 @@ func TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage(t *testing.T) {
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 	fakeMetas := func() []docker.Meta {
 		return []docker.Meta{{Name: "jellyfin", State: "running"}} // Created left at its zero value
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
 
 	require.Equal(t, int64(0), snap.Containers["jellyfin"].Created)
 }
 
 // TestBuildSnapshotDropsStaleSampleFromRunningContainer pins the
 // per-sample freshness gate a running container's metrics still need:
-// containerFrameEntities/include only decide whether the ENTITY belongs
-// in the frame, so a still-running container's own individual samples
-// were previously included unconditionally, no matter how old. That let
+// buildSnapshot's own entity-membership seeding only decides whether the
+// ENTITY belongs in the frame, so a still-running container's own
+// individual samples were previously included unconditionally, no
+// matter how old. That let
 // a metric that stops being emitted (e.g. `docker update --memory 0`
 // clearing mem.limit_bytes) serve its last recorded value as "current"
 // forever. A sample this stale must be dropped even though its
@@ -642,12 +689,14 @@ func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 	fakeMetas := func() []docker.Meta {
 		return []docker.Meta{{Name: "db", State: "running"}} // running unconditionally, per buildSnapshot's own entity-level contract
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -656,12 +705,104 @@ func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
 	require.Equal(t, 5e8, c.Metrics["mem.bytes"], "a fresh sibling metric on the same entity must still come through")
 }
 
+// TestBuildSnapshotIncludesStoppedContainerWithEmptyMetrics pins the
+// stopped-container fix: a container the registry knows about but that
+// isn't running (fakeMetas stands in for dc.All() here, same convention
+// as the fake-Metas test above) must still appear in the frame with its
+// real state/identity, and with no metrics leaking in from before it
+// stopped -- the store has no sample for it at all in this test, so its
+// Metrics map coming back empty also proves buildSnapshot doesn't
+// fabricate one.
+func TestBuildSnapshotIncludesStoppedContainerWithEmptyMetrics(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "gitea", State: "exited", Health: "", Image: "demo/gitea:latest"}}
+	}
+
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+
+	c, ok := snap.Containers["gitea"]
+	require.True(t, ok, "a stopped-but-known container must still appear in the frame")
+	require.Equal(t, "exited", c.State)
+	require.Equal(t, "demo/gitea:latest", c.Image)
+	require.Empty(t, c.Metrics, "no live samples were recorded for it -- Metrics must not be fabricated")
+}
+
+// TestBuildSnapshotPassesThroughComposeProject pins the compare view's own
+// Groups-chip data source: a Meta's ComposeProject (label passthrough,
+// see registry_test.go's TestMetaFromInspectExtractsComposeProjectLabel)
+// must survive into ContainerDTO unchanged, straight alongside Icon --
+// same fakeMetas convention as TestBuildSnapshotIncludesFakeMetasWhenWired
+// above -- and a Meta with no compose project must come through as "",
+// not an absent/zero-value surprise.
+func TestBuildSnapshotPassesThroughComposeProject(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{
+			{Name: "gridmind-api", State: "running", Health: "healthy", Image: "demo/gridmind-api:latest", ComposeProject: "gridmind-cloud"},
+			{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}, // no compose project
+		}
+	}
+
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+
+	require.Equal(t, "gridmind-cloud", snap.Containers["gridmind-api"].ComposeProject)
+	require.Equal(t, "", snap.Containers["jellyfin"].ComposeProject)
+}
+
+// TestBuildSnapshotPassesThroughCpusetAndExitCode pins Container Detail's
+// two Go passthroughs (the anomaly banner's exit code, the Limits card's
+// cpuset pin) exactly the same "straight through from Meta, no math"
+// shape ComposeProject's own test above already pins -- an unpinned/
+// still-running container must read back empty/zero, not some stale or
+// invented value.
+func TestBuildSnapshotPassesThroughCpusetAndExitCode(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
+	sources := func() map[string]string { return map[string]string{} }
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{
+			{Name: "minecraft", State: "running", Health: "healthy", Image: "demo/minecraft:latest", Cpuset: "0-1"},
+			{Name: "vaultwarden", State: "exited", Image: "demo/vaultwarden:latest", ExitCode: 137},
+			{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}, // no pin, never exited
+		}
+	}
+
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+
+	require.Equal(t, "0-1", snap.Containers["minecraft"].Cpuset)
+	require.Equal(t, 0, snap.Containers["minecraft"].ExitCode)
+	require.Equal(t, 137, snap.Containers["vaultwarden"].ExitCode)
+	require.Equal(t, "", snap.Containers["jellyfin"].Cpuset)
+	require.Equal(t, 0, snap.Containers["jellyfin"].ExitCode)
+}
+
 // TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary pins
 // the per-sample freshness gate's own boundary (main.go: "nowUnix-
 // sample.TS >= containerFrameMaxAge"): a sample exactly containerFrameMaxAge
 // seconds old must be dropped, not just one older than that -- >=, not >.
-// containerFrameEntities' own boundary (the entity-level cutoff) already
-// has this exact pin; this is the per-sample gate's turn.
 func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
 	require.NoError(t, err)
@@ -673,12 +814,14 @@ func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testin
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 	fakeMetas := func() []docker.Meta {
 		return []docker.Meta{{Name: "db", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -703,12 +846,14 @@ func TestBuildSnapshotDropsStaleContainerGPUBusyPct(t *testing.T) {
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 	fakeMetas := func() []docker.Meta {
 		return []docker.Meta{{Name: "plex", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["plex"]
 	require.True(t, ok)
@@ -748,12 +893,14 @@ rotational="1"
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, unraidDir, "/proc")
 	require.NoError(t, ur.Tick(context.Background(), time.Unix(1000, 0)))
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 	fakeDiskMeta := func() map[string]unraid.DiskMeta {
 		return map[string]unraid.DiskMeta{"flash": {Device: "sdi", Kind: "usb"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, fakeDiskMeta, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, fakeDiskMeta, nil)()
 
 	require.Equal(t, server.DiskMetaDTO{Device: "sdc", Kind: "hdd"}, snap.DiskMeta["disk1"], "the real unraid collector's own DiskMeta must survive into the DTO")
 	require.Equal(t, server.DiskMetaDTO{Device: "sdi", Kind: "usb"}, snap.DiskMeta["flash"], "fake mode's own DiskMeta overlay must land alongside it, not replace it")
@@ -776,7 +923,7 @@ func TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced(t *t
 	}))
 	if _, err := st.UpsertAlertInstance(store.AlertInstance{
 		RuleID: "host-cpu-high", Kind: "host", State: "firing", Severity: "warning",
-		Value: 91, Threshold: 85, StartedAt: 900, FiredAt: 1000,
+		Value: 91, Threshold: 85, Summary: "host is at 91.0% (over 85.0% for 0s)", StartedAt: 900, FiredAt: 1000,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -792,15 +939,18 @@ func TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced(t *t
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)()
 
 	require.Len(t, snap.Alerts.Firing, 1, "the pending instance must be excluded from the frame")
 	f := snap.Alerts.Firing[0]
 	require.Equal(t, "host-cpu-high", f.RuleID)
 	require.Equal(t, "Host CPU high", f.RuleName, "the frame must join the rule's Name, not just carry rule_id")
 	require.Equal(t, 91.0, f.Value)
+	require.Equal(t, "host is at 91.0% (over 85.0% for 0s)", f.Summary, "the instance's own Summary must carry through -- the Alerts view's event-alert detail line reads this")
 	require.True(t, f.Silenced, "the rule-wide silence (entity \"\") must cover this instance")
 	require.Equal(t, 1, snap.Alerts.FiringCount)
 	require.Equal(t, 0, snap.Alerts.Truncated)
@@ -830,9 +980,11 @@ func TestBuildSnapshotAlertsBlockCapsAtTwentyAndReportsTruncated(t *testing.T) {
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)()
 
 	require.Len(t, snap.Alerts.Firing, server.AlertsFrameCap)
 	require.Equal(t, 25, snap.Alerts.FiringCount)
@@ -850,9 +1002,11 @@ func TestBuildSnapshotAlertsBlockEmptyChannelsWhenNoDispatcher(t *testing.T) {
 
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)()
 
 	require.Empty(t, snap.Alerts.Channels)
 	require.Empty(t, snap.Alerts.Firing)
@@ -955,8 +1109,7 @@ func fakeMeta(name string) docker.Meta { return docker.Meta{Name: name} }
 
 // TestContainerStorageResolvesMountsAndDeviceIO pins containerStorage's
 // full happy path: a hand-built lookupMeta/poolSlots pair (no real
-// docker.Collector registry or daemon needed, the same reason
-// containerFrameEntities takes lookupByName as a parameter) plus a bare
+// docker.Collector registry or daemon needed) plus a bare
 // *store.Live carrying this container's live:io.* samples -- proving the
 // mount->storage resolution and the per-device rate assembly both land
 // in the DTO correctly.
@@ -974,20 +1127,131 @@ func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
 		}, true
 	}
 	poolSlots := func() []string { return []string{"cache"} }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	noSharePlacement := func() map[string]unraid.SharePlacement { return nil }
 
 	live := store.NewLive(8)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.read_bps"}, 1000, 123.5)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.write_bps"}, 1000, 45)
 	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "cpu.pct"}, 1000, 4.2) // must not leak into devices
 
-	dto, ok := containerStorage(lookupMeta, poolSlots, live, "jellyfin", 1000)
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, noSharePlacement, nil, nil, "/unused", live, "jellyfin", 1000)
 	require.True(t, ok)
 
 	require.Equal(t, []server.MountDTO{
 		{Source: "/mnt/user/appdata/jellyfin", Destination: "/config", RW: true, Storage: server.StorageRefDTO{Kind: "share", Name: "appdata"}},
 		{Source: "/mnt/cache/transcode", Destination: "/tmp", RW: true, Storage: server.StorageRefDTO{Kind: "pool", Name: "cache"}},
 	}, dto.Mounts)
-	require.Equal(t, []server.DeviceIODTO{{Device: "sda", ReadBps: 123.5, WriteBps: 45}}, dto.Devices)
+	require.Equal(t, []server.DeviceIODTO{{Device: "sda", Label: "sda", ReadBps: 123.5, WriteBps: 45}}, dto.Devices)
+}
+
+// TestContainerStorageJoinsSharePlacementRealAndFakeOverlay pins the new
+// share->cache-pool join: a share sharePlacement (the real collector's
+// own SharePlacement()) knows about gets it straight through, a share
+// only fakeSharePlacement covers still resolves (fake-data mode has no
+// real shares.ini at all), and a mount that isn't kind=share never gets
+// a Placement even if the exact same name happened to appear in the map
+// (Placement is share-only, by construction, not merely by absence).
+func TestContainerStorageJoinsSharePlacementRealAndFakeOverlay(t *testing.T) {
+	lookupMeta := func(name string) (docker.Meta, bool) {
+		return docker.Meta{
+			Name: name,
+			Mounts: []docker.MountInfo{
+				{Source: "/mnt/user/appdata/" + name, Destination: "/config", RW: true},
+				{Source: "/mnt/user/downloads", Destination: "/downloads", RW: true},
+				{Source: "/mnt/cache/appdata", Destination: "/tmp", RW: true}, // pool, not share -- name collides with the share on purpose
+			},
+		}, true
+	}
+	poolSlots := func() []string { return []string{"cache"} }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	sharePlacement := func() map[string]unraid.SharePlacement {
+		return map[string]unraid.SharePlacement{"appdata": {Mode: "yes", Pool: "cache"}}
+	}
+	fakeSharePlacement := func() map[string]unraid.SharePlacement {
+		return map[string]unraid.SharePlacement{"downloads": {Mode: "only", Pool: "rocket_pool"}}
+	}
+
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, sharePlacement, fakeSharePlacement, nil, "/unused", store.NewLive(8), "jellyfin", 1000)
+	require.True(t, ok)
+
+	byDest := map[string]server.MountDTO{}
+	for _, m := range dto.Mounts {
+		byDest[m.Destination] = m
+	}
+	require.Equal(t, &server.SharePlacementDTO{Mode: "yes", Pool: "cache"}, byDest["/config"].Storage.Placement)
+	require.Equal(t, &server.SharePlacementDTO{Mode: "only", Pool: "rocket_pool"}, byDest["/downloads"].Storage.Placement)
+	require.Nil(t, byDest["/tmp"].Storage.Placement, "kind=pool never gets a share Placement, even sharing a name with a real share")
+}
+
+// TestContainerStorageResolvesDeviceLabelsViaDiskMetaJoinAndFakeOverlay
+// pins the label-resolution wiring containerStorage adds on top of
+// deviceIOFromSamples' bare device rows: a device diskMeta places in a
+// known slot picks up that slot's name (the real-collector path, sysRoot
+// unused for it), a device fakeDiskMeta adds joins the SAME way (proving
+// the real+fake merge actually happens before the join, not after), and
+// a device fakeDeviceLabels names directly wins outright even though
+// diskMeta/sysRoot would have resolved (or failed to resolve) it some
+// other way -- the one override this collector's own DiskMeta join can
+// never produce on its own (see fake.Generator.DeviceLabels' own doc).
+func TestContainerStorageResolvesDeviceLabelsViaDiskMetaJoinAndFakeOverlay(t *testing.T) {
+	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "jellyfin"}, true }
+	poolSlots := func() []string { return nil }
+	diskMeta := func() map[string]unraid.DiskMeta {
+		return map[string]unraid.DiskMeta{"disk1": {Device: "sdc", Kind: "hdd"}}
+	}
+	fakeDiskMeta := func() map[string]unraid.DiskMeta {
+		return map[string]unraid.DiskMeta{"rocket_pool": {Device: "nvme0n1", Kind: "nvme"}}
+	}
+	fakeDeviceLabels := func() map[string]unraid.DeviceLabel {
+		return map[string]unraid.DeviceLabel{"loop2": {Label: "docker.img"}}
+	}
+
+	live := store.NewLive(8)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sdc.read_bps"}, 1000, 1)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.nvme0n1.read_bps"}, 1000, 2)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.loop2.read_bps"}, 1000, 3)
+
+	noSharePlacement := func() map[string]unraid.SharePlacement { return nil }
+	dto, ok := containerStorage(lookupMeta, poolSlots, diskMeta, fakeDiskMeta, noSharePlacement, nil, fakeDeviceLabels, "/unused", live, "jellyfin", 1000)
+	require.True(t, ok)
+
+	byDevice := map[string]server.DeviceIODTO{}
+	for _, d := range dto.Devices {
+		byDevice[d.Device] = d
+	}
+	require.Equal(t, "disk1", byDevice["sdc"].Label, "the real collector's own diskMeta must still join")
+	require.Equal(t, "hdd", byDevice["sdc"].Kind)
+	require.Equal(t, "rocket_pool", byDevice["nvme0n1"].Label, "fakeDiskMeta must merge into the SAME join, not bypass it")
+	require.Equal(t, "nvme", byDevice["nvme0n1"].Kind)
+	require.Equal(t, "docker.img", byDevice["loop2"].Label, "fakeDeviceLabels overrides outright for a device the join can't cover")
+	require.Equal(t, "", byDevice["loop2"].Kind)
+}
+
+// TestContainerStorageThreadsSysRootIntoDeviceLabelResolution pins that
+// containerStorage's sysRoot parameter is the one ResolveDeviceLabel's
+// loop branch actually reads -- a real (non-fake) loop device resolves
+// its friendly label only when sysRoot points at the fixture tree
+// carrying its backing_file.
+func TestContainerStorageThreadsSysRootIntoDeviceLabelResolution(t *testing.T) {
+	sysRoot := t.TempDir()
+	// Mirrors a real /sys/block/loop0/loop/backing_file -- see unraid.
+	// ResolveDeviceLabel's own doc for the exact path this reads.
+	loopDir := filepath.Join(sysRoot, "block", "loop0", "loop")
+	require.NoError(t, os.MkdirAll(loopDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(loopDir, "backing_file"), []byte("/mnt/user/system/docker/docker.img\n"), 0o644))
+
+	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "jellyfin"}, true }
+	poolSlots := func() []string { return nil }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	noSharePlacement := func() map[string]unraid.SharePlacement { return nil }
+
+	live := store.NewLive(8)
+	live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.loop0.read_bps"}, 1000, 1)
+
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, noSharePlacement, nil, nil, sysRoot, live, "jellyfin", 1000)
+	require.True(t, ok)
+	require.Equal(t, "docker.img", dto.Devices[0].Label)
 }
 
 // TestContainerStorageUnknownContainerReturnsFalse pins the not-found
@@ -996,8 +1260,10 @@ func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
 func TestContainerStorageUnknownContainerReturnsFalse(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
 	poolSlots := func() []string { return nil }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	noSharePlacement := func() map[string]unraid.SharePlacement { return nil }
 
-	_, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "ghost", 0)
+	_, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, noSharePlacement, nil, nil, "/unused", store.NewLive(8), "ghost", 0)
 	require.False(t, ok)
 }
 
@@ -1008,8 +1274,10 @@ func TestContainerStorageUnknownContainerReturnsFalse(t *testing.T) {
 func TestContainerStorageEmptyMountsAndDevicesAreNonNilSlices(t *testing.T) {
 	lookupMeta := func(string) (docker.Meta, bool) { return docker.Meta{Name: "bare"}, true }
 	poolSlots := func() []string { return nil }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	noSharePlacement := func() map[string]unraid.SharePlacement { return nil }
 
-	dto, ok := containerStorage(lookupMeta, poolSlots, store.NewLive(8), "bare", 0)
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, noSharePlacement, nil, nil, "/unused", store.NewLive(8), "bare", 0)
 	require.True(t, ok)
 	require.NotNil(t, dto.Mounts)
 	require.Empty(t, dto.Mounts)
@@ -1080,7 +1348,7 @@ func TestBuildContainerStorageUnknownReturnsFalse(t *testing.T) {
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 
-	_, ok := buildContainerStorage(dc, ur, st, nil)("ghost")
+	_, ok := buildContainerStorage(dc, ur, st, nil, nil, nil, nil, "/unused")("ghost")
 	require.False(t, ok)
 }
 
@@ -1103,7 +1371,7 @@ func TestBuildContainerStorageMergesFakeMetas(t *testing.T) {
 		}}
 	}
 
-	dto, ok := buildContainerStorage(dc, ur, st, fakeMetas)("frigate")
+	dto, ok := buildContainerStorage(dc, ur, st, fakeMetas, nil, nil, nil, "/unused")("frigate")
 
 	require.True(t, ok, "a fake-mode container must resolve via fakeMetas, not 404")
 	require.Equal(t, []server.MountDTO{
@@ -1121,67 +1389,8 @@ func TestBuildContainerStorageNilFakeMetasUnaffected(t *testing.T) {
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 
-	_, ok := buildContainerStorage(dc, ur, st, nil)("ghost")
+	_, ok := buildContainerStorage(dc, ur, st, nil, nil, nil, nil, "/unused")("ghost")
 	require.False(t, ok)
-}
-
-// TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup pins the OR's
-// first clause: a name in `running` is included unconditionally — the
-// lookup function must not even be consulted for it (a call for this name
-// fails the test immediately, proving the OR short-circuits).
-func TestContainerFrameEntitiesIncludesRunningRegardlessOfLookup(t *testing.T) {
-	running := map[string]struct{}{"jellyfin": {}}
-	lookup := func(name string) (docker.Meta, bool) {
-		t.Fatalf("lookupByName must not be consulted for a running container, got %q", name)
-		return docker.Meta{}, false
-	}
-
-	got := containerFrameEntities(running, map[string]int64{}, 60, lookup)
-	require.Contains(t, got, "jellyfin")
-}
-
-// TestContainerFrameEntitiesIncludesFreshKnownNonRunning pins the OR's
-// second clause: a non-running name with a live sample younger than
-// maxAge AND a known lookup result is included.
-func TestContainerFrameEntitiesIncludesFreshKnownNonRunning(t *testing.T) {
-	lookup := func(name string) (docker.Meta, bool) { return fakeMeta(name), name == "radarr" }
-
-	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 59}, 60, lookup)
-	require.Contains(t, got, "radarr")
-}
-
-// TestContainerFrameEntitiesExcludesStaleEvenWhenKnown pins the
-// "stopped-and-gone" cutoff itself: once a non-running container's
-// freshest sample is 60s old or older, it drops out of the frame even
-// though lookupByName still recognizes the name (registry cleanup and
-// the frame's own 60s cutoff are two different clocks).
-func TestContainerFrameEntitiesExcludesStaleEvenWhenKnown(t *testing.T) {
-	lookup := func(name string) (docker.Meta, bool) { return fakeMeta(name), true }
-
-	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 60}, 60, lookup)
-	require.NotContains(t, got, "radarr", "age >= maxAge must exclude, not just age > maxAge")
-}
-
-// TestContainerFrameEntitiesExcludesFreshButUnknown pins the other half:
-// a stopped-AND-REMOVED container's lingering fresh sample must not
-// resurrect it once dc no longer knows the name at all.
-func TestContainerFrameEntitiesExcludesFreshButUnknown(t *testing.T) {
-	lookup := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
-
-	got := containerFrameEntities(map[string]struct{}{}, map[string]int64{"radarr": 0}, 60, lookup)
-	require.NotContains(t, got, "radarr", "a name the registry no longer knows must drop immediately")
-}
-
-// TestContainerFrameEntitiesRunningWinsOverStaleSample confirms a name
-// present in both `running` and `sampleAge` (the common case: a running
-// container that also has metric samples) is included via the running
-// clause and isn't accidentally excluded by a stale sampleAge entry.
-func TestContainerFrameEntitiesRunningWinsOverStaleSample(t *testing.T) {
-	running := map[string]struct{}{"jellyfin": {}}
-	lookup := func(string) (docker.Meta, bool) { return docker.Meta{}, false }
-
-	got := containerFrameEntities(running, map[string]int64{"jellyfin": 99999}, 60, lookup)
-	require.Contains(t, got, "jellyfin")
 }
 
 func TestHealthcheckExitPath(t *testing.T) {
@@ -1422,7 +1631,7 @@ func TestBuildDispatcherIncludesNotifyAndConfiguredWebhookChannels(t *testing.T)
 	}))
 	cfg := config.New(st, func(string) string { return "" })
 
-	d, err := buildDispatcher(st, cfg, func(string) string { return "" }, "v-test")
+	d, err := buildDispatcher(st, cfg, func(string) string { return "" }, "v-test", false)
 	require.NoError(t, err)
 	t.Cleanup(d.Stop)
 
@@ -1451,7 +1660,7 @@ func TestAlertEngineFiresThroughDispatcherToNotifySpool(t *testing.T) {
 	}
 	cfg := config.New(st, getenv)
 
-	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test")
+	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test", false)
 	require.NoError(t, err)
 	t.Cleanup(dispatcher.Stop)
 
@@ -1619,4 +1828,297 @@ func TestRunWiresAlertsAndWebhooksAPIEndToEnd(t *testing.T) {
 	require.NoError(t, json.NewDecoder(snapResp.Body).Decode(&snap))
 	require.NotNil(t, snap.Alerts.Firing, "the frame's alerts block must always be a real (if empty) array")
 	require.Contains(t, snap.Alerts.Channels, "notify")
+}
+
+// --- Task 9: fake-mode alert demo -------------------------------------------
+
+func TestResolveNotifyDirEnvAlwaysWinsRegardlessOfMode(t *testing.T) {
+	for _, fakeMode := range []bool{false, true} {
+		dir, err := resolveNotifyDir(func(k string) string {
+			if k == "GANTRY_NOTIFY_DIR" {
+				return "/custom/notify"
+			}
+			return ""
+		}, fakeMode)
+		require.NoError(t, err)
+		require.Equal(t, "/custom/notify", dir, "fakeMode=%v", fakeMode)
+	}
+}
+
+func TestResolveNotifyDirRealModeDefaultsToNotifyMount(t *testing.T) {
+	dir, err := resolveNotifyDir(func(string) string { return "" }, false)
+	require.NoError(t, err)
+	require.Equal(t, "/notify", dir)
+}
+
+// TestResolveNotifyDirFakeModeCreatesFreshWritableTempDir pins Task 9's
+// own contract: with no override, fake mode gets a real, distinct,
+// writable directory each call -- never the unmounted "/notify" real
+// mode falls back to -- so the notify channel's own construction-time
+// probe (channel_notify.go's Health doc) finds it writable and reports
+// "ok" immediately, with no operator action.
+func TestResolveNotifyDirFakeModeCreatesFreshWritableTempDir(t *testing.T) {
+	dirA, err := resolveNotifyDir(func(string) string { return "" }, true)
+	require.NoError(t, err)
+	require.NotEqual(t, "/notify", dirA)
+	require.NoError(t, os.WriteFile(filepath.Join(dirA, "probe"), []byte("x"), 0o644))
+
+	dirB, err := resolveNotifyDir(func(string) string { return "" }, true)
+	require.NoError(t, err)
+	require.NotEqual(t, dirA, dirB, "each call with no override must get its own fresh directory")
+}
+
+func TestSeedFakeWebhookTargetsInsertsBothAndIsIdempotent(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedFakeWebhookTargets(st, 8380))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 2)
+	byID := map[string]alert.WebhookTarget{}
+	for _, tgt := range targets {
+		byID[tgt.ID] = tgt
+	}
+	require.Equal(t, "http://127.0.0.1:8380/api/healthz", byID[fakeWebhookOKTargetID].URL)
+	require.True(t, byID[fakeWebhookOKTargetID].Enabled)
+	require.Equal(t, "http://127.0.0.1:1/dead", byID[fakeWebhookFailTargetID].URL)
+	require.True(t, byID[fakeWebhookFailTargetID].Enabled)
+
+	// Idempotent: a second call (a later boot) must not duplicate either
+	// target, and must leave an in-between hand edit alone.
+	edited := byID[fakeWebhookOKTargetID]
+	edited.Enabled = false
+	require.NoError(t, saveWebhookTargets(st, []alert.WebhookTarget{edited, byID[fakeWebhookFailTargetID]}))
+	require.NoError(t, seedFakeWebhookTargets(st, 8380))
+
+	targets, err = loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 2, "re-seeding must not duplicate either target")
+	for _, tgt := range targets {
+		if tgt.ID == fakeWebhookOKTargetID {
+			require.False(t, tgt.Enabled, "re-seeding must not resurrect a hand-edited target")
+		}
+	}
+}
+
+// TestRunFakeModeSeedsFastRulesAndDemoWebhookTargets boots the real
+// server with GANTRY_FAKE_DATA=1 and no GANTRY_NOTIFY_DIR override, and
+// checks everything Task 9 promises at BOOT time (not the multi-minute
+// fire/resolve journey itself, which TestFakeModeAlertDemoFiresThenResolves
+// below proves against the engine directly, deterministically): every
+// threshold rule seeds with a 60s/60s window, both demo webhook targets
+// exist, and the notify channel already reads "ok" against its own
+// fresh temp dir with zero configuration.
+func TestRunFakeModeSeedsFastRulesAndDemoWebhookTargets(t *testing.T) {
+	port := freePort(t)
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   dbPath,
+		"GANTRY_FAKE_DATA": "1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("run did not shut down")
+		}
+	}()
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(base + "/api/healthz")
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	rulesResp, err := http.Get(base + "/api/alerts/rules")
+	require.NoError(t, err)
+	defer drainAndClose(rulesResp)
+	var rulesBody struct {
+		Rules []server.AlertRuleDTO `json:"rules"`
+	}
+	require.NoError(t, json.NewDecoder(rulesResp.Body).Decode(&rulesBody))
+	found := 0
+	for _, r := range rulesBody.Rules {
+		if r.Type != "threshold" {
+			continue
+		}
+		found++
+		require.EqualValues(t, 60, r.ForSeconds, "rule %q must seed fast in fake mode", r.ID)
+		require.EqualValues(t, 60, r.ClearSeconds, "rule %q must seed fast in fake mode", r.ID)
+	}
+	require.Equal(t, 7, found, "all seven threshold builtins must have compressed windows")
+
+	whResp, err := http.Get(base + "/api/alerts/webhooks")
+	require.NoError(t, err)
+	defer drainAndClose(whResp)
+	var whBody struct {
+		Targets []server.WebhookTargetDTO `json:"targets"`
+	}
+	require.NoError(t, json.NewDecoder(whResp.Body).Decode(&whBody))
+	ids := map[string]bool{}
+	for _, tgt := range whBody.Targets {
+		ids[tgt.ID] = true
+	}
+	require.True(t, ids[fakeWebhookOKTargetID], "the always-succeeds demo target must be seeded")
+	require.True(t, ids[fakeWebhookFailTargetID], "the always-fails demo target must be seeded")
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(base + "/api/alerts")
+		if err != nil {
+			return false
+		}
+		defer drainAndClose(resp)
+		var body struct {
+			Channels map[string]string `json:"channels"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&body) != nil {
+			return false
+		}
+		return body.Channels["notify"] == "ok"
+	}, 3*time.Second, 50*time.Millisecond, "the notify channel must read ok against fake mode's own temp-dir default, no configuration needed")
+}
+
+// TestFakeModeAlertDemoFiresThenResolves wires the real fake.Generator
+// straight into a real alert.Engine + the real buildDispatcher output --
+// the actual production pieces, not a re-implementation -- and drives
+// both through a synthetic clock advancing in the fake generator's own
+// 2s cadence, so the whole ~6-minute demo schedule (disk4's temp ramp
+// crossing disk-temp-high's fire threshold, then its cool-down crossing
+// the clear threshold) proves out in a fast, deterministic test rather
+// than a real wall-clock wait -- see internal/fake/fake.go's
+// alertDemoDiskEntity doc for the exact schedule these tick counts walk.
+func TestFakeModeAlertDemoFiresThenResolves(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(true)))
+
+	fk := fake.New(st, st, 1)
+
+	notifyDir := t.TempDir()
+	getenv := func(k string) string {
+		if k == "GANTRY_NOTIFY_DIR" {
+			return notifyDir
+		}
+		return ""
+	}
+	cfg := config.New(st, getenv)
+	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test", true)
+	require.NoError(t, err)
+	t.Cleanup(dispatcher.Stop)
+
+	fleet := func() []alert.FleetMember {
+		metas := fk.Metas()
+		out := make([]alert.FleetMember, len(metas))
+		for i, m := range metas {
+			out[i] = alert.FleetMember{Name: m.Name, State: m.State, Health: m.Health}
+		}
+		return out
+	}
+	noClass := func(string, string) string { return "" }
+
+	boot := time.Unix(1_700_000_000, 0)
+	now := boot
+	eng := alert.New(st, st.Live().MatchSince, noClass, fleet, dispatcher.Dispatch, func() time.Time { return now })
+
+	tick := func(elapsedSeconds int) {
+		now = boot.Add(time.Duration(elapsedSeconds) * time.Second)
+		fk.Tick(now)
+		require.NoError(t, eng.Tick(context.Background()))
+	}
+
+	// Ramp + hold: disk4 crosses disk-temp-high's 55°C fire threshold at
+	// ~t=64s and stays above it, satisfying the fast-mode 60s sustained-
+	// for window by ~t=124s (see alertDemoDiskEntity's own doc). 140s
+	// gives comfortable margin.
+	for s := 0; s <= 140; s += 2 {
+		tick(s)
+	}
+
+	active, err := st.ActiveAlertInstances(context.Background())
+	require.NoError(t, err)
+	var firing *store.AlertInstance
+	for i := range active {
+		if active[i].RuleID == "disk-temp-high" && active[i].Entity == "disk4" {
+			firing = &active[i]
+		}
+	}
+	require.NotNil(t, firing, "disk-temp-high must be firing on disk4 by t=140s")
+	require.Equal(t, "firing", firing.State)
+	require.Greater(t, firing.Value, 55.0)
+
+	// The frame's own alerts block (main.go's buildAlertsBlock) must
+	// also see it -- the same data the Overview headline/Alerts view
+	// read live, capped and joined with the rule name.
+	block := buildAlertsBlock(st, dispatcher)
+	sawDisk4 := false
+	for _, f := range block.Firing {
+		if f.RuleID == "disk-temp-high" && f.Entity == "disk4" {
+			sawDisk4 = true
+			require.Equal(t, "Disk temperature high", f.RuleName)
+		}
+	}
+	require.True(t, sawDisk4, "the frame's alerts block must carry the firing disk4 instance")
+
+	// At least one delivery (the "fired" notification, through the real
+	// notify-spool channel) must have landed by now.
+	require.Eventually(t, func() bool {
+		deliveries, derr := st.LastDeliveries(context.Background(), 20)
+		if derr != nil {
+			return false
+		}
+		for _, d := range deliveries {
+			if d.Channel == "notify" && d.OK {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 20*time.Millisecond, "the fired notification must reach the notify spool")
+
+	// Cool-down: disk4 crosses back below the 50°C clear threshold at
+	// ~t=310s and stays below it, satisfying the 60s clear window by
+	// ~t=370s. 420s gives comfortable margin.
+	for s := 142; s <= 420; s += 2 {
+		tick(s)
+	}
+
+	history, err := st.AlertHistory(context.Background(), 0, 0, 50)
+	require.NoError(t, err)
+	var resolved *store.AlertInstance
+	for i := range history {
+		if history[i].RuleID == "disk-temp-high" && history[i].Entity == "disk4" {
+			resolved = &history[i]
+		}
+	}
+	require.NotNil(t, resolved, "disk-temp-high on disk4 must have resolved by t=420s")
+	require.Equal(t, "resolved", resolved.State)
+	require.Equal(t, "cleared", resolved.ResolveReason)
+	require.Less(t, resolved.Value, 50.0)
+
+	activeAfter, err := st.ActiveAlertInstances(context.Background())
+	require.NoError(t, err)
+	for _, inst := range activeAfter {
+		require.False(t, inst.RuleID == "disk-temp-high" && inst.Entity == "disk4", "the resolved instance must no longer be active")
+	}
+
+	require.Eventually(t, func() bool {
+		deliveries, derr := st.LastDeliveries(context.Background(), 20)
+		if derr != nil {
+			return false
+		}
+		for _, d := range deliveries {
+			if d.Channel == "notify" && d.Phase == "resolved" && d.OK {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 20*time.Millisecond, "the resolved notification must also reach the notify spool")
 }

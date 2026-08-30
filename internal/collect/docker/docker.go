@@ -178,10 +178,14 @@ func (c *Collector) evictContainer(kind, name string) {
 // container's Meta.
 func (c *Collector) Running() []Meta { return c.reg.running() }
 
-// All returns a name-sorted snapshot of every known container's Meta,
-// running or not -- the alert engine's Fleet source (Task 4's boot
-// seeding needs to see a stopped container carrying a stale Health, not
-// just the running set Running() already serves everything else).
+// All returns a name-sorted snapshot of every container the registry
+// currently knows about, running or stopped -- main's snapshot builder
+// seeds the live frame from this instead of Running() so a stopped-but-
+// known container still appears (state/identity/meta, no stale metrics),
+// and the alert engine's Fleet source uses the same method for its boot
+// seeding, which needs to see a stopped container carrying a stale
+// Health rather than just the running set Running() already serves
+// everything else.
 func (c *Collector) All() []Meta { return c.reg.all() }
 
 // Tick refreshes inventory every 10s, then records per-container stats
@@ -225,7 +229,16 @@ func (c *Collector) refreshInventory(ctx context.Context, now time.Time) error {
 		if err != nil {
 			continue
 		}
-		metas = append(metas, metaFromInspect(resp, statuses))
+		m := metaFromInspect(resp, statuses)
+		// Cpuset: computed here (not inside metaFromInspect, a pure
+		// function of the inspect response alone) because "does this
+		// narrow the container" needs the CURRENT host core count, which
+		// only this method has (hostCoresOrNumCPU) -- see CPUSetPin's own
+		// doc for why an unrestricted cpuset must read as no pin at all.
+		if pin, ok := CPUSetPin(m.Alloc.CPUSetRaw, c.hostCoresOrNumCPU()); ok {
+			m.Cpuset = pin
+		}
+		metas = append(metas, m)
 	}
 	c.reg.applyInventory(metas, c.events, c.evictContainer)
 	c.recordMeta(metas, now)
@@ -243,11 +256,11 @@ func (c *Collector) refreshInventory(ctx context.Context, now time.Time) error {
 //
 // Deliberately restricted to State=="running": metas here includes every
 // container ContainerList(All) returns, including long-exited ones the
-// registry still remembers (see lookupByName's doc) -- recording a fresh
-// sample for one of those every 10s inventory poll would keep resetting
-// its sampleAge in buildSnapshot's stopped-container filter, which would
-// never let it age out of the live frame the way an exited container's
-// naturally-aging cgroup stats already do today.
+// registry still remembers (see lookupByName's doc) -- rewriting a fresh
+// meta.started_at sample for one of those every 10s poll would keep its
+// timestamp perpetually current even though the container itself hasn't
+// moved, which would read as an ever-climbing uptime for something that
+// isn't running at all.
 func (c *Collector) recordMeta(metas []Meta, now time.Time) {
 	ts := now.Unix()
 	for _, m := range metas {
@@ -270,6 +283,12 @@ func (c *Collector) recordMeta(metas []Meta, now time.Time) {
 // separate absence check.
 const unraidIconLabel = "net.unraid.docker.icon"
 
+// composeProjectLabel is the label docker compose sets on every container
+// it creates, naming the project (stack) it belongs to -- Meta.
+// ComposeProject mirrors unraidIconLabel's own extraction shape exactly
+// below, and inherits the same nil-Labels safety.
+const composeProjectLabel = "com.docker.compose.project"
+
 // unraidWebUILabel is Community Applications' WebUI-launch-button label.
 // Its value is a template placeholder, not a real URL -- e.g.
 // "http://[IP]:[PORT:8096]/" -- left completely unresolved here; only
@@ -282,9 +301,13 @@ const unraidWebUILabel = "net.unraid.docker.webui"
 // response plus updateStatuses, the unraid-update-status.json reader's
 // current image->status snapshot (nil when no reader is wired, or the
 // file was unreadable this poll -- see joinUpdateStatus). Everything
-// else is derived purely from resp itself: labels (Icon, WebUIURL,
-// ChangelogURL/ProjectURL via changelog.go), Mounts (mountsFromInspect),
-// and NetworkSettings (Networks/Ports via netinfo.go).
+// else is derived purely from resp itself: labels (Icon, ComposeProject,
+// WebUIURL, ChangelogURL/ProjectURL via changelog.go), Mounts
+// (mountsFromInspect), and NetworkSettings (Networks/Ports via
+// netinfo.go). Cpuset is the one Meta field NOT set here even though its
+// raw input (Alloc.CPUSetRaw) is: it needs the live host core count to
+// decide whether the cpuset actually narrows the container, which only
+// refreshInventory's caller has -- see Cpuset's own doc on Meta.
 func metaFromInspect(resp container.InspectResponse, updateStatuses map[string]string) Meta {
 	m := Meta{
 		ID:           resp.ID,
@@ -297,6 +320,7 @@ func metaFromInspect(resp container.InspectResponse, updateStatuses map[string]s
 	if resp.Config != nil {
 		m.Image = resp.Config.Image
 		m.Icon = resp.Config.Labels[unraidIconLabel]
+		m.ComposeProject = resp.Config.Labels[composeProjectLabel]
 		m.WebUIURL = resp.Config.Labels[unraidWebUILabel]
 		m.ChangelogURL, m.ProjectURL = changelogAndProjectURLs(resp.Config.Labels, m.Image)
 		m.UpdateStatus = joinUpdateStatus(m.Image, updateStatuses)
@@ -308,6 +332,7 @@ func metaFromInspect(resp container.InspectResponse, updateStatuses map[string]s
 	if resp.State != nil {
 		m.State = resp.State.Status
 		m.Pid = resp.State.Pid
+		m.ExitCode = resp.State.ExitCode
 		if resp.State.Health != nil {
 			m.Health = resp.State.Health.Status
 		}
@@ -353,7 +378,7 @@ func allocFromHostConfig(r container.Resources) alloc {
 		a.CPUQuotaCores, a.HasCPUQuota = float64(r.CPUQuota)/float64(period), true
 	}
 	if n, ok := parseCPUSetCount(r.CpusetCpus); ok {
-		a.CPUSetCores, a.HasCPUSet = n, true
+		a.CPUSetCores, a.CPUSetRaw, a.HasCPUSet = n, r.CpusetCpus, true
 	}
 	if r.PidsLimit != nil && *r.PidsLimit > 0 {
 		a.PidsLimit, a.HasPidsLimit = uint64(*r.PidsLimit), true

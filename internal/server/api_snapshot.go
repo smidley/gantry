@@ -23,8 +23,18 @@ type SnapshotDTO struct {
 	DiskMeta      map[string]DiskMetaDTO        `json:"disk_meta"` // slot -> device+type meta (strings can't ride Disks' float64 map)
 	Unraid        map[string]map[string]float64 `json:"unraid"`    // entity ("array"|"docker") -> metric -> value
 	GPU           map[string]map[string]float64 `json:"gpu"`
-	Sources       map[string]string             `json:"sources"` // collector name -> "ok" | unavailability detail
-	Alerts        AlertsBlockDTO                `json:"alerts"`  // Phase 4: firing alerts + channel health, so the UI is live without polling /api/alerts
+	GPUMeta       map[string]GPUMetaDTO         `json:"gpu_meta"` // pdev (or "gpu0"/"nvidia0") -> vendor+driver meta (strings can't ride GPU's float64 map)
+	Sources       map[string]string             `json:"sources"`  // collector name -> "ok" | unavailability detail
+	Alerts        AlertsBlockDTO                `json:"alerts"`   // Phase 4: firing alerts + channel health, so the UI is live without polling /api/alerts
+}
+
+// GPUMetaDTO is one GPU entity's vendor + driver -- the frontend's card
+// title source of truth (previously just the raw pdev address, e.g.
+// "0000:00:02.0" -- see gpu.EntityMeta's own doc for where this comes
+// from).
+type GPUMetaDTO struct {
+	Vendor string `json:"vendor"`
+	Driver string `json:"driver"`
 }
 
 // AlertsFrameCap bounds how many firing alerts SnapshotDTO.Alerts.Firing
@@ -54,6 +64,15 @@ type AlertsBlockDTO struct {
 // (store.AlertInstance itself only carries RuleID; the frame assembly
 // joins it against the current rule list once per tick rather than
 // making every consumer do that lookup itself).
+//
+// Summary is the instance's own stored sentence (store.AlertInstance.
+// Summary) -- for a THRESHOLD rule it restates Value/Threshold in
+// words, but for an EVENT rule it's the only meaningful description at
+// all: Metric/Value/Threshold are all zero value for an event-type
+// instance (there is no metric to compare against a threshold), so a
+// naive "value vs threshold" render reads as a meaningless "0 vs 0".
+// Consumers must render Summary instead of Value/Threshold whenever
+// Metric is "" -- see web/src/views/Alerts.svelte and overviewStatus.ts.
 type FiringAlertDTO struct {
 	RuleID    string  `json:"rule_id"`
 	RuleName  string  `json:"rule_name"`
@@ -63,6 +82,7 @@ type FiringAlertDTO struct {
 	Metric    string  `json:"metric"`
 	Value     float64 `json:"value"`
 	Threshold float64 `json:"threshold"`
+	Summary   string  `json:"summary"`
 	FiredAt   int64   `json:"fired_at"`
 	Silenced  bool    `json:"silenced"`
 }
@@ -106,11 +126,24 @@ type DiskMetaDTO struct {
 // deliberately always non-nil "[]" -- a per-request, one-container
 // response has no such multiplied cost.
 type ContainerDTO struct {
-	State        string             `json:"state"`
-	Health       string             `json:"health"`
-	Image        string             `json:"image"`
-	Icon         string             `json:"icon"`
-	Created      int64              `json:"created,omitempty"`
+	State   string `json:"state"`
+	Health  string `json:"health"`
+	Image   string `json:"image"`
+	Icon    string `json:"icon"`
+	Created int64  `json:"created,omitempty"`
+	// ComposeProject is docker.Meta's own field of the same name, straight
+	// through -- "" for a container not created via docker compose. The
+	// compare view's Groups chip row (Containers.svelte) groups by this.
+	ComposeProject string `json:"compose_project"`
+	// Cpuset is docker.Meta's own field of the same name, straight
+	// through -- "" for a container with no cpuset pin (or one that
+	// doesn't actually narrow it below the host's own core count). Backs
+	// Container Detail's Limits facts line.
+	Cpuset string `json:"cpuset"`
+	// ExitCode is docker.Meta's own field of the same name, straight
+	// through -- meaningful only once State is "exited"/"dead". Backs
+	// Container Detail's anomaly banner ("Stopped -- exit code 137 ...").
+	ExitCode     int                `json:"exit_code"`
 	UpdateStatus string             `json:"update_status,omitempty"`
 	ChangelogURL string             `json:"changelog_url,omitempty"`
 	ProjectURL   string             `json:"project_url,omitempty"`

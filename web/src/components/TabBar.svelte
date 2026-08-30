@@ -1,11 +1,12 @@
 <!--
   TabBar: mobile (<768px) bottom nav, rendered from the same routes
-  table as Sidebar. min-width 50px per item keeps all 7 within a 375px
-  viewport (7*50=350px); overflow-x:auto is a safety net, not the
-  expected path. Labels wrap at word boundaries within their own
-  ~50px column (see the .microlabel override below for why that needs
-  an explicit width) -- mobileLabel supplies a soft-hyphen break point
-  for the two labels wide enough to need one even after that.
+  table as Sidebar. min-width 46px per item keeps all 8 within a 375px
+  viewport (8*46=368px, Maintenance's addition is what pushed 7*50's own
+  exact fit past it); overflow-x:auto is a safety net, not the expected
+  path. Labels wrap at word boundaries within their own ~46px column
+  (see the .microlabel override below for why that needs an explicit
+  width) -- mobileLabel supplies a soft-hyphen break point for the
+  labels wide enough to need one even after that.
 -->
 <script>
   import { route, routes } from '../lib/router';
@@ -33,7 +34,7 @@
   }
   .tab-bar__item {
     flex: 1 1 0;
-    min-width: 50px;
+    min-width: 46px;
     min-height: 48px;
     display: flex;
     flex-direction: column;

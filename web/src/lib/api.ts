@@ -10,7 +10,60 @@ export interface ContainerDTO {
   health: string;
   image: string;
   icon: string;
+  // compose_project is docker.Meta's own ComposeProject, straight through
+  // (server's api_snapshot.go) -- "" for a container not created via
+  // docker compose. Backs the Containers view's Groups chip row and the
+  // compare view (lib/composeGroups.ts).
+  compose_project: string;
+  // cpuset is docker.Meta's own field of the same name, straight through
+  // -- "" for no cpuset pin (or one that doesn't narrow below the host's
+  // own core count). Backs Container Detail's Limits facts line
+  // (lib/containerLimits.ts).
+  cpuset: string;
+  // exit_code is docker.Meta's own field of the same name, straight
+  // through -- meaningful only once state is "exited"/"dead". Backs
+  // Container Detail's anomaly banner (lib/containerAnomaly.ts).
+  exit_code: number;
+  // created/update_status/changelog_url/project_url/webui_url/networks/
+  // ports all mirror docker.Meta's own fields of the same name straight
+  // through (server's api_snapshot.go) and all carry "omitempty" on the
+  // Go side -- absent, not just falsy, when unpopulated.
+  created?: number;
+  update_status?: string;
+  changelog_url?: string;
+  project_url?: string;
+  webui_url?: string;
+  networks?: NetworkInfoDTO[];
+  ports?: PortInfoDTO[];
   metrics: Record<string, number>;
+}
+
+// NetworkInfoDTO mirrors server.NetworkInfoDTO -- one docker network a
+// container is attached to. ip is absent for a network that assigns none
+// to this container and for the synthetic {name: "host"} entry
+// host-network containers report.
+export interface NetworkInfoDTO {
+  name: string;
+  ip?: string;
+}
+
+// PortInfoDTO mirrors server.PortInfoDTO -- one container-port binding.
+// host_ip/host_port are both absent for an exposed-but-unpublished port
+// (EXPOSE with no -p) -- itself useful information, not an absence to
+// filter out.
+export interface PortInfoDTO {
+  container_port: number;
+  proto: string;
+  host_ip?: string;
+  host_port?: number;
+}
+
+// GPUMetaDTO mirrors server.GPUMetaDTO -- one GPU entity's vendor +
+// driver, the card title's own source of truth (see GPUStrip/
+// GPUEntityCard's own doc for why the raw pdev address alone isn't).
+export interface GPUMetaDTO {
+  vendor: string;
+  driver: string;
 }
 
 export interface SnapshotDTO {
@@ -21,7 +74,266 @@ export interface SnapshotDTO {
   disks: Record<string, Record<string, number>>;
   unraid: Record<string, Record<string, number>>; // entity ("array"|"docker") -> metric -> value
   gpu: Record<string, Record<string, number>>;
+  gpu_meta: Record<string, GPUMetaDTO>; // pdev (or "gpu0"/"nvidia0") -> vendor+driver meta
   sources: Record<string, string>;
+  alerts: AlertsBlockDTO;
+}
+
+// FiringAlertDTO mirrors server.FiringAlertDTO -- one firing instance's
+// frame-sized summary, carried live in SnapshotDTO.alerts.firing on
+// every 2s tick (no polling). A narrower cousin of AlertInstanceDTO
+// below: just what the Overview headline and the Alerts view's live
+// section need, plus rule_name (the frame joins it against the current
+// rule list once per tick so no consumer has to).
+//
+// summary is the instance's own stored sentence -- the only meaningful
+// description for an EVENT alert, whose metric/value/threshold are all
+// the zero value (there is no metric to compare against a threshold).
+// Render summary instead of value/threshold whenever metric is "".
+export interface FiringAlertDTO {
+  rule_id: string;
+  rule_name: string;
+  severity: string;
+  kind: string;
+  entity: string;
+  metric: string;
+  value: number;
+  threshold: number;
+  summary: string;
+  fired_at: number;
+  silenced: boolean;
+}
+
+// AlertsBlockDTO mirrors server.AlertsBlockDTO. firing is always a real
+// (if empty) array, capped at 20 entries server-side; truncated + firing_count
+// mean the headline's own count and the visible row count can disagree
+// only in the rare case where more than 20 things are firing at once --
+// firing_count is the true total to show, truncated the amount cut.
+export interface AlertsBlockDTO {
+  firing: FiringAlertDTO[];
+  firing_count: number;
+  truncated: number;
+  channels: Record<string, string>;
+}
+
+// AlertRuleDTO mirrors server.AlertRuleDTO field-for-field (identical
+// names/order to internal/store.AlertRule) -- see that Go struct's own
+// doc and internal/store/migrations/003_alerts.sql for what each field
+// means. A rule with type "event" carries the zero value ("", 0, false)
+// for every threshold-only field (metric/op/threshold/...), and vice
+// versa.
+export interface AlertRuleDTO {
+  id: string;
+  name: string;
+  enabled: boolean;
+  builtin: boolean;
+  type: 'threshold' | 'event';
+  kind: string;
+  entity_glob: string;
+  entity_class: string;
+  metric: string;
+  op: string;
+  threshold: number;
+  clear_threshold: number;
+  warn_threshold: number;
+  critical_threshold: number;
+  band_family: string;
+  for_seconds: number;
+  clear_seconds: number;
+  event_kinds: string;
+  min_severity: string;
+  clear_event_kinds: string;
+  clear_max_severity: string;
+  severity: string;
+  channels: string;
+  renotify_hours: number;
+  updated_at: number;
+}
+
+export interface AlertRulesResponse {
+  rules: AlertRuleDTO[];
+}
+
+// AlertInstanceDTO mirrors server.AlertInstanceDTO -- one alert_instances
+// row plus silenced, computed fresh from the current silence list at
+// response time (always false on a history row: "currently silenced"
+// isn't meaningful for something already resolved).
+export interface AlertInstanceDTO {
+  id: number;
+  rule_id: string;
+  kind: string;
+  entity: string;
+  metric: string;
+  state: string;
+  severity: string;
+  value: number;
+  threshold: number;
+  summary: string;
+  started_at: number;
+  fired_at: number;
+  resolved_at: number;
+  resolve_reason: string;
+  last_notified_at: number;
+  notify_count: number;
+  silenced: boolean;
+}
+
+// SilenceDTO mirrors server.SilenceDTO. scope is "all" only for a
+// global mute (rule_id and entity both ""), omitted otherwise.
+export interface SilenceDTO {
+  id: number;
+  rule_id: string;
+  entity: string;
+  reason: string;
+  until: number;
+  created_at: number;
+  scope?: 'all';
+}
+
+export interface AlertsGetResponse {
+  active: AlertInstanceDTO[];
+  silences: SilenceDTO[];
+  channels: Record<string, string>;
+}
+
+// WebhookTargetDTO mirrors server.WebhookTargetDTO. header_value is
+// NEVER present on the wire (header_set stands in for it) -- see
+// WebhookTargetInput's own doc for how a PUT edits a secret without
+// ever echoing it back first.
+export interface WebhookTargetDTO {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  header_name?: string;
+  header_set: boolean;
+  timeout_s: number;
+  env_overridden?: boolean;
+}
+
+export interface WebhooksGetResponse {
+  targets: WebhookTargetDTO[];
+}
+
+// WebhookTargetInput is PUT /api/alerts/webhooks' per-target wire shape.
+// header_value is optional and three-way: omitted keeps whatever secret
+// is already stored for this id, "" clears it, anything else sets it --
+// the only way to edit a write-only secret without ever reading it back.
+export interface WebhookTargetInput {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  header_name: string;
+  header_value?: string;
+  timeout_s: number;
+}
+
+export function fetchAlerts(): Promise<AlertsGetResponse> {
+  return getJSON<AlertsGetResponse>('/api/alerts');
+}
+
+// fetchAlertRules fetches the live configured rule set, or (defaults:
+// true) the compiled-in seed list -- the exact GET /api/alerts/
+// rules?defaults=1 path Task 11's "reset to default" control uses, so
+// this component never hardcodes the defaults table itself.
+export function fetchAlertRules(opts: { defaults?: boolean } = {}): Promise<AlertRulesResponse> {
+  const qs = opts.defaults ? '?defaults=1' : '';
+  return getJSON<AlertRulesResponse>(`/api/alerts/rules${qs}`);
+}
+
+// AlertRulesPutError mirrors SettingsPutError's own shape: a plain
+// Error carrying the server's message, thrown on any non-2xx response
+// (400 field-shaped validation failures from alert.ValidateRule, or the
+// builtin-identity 400s handleAlertsRulesPut's own doc names) -- the
+// rule editor surfaces message verbatim, since the server's messages
+// already name the offending rule id and the exact bound violated.
+export type AlertRulesPutError = Error;
+
+// putAlertRules performs the whole-document replace: the caller submits
+// its own already-edited full list (builtins included, exactly as GET
+// returned them, edited numbers and all) -- see handleAlertsRulesPut's
+// own doc for why a partial submission can't work (an omitted builtin
+// reads as an attempted deletion and 400s).
+export async function putAlertRules(rules: AlertRuleDTO[]): Promise<AlertRulesResponse> {
+  const res = await fetch('/api/alerts/rules', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rules }),
+  });
+  const body = (await res.json()) as AlertRulesResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `PUT /api/alerts/rules: ${res.status} ${res.statusText}`);
+  }
+  return body;
+}
+
+export function fetchAlertHistory(
+  params: { from?: number; to?: number; limit?: number; signal?: AbortSignal } = {},
+): Promise<AlertInstanceDTO[]> {
+  const q = new URLSearchParams();
+  if (params.from !== undefined) q.set('from', String(params.from));
+  if (params.to !== undefined) q.set('to', String(params.to));
+  if (params.limit !== undefined) q.set('limit', String(params.limit));
+  const qs = q.toString();
+  return getJSON<AlertInstanceDTO[]>(`/api/alerts/history${qs ? `?${qs}` : ''}`, params.signal);
+}
+
+// createSilence backs the Alerts view's snooze control: rule_id and/or
+// entity "" scope it wider (rule-wide or entity-wide); leaving BOTH ""
+// requires scope:"all" (handleAlertsSilencesPost's own guard against an
+// accidental global mute) -- Task 10 deliberately never offers that
+// gesture from the Active row itself, only Settings' own explicit
+// global-silence control does.
+export async function createSilence(body: {
+  rule_id?: string;
+  entity?: string;
+  hours: number;
+  reason?: string;
+  scope?: 'all';
+}): Promise<SilenceDTO> {
+  const res = await fetch('/api/alerts/silences', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rule_id: body.rule_id ?? '', entity: body.entity ?? '', hours: body.hours, reason: body.reason ?? '', scope: body.scope ?? '' }),
+  });
+  const parsed = (await res.json()) as SilenceDTO & { error?: string };
+  if (!res.ok) {
+    throw new Error(parsed.error ?? `POST /api/alerts/silences: ${res.status} ${res.statusText}`);
+  }
+  return parsed;
+}
+
+// deleteSilence lifts a silence early ("lift" in the Alerts view) --
+// 204 whether or not the id still existed, so this never throws for an
+// already-expired/already-lifted silence.
+export async function deleteSilence(id: number): Promise<void> {
+  const res = await fetch(`/api/alerts/silences/${id}`, { method: 'DELETE' });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`DELETE /api/alerts/silences/${id}: ${res.status} ${res.statusText}`);
+  }
+}
+
+export function fetchWebhookTargets(): Promise<WebhooksGetResponse> {
+  return getJSON<WebhooksGetResponse>('/api/alerts/webhooks');
+}
+
+// putWebhookTargets is READ_ONLY-gated server-side (a 403 there is
+// exactly as real an outcome as a 400/409, surfaced the same way) --
+// the one alerting write path GANTRY_READ_ONLY actually blocks (webhook
+// targets configure an outbound side-effect capability; rules/silences
+// don't -- see handleAlertsWebhooksPut's own doc for the asymmetry).
+export async function putWebhookTargets(targets: WebhookTargetInput[]): Promise<WebhooksGetResponse> {
+  const res = await fetch('/api/alerts/webhooks', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targets }),
+  });
+  const body = (await res.json()) as WebhooksGetResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `PUT /api/alerts/webhooks: ${res.status} ${res.statusText}`);
+  }
+  return body;
 }
 
 export interface ContainerInfo {
@@ -59,6 +371,36 @@ export interface GantryEvent {
   Detail: string;
 }
 
+// SharePlacementDTO mirrors api_storage.go's own SharePlacementDTO: mode
+// is useCache's own wire value ("yes" | "no" | "only" | "prefer"); pool
+// is absent (not "") when mode is "no" -- see its Go doc for why.
+export interface SharePlacementDTO {
+  mode: string;
+  pool?: string;
+}
+
+// StorageMountDTO/StorageDeviceDTO/StorageDTO mirror internal/server/
+// api_storage.go's MountDTO/DeviceIODTO/StorageDTO exactly.
+export interface StorageMountDTO {
+  source: string;
+  destination: string;
+  rw: boolean;
+  storage: { kind: string; name: string; placement?: SharePlacementDTO };
+}
+
+export interface StorageDeviceDTO {
+  device: string;
+  label: string;
+  kind: string;
+  read_bps: number;
+  write_bps: number;
+}
+
+export interface StorageDTO {
+  mounts: StorageMountDTO[];
+  devices: StorageDeviceDTO[];
+}
+
 export interface RetentionSettings {
   r1_hours: number;
   r2_days: number;
@@ -69,6 +411,18 @@ export interface RetentionSettings {
 export interface SettingsResponse {
   retention: RetentionSettings;
   env_overridden: string[];
+}
+
+// Group mirrors server.Group -- one user-defined, named set of
+// container names (api_groups.go), the custom counterpart to
+// composeGroups.ts's own docker-compose-derived groups.
+export interface Group {
+  name: string;
+  members: string[];
+}
+
+export interface GroupsResponse {
+  groups: Group[];
 }
 
 export type TopResource = 'cpu' | 'mem' | 'net' | 'io' | 'gpu';
@@ -147,6 +501,16 @@ export function fetchContainers(): Promise<ContainerInfo[]> {
   return getJSON<ContainerInfo[]>('/api/containers');
 }
 
+// fetchContainerStorage backs ContainerDetail's Storage section --
+// mounts plus each backing device's current IO rate (the latter is
+// ring-only, never in the SSE frame, hence a plain poll here rather
+// than a read off `live.frame`). A 404 (name docker/fake-mode don't
+// know) throws same as every other getJSON call; the caller treats that
+// as "no storage panel for this container" rather than an error state.
+export function fetchContainerStorage(name: string, signal?: AbortSignal): Promise<StorageDTO> {
+  return getJSON<StorageDTO>(`/api/containers/${encodeURIComponent(name)}/storage`, signal);
+}
+
 // fetchSnapshot backs Overview's live-seed discovery step: host metrics
 // carry no fixed per-device vocabulary (a real box's net/diskio keys are
 // named after whatever interfaces/devices it actually has -- see
@@ -220,6 +584,190 @@ export async function putSettings(retention: RetentionSettings): Promise<Setting
     throw err;
   }
   return body;
+}
+
+export function fetchGroups(): Promise<GroupsResponse> {
+  return getJSON<GroupsResponse>('/api/groups');
+}
+
+// putGroups replaces the entire saved groups list -- no per-group
+// create/rename/delete route, matching GroupsIface.Set's own
+// whole-document-replace contract server-side (api_groups.go). Throws
+// a plain Error carrying the server's own message (e.g. "duplicate
+// group name") on a non-2xx response -- unlike putSettings, the server
+// never attaches per-field detail here (validateGroups returns one
+// combined message, not a field map), so there's nothing extra to
+// preserve on the thrown error.
+export async function putGroups(groups: Group[]): Promise<GroupsResponse> {
+  const res = await fetch('/api/groups', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groups }),
+  });
+  const body = (await res.json()) as GroupsResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `PUT /api/groups: ${res.status} ${res.statusText}`);
+  }
+  return body;
+}
+
+// ImageInfo/ImagesSummary/ImagesDTO mirror internal/server/api_images.go's
+// structs of the same names exactly. repo_tags is never empty on the
+// wire -- the server itself fills in a digest ref or the literal
+// "<none>" (see its own digestRefsOrNone) whenever a real image has no
+// tag, so this view never needs to look at repo_digests directly.
+export interface ImageInfo {
+  id: string;
+  full_id: string;
+  repo_tags: string[];
+  repo_digests?: string[];
+  size_bytes: number;
+  created: number;
+  state: string; // 'in-use' | 'unused' | 'dangling'
+  containers?: string[];
+}
+
+export interface ImagesSummary {
+  in_use: number;
+  unused: number;
+  dangling: number;
+  reclaimable_bytes: number;
+  note: string;
+}
+
+export interface ImagesDTO {
+  images: ImageInfo[];
+  summary: ImagesSummary;
+}
+
+export function fetchImages(signal?: AbortSignal): Promise<ImagesDTO> {
+  return getJSON<ImagesDTO>('/api/images', signal);
+}
+
+export interface ImageRemoveResult {
+  id: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface DeletedImage {
+  id: string;
+  repo_tags: string[];
+  size_bytes: number;
+}
+
+export interface ImagePruneResult {
+  deleted: DeletedImage[];
+  reclaimed_bytes: number;
+  errors: string[];
+}
+
+// postConfirmed is the shared shape of every /api/images and
+// /api/containers/maintenance mutating route: POST with the resource's
+// own X-Gantry-Confirm value, JSON body. Every one of those routes'
+// error bodies (400/403/413/428/500) is the app-wide {"error":"..."}
+// shape (writeError), so a thrown Error's message is always that string
+// rather than a generic status line -- matching putSettings/putGroups'
+// own "surface the server's own message" convention, just without their
+// extra structured fields (none of these routes attach any).
+async function postConfirmed<T>(url: string, confirmValue: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Gantry-Confirm': confirmValue },
+    body: JSON.stringify(body),
+  });
+  const parsed = await res.json();
+  if (!res.ok) {
+    throw new Error((parsed as { error?: string })?.error ?? `POST ${url}: ${res.status} ${res.statusText}`);
+  }
+  return parsed as T;
+}
+
+export function removeImages(ids: string[]): Promise<ImageRemoveResult[]> {
+  return postConfirmed('/api/images/remove', 'images', { ids });
+}
+
+export function pruneImages(mode: 'dangling' | 'unused'): Promise<ImagePruneResult> {
+  return postConfirmed('/api/images/prune', 'images', { mode });
+}
+
+// ContainerMaintenanceInfo/-Summary/-DTO mirror internal/server/
+// api_containers_maintenance.go's structs of the same names exactly.
+export interface ContainerMaintenanceInfo {
+  id: string;
+  full_id: string;
+  name: string;
+  image: string;
+  state: string; // 'exited' | 'created' | 'dead'
+  exit_code?: number;
+  created: number;
+  finished_at?: number;
+  managed?: string;
+  restart_policy?: string;
+}
+
+export interface ContainerMaintenanceSummary {
+  exited: number;
+  created: number;
+  dead: number;
+}
+
+export interface ContainerMaintenanceDTO {
+  containers: ContainerMaintenanceInfo[];
+  summary: ContainerMaintenanceSummary;
+}
+
+export function fetchContainersMaintenance(signal?: AbortSignal): Promise<ContainerMaintenanceDTO> {
+  return getJSON<ContainerMaintenanceDTO>('/api/containers/maintenance', signal);
+}
+
+export interface ContainerRemoveResult {
+  id: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface DeletedContainer {
+  id: string;
+  name: string;
+  image: string;
+}
+
+export interface ContainerPruneResult {
+  deleted: DeletedContainer[];
+  errors: string[];
+}
+
+export function removeContainersMaintenance(ids: string[]): Promise<ContainerRemoveResult[]> {
+  return postConfirmed('/api/containers/maintenance/remove', 'containers', { ids });
+}
+
+export function pruneContainersMaintenance(
+  mode: 'exited' | 'created' | 'all-stopped',
+  olderThanHours: number = 0,
+): Promise<ContainerPruneResult> {
+  return postConfirmed('/api/containers/maintenance/prune', 'containers', { mode, older_than_hours: olderThanHours });
+}
+
+// probeReadOnly detects GANTRY_READ_ONLY (never exposed on any GET
+// response -- there's no config hint for it anywhere in the frame or
+// /api/settings) without ever risking a real mutation. Every mutating
+// /api/images and /api/containers/maintenance route checks the confirm
+// header and the read-only flag (requireMutationAllowed, server-side)
+// BEFORE the body is even decoded, so a deliberately-invalid mode can
+// never reach an actual remove/prune call -- it 400s "mode must be..."
+// when writable, or 403s "read-only mode" when not, either way before
+// anything real happens. images/prune is picked arbitrarily: ReadOnly is
+// one flag shared by every mutating route on both resources, never
+// scoped per-resource, so one probe answers for both Maintenance cards.
+export async function probeReadOnly(signal?: AbortSignal): Promise<boolean> {
+  const res = await fetch('/api/images/prune', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Gantry-Confirm': 'images' },
+    body: JSON.stringify({ mode: '__gantry_probe__' }),
+    signal,
+  });
+  return res.status === 403;
 }
 
 // streamLogs opens /api/containers/{name}/logs and yields decoded text

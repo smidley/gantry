@@ -1,6 +1,7 @@
 package unraid
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -87,4 +88,54 @@ func TestTickSharesMissingFileDegradesSilently(t *testing.T) {
 	c := New(sink, &fakeEvents{}, dir, t.TempDir())
 	c.tickShares(time.Unix(1000, 0))
 	require.Empty(t, sink.records)
+	require.Empty(t, c.SharePlacement())
+}
+
+// TestTickSharesPlacementFromRealCapture pins the real useCache/cachePool
+// shape against testdata/shares_real.ini (see
+// TestTickSharesRealCaptureFromLiveUnraidBox's own doc for its
+// provenance) -- share1 (useCache="no"), share2/Share2 (useCache="only",
+// cachePool="cache"), and share3 (useCache="only", cachePool=
+// "rocket_pool", a different pool than share2's). Keyed by the RAW
+// share name (shares.ini's own section header, unslugged) since that's
+// what ResolveStoragePath's own share-name extraction returns from a
+// mount path -- unlike the used_bytes metric name above, share2/Share2
+// do NOT collide here.
+func TestTickSharesPlacementFromRealCapture(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "testdata/shares_real.ini", filepath.Join(dir, "shares.ini"))
+	c := New(newFakeSink(), &fakeEvents{}, dir, t.TempDir())
+
+	c.tickShares(time.Unix(1000, 0))
+
+	placement := c.SharePlacement()
+	require.Equal(t, SharePlacement{Mode: "no", Pool: ""}, placement["share1"])
+	require.Equal(t, SharePlacement{Mode: "only", Pool: "cache"}, placement["share2"])
+	require.Equal(t, SharePlacement{Mode: "only", Pool: "cache"}, placement["Share2"])
+	require.Equal(t, SharePlacement{Mode: "only", Pool: "rocket_pool"}, placement["share3"])
+}
+
+// TestTickSharesPlacementCoversYesAndPrefer locks in the two useCache
+// values the real capture above doesn't happen to exercise.
+func TestTickSharesPlacementCoversYesAndPrefer(t *testing.T) {
+	dir := t.TempDir()
+	ini := `["backups"]
+name="backups"
+useCache="yes"
+cachePool="cache"
+used="1048576"
+["hot"]
+name="hot"
+useCache="prefer"
+cachePool="rocket_pool"
+used="2097152"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shares.ini"), []byte(ini), 0o644))
+	c := New(newFakeSink(), &fakeEvents{}, dir, t.TempDir())
+
+	c.tickShares(time.Unix(1000, 0))
+
+	placement := c.SharePlacement()
+	require.Equal(t, SharePlacement{Mode: "yes", Pool: "cache"}, placement["backups"])
+	require.Equal(t, SharePlacement{Mode: "prefer", Pool: "rocket_pool"}, placement["hot"])
 }

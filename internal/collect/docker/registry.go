@@ -38,16 +38,37 @@ import (
 // (changelog.go).
 type Meta struct {
 	ID, Name, Image, Icon, State, Health string
-	Pid                                  int
-	StartedAt, Created                   time.Time
-	HostNet                              bool
-	RestartCount                         int
-	Alloc                                alloc
-	Mounts                               []MountInfo
-	UpdateStatus                         string // "available" | "current" | "" (unknown: no match, no reader, unreadable file)
-	ChangelogURL, ProjectURL, WebUIURL   string
-	Networks                             []NetworkInfo
-	Ports                                []PortInfo
+	// ComposeProject is the com.docker.compose.project label docker
+	// compose sets on every container it creates, naming the stack it
+	// belongs to -- "" for a container not created via compose. Extracted
+	// in metaFromInspect exactly like Icon (a label read, nil-Labels-safe,
+	// no separate absence check).
+	ComposeProject     string
+	Pid                int
+	StartedAt, Created time.Time
+	HostNet            bool
+	RestartCount       int
+	// Cpuset is the display-ready cpuset pin string ("0-5, 13-15") when
+	// this container's cpuset actually narrows it below the host's own
+	// core count -- "" for an unpinned or unrestricted one (CPUSetPin,
+	// cgroupv2.go). Computed once at inspect time (refreshInventory)
+	// rather than derived from Alloc by every reader, since Alloc alone
+	// can't answer "does this narrow the container" without also knowing
+	// the current host core count. fake.go sets this directly for its own
+	// synthetic pinned demo container, which has no real HostConfig to
+	// derive an Alloc from at all.
+	Cpuset string
+	// ExitCode is docker inspect's State.ExitCode, straight through --
+	// meaningful only once State is "exited" or "dead" (0 while running,
+	// same "always present, contextually interpreted" convention as
+	// State/Health themselves).
+	ExitCode                           int
+	Alloc                              alloc
+	Mounts                             []MountInfo
+	UpdateStatus                       string // "available" | "current" | "" (unknown: no match, no reader, unreadable file)
+	ChangelogURL, ProjectURL, WebUIURL string
+	Networks                           []NetworkInfo
+	Ports                              []PortInfo
 }
 
 // MountInfo is one container mount, as reported by docker inspect's
@@ -132,12 +153,16 @@ func (r *registry) running() []Meta {
 	return out
 }
 
-// all returns a name-sorted snapshot of every known Meta regardless of
-// state -- unlike running(), a stopped container with a lingering stale
-// Health string is included. The alert engine's boot-seeding pass (Task
-// 4) needs exactly this: it applies its own state=="running" gate itself,
-// and needs a stopped-but-still-known container to run that gate against
-// rather than never seeing it at all.
+// all returns a name-sorted snapshot of every Meta the registry currently
+// knows about, running or not -- a stopped-but-not-yet-removed container
+// stays here (see applyInventory/applyEvent's own removal docs) until it's
+// actually gone. Used by the snapshot frame (Task: stopped containers) so
+// a container the fleet turned off on purpose still shows up with its
+// real state/identity, not just while running, and by the alert engine's
+// boot-seeding pass, which applies its own state=="running" gate itself
+// and needs a stopped-but-still-known container (possibly carrying a
+// lingering stale Health string) to run that gate against rather than
+// never seeing it at all.
 func (r *registry) all() []Meta {
 	r.mu.Lock()
 	out := make([]Meta, 0, len(r.byID))
@@ -286,7 +311,7 @@ func translateEvent(msg events.Message, name string) (store.Event, bool) {
 	case msg.Action == events.ActionDie:
 		exitCode := msg.Actor.Attributes["exitCode"]
 		sev := "info"
-		if exitCode != "" && exitCode != "0" {
+		if exitCode != "" && exitCode != "0" && exitCode != "143" {
 			sev = "warning"
 		}
 		return store.Event{Kind: "container.die", Entity: name, Severity: sev, Detail: "exit code " + exitCode}, true

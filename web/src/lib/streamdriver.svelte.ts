@@ -15,14 +15,30 @@
 // this module's own browser dependency to plain DOM APIs, with no
 // svelte/motion import here at all, is what guarantees nothing pulls
 // window.matchMedia in at import time outside an actual browser -- the
-// mechanism-3 Tween components import prefersReducedMotion directly
-// instead (safe there: .svelte files are never imported by vitest).
+// mechanism-3 Tween components read motion.svelte.ts's own `reduced`
+// instead (safe there: .svelte.ts files are never imported by vitest).
+// This file stays independent of THAT module too (no cross-import of a
+// $state/$derived-using class here) -- it re-resolves the SAME stored
+// preference through the pure resolveReducedMotion it shares with
+// motion.svelte.ts, and motion.svelte.ts's own set() calls
+// setMotionPreference below directly (a same-tab localStorage write
+// fires no 'storage' event of its own) so both stay in lockstep without
+// either depending on the other's reactive machinery.
 import { gateReducer, isDriverActive, shouldBroadcast, type GateState } from './streamdriver';
+import { resolveReducedMotion, type MotionPreference } from './motion';
 
 type Tick = (nowMs: number) => void;
 
+const MOTION_STORAGE_KEY = 'gantry.motion'; // must match motion.svelte.ts's own STORAGE_KEY
+
 function systemPrefersReducedMotion(): boolean {
   return typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+}
+
+function loadMotionPreference(): MotionPreference {
+  if (typeof localStorage === 'undefined') return 'system';
+  const stored = localStorage.getItem(MOTION_STORAGE_KEY);
+  return stored === 'on' || stored === 'off' || stored === 'system' ? stored : 'system';
 }
 
 class StreamDriver {
@@ -87,11 +103,29 @@ class StreamDriver {
 
 const driver = new StreamDriver();
 
+// motionPreference is this module's own plain (non-reactive) mirror of
+// motion.svelte.ts's stored preference -- kept here, rather than
+// imported, so this file's own "no runes, no svelte/motion" isolation
+// (see the doc above) holds regardless of what motion.svelte.ts pulls in.
+let motionPreference: MotionPreference = loadMotionPreference();
+
+function applyReducedMotion() {
+  driver.setReducedMotion(resolveReducedMotion(motionPreference, systemPrefersReducedMotion()));
+}
+
+// setMotionPreference is motion.svelte.ts's own set()'s direct nudge
+// (see the doc above for why a same-tab localStorage write alone isn't
+// enough) -- called once on every preference change, applying it to the
+// shared driver immediately rather than waiting for the next OS-level
+// matchMedia callback.
+export function setMotionPreference(pref: MotionPreference) {
+  motionPreference = pref;
+  applyReducedMotion();
+}
+
 if (typeof window !== 'undefined' && window.matchMedia) {
-  driver.setReducedMotion(systemPrefersReducedMotion());
-  window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', (e) => {
-    driver.setReducedMotion(e.matches);
-  });
+  applyReducedMotion();
+  window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', applyReducedMotion);
 }
 
 // subscribeWhileVisible is what TimeChart/Sparkline call from their own
@@ -100,10 +134,9 @@ if (typeof window !== 'undefined' && window.matchMedia) {
 // $effect runs -- see TimeChart's own doc for why). The chart only
 // actually joins the shared driver while that element is intersecting
 // the viewport; scrolling it off-screen unsubscribes immediately, which
-// combined with prefersReducedMotion zeroing the driver out globally
-// (above) is the other half of "stops entirely when there are zero
-// subscribers" -- a live-mode chart that isn't currently on-screen costs
-// nothing.
+// combined with reduced motion zeroing the driver out globally (above)
+// is the other half of "stops entirely when there are zero subscribers"
+// -- a live-mode chart that isn't currently on-screen costs nothing.
 export function subscribeWhileVisible(getEl: () => Element | null | undefined, onTick: Tick): () => void {
   const el = getEl();
   if (!el || typeof IntersectionObserver === 'undefined') {

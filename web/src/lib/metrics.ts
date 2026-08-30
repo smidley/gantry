@@ -27,6 +27,19 @@ export type GPUEngine = (typeof GPU_ENGINE_ORDER)[number];
 // site that uses it, stays unchanged.
 export const GPU_ENTITY_ENGINE_ORDER = [...GPU_ENGINE_ORDER, 'gpu'] as const;
 
+// gpuTitle builds a GPU entity's card title from its vendor+driver meta
+// (server.GPUMetaDTO, threaded through the live frame's gpu_meta map) --
+// "Intel GPU (i915)" -- rather than the bare entity id, which for the
+// DRM fdinfo path IS a raw PCI address (e.g. "0000:00:02.0": Scott's own
+// question, "what does this mean?"). Falls back to the bare entity id
+// when no meta is known for it (a snapshot that hasn't caught up yet, or
+// a caller with none at all) -- the same fallback the backend's own
+// vendor lookup uses for a missing/unreadable vendor file.
+export function gpuTitle(entity: string, meta: { vendor: string; driver: string } | undefined): string {
+  if (!meta) return entity;
+  return `${meta.vendor} GPU (${meta.driver})`;
+}
+
 // sumMetricsByPattern sums every value in `metrics` whose key starts with
 // `prefix` and ends with `suffix`. This covers both a flat key (prefix
 // and suffix directly adjacent, e.g. "diskio.read_bps") and a key with a
@@ -146,6 +159,31 @@ export function enginesPresent(
 export function seqStep(pct: number): string {
   const step = Math.min(7, Math.max(1, Math.ceil((pct / 100) * 7)));
   return `var(--seq-${step}00)`;
+}
+
+// NICE_CEILING_STEPS is the classic 1-2-5-per-decade "nice round number"
+// ladder -- 10 is included so every decade's own top step is exact
+// (100, 1000, ...) rather than falling through to the next decade's 1x.
+const NICE_CEILING_STEPS = [1, 2, 5, 10];
+
+// niceCeiling rounds `max` up to the next step of that ladder, scaled to
+// max's own magnitude -- a byte-rate leaderboard's bar scale (Top
+// Consumers, net/io) reads against this instead of the busiest row's own
+// value, so a quiet fleet's bars don't all read as nearly-full just
+// because nothing happening right now is any busier (Scott: "NET can
+// obviously go higher, but it looks like it's maxed out"). Works at any
+// magnitude (B/s through GB/s and beyond) since it operates on the raw
+// number, not a formatted string. 0 for a non-positive/non-finite max --
+// nothing to scale against.
+export function niceCeiling(max: number): number {
+  if (!Number.isFinite(max) || max <= 0) return 0;
+  const exp = Math.floor(Math.log10(max));
+  const base = 10 ** exp;
+  for (const step of NICE_CEILING_STEPS) {
+    const candidate = step * base;
+    if (candidate >= max) return candidate;
+  }
+  return 10 * base; // unreachable (NICE_CEILING_STEPS's own last step is 10), kept so this stays total
 }
 
 // parityIsRunning applies the parity-progress wire semantic var.go's

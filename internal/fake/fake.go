@@ -44,6 +44,47 @@ type archetype struct {
 	memLimitBytes float64
 	cpuAllocCores float64
 
+	// cpusetRaw is minecraft's own pin, in the same raw core-list syntax
+	// docker.CPUSetPin parses ("0-1") -- kept separate from cpuAllocCores
+	// above (which drives the cpu.alloc_cores/alloc_pct METRICS a cpuset
+	// pin also implies) since this one demos the Go passthrough of the
+	// actual pinned core ids for display, not a number.
+	cpusetRaw string
+
+	// exitCode models docker inspect's State.ExitCode for a stopped
+	// archetype -- 0 (the zero value, "clean exit") for prowlarr, a
+	// plausible OOM-kill code for vaultwarden, so the anomaly banner's
+	// exit-code table has both a mundane and a dramatic stopped demo.
+	exitCode int
+
+	// unhealthy models a RUNNING container whose healthcheck is
+	// currently failing -- the one fleet member the anomaly banner's
+	// primary "why does this need me" scenario demos end to end.
+	unhealthy bool
+
+	// stopped models a container the user turned off on purpose --
+	// Metas() reports it State "exited" (no Health), and Tick skips it
+	// outright (a stopped container has no live stats to synthesize),
+	// so fake mode's frame exercises the same stopped-but-known path a
+	// real box's registry gives one.
+	stopped bool
+
+	// created models a container that's been provisioned but never
+	// started (docker's own "created" state) -- Scott's own live example
+	// was a burst of ephemeral CI-runner spawns. Metas() reports it State
+	// "created" (no Health, same as stopped -- nothing to check), and
+	// Tick skips it outright, same reason as stopped: nothing has ever
+	// run, so there's nothing to synthesize.
+	created bool
+
+	// composeProject models the com.docker.compose.project label a real
+	// docker-compose stack's members all share (see docker.go's
+	// composeProjectLabel) -- "" (the default, most of this fleet) for a
+	// container modeled as standalone. Only the gridmind-* members below
+	// set this, so the Containers view's Groups chip row has a real
+	// multi-container "team" to render in fake mode.
+	composeProject string
+
 	// updateStatus/changelogURL/projectURL are the update-badge demo
 	// variety: "" (most of the fleet, the real-box default) means no
 	// update data at all. jellyfin and paperless are given an
@@ -85,28 +126,81 @@ var fleet = []archetype{
 	{name: "radarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 300e6, netScale: 2e5},
 	// sonarr: the "already up to date" update-status demo container.
 	{name: "sonarr", cpuBase: 1, cpuAmp: 1, cpuSpike: 0.005, memBytes: 320e6, netScale: 2e5, updateStatus: "current"},
-	{name: "prowlarr", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 150e6, netScale: 5e4},
+	{name: "prowlarr", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 150e6, netScale: 5e4, stopped: true},
 	{name: "qbittorrent", cpuBase: 6, cpuAmp: 4, cpuSpike: 0.01, memBytes: 500e6, netScale: 8e6},
 	{name: "sabnzbd", cpuBase: 2, cpuAmp: 6, cpuSpike: 0.01, memBytes: 400e6, netScale: 9e6},
 	// postgres: the memory-limited demo container, ~60-80% of its limit.
 	{name: "postgres", cpuBase: 2, cpuAmp: 0.5, cpuSpike: 0.001, memBytes: 1.2e9, netScale: 1e5, memLimitBytes: 1.7e9},
 	{name: "redis", cpuBase: 0.5, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 200e6, netScale: 8e4},
 	{name: "homeassistant", cpuBase: 3, cpuAmp: 1, cpuSpike: 0.005, memBytes: 700e6, netScale: 1e5},
-	{name: "grafana", cpuBase: 1, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 250e6, netScale: 6e4},
+	// grafana: the unhealthy demo container (its healthcheck is modeled
+	// as permanently failing) -- Container Detail's anomaly "why" banner
+	// needs one currently-unhealthy fleet member to demo against; see
+	// unhealthyEventFired's own doc for the matching events-feed evidence.
+	{name: "grafana", cpuBase: 1, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 250e6, netScale: 6e4, unhealthy: true},
 	// pihole: the host-network demo container (--net=host, a common
 	// real-box choice for DNS).
 	{name: "pihole", cpuBase: 0.5, cpuAmp: 0.3, cpuSpike: 0.001, memBytes: 120e6, netScale: 4e4,
 		hostNet: true, networks: []docker.NetworkInfo{{Name: "host"}}},
 	{name: "nginx", cpuBase: 0.3, cpuAmp: 0.2, cpuSpike: 0.001, memBytes: 80e6, netScale: 5e5},
-	{name: "vaultwarden", cpuBase: 0.2, cpuAmp: 0.1, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4},
+	// vaultwarden's exitCode 137 (SIGKILL/OOM-likely) gives the anomaly
+	// banner's exit-code table a dramatic stopped demo alongside
+	// prowlarr's own plain, code-0 "stopped cleanly" one below.
+	{name: "vaultwarden", cpuBase: 0.2, cpuAmp: 0.1, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4, stopped: true, exitCode: 137},
 	{name: "immich", cpuBase: 5, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.5e9, netScale: 1e6},
 	{name: "paperless", cpuBase: 1, cpuAmp: 2, cpuSpike: 0.01, memBytes: 400e6, netScale: 8e4,
 		updateStatus: "available", changelogURL: "https://github.com/paperless-ngx/paperless-ngx/releases"},
 	{name: "gitea", cpuBase: 0.5, cpuAmp: 0.5, cpuSpike: 0.002, memBytes: 300e6, netScale: 6e4},
 	// minecraft: the cpuset-pinned demo container (pinned to 2 of the fake host's 8 cores).
-	{name: "minecraft", cpuBase: 8, cpuAmp: 5, cpuSpike: 0.01, memBytes: 2.5e9, netScale: 3e5, cpuAllocCores: 2.0},
+	{name: "minecraft", cpuBase: 8, cpuAmp: 5, cpuSpike: 0.01, memBytes: 2.5e9, netScale: 3e5, cpuAllocCores: 2.0, cpusetRaw: "0-1"},
 	{name: "frigate", cpuBase: 12, cpuAmp: 4, cpuSpike: 0.02, memBytes: 1.1e9, netScale: 5e6},
 	{name: "unifi-controller", cpuBase: 2, cpuAmp: 1, cpuSpike: 0.005, memBytes: 900e6, netScale: 2e5},
+	// duplicati/watchtower: the fleet's two never-started demo containers
+	// (created via Community Apps, not yet started) -- see archetype.
+	// created's own doc.
+	{name: "duplicati", created: true},
+	{name: "watchtower", created: true},
+
+	// gridmind-*: a four-container docker-compose stack (a small
+	// self-hosted app's api/worker/scheduler/db team), sharing the
+	// "gridmind-cloud" compose project -- fake mode's own multi-detail
+	// compare demo, exercising the Containers view's Groups chip row
+	// (>=2 members sharing a project) end to end. gridmind-db also gets a
+	// memory limit, like postgres above, so the compare page's own
+	// per-member "% of limit" cell has a real limited member to show
+	// alongside the unlimited ones.
+	{name: "gridmind-api", cpuBase: 1.5, cpuAmp: 1, cpuSpike: 0.01, memBytes: 350e6, netScale: 1.2e6, composeProject: "gridmind-cloud"},
+	{name: "gridmind-worker", cpuBase: 3, cpuAmp: 3, cpuSpike: 0.03, memBytes: 500e6, netScale: 3e5, composeProject: "gridmind-cloud"},
+	{name: "gridmind-scheduler", cpuBase: 0.3, cpuAmp: 0.2, cpuSpike: 0.002, memBytes: 120e6, netScale: 2e4, composeProject: "gridmind-cloud"},
+	{name: "gridmind-db", cpuBase: 1, cpuAmp: 0.4, cpuSpike: 0.001, memBytes: 600e6, netScale: 5e4, memLimitBytes: 1e9, composeProject: "gridmind-cloud"},
+
+	// tie cluster: a dozen quiet sidecar/exporter-style containers, all
+	// under a fifth of a percent of host CPU -- the real-box shape
+	// rankStability.ts's own stability fix targets (Scott's report: "38+
+	// containers with MANY tied values... whose relative order can flap
+	// every 2s tick"). cpuBase/cpuAmp barely matter at this scale: Tick's
+	// own `+ g.rng.Float64()` noise term (up to a full raw unit) already
+	// dwarfs them, so every one of these independently jitters around
+	// ~0.0-0.15% host share every tick regardless -- reproducing the real
+	// per-tick sampling noise, not a display artifact of stale data.
+	{name: "cadvisor", cpuBase: 0.08, cpuAmp: 0.03, cpuSpike: 0.001, memBytes: 60e6, netScale: 2e4},
+	{name: "node-exporter", cpuBase: 0.06, cpuAmp: 0.02, cpuSpike: 0.001, memBytes: 30e6, netScale: 1e4},
+	{name: "promtail", cpuBase: 0.1, cpuAmp: 0.04, cpuSpike: 0.001, memBytes: 45e6, netScale: 3e4},
+	{name: "autoheal", cpuBase: 0.05, cpuAmp: 0.02, cpuSpike: 0.001, memBytes: 20e6, netScale: 5e3},
+	{name: "speedtest-tracker", cpuBase: 0.12, cpuAmp: 0.05, cpuSpike: 0.001, memBytes: 90e6, netScale: 1e4},
+	{name: "uptime-kuma", cpuBase: 0.09, cpuAmp: 0.03, cpuSpike: 0.001, memBytes: 70e6, netScale: 8e3},
+	{name: "dozzle", cpuBase: 0.07, cpuAmp: 0.03, cpuSpike: 0.001, memBytes: 40e6, netScale: 6e3},
+	// flaresolverr's own cpuSpike is deliberately much higher than its
+	// tie-cluster siblings -- a reliable-enough-to-observe (not just
+	// theoretically-possible) genuine, momentary rank-changing event
+	// among an otherwise noise-only cluster, for a manual "does a REAL
+	// change still glide" check without needing a dedicated scenario-
+	// control endpoint.
+	{name: "flaresolverr", cpuBase: 0.1, cpuAmp: 0.04, cpuSpike: 0.15, memBytes: 250e6, netScale: 4e4},
+	{name: "ntfy", cpuBase: 0.06, cpuAmp: 0.02, cpuSpike: 0.001, memBytes: 35e6, netScale: 5e3},
+	{name: "syncthing", cpuBase: 0.11, cpuAmp: 0.04, cpuSpike: 0.001, memBytes: 110e6, netScale: 5e4},
+	{name: "filebrowser", cpuBase: 0.05, cpuAmp: 0.02, cpuSpike: 0.001, memBytes: 25e6, netScale: 4e3},
+	{name: "changedetection", cpuBase: 0.09, cpuAmp: 0.03, cpuSpike: 0.001, memBytes: 80e6, netScale: 1e4},
 }
 
 // diskSpec describes one of the fake array's fixed 8 disks: parity
@@ -123,6 +217,14 @@ type diskSpec struct {
 	spunDown   bool
 	noSensor   bool    // true for a device with no temp sensor at all (e.g. USB flash) -- distinct from spunDown; never emits temp.c regardless of spun state
 	rotational float64 // disks.ini's own rotational value: 1 spinning, 0 solid-state
+	// ioReadScale/ioWriteScale: this device's own read/write bytes/sec
+	// UPPER bound -- emitDiskIO below draws a uniform 0..scale sample
+	// each tick, same "no baseline floor" shape the old single flat
+	// diskio.read_bps/write_bps pair used. Pools front the fleet's real
+	// traffic (downloads, transcodes); parity and the boot flash device
+	// sit close to idle in ordinary operation.
+	ioReadScale  float64
+	ioWriteScale float64
 }
 
 // disks is the fake array's fixed 8-disk fleet, covering all four of
@@ -141,15 +243,20 @@ type diskSpec struct {
 // exempt from that field) and a plain SCSI-style device name ("sdi") --
 // classifying it correctly depends entirely on unraid.DiskKind's
 // slot-name override, never on either of those two signals.
+// disk1 carries a deliberately higher ioReadScale/ioWriteScale than its
+// disk2-4 siblings (a media-library disk seeing real reads, next to
+// otherwise-quiet array members) so the Storage chart's own "any drive
+// with recent IO defaults visible" rule has a real data disk to apply
+// to, not just the two pools.
 var disks = []diskSpec{
-	{"parity", "sdb", false, 12e12, 0, 38, false, false, 1},
-	{"disk1", "sdc", true, 8e12, 0.62, 34, false, false, 1},
-	{"disk2", "sdd", true, 8e12, 0.71, 35, false, false, 1},
-	{"disk3", "sde", true, 8e12, 0.55, 36, true, false, 1},
-	{"disk4", "sdf", true, 4e12, 0.40, 37, false, false, 1},
-	{"cache", "sdh", true, 1e12, 0.35, 41, false, false, 0},
-	{"rocket_pool", "nvme0n1", true, 2e12, 0.28, 44, false, false, 0},
-	{"flash", "sdi", true, 32e9, 0.05, 0, false, true, 1},
+	{"parity", "sdb", false, 12e12, 0, 38, false, false, 1, 1e4, 5e3},
+	{"disk1", "sdc", true, 8e12, 0.62, 34, false, false, 1, 2.5e6, 1.2e6},
+	{"disk2", "sdd", true, 8e12, 0.71, 35, false, false, 1, 1.5e5, 6e4},
+	{"disk3", "sde", true, 8e12, 0.55, 36, true, false, 1, 1.5e5, 6e4},
+	{"disk4", "sdf", true, 4e12, 0.40, 37, false, false, 1, 1.5e5, 6e4},
+	{"cache", "sdh", true, 1e12, 0.35, 41, false, false, 0, 4e6, 10e6},
+	{"rocket_pool", "nvme0n1", true, 2e12, 0.28, 44, false, false, 0, 2e6, 1.5e6},
+	{"flash", "sdi", true, 32e9, 0.05, 0, false, true, 1, 3e3, 1e3},
 }
 
 const (
@@ -161,6 +268,14 @@ const (
 	// collector's cgroupv2.go doc for the same math against a real
 	// runtime.NumCPU()/proc-stat count.
 	fakeHostCores = 8
+
+	// fakeHostMemBytes is the demo box's assumed total RAM (32GiB, a
+	// plausible home-server figure) -- Tick divides each container's own
+	// mem.bytes by this to synthesize mem.pct (host-share memory), the
+	// per-container analogue of cpu.pct above. The real collector derives
+	// this the same way (cgroupv2.go, off the host collector's MemTotal),
+	// just from an actual /proc/meminfo read instead of a fixed constant.
+	fakeHostMemBytes = 32e9
 
 	// fakePidsLimit is pids.max on every fake container, matching the
 	// real-box default (docker's own pids.max, seen on every container
@@ -202,6 +317,59 @@ const (
 	restartContainer = "sonarr"
 	oomContainer     = "minecraft"
 
+	// alertDemoOOMContainer/alertDemoOOMAt (Phase 4 Task 9): a SEPARATE,
+	// one-shot container.oom synthesized specifically so the alert
+	// engine's container-oom builtin rule has something to fire within
+	// the "~3 minutes of boot" fake-mode contract -- the pre-existing
+	// periodic oomContainer/oomEvery schedule above doesn't land until
+	// ~10min, too late for a short interactive demo session. Landing on
+	// the same container restartEvery already cycles (sonarr) is the
+	// plan's own explicit choice, not a collision to avoid: they're two
+	// independently-scheduled, differently-KINDED events (container.
+	// start vs container.oom), and container-oom has no rule watching
+	// container.start anyway. This is a genuinely separate event from
+	// oomContainer's own periodic one -- see alertOOMEventFired's doc.
+	alertDemoOOMContainer = "sonarr"
+	alertDemoOOMAt        = 3 * time.Minute
+
+	// alertDemoDiskEntity/alertDemo{Ramp,Cool}*/alertDemoTemp* (Phase 4
+	// Task 9): disk4's temp.c is driven by alertDemoDiskTempC instead of
+	// the generic per-disk sin+noise formula every other disk uses, so
+	// the alert engine's disk-temp-high builtin rule has a real,
+	// predictable fire-then-resolve story to demo. Schedule (all times
+	// relative to boot, elapsed==0):
+	//
+	//   t=0s -> 90s     ramp 48 -> 58°C (linear)
+	//   90s  -> 270s    hold ~57-59°C (safely above the 55°C fire
+	//                   threshold the whole time)
+	//   270s -> 360s    ramp back down 58 -> 40°C (linear)
+	//   360s onward     hold ~38-42°C (safely below the 50°C clear
+	//                   threshold the whole time)
+	//
+	// With fake mode's seeded builtins compressed to a 60s for_seconds/
+	// clear_seconds (store.DefaultAlertRules' fast parameter), the ramp
+	// crosses 55°C at t=63s and stays above it continuously afterward, so
+	// disk-temp-high's 60s sustained-for window is satisfied by ~t=124s
+	// (2m04s) -- comfortably inside the "~3 minutes of boot" fake-mode
+	// contract. The cool-down ramp crosses back below 50°C at ~t=310s and
+	// stays below it, satisfying the 60s clear window by ~t=370s (6m10s)
+	// -- a real resolve, a resolved notice, and a history row, matching
+	// the plan's own "~T+6min" timing.
+	alertDemoDiskEntity   = "disk4"
+	alertDemoRampDuration = 90 * time.Second
+	alertDemoTempStart    = 48.0
+	alertDemoTempPeak     = 58.0
+	alertDemoCoolStart    = 270 * time.Second
+	alertDemoCoolDuration = 90 * time.Second
+	alertDemoTempFloor    = 40.0
+
+	// unhealthyContainer is grafana (see its own archetype.unhealthy
+	// doc) -- the anomaly banner's evidence list needs at least one
+	// real container.health event to point to, fired once near boot
+	// (unhealthyEventFired) since Metas() already reports it unhealthy
+	// from the very first snapshot, with no later transition to catch.
+	unhealthyContainer = "grafana"
+
 	// gpuEntity is the fake GPU device's kind="gpu" entity name.
 	gpuEntity = "gpu0"
 	// jellyfinBurstChance/MinTicks/MaxTicks give jellyfin's GPU usage a
@@ -233,6 +401,13 @@ type Generator struct {
 	parityStarted       bool
 	parityFinished      bool
 	diskErrorsFired     bool
+	unhealthyEventFired bool
+	// alertOOMEventFired guards the Task 9 alert-demo one-shot (see
+	// alertDemoOOMContainer/alertDemoOOMAt's own doc) -- a SEPARATE flag
+	// from lastOOMBoundary below, which tracks the pre-existing periodic
+	// oomContainer/oomEvery schedule; the two fire independently, on
+	// different containers, at different times.
+	alertOOMEventFired bool
 
 	// jellyfinBurstTicks counts down a GPU-usage burst in progress; 0
 	// means idle and eligible to roll a new burst.
@@ -316,6 +491,9 @@ func (g *Generator) Tick(now time.Time) {
 
 	hostCPUPct := 0.0
 	for i, a := range fleet {
+		if a.stopped || a.created {
+			continue // no live stats for a stopped or never-started container -- see archetype's own docs
+		}
 		// raw is on the old docker-stats 0-100 per-core scale; /100 turns
 		// it into cpu.cores (1.00 = one full core), and dividing THAT by
 		// fakeHostCores turns it into cpu.pct, a host-share percentage --
@@ -338,6 +516,7 @@ func (g *Generator) Tick(now time.Time) {
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "cpu.pct"}, ts, cpuPct)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "cpu.cores"}, ts, cpuCores)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "mem.bytes"}, ts, mem)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "mem.pct"}, ts, 100*mem/fakeHostMemBytes)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "net.rx_bps"}, ts, rx)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "net.tx_bps"}, ts, tx)
 
@@ -385,13 +564,21 @@ func (g *Generator) Tick(now time.Time) {
 		// mode too -- "sda"/"nvme0n1" are a plausible fixed pair of device
 		// names, not tied to fakeContainerMounts' share/disk/flash naming
 		// (real per-device IO and Unraid slot names are unrelated
-		// namespaces).
+		// namespaces). loop2 is the third: a small slice of every
+		// container's own IO landing against docker's own image-file-
+		// backed storage (a real box's docker.img, loop-mounted -- see
+		// DeviceLabels' own doc for why this needs a fake-only label
+		// override), scaled well below the other two since that's really
+		// just image-layer reads plus a thin writable layer, never the
+		// bulk of a container's data IO.
 		ioRead := a.netScale * (0.4 + 0.6*g.rng.Float64())
 		ioWrite := ioRead * 0.35 * (0.5 + g.rng.Float64())
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.sda.read_bps"}, ts, ioRead)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.sda.write_bps"}, ts, ioWrite)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.nvme0n1.read_bps"}, ts, ioRead*0.25)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.nvme0n1.write_bps"}, ts, ioWrite*0.15)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.loop2.read_bps"}, ts, ioRead*0.05)
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.loop2.write_bps"}, ts, ioWrite*0.08)
 	}
 
 	// hostCPUPct is already a sum of host-share percentages (see the loop
@@ -401,11 +588,10 @@ func (g *Generator) Tick(now time.Time) {
 	// a plausible range now that the terms it's summing are host-share,
 	// not inflated per-core, percentages.
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "cpu.total"}, ts, clamp(hostCPUPct+5, 0, 100))
+	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "cpu.count"}, ts, float64(fakeHostCores))
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "mem.used_pct"}, ts, clamp(55+10*math.Sin(phase/3)+2*g.rng.Float64(), 0, 100))
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "net.rx_bps"}, ts, 20e6*(0.5+g.rng.Float64()))
 	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "net.tx_bps"}, ts, 5e6*(0.5+g.rng.Float64()))
-	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio.read_bps"}, ts, 30e6*g.rng.Float64())
-	g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio.write_bps"}, ts, 15e6*g.rng.Float64())
 
 	g.emitDisks(ts, elapsed)
 	g.emitArray(ts, elapsed)
@@ -414,9 +600,15 @@ func (g *Generator) Tick(now time.Time) {
 	g.emitContainerEvents(ts, elapsed)
 }
 
-// emitDisks records every fake disk's spun_up/temp.c/fs.*/errors series
-// for one tick -- see the disks var and errorDiskEntity/diskErrorsAt
-// consts for the per-disk shape and the one rare error's schedule.
+// emitDisks records every fake disk's spun_up/temp.c/fs.*/errors/diskio
+// series for one tick -- see the disks var and errorDiskEntity/
+// diskErrorsAt consts for the per-disk shape and the one rare error's
+// schedule. diskio is recorded host-scoped and device-keyed
+// ("diskio.<device>.read_bps", not a per-disk-entity series) to mirror
+// real mode's own host.go shape exactly (per-device /proc/diskstats
+// counters have no disk-SLOT dimension of their own) -- Storage's chart
+// joins it back to a slot via disk_meta[slot].device, same as any other
+// real-mode consumer would.
 func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 	phase := elapsed.Seconds() / 300.0
 	for i, d := range disks {
@@ -426,9 +618,20 @@ func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 		}
 		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "spun_up"}, ts, spunUp)
 		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "rotational"}, ts, d.rotational)
+		g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + d.device + ".read_bps"}, ts, d.ioReadScale*g.rng.Float64())
+		g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + d.device + ".write_bps"}, ts, d.ioWriteScale*g.rng.Float64())
 
 		if !d.spunDown && !d.noSensor {
-			temp := clamp(d.tempBase+2.5*math.Sin(phase+float64(i))+(g.rng.Float64()-0.5)*1.5, 32, 45)
+			var temp float64
+			if d.name == alertDemoDiskEntity {
+				// The alert demo's own deterministic ramp/hold/cool/hold
+				// shape (Task 9) -- NOT the generic sin+noise formula
+				// every other disk uses -- see alertDemoDiskEntity's own
+				// doc for the full schedule and why.
+				temp = alertDemoDiskTempC(elapsed, g.rng)
+			} else {
+				temp = clamp(d.tempBase+2.5*math.Sin(phase+float64(i))+(g.rng.Float64()-0.5)*1.5, 32, 45)
+			}
 			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "temp.c"}, ts, temp)
 		}
 
@@ -439,6 +642,14 @@ func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 			used := d.sizeBytes * usedFrac
 			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.used_bytes"}, ts, used)
 			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.free_bytes"}, ts, d.sizeBytes-used)
+			// fs.used_pct = usedFrac*100 exactly (used+free == d.sizeBytes
+			// always here), matching disks.go's real-collector formula.
+			// Deliberately plain sub-threshold drift, not a demo: every
+			// disk's baseUsed above tops out at disk2's 0.71, nowhere
+			// near disk-usage-high's 90% fire threshold, so this can
+			// never become a second, accidental alert demo alongside
+			// Task 9's own deliberate disk4 temp.c ramp.
+			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.used_pct"}, ts, usedFrac*100)
 		}
 
 		errCount := 0.0
@@ -451,6 +662,31 @@ func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 	if !g.diskErrorsFired && elapsed >= diskErrorsAt {
 		g.diskErrorsFired = true
 		g.appendEvent(ts, store.Event{Kind: "disk.errors", Entity: errorDiskEntity, Severity: "alert", Detail: "errors 0 → 1"})
+	}
+}
+
+// alertDemoDiskTempC drives disk4's temp.c through the deterministic
+// ramp/hold/cool/hold shape documented on alertDemoDiskEntity, pure in
+// elapsed time (like every other schedule in this file) so a test can
+// drive it with arbitrary injected durations. Monotonic within each
+// ramp -- no noise is added while the value is actually crossing a
+// threshold -- so disk-temp-high's hysteresis window can never
+// spuriously flicker back across the fire (55°C) or clear (50°C)
+// boundary mid-ramp; small noise only appears on the two HOLD phases,
+// and is clamped well clear of both boundaries (57-59°C while hot,
+// 38-42°C while cool) so it can never itself cross either one.
+func alertDemoDiskTempC(elapsed time.Duration, rng *rand.Rand) float64 {
+	switch {
+	case elapsed < alertDemoRampDuration:
+		frac := float64(elapsed) / float64(alertDemoRampDuration)
+		return alertDemoTempStart + (alertDemoTempPeak-alertDemoTempStart)*frac
+	case elapsed < alertDemoCoolStart:
+		return alertDemoTempPeak - 1 + rng.Float64()*2 // holds 57-59
+	case elapsed < alertDemoCoolStart+alertDemoCoolDuration:
+		frac := float64(elapsed-alertDemoCoolStart) / float64(alertDemoCoolDuration)
+		return alertDemoTempPeak - (alertDemoTempPeak-alertDemoTempFloor)*frac
+	default:
+		return alertDemoTempFloor - 2 + rng.Float64()*4 // holds 38-42
 	}
 }
 
@@ -575,6 +811,24 @@ func (g *Generator) emitSelf(ts int64) {
 // real 2s cadence, or in this file's own tests) fires only the latest
 // one, not a backfill of every skipped boundary.
 func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
+	// unhealthyContainer's own health.flip: fires exactly once, on the
+	// very first tick (elapsed==0) -- unlike the restart/OOM schedules
+	// below, there's no later boundary to catch it on, since Metas()
+	// reports it unhealthy unconditionally from the start.
+	if !g.unhealthyEventFired {
+		g.unhealthyEventFired = true
+		g.appendEvent(ts, store.Event{Kind: "container.health", Entity: unhealthyContainer, Severity: "warning", Detail: "unhealthy"})
+	}
+	// Task 9 alert demo: a single container.oom on sonarr, once, at
+	// alertDemoOOMAt -- see its own doc for why this is separate from
+	// the periodic oomContainer/lastOOMBoundary schedule just below.
+	// Severity "alert" matches container-oom's own min_severity floor
+	// (store.DefaultAlertRules) exactly, the same "collector already
+	// made the call" contract every other builtin event rule relies on.
+	if !g.alertOOMEventFired && elapsed >= alertDemoOOMAt {
+		g.alertOOMEventFired = true
+		g.appendEvent(ts, store.Event{Kind: "container.oom", Entity: alertDemoOOMContainer, Severity: "alert"})
+	}
 	if b := int64(elapsed / restartEvery); b > g.lastRestartBoundary {
 		g.lastRestartBoundary = b
 		g.appendEvent(ts, store.Event{
@@ -610,33 +864,56 @@ func fakeContainerMounts(name string) []docker.MountInfo {
 	return mounts
 }
 
-// Metas returns one synthetic docker.Meta per fleet archetype, always
-// reporting state "running"/health "healthy" (the fake fleet's own
-// identity never stops or restarts -- emitContainerEvents' periodic
-// events simulate that instead, without actually changing state here),
-// plus a plausible Mounts set (fakeContainerMounts) so the storage
-// panel has something to resolve. Created reuses fakeContainerStartedAt's
-// own instant rather than a separate offset: this fleet's identity never
+// Metas returns one synthetic docker.Meta per fleet archetype: state
+// "running"/health "healthy" for the fleet's own identity, except the
+// members marked archetype.stopped ("exited"/"") or archetype.created
+// ("created"/"") (the fleet's running/stopped/created split is otherwise
+// fixed -- emitContainerEvents' periodic events simulate restarts/OOMs on
+// top of it, without actually changing any member's own state here), and
+// health "unhealthy" for the one member marked archetype.unhealthy,
+// plus a plausible Mounts set (fakeContainerMounts) so the storage panel
+// has something to resolve. Created reuses fakeContainerStartedAt's own
+// instant rather than a separate offset: this fleet's identity never
 // restarts, so "created" and "started" are the same moment, exactly
 // like a real container that's run continuously since it was first
 // created. main wiring passes this to buildSnapshot/buildContainersList/
 // buildContainerStorage (GANTRY_FAKE_DATA=1 only) so the fake fleet is
-// treated exactly like dc.Running()'s real entries: without it, Task
-// 4's DTO-v2 container filter (only dc.Running() OR a name with both a
-// fresh live sample AND a known Meta) would empty every fake-mode
-// frame, since this generator writes samples straight to the store,
-// bypassing docker's registry entirely.
+// treated exactly like a real registry's own entries: without it, every
+// fake-mode frame would come up empty, since this generator writes
+// samples straight to the store, bypassing docker's registry entirely.
+// buildContainersList/buildContainerStorage still only care about a
+// container being KNOWN, not which state it's in, so the stopped/created
+// members flow through those two unchanged.
 func (g *Generator) Metas() []docker.Meta {
 	out := make([]docker.Meta, len(fleet))
 	for i, a := range fleet {
-		out[i] = docker.Meta{
-			Name: a.name, State: "running", Health: "healthy", Image: "demo/" + a.name + ":latest",
-			Created:      fakeContainerStartedAt(g.boot, i),
-			HostNet:      a.hostNet,
-			Mounts:       fakeContainerMounts(a.name),
+		state, health := "running", "healthy"
+		switch {
+		case a.stopped:
+			state, health = "exited", ""
+		case a.created:
+			state, health = "created", ""
+		case a.unhealthy:
+			health = "unhealthy"
+		}
+		m := docker.Meta{
+			Name: a.name, State: state, Health: health, Image: "demo/" + a.name + ":latest",
+			Created:        fakeContainerStartedAt(g.boot, i),
+			ComposeProject: a.composeProject, HostNet: a.hostNet,
+			Mounts: fakeContainerMounts(a.name), ExitCode: a.exitCode,
 			UpdateStatus: a.updateStatus, ChangelogURL: a.changelogURL, ProjectURL: a.projectURL,
 			WebUIURL: a.webUIURL, Networks: slices.Clone(a.networks), Ports: slices.Clone(a.ports),
 		}
+		// Cpuset: docker.CPUSetPin, not a literal, so fake mode's own
+		// "narrows below host" gate can never drift from the real
+		// collector's (see its own doc) -- this package can't construct
+		// docker's unexported `alloc` type to set m.Alloc directly the
+		// way a real inspect would, so the pin is computed straight from
+		// the archetype's raw string instead.
+		if pin, ok := docker.CPUSetPin(a.cpusetRaw, fakeHostCores); ok {
+			m.Cpuset = pin
+		}
+		out[i] = m
 	}
 	return out
 }
@@ -655,6 +932,34 @@ func (g *Generator) DiskMetas() map[string]unraid.DiskMeta {
 		out[d.name] = unraid.DiskMeta{Device: d.device, Kind: unraid.DiskKind(d.name, d.device, d.rotational, true)}
 	}
 	return out
+}
+
+// DeviceLabels is DiskMetas' device-LABEL analogue, for the storage
+// panel's Live IO rows rather than Storage's disk cards: the container
+// IO loop above (Tick) writes a "loop2" device for every fake
+// container, standing in for docker's own image-file-backed storage on
+// a real Unraid box. unraid.ResolveDeviceLabel resolves a real loop
+// device's friendly label by reading its /sys/block/<dev>/loop/
+// backing_file -- a real host filesystem fake-data mode never has, so
+// this hands main wiring the SAME answer that read would produce on a
+// real box, as a small, fixed override keyed by device name (unlike
+// DiskMetas' slot-keyed join, which the real ResolveDeviceLabel path
+// already applies unchanged to this generator's own disks -- see
+// buildContainerStorage's own doc for how the two merge).
+func (g *Generator) DeviceLabels() map[string]unraid.DeviceLabel {
+	return map[string]unraid.DeviceLabel{"loop2": {Label: "docker.img"}}
+}
+
+// SharePlacements is DiskMetas' share-placement analogue: fakeContainerMounts
+// gives every fleet member an /mnt/user/appdata/<name> share mount, and
+// this pins that ONE share to rocket_pool -- the fake fleet's own NVMe
+// pool (disks' own doc) -- so the storage panel has a real "share ->
+// cache pool -> pool kind" chain to resolve end to end in fake mode, the
+// same scenario that prompted this feature (Scott: "you can see that
+// the downloads share is used, but you don't know that the drive it's
+// stored on is the nvme cache drive").
+func (g *Generator) SharePlacements() map[string]unraid.SharePlacement {
+	return map[string]unraid.SharePlacement{"appdata": {Mode: "only", Pool: "rocket_pool"}}
 }
 
 // Run ticks until ctx is done. clock defaults to time.Now when nil.

@@ -9,10 +9,12 @@ const ROUTES: { hash: string; h1: string }[] = [
   { hash: '#/', h1: 'Overview' },
   { hash: '#/containers', h1: 'Containers' },
   { hash: '#/containers/jellyfin', h1: 'jellyfin' },
-  { hash: '#/top', h1: 'Top Consumers' },
+  { hash: '#/top', h1: 'Metrics' },
   { hash: '#/storage', h1: 'Storage' },
+  { hash: '#/maintenance', h1: 'Maintenance' },
   { hash: '#/gpu', h1: 'GPU' },
   { hash: '#/events', h1: 'Events' },
+  { hash: '#/alerts', h1: 'Alerts' },
   { hash: '#/settings', h1: 'Settings' },
 ];
 
@@ -52,11 +54,23 @@ test('overview: status headline reflects fleet/array/disk state, the fleet strip
   // the sandbox's own real containers showed up in the fleet total
   // too), so the true size varies by environment. This instead checks
   // that the strip and the sentence -- two client-side views of the
-  // exact same live container set -- agree with each other.
+  // exact same live container set -- agree with each other. The
+  // sentence itself is one of two shapes (fleetSentence, overviewStatus.
+  // ts): "N containers, all running." when nothing's stopped, or "N
+  // running · M stopped." once anything is -- the fake fleet always has
+  // at least one stopped archetype, but a real box's own containers
+  // sharing this environment could tip either way, so both are parsed.
   const fleetSentence = page.locator('.overview__sub-line').first();
   await expect(fleetSentence).toBeVisible();
-  const statedTotal = Number((await fleetSentence.textContent())?.match(/^(\d+)/)?.[1]);
-  expect(statedTotal).toBeGreaterThan(0);
+  const sentenceText = (await fleetSentence.textContent()) ?? '';
+  const stoppedMatch = sentenceText.match(/^(\d+) running · (\d+) stopped\.$/);
+  const allRunningMatch = sentenceText.match(/^(\d+) containers?, all running\.$/);
+  const statedTotal = stoppedMatch
+    ? Number(stoppedMatch[1]) + Number(stoppedMatch[2])
+    : allRunningMatch
+      ? Number(allRunningMatch[1])
+      : NaN;
+  expect(statedTotal, `unrecognized fleet sentence shape: ${sentenceText}`).toBeGreaterThan(0);
 
   const fleetUnits = page.locator('.fleet-strip .fleet-unit');
   await expect.poll(() => fleetUnits.count()).toBe(statedTotal);
@@ -96,6 +110,173 @@ test('overview: the Top Consumers module metric switcher changes the module and 
   await expect(page.getByRole('tab', { name: 'Memory', exact: true })).toHaveAttribute('aria-selected', 'true');
 });
 
+// Header compaction (Scott: "lots of wasted space here"): the status
+// band -- headline facts on the left, fleet strip + array schematic on
+// the right -- is a side-by-side row at >=768px and a plain vertical
+// stack below that, same breakpoint convention as every other
+// desktop/mobile split in this app.
+test('overview: the status band is two columns at desktop width and stacked at mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('#/');
+
+  const facts = page.locator('.overview__status-facts');
+  const visuals = page.locator('.overview__status-visuals');
+  await expect(facts).toBeVisible();
+  await expect(visuals).toBeVisible();
+
+  const factsBox = await facts.boundingBox();
+  const visualsBox = await visuals.boundingBox();
+  expect(factsBox).not.toBeNull();
+  expect(visualsBox).not.toBeNull();
+  // Side by side: roughly the same top, visuals strictly to the right.
+  expect(Math.abs(factsBox.y - visualsBox.y)).toBeLessThan(8);
+  expect(visualsBox.x).toBeGreaterThan(factsBox.x + factsBox.width - 8);
+
+  await page.setViewportSize({ width: 375, height: 800 });
+  const factsBoxMobile = await facts.boundingBox();
+  const visualsBoxMobile = await visuals.boundingBox();
+  // Stacked: visuals starts at or below where facts ends, not beside it.
+  expect(visualsBoxMobile.y).toBeGreaterThanOrEqual(factsBoxMobile.y + factsBoxMobile.height - 4);
+});
+
+// Balance pass (Scott: "sections are arranged oddly with lots of wasted
+// space... odd sizes"): "Needs a look" used to be a separate, full-width
+// block below the whole status band, which only started once the
+// TALLER of the two columns (fleet strip + schematic) finished --
+// leaving a dead gap under the shorter facts column the entire time
+// (confirmed live: a 175px void at 1440px). It now lives INSIDE
+// overview__status-facts, right after the fact lines -- this pins that
+// nesting directly: attention's own left edge and width must match
+// facts' column, not the full band.
+test('overview: needs-a-look sits inside the facts column, not a separate full-width block', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('#/');
+
+  const attention = page.locator('.overview__attention');
+  if ((await attention.count()) === 0) {
+    test.skip(true, 'fake fleet booted all-clear for this run -- nothing to check');
+  }
+
+  const facts = page.locator('.overview__status-facts');
+  const factsBox = await facts.boundingBox();
+  const attentionBox = await attention.boundingBox();
+  expect(factsBox).not.toBeNull();
+  expect(attentionBox).not.toBeNull();
+
+  expect(Math.abs(attentionBox.x - factsBox.x), "attention must share the facts column's own left edge").toBeLessThan(2);
+  expect(
+    attentionBox.width,
+    'attention must be contained in the facts column, not stretch across the full band',
+  ).toBeLessThanOrEqual(factsBox.width + 2);
+});
+
+// Balance pass, second half: the old shared two-column BODY put Top
+// Consumers and the events feed in unrelated columns for no reason
+// tied to either one's own content -- Top Consumers ended up
+// width-starved while the rail's column ran nearly double the other
+// column's height (confirmed live: 1287px vs 659px). Top Consumers and
+// Recent events now share one wide lane, STACKED (never side by side,
+// so they can never fight each other for width), while the rail -- the
+// one module here that's genuinely narrow by nature -- gets its own,
+// narrower lane.
+test('overview: Top Consumers and Recent events share one wide column, wider than the rail\'s own', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('#/');
+
+  const top = page.locator('.overview__top');
+  const events = page.locator('.overview__events');
+  const rail = page.locator('.overview__metrics-rail');
+  await expect(top).toBeVisible();
+  await expect(events).toBeVisible();
+  await expect(rail).toBeVisible();
+
+  const topBox = await top.boundingBox();
+  const eventsBox = await events.boundingBox();
+  const railBox = await rail.boundingBox();
+
+  // Stacked in the same column: same left edge and width, events below top.
+  expect(Math.abs(topBox.x - eventsBox.x)).toBeLessThan(2);
+  expect(Math.abs(topBox.width - eventsBox.width)).toBeLessThan(2);
+  expect(eventsBox.y).toBeGreaterThanOrEqual(topBox.y + topBox.height - 4);
+
+  // The rail sits in its own, narrower lane to the right -- not the
+  // roughly-half-the-body-width column it used to share with events.
+  expect(railBox.x).toBeGreaterThan(topBox.x + topBox.width - 8);
+  expect(railBox.width).toBeLessThan(topBox.width);
+});
+
+// Needs-a-look rows collapsed from a title line plus a separate detail
+// line into one inline sentence -- every row is a single flex line
+// (overview__attn-line), never a taller two-line block, regardless of
+// which anomaly happens to be active for a given fake-fleet run.
+test('overview: needs-a-look rows render as one line, not a title line over a detail line', async ({ page }) => {
+  await page.goto('#/');
+
+  const attention = page.locator('.overview__attention');
+  if ((await attention.count()) === 0) {
+    test.skip(true, 'fake fleet booted all-clear for this run -- nothing to check');
+  }
+
+  const lines = page.locator('.overview__attn-line');
+  await expect(lines.first()).toBeVisible();
+  const count = await lines.count();
+  for (let i = 0; i < count; i++) {
+    const box = await lines.nth(i).boundingBox();
+    // One line of this app's body text is comfortably under 30px tall;
+    // the old title+detail stack ran closer to 45-50px.
+    expect(box.height, `row ${i} looks like a two-line stack`).toBeLessThan(30);
+  }
+});
+
+// Bay schematic: now always part of the status band's right column
+// (previously only shown during a disk anomaly), bigger, with a hover/
+// focus label (slot, device, temp, used/total) and a real click-through
+// into #/storage -- the header-compaction + array-visualization passes.
+test('overview: the bay schematic is always visible, shows a hover/focus detail label, and links to storage', async ({
+  page,
+}) => {
+  await page.goto('#/');
+
+  const bars = page.locator('.bay-schematic__bar');
+  await expect(bars.first()).toBeVisible();
+  await expect(bars.first()).toHaveAttribute('href', '#/storage');
+
+  const label = page.locator('.bay-schematic__label');
+  await expect(label).not.toHaveClass(/bay-schematic__label--visible/);
+  await bars.first().hover();
+  await expect(label).toHaveClass(/bay-schematic__label--visible/);
+  // slot name, device, and a used/total byte pair -- the richer detail
+  // a hover now carries that the bar's own aria-label already had in
+  // short form.
+  await expect(label).toContainText('/');
+
+  await bars.first().focus();
+  await expect(label).toHaveClass(/bay-schematic__label--visible/);
+
+  await bars.first().click();
+  await expect(page).toHaveURL(/#\/storage$/);
+});
+
+// Fleet heat + tooltip (Scott: "make it earn its space" + "should say
+// the container name and show its icon as you mouse over it"): a
+// hover or keyboard focus on any unit reveals name/CPU/mem, previously
+// only present as an aria-label with nothing for a sighted user.
+test('overview: hovering or focusing a fleet unit reveals its name, CPU, and memory', async ({ page }) => {
+  await page.goto('#/');
+
+  const firstUnit = page.locator('.fleet-strip .fleet-unit').first();
+  await expect(firstUnit).toBeVisible();
+  const label = page.locator('.fleet-strip__label');
+  await expect(label).not.toHaveClass(/fleet-strip__label--visible/);
+
+  await firstUnit.hover();
+  await expect(label).toHaveClass(/fleet-strip__label--visible/);
+  await expect(label).toHaveText(/\d+\.\d%/); // a live CPU percentage
+
+  await firstUnit.focus();
+  await expect(label).toHaveClass(/fleet-strip__label--visible/);
+});
+
 test('containers: clicking a header sorts the table', async ({ page }) => {
   await page.goto('#/containers');
 
@@ -115,6 +296,78 @@ test('containers: clicking a header sorts the table', async ({ page }) => {
   expect(after).toEqual([...after].sort((a, b) => a.localeCompare(b)));
 });
 
+// Never-started ("created") containers: fake.go's fleet always includes
+// two (duplicati, watchtower) precisely to exercise this -- Scott's own
+// live example was a burst of ephemeral CI-runner spawns entering the
+// frame once stopped containers started showing up there too. They must
+// stay out of the Overview fleet/headline entirely (nothing to monitor,
+// high churn) but still be findable in the Containers view.
+test('containers: never-started containers are excluded from the Overview fleet but listed here with their own state', async ({
+  page,
+}) => {
+  await page.goto('#/containers');
+
+  // Not among the running table's rows.
+  await expect(page.locator('table.containers-table:has(thead) tr.container-row', { hasText: 'duplicati' })).toHaveCount(
+    0,
+  );
+
+  const notRunningToggle = page.getByRole('button', { name: /Not running/ });
+  await expect(notRunningToggle).toBeVisible();
+  await notRunningToggle.click();
+
+  const duplicatiRow = page.locator('tr.container-row', { hasText: 'duplicati' });
+  await expect(duplicatiRow).toBeVisible();
+  await expect(duplicatiRow).toContainText('created'); // its own state, not just a health-dot color
+
+  const watchtowerRow = page.locator('tr.container-row', { hasText: 'watchtower' });
+  await expect(watchtowerRow).toContainText('created');
+
+  // Overview: excluded from the fleet strip's own units and (since the
+  // fake fleet always has a real stopped archetype too) the "N running ·
+  // M stopped" sentence's M, which counts exited only.
+  await page.goto('#/');
+  const stripHrefs = await page
+    .locator('.fleet-strip .fleet-unit')
+    .evaluateAll((els) => els.map((el) => el.getAttribute('href')));
+  expect(stripHrefs).not.toContain('#/containers/duplicati');
+  expect(stripHrefs).not.toContain('#/containers/watchtower');
+
+  const sentenceText = (await page.locator('.overview__sub-line').first().textContent()) ?? '';
+  const stoppedMatch = sentenceText.match(/^(\d+) running · (\d+) stopped\.$/);
+  expect(stoppedMatch, `unexpected fleet sentence shape: ${sentenceText}`).not.toBeNull();
+  const statedTotal = Number(stoppedMatch[1]) + Number(stoppedMatch[2]);
+  await expect.poll(() => page.locator('.fleet-strip .fleet-unit').count()).toBe(statedTotal);
+});
+
+// Regression coverage for Scott's own report: "when values change, the
+// width of the columns change size. this happens constantly and is not
+// good looking." table-layout:fixed + the <colgroup> (Containers.svelte)
+// mean every column's width comes from ITS OWN fixed spec, never
+// recomputed from a row's live content -- so column x-positions must
+// stay byte-identical across two real live ticks (2s cadence), even
+// though the cell TEXT underneath them keeps changing length
+// ("17.2 KB/s" vs "947.6 B/s").
+test('containers: column widths do not jitter as live values tick', async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.goto('#/containers');
+
+  const headers = page.locator('table.containers-table:has(thead) thead th');
+  await expect.poll(() => headers.count()).toBeGreaterThan(0);
+
+  async function headerRects() {
+    return headers.evaluateAll((ths) => ths.map((th) => ({ left: th.getBoundingClientRect().left, width: th.getBoundingClientRect().width })));
+  }
+
+  const before = await headerRects();
+  // Comfortably more than one 2s tick, so at least one visible value's
+  // rendered string length has actually changed underneath these cells.
+  await page.waitForTimeout(6_000);
+  const after = await headerRects();
+
+  expect(after).toEqual(before);
+});
+
 test('container detail: charts render and the log viewer shows its empty state', async ({ page }) => {
   await page.goto('#/containers/jellyfin');
 
@@ -126,6 +379,278 @@ test('container detail: charts render and the log viewer shows its empty state',
   await expect(page.locator('.log-viewer__empty')).toContainText('Logs aren\'t available for "jellyfin"', {
     timeout: 10_000,
   });
+});
+
+// "jellyfin" is the only fake-fleet archetype whose mounts cover three
+// different storage kinds at once (fakeContainerMounts: a share, an
+// array disk, and the flash boot device -- "pool" only resolves on a
+// real box, since it needs a real disks.ini). Devices/capacity are
+// ring-only/live-frame samples that take the fake generator a couple of
+// ticks to populate after the server starts, hence the generous
+// timeouts on the first reads of each.
+test('container detail: storage panel renders mounts with kind badges, capacity, and labeled live device IO', async ({
+  page,
+}) => {
+  // Wide enough that the mount list's 2-column layout (>=1200px) is
+  // active, so the column-alignment checks below have two real groups
+  // to compare against each other, not just against themselves.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('#/containers/jellyfin');
+
+  const mountRow = (destination: string) =>
+    page
+      .locator('.storage-mount')
+      .filter({ has: page.locator('.storage-mount__dest', { hasText: new RegExp(`^${destination}$`) }) });
+  const CAPACITY_TEXT = /^\d+\.\d% full · \d+\.\d (B|KiB|MiB|GiB|TiB|PiB) free$/;
+
+  await expect(mountRow('/config').locator('.storage-mount__badge')).toContainText('Share · appdata');
+  await expect(mountRow('/config').locator('.storage-mount__ro')).toHaveCount(0); // rw is the default -- not labeled
+  // A share spans however many disks it happens to land on -- Unraid
+  // tracks no true per-share usage, so there's no single slot to show
+  // capacity for (mountCapacitySlot's own "don't fake it" rule) -- the
+  // cell itself still renders (it's a fixed grid column), just empty.
+  await expect(mountRow('/config').locator('.storage-mount__capacity-cell')).toBeEmpty();
+
+  await expect(mountRow('/media').locator('.storage-mount__badge')).toContainText('Disk · disk1');
+  await expect(mountRow('/media').locator('.storage-mount__ro')).toBeVisible();
+  await expect(mountRow('/media').locator('.storage-mount__capacity-cell')).toHaveText(CAPACITY_TEXT, {
+    timeout: 10_000,
+  });
+
+  await expect(mountRow('/flash').locator('.storage-mount__badge')).toContainText('Flash');
+  await expect(mountRow('/flash').locator('.storage-mount__ro')).toBeVisible();
+  await expect(mountRow('/flash').locator('.storage-mount__capacity-cell')).toHaveText(CAPACITY_TEXT, {
+    timeout: 10_000,
+  });
+
+  // Column-alignment regression coverage for Scott's own report ("try to
+  // line things up a little better here"): every mount's dest/badge cell
+  // must start at the same x as every other mount's in the SAME CSS
+  // column group (/config and /flash both land in the left group at
+  // this width), and /media's own group (the right one) must start at a
+  // consistent offset from it -- one shared grid template guarantees
+  // this by construction (see ContainerDetail.svelte's own doc), unlike
+  // the masonry `columns: 2` layout this replaced, which could only
+  // ever align a mount with itself.
+  const destConfig = await mountRow('/config').locator('.storage-mount__dest').boundingBox();
+  const destFlash = await mountRow('/flash').locator('.storage-mount__dest').boundingBox();
+  const badgeConfig = await mountRow('/config').locator('.storage-mount__badge-cell').boundingBox();
+  const badgeFlash = await mountRow('/flash').locator('.storage-mount__badge-cell').boundingBox();
+  expect(destConfig).not.toBeNull();
+  expect(destFlash).not.toBeNull();
+  expect(destConfig.x).toBeCloseTo(destFlash.x, 0);
+  expect(badgeConfig.x).toBeCloseTo(badgeFlash.x, 0);
+
+  const destMedia = await mountRow('/media').locator('.storage-mount__dest').boundingBox();
+  expect(destMedia.x).toBeGreaterThan(destConfig.x + destConfig.width); // the right-hand CSS column, not stacked under the left
+
+  // Devices sort by raw device name (deviceIOFromSamples) -- loop2,
+  // nvme0n1, sda -- exercising all three of unraid.ResolveDeviceLabel's
+  // own paths at once: a loop device's backing_file (docker.img, via
+  // fake mode's own override -- fake.go's DeviceLabels, since fake mode
+  // has no real /sys to read), a DiskMeta slot join (nvme0n1 ->
+  // rocket_pool, kind nvme), and raw passthrough (sda isn't any of the
+  // fake fleet's own disk devices). jellyfin's own devices always carry
+  // real (nonzero) IO in fake mode, so the noise rule (its own mocked
+  // tests below) never hides any of these three.
+  await expect(page.locator('.storage-device').first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('.storage-device')).toHaveCount(3);
+
+  const loopRow = page.locator('.storage-device').nth(0);
+  await expect(loopRow.locator('.storage-device__label')).toContainText('docker.img');
+  await expect(loopRow.locator('.storage-device__raw')).toHaveText('loop2');
+  await expect(loopRow.locator('.storage-device__kind')).toHaveCount(0); // fake's override names a label but no kind
+
+  const poolRow = page.locator('.storage-device').nth(1);
+  await expect(poolRow.locator('.storage-device__label')).toContainText('rocket_pool');
+  await expect(poolRow.locator('.storage-device__raw')).toHaveText('nvme0n1');
+  await expect(poolRow.locator('.storage-device__kind')).toContainText('NVMe');
+  // Read/Write are named once, in the header (checked below), not
+  // repeated as text on every row -- each value still carries its own
+  // identity via aria-label for anyone not reading the header visually.
+  await expect(poolRow.locator('.storage-device__value').nth(0)).toHaveAttribute('aria-label', /^Read /);
+  await expect(poolRow.locator('.storage-device__value').nth(1)).toHaveAttribute('aria-label', /^Write /);
+
+  const rawRow = page.locator('.storage-device').nth(2);
+  await expect(rawRow.locator('.storage-device__label')).toContainText('sda');
+  await expect(rawRow.locator('.storage-device__raw')).toBeEmpty(); // sda isn't any known slot's device -- stays raw, no secondary
+  await expect(rawRow.locator('.storage-device__kind')).toHaveCount(0);
+
+  await expect(page.locator('.storage-device-header', { hasText: 'Read' })).toBeVisible();
+  await expect(page.locator('.storage-device-header', { hasText: 'Write' })).toBeVisible();
+
+  // Read/Write column alignment -- "so all rows and the Total row line
+  // up exactly": every .storage-device__value is a (read, write) pair in
+  // DOM order, one pair per device row plus one for the Total row, so
+  // every even index is a Read cell and every odd index a Write cell --
+  // each group must share exactly one x position.
+  await expect(page.locator('.storage-total')).toContainText('Total');
+  const valueXs = await page
+    .locator('.storage-device__value')
+    .evaluateAll((els) => els.map((el) => Math.round(el.getBoundingClientRect().x)));
+  expect(valueXs).toHaveLength(8); // 3 devices + Total, x2 each
+  const readXs = valueXs.filter((_, i) => i % 2 === 0);
+  const writeXs = valueXs.filter((_, i) => i % 2 === 1);
+  expect(new Set(readXs).size).toBe(1);
+  expect(new Set(writeXs).size).toBe(1);
+});
+
+// Share->disk placement (Scott: "you can see that the downloads share
+// is used, but you don't know that the drive it's stored on is the
+// nvme cache drive... we need to connect the dots"): fake mode pins the
+// appdata share (every fleet member's /config mount) to rocket_pool,
+// the fake fleet's own NVMe pool (fake.Generator.SharePlacements' own
+// doc), so the mount that already read "Share · appdata" now also names
+// which drive that share actually lives on, tinted to match rocket_
+// pool's own kind badge elsewhere on this same page.
+test('container detail: a share mount shows which cache pool it lives on, tinted by that pool\'s own kind', async ({
+  page,
+}) => {
+  await page.goto('#/containers/jellyfin');
+
+  const configMount = page
+    .locator('.storage-mount')
+    .filter({ has: page.locator('.storage-mount__dest', { hasText: /^\/config$/ }) });
+  const placement = configMount.locator('.storage-mount__placement');
+
+  await expect(placement).toHaveText('→ lives on rocket_pool (nvme)');
+  await expect(placement).toHaveClass(/storage-mount__placement--nvme/);
+
+  // Tinted to match, not merely present: the SAME color rocket_pool's
+  // own NVMe kind badge already renders with in the Live IO section
+  // below (poolRow's own storage-device__kind, see the test above).
+  const placementColor = await placement.evaluate((el) => getComputedStyle(el).color);
+  const nvmeBadgeColor = await page
+    .locator('.storage-device__kind', { hasText: 'NVMe' })
+    .evaluate((el) => getComputedStyle(el).color);
+  expect(placementColor).toBe(nvmeBadgeColor);
+
+  // A non-share mount never gets a placement line, even one backed by
+  // the very pool the share above resolved to.
+  const mediaMount = page
+    .locator('.storage-mount')
+    .filter({ has: page.locator('.storage-mount__dest', { hasText: /^\/media$/ }) });
+  await expect(mediaMount.locator('.storage-mount__placement')).toHaveCount(0);
+});
+
+// Live IO noise rule (recentlyActiveDevices/recordDeviceActivity, lib/
+// containerStorage.ts): fake mode's own devices are always active
+// (fake.go's Tick never zeroes them), so exercising "never had any IO"
+// needs a mocked response. mounts: [] means the Mounts sub-section shows
+// its own "No mounts for this container." line -- same shared
+// .container-detail__storage-empty class the Live IO one below would
+// use if it were showing, so that check is scoped by text, not the bare
+// class, to tell the two apart.
+test('container detail: storage panel hides a device with no recent IO but still counts it in Total', async ({
+  page,
+}) => {
+  await page.route('**/api/containers/jellyfin/storage', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        mounts: [],
+        devices: [
+          { device: 'sda', label: 'sda', kind: '', read_bps: 120000, write_bps: 40000 },
+          { device: 'loop1', label: 'bzmodules', kind: '', read_bps: 0, write_bps: 0 },
+        ],
+      }),
+    }),
+  );
+  await page.goto('#/containers/jellyfin');
+
+  await expect(page.locator('.storage-device')).toHaveCount(1, { timeout: 10_000 });
+  await expect(page.locator('.storage-device__label')).toContainText('sda');
+  await expect(page.locator('.container-detail__storage-empty', { hasText: 'No recent disk IO.' })).toHaveCount(0);
+
+  // Total sums BOTH devices (120000+0 read bps = 120.0 KB/s), not just
+  // the one visible row -- truthful even though bzmodules never renders.
+  await expect(page.locator('.storage-total .storage-device__value').nth(0)).toHaveAttribute(
+    'aria-label',
+    'Read 120.0 KB/s',
+  );
+  await expect(page.locator('.storage-total .storage-device__value').nth(1)).toHaveAttribute(
+    'aria-label',
+    'Write 40.0 KB/s',
+  );
+});
+
+test('container detail: an active Unraid-OS loop device gets a muted suffix', async ({ page }) => {
+  await page.route('**/api/containers/jellyfin/storage', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        mounts: [],
+        devices: [{ device: 'loop1', label: 'bzmodules', kind: '', read_bps: 5000, write_bps: 0 }],
+      }),
+    }),
+  );
+  await page.goto('#/containers/jellyfin');
+
+  const row = page.locator('.storage-device').first();
+  await expect(row).toBeVisible({ timeout: 10_000 });
+  await expect(row.locator('.storage-device__label')).toContainText('bzmodules');
+  await expect(row.locator('.storage-device__os-tag')).toHaveText('(Unraid OS)');
+});
+
+test('container detail: storage panel shows a quiet message once every device has gone idle', async ({ page }) => {
+  await page.route('**/api/containers/jellyfin/storage', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ mounts: [], devices: [{ device: 'sda', label: 'sda', kind: '', read_bps: 0, write_bps: 0 }] }),
+    }),
+  );
+  await page.goto('#/containers/jellyfin');
+
+  await expect(page.locator('.container-detail__storage-empty', { hasText: 'No recent disk IO.' })).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.locator('.storage-device')).toHaveCount(0);
+  await expect(page.locator('.storage-total')).toHaveCount(0);
+});
+
+// Horizontal-overflow regression: TimeChart/Sparkline bake each chart's
+// width in literal canvas pixels (build()/setSize read the host's
+// clientWidth), and a grid item's default min-width:auto lets that
+// baked canvas set its track's minimum -- so when the content box later
+// narrows (window resize, a vertical scrollbar appearing), the 1fr
+// tracks physically can't shrink, cards overrun the page sideways, and
+// the ResizeObserver that's supposed to re-fit the chart can never
+// fire: the element it watches is held at its stale width by the very
+// canvas it would resize. Two live instances of the same trap, both
+// reproduced narrowing 1920 -> 1200: Container Detail's chart cards
+// (the Memory card's right edge sat ~210px past the viewport, whole
+// page scrolling horizontally) and Settings' footprint card (its
+// sparklines pinned the row's first track at 550px, shoving the About
+// card 16px past the page).
+test('chart-hosting grid cards release their tracks when the viewport narrows', async ({ page }) => {
+  const ROWS: { hash: string; canvas: string }[] = [
+    { hash: '#/containers/jellyfin', canvas: '.container-detail__charts canvas' },
+    { hash: '#/settings', canvas: '.settings-footprint canvas' },
+  ];
+  for (const r of ROWS) {
+    await page.setViewportSize({ width: 1920, height: 900 });
+    await page.goto(r.hash);
+
+    // The chart must exist BEFORE the resize -- the bug is a stale
+    // already-built canvas holding its track open, not a fresh build at
+    // the narrow width (which sizes correctly).
+    await expect(page.locator(r.canvas).first()).toBeVisible({ timeout: 10_000 });
+
+    await page.setViewportSize({ width: 1200, height: 900 });
+
+    // expect.poll gives the ResizeObserver -> setSize chain a beat to
+    // settle; the invariant is "no horizontal overflow anywhere on the
+    // page" (documentElement.clientWidth already excludes any vertical
+    // scrollbar, so a positive difference is a real sideways spill).
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), {
+        message: `horizontal overflow on ${r.hash} after narrowing`,
+      })
+      .toBeLessThanOrEqual(0);
+  }
 });
 
 test('top consumers: switching window from Now to 1h renders without erroring', async ({ page }) => {
@@ -143,6 +668,202 @@ test('top consumers: switching window from Now to 1h renders without erroring', 
   // freshly-started store that may not have an hour of history yet.
   await expect(page.locator('.top-consumers__error')).toHaveCount(0);
   await expect(page.locator('.top-bar-list__row, .top-bar-list__empty').first()).toBeVisible();
+
+  // If the window actually has rows (real store history), the hero
+  // chart's own per-container /api/series fetches must have populated a
+  // legend too, not just the ranked bars -- proves the fetched-window
+  // path (as opposed to Now's live rings) actually wires up.
+  const rowCount = await page.locator('.top-bar-list__row').count();
+  if (rowCount > 0) {
+    await expect(page.locator('.top-consumers__header canvas')).toBeVisible();
+    await expect.poll(() => page.locator('.top-consumers__chip').count()).toBeGreaterThan(0);
+  }
+});
+
+// Metric breakdown pages: an Overview rail tile deep-links into its own
+// resource's #/top/:resource route, which grows into a real attribution
+// page there -- host-total header (value + live chart), the COMPLETE
+// container list (not Overview's own top-5 module), a trailing
+// "unattributed" summary row, and -- for a directional resource -- every
+// row (including that summary one) showing both sides of the pair in
+// their own colors. GPU deliberately gets none of the header/summary
+// row (see topFromFrame.ts's own doc on why there's no single honest
+// whole-machine GPU number).
+test('overview: a rail tile deep-links to its own metric breakdown page', async ({ page }) => {
+  await page.goto('#/');
+
+  const memTile = page.locator('.overview__metrics-rail .stat-tile', { hasText: 'Memory' });
+  await expect(memTile).toBeVisible();
+  await expect(memTile).toHaveAttribute('href', '#/top/mem');
+  await memTile.click();
+  await expect(page).toHaveURL(/#\/top\/mem$/);
+  await expect(page.getByRole('tab', { name: 'Memory', exact: true })).toHaveAttribute('aria-selected', 'true');
+});
+
+test('top consumers: cpu breakdown page shows a host-total header with a live multi-line chart and a legend', async ({
+  page,
+}) => {
+  await page.goto('#/top/cpu');
+
+  await expect(page.locator('.top-consumers__header')).toBeVisible();
+  await expect(page.locator('.top-consumers__header-value')).toHaveText(/^\d+\.\d%$/);
+  await expect(page.locator('.top-consumers__header canvas')).toBeVisible();
+
+  // The hero chart's own legend: up to 10 container chips + a trailing
+  // "Host total" reference chip, in the SAME order as the ranked list
+  // below (both read the same top-N ranking).
+  const chips = page.locator('.top-consumers__chip');
+  await expect.poll(() => chips.count()).toBeGreaterThan(1);
+  await expect(chips.last()).toHaveText('Host total');
+  const chipCount = await chips.count();
+  expect(chipCount).toBeLessThanOrEqual(11); // top 10 containers + host total
+
+  const firstChipName = (await chips.first().textContent())?.trim();
+  const firstRowName = await page.locator('.top-bar-list__name-text').first().textContent();
+  expect(firstChipName).toContain(firstRowName?.trim());
+
+  // uPlot's own built-in legend is suppressed (showLegend={false}) --
+  // the chip row above is the only legend, not a second, redundant one.
+  await expect(page.locator('.top-consumers__header .u-legend')).toHaveCount(0);
+});
+
+test('top consumers: clicking a legend chip toggles it, hovering focuses it, without erroring', async ({ page }) => {
+  await page.goto('#/top/cpu');
+  const firstChip = page.locator('.top-consumers__chip').first();
+  await expect(firstChip).toBeVisible();
+
+  await firstChip.hover();
+  await firstChip.click();
+  await expect(firstChip).toHaveClass(/top-consumers__chip--off/);
+  await expect(firstChip).toHaveAttribute('aria-pressed', 'false');
+
+  await firstChip.click();
+  await expect(firstChip).not.toHaveClass(/top-consumers__chip--off/);
+});
+
+test('top consumers: the ranked-list card is labeled "Top Consumers" under the renamed "Metrics" page', async ({
+  page,
+}) => {
+  await page.goto('#/top/cpu');
+  await expect(page.locator('h1.page-title')).toHaveText('Metrics');
+  await expect(page.locator('.top-consumers__panel-label')).toHaveText('Top Consumers');
+});
+
+test('top consumers: the cpu breakdown list is complete (not top-5) and ends with an unattributed row', async ({
+  page,
+}) => {
+  await page.goto('#/top/cpu');
+
+  const rows = page.locator('.top-bar-list__row');
+  await expect.poll(() => rows.count()).toBeGreaterThan(5);
+
+  // The last row is the pinned, unlinked "Unattributed (host)" summary --
+  // a plain <span> name, not a link into some container's detail page.
+  const lastRow = rows.last();
+  await expect(lastRow).toContainText('Unattributed (host)');
+  await expect(lastRow.locator('.top-bar-list__name')).toHaveCount(1);
+  const tagName = await lastRow.locator('.top-bar-list__name').evaluate((el) => el.tagName);
+  expect(tagName).toBe('SPAN');
+});
+
+test('top consumers: network breakdown pairs down/up in the header and on every row, in two colors', async ({
+  page,
+}) => {
+  await page.goto('#/top/net');
+
+  const header = page.locator('.top-consumers__header-values .top-consumers__header-value');
+  await expect(header).toHaveCount(2);
+  await expect(header.first()).toContainText('↓');
+  await expect(header.nth(1)).toContainText('↑');
+  const [downColor, upColor] = await header.evaluateAll((els) => els.map((el) => getComputedStyle(el).color));
+  expect(downColor).not.toBe(upColor);
+
+  const firstRow = page.locator('.top-bar-list__row').first();
+  await expect(firstRow.locator('.top-bar-list__value')).toHaveCount(2);
+  await expect(firstRow.locator('.top-bar-list__value').first()).toContainText('↓');
+  await expect(firstRow.locator('.top-bar-list__value').nth(1)).toContainText('↑');
+});
+
+test('top consumers: gpu breakdown has no host-total VALUE or unattributed row, but still gets the per-container hero chart', async ({
+  page,
+}) => {
+  await page.goto('#/top/gpu');
+
+  await expect(page.locator('.top-bar-list__row, .top-bar-list__empty').first()).toBeVisible();
+  await expect(page.locator('.top-bar-list__row', { hasText: 'Unattributed' })).toHaveCount(0);
+
+  // gpu gets no whole-machine number (topFromFrame.ts's own doc: a
+  // busy_pct is inherently per-engine/per-device) -- the header card
+  // itself still renders, chart-only, whenever at least one container
+  // has GPU activity (fake mode's jellyfin always does).
+  const header = page.locator('.top-consumers__header');
+  await expect(header).toBeVisible();
+  await expect(header.locator('.top-consumers__header-value')).toHaveCount(0);
+  await expect(header).toContainText('GPU');
+  await expect(header).toContainText('per container');
+  await expect(header.locator('canvas')).toBeVisible();
+});
+
+// Core-budget ribbon: the CPU breakdown page's own hero, live only. Math
+// smoke test (the real segment math is unit-tested directly in lib/
+// coreBudget.test.ts) -- this just pins that the rendered widths actually
+// sum to the bar's own full width and that switching away from CPU (or
+// to a fetched window) removes it cleanly rather than leaving it stuck.
+test('top consumers: the CPU core-budget ribbon renders segments that sum to the bar width', async ({ page }) => {
+  await page.goto('#/top/cpu');
+
+  const bar = page.locator('.core-ribbon__bar');
+  await expect(bar).toBeVisible();
+  await expect(bar).toHaveAttribute('aria-label', /^CPU core budget, \d+ cores$/);
+
+  const { barWidth, partsWidth } = await bar.evaluate((el) => {
+    const barWidth = el.getBoundingClientRect().width;
+    const parts = [...el.querySelectorAll('.core-ribbon__segment, .core-ribbon__free')];
+    const partsWidth = parts.reduce((sum, p) => sum + p.getBoundingClientRect().width, 0);
+    return { barWidth, partsWidth };
+  });
+  // A point of slack absorbs sub-pixel rounding across however many
+  // segments happen to be present.
+  expect(Math.abs(barWidth - partsWidth)).toBeLessThan(2);
+
+  // Hovering a segment reveals its own name+cores label; leaving it
+  // hides it again.
+  const firstSegment = bar.locator('.core-ribbon__segment').first();
+  const label = page.locator('.core-ribbon__label');
+  await expect(label).not.toHaveClass(/core-ribbon__label--visible/);
+  await firstSegment.hover();
+  await expect(label).toHaveClass(/core-ribbon__label--visible/);
+
+  // Switching to a non-CPU resource removes the ribbon entirely.
+  await page.getByRole('tab', { name: 'Memory', exact: true }).click();
+  await expect(page.locator('.core-ribbon__bar')).toHaveCount(0);
+});
+
+// Rate-metric scale ceilings: net/io have no fixed 0-100 ceiling, so
+// their bars read against a "nice" 1-2-5 ceiling at least as large as
+// the current max (niceCeiling, lib/metrics.ts) instead of the
+// leaderboard's own busiest row -- labeled once per surface (module vs.
+// view) rather than per row. Percent metrics (cpu/gpu) are unaffected --
+// still absolute 0-100, no ceiling label at all.
+test('top consumers: net/io bars scale to a nice ceiling, labeled once, unlike percent metrics', async ({ page }) => {
+  await page.goto('#/top/net');
+
+  const label = page.locator('.top-consumers__scale');
+  await expect(label).toBeVisible();
+  await expect(label).toHaveText(/^Bars scaled to ≤ \d+(\.\d+)? (B|KB|MB|GB)\/s$/);
+
+  // cpu/gpu stay absolute-0-100 -- no ceiling label at all.
+  await page.getByRole('tab', { name: 'CPU', exact: true }).click();
+  await expect(page.locator('.top-consumers__scale')).toHaveCount(0);
+
+  // Overview's own compact module gets the identical treatment, once
+  // per module rather than per row.
+  await page.goto('#/');
+  const netTab = page.getByRole('tab', { name: 'Net', exact: true });
+  await netTab.click();
+  const moduleLabel = page.locator('.overview__top-scale');
+  await expect(moduleLabel).toBeVisible();
+  await expect(moduleLabel).toHaveText(/^Scale ≤ \d+(\.\d+)? (B|KB|MB|GB)\/s$/);
 });
 
 // Regression coverage for the top-consumers host-share fix: a container
@@ -175,6 +896,46 @@ test('top consumers: CPU rows read as a host-share percentage with a quiet cores
   await expect(page.locator('.top-bar-list__secondary').first()).toHaveText(/^≈\d+\.\d cores$/);
 });
 
+// Regression coverage for Scott's own report: a quiet 6.5%-busy container
+// used to draw a nearly-full bar just because nothing else running was any
+// busier -- the leaderboard scaled every bar relative to its OWN top row,
+// not to the machine. cpu/gpu are both read on a fixed 0-100 scale (see
+// topFromFrame's resourceScaleMax), so a row's bar width and its own
+// printed percentage must always agree, on every row, not just the top
+// one. Two separate page.goto calls (rather than clicking between tabs on
+// one page) sidesteps a separate, already-flagged bug where a container
+// present on both leaderboards keeps its prior tab's value for a while
+// after a same-page tab switch -- irrelevant to the scale math this pins,
+// but no reason to couple this test to it.
+test('top consumers: CPU and GPU bar widths read as an absolute fraction of 100, not relative to the busiest row', async ({
+  page,
+}) => {
+  async function assertBarMatchesItsOwnValue(hash: string) {
+    await page.goto(hash);
+    const rows = page.locator('.top-bar-list__row');
+    await expect(rows.first()).toBeVisible();
+    const count = await rows.count();
+    for (let i = 0; i < count; i++) {
+      const { value, actualPct } = await rows.nth(i).evaluate((el) => {
+        const value = Number(el.querySelector('.top-bar-list__value')!.textContent!.replace('%', ''));
+        const track = el.querySelector('.top-bar-list__track')!.getBoundingClientRect();
+        const bar = el.querySelector('.top-bar-list__bar')!.getBoundingClientRect();
+        return { value, actualPct: (bar.width / track.width) * 100 };
+      });
+      // A whole point of slack absorbs the value text's own 1-decimal
+      // rounding -- a relative-to-max regression would be off by tens of
+      // points on every row but the top one, well outside this.
+      expect(actualPct, `${hash} row ${i}: value ${value}%, bar reads ${actualPct.toFixed(1)}%`).toBeGreaterThan(
+        value - 1,
+      );
+      expect(actualPct).toBeLessThan(value + 1);
+    }
+  }
+
+  await assertBarMatchesItsOwnValue('#/top/cpu');
+  await assertBarMatchesItsOwnValue('#/top/gpu');
+});
+
 test('overview: the Top Consumers module shows the same host-share cores secondary on CPU rows', async ({ page }) => {
   await page.goto('#/');
 
@@ -205,6 +966,140 @@ test('storage: every disk type badge is classified correctly (hdd/ssd/nvme/usb)'
   // The boot device's own role label is distinct from a plain pool's --
   // proves ROLE_LABEL and MEDIA_LABEL aren't accidentally conflated.
   await expect(diskRow('flash')).toContainText('Boot (flash)');
+});
+
+// Status-colored values (thresholds.ts): disk2 is fake.go's own fixture
+// with baseUsed 0.71 -- just over disk.capacity's 70% warn threshold --
+// so its capacity number must render banded, not plain ink; disk4
+// (baseUsed 0.40) stays comfortably in-band and must stay plain ink,
+// proving this isn't just "every disk gets tinted".
+test('storage: a disk over the capacity threshold renders its number banded, one under it stays plain ink', async ({
+  page,
+}) => {
+  await page.goto('#/storage');
+
+  const diskRow = (name: string) =>
+    page.locator('.storage-disk').filter({ has: page.locator('.storage-disk__name', { hasText: new RegExp(`^${name}$`) }) });
+
+  const inkColor = await page.locator('.storage-disk__name').first().evaluate((el) => getComputedStyle(el).color);
+
+  const overThreshold = diskRow('disk2').locator('.storage-disk__usage-pct');
+  await expect(overThreshold).toBeVisible();
+  await expect(overThreshold).toContainText(/^7\d\.\d%$/); // ~71%, drifts slowly upward but stays in the 70s for any test run
+  const overColor = await overThreshold.evaluate((el) => getComputedStyle(el).color);
+  expect(overColor).not.toBe(inkColor);
+
+  const underThreshold = diskRow('disk4').locator('.storage-disk__usage-pct');
+  await expect(underThreshold).toBeVisible();
+  const underColor = await underThreshold.evaluate((el) => getComputedStyle(el).color);
+  expect(underColor).toBe(inkColor);
+});
+
+// Storage header chart (Scott: "a graph that can switch between disk
+// io, storage used, and temperature... each line... a separate
+// drive"): a segmented IO/Used/Temp switcher over a per-drive TimeChart
+// and a kind-tinted legend, reusing the Metrics page's own hero-chart
+// interaction pattern. pageerror is collected for the whole test --
+// this is the regression guard for a real bug this feature shipped
+// with (every line missing its own `label`, so TimeChart's tooltip --
+// keyed by row.label -- collapsed every row onto one shared `undefined`
+// key the instant a hover first populated it: each_key_duplicate).
+test('storage: the header chart switches metrics/windows and its legend toggles lines without erroring', async ({
+  page,
+}) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (err) => pageErrors.push(err.message));
+
+  await page.goto('#/storage');
+
+  const chart = page.locator('.storage-chart');
+  await expect(chart).toBeVisible();
+  await expect(chart.locator('.microlabel').first()).toHaveText('IO by drive');
+  await expect(chart.locator('canvas')).toBeVisible();
+
+  const usedTab = chart.getByRole('tab', { name: 'Used', exact: true });
+  await usedTab.click();
+  await expect(usedTab).toHaveAttribute('aria-selected', 'true');
+  await expect(chart.locator('.microlabel').first()).toHaveText('Used by drive');
+
+  const tempTab = chart.getByRole('tab', { name: 'Temp', exact: true });
+  await tempTab.click();
+  await expect(chart.locator('.microlabel').first()).toHaveText('Temp by drive');
+
+  await chart.getByRole('button', { name: '1h', exact: true }).click();
+  await expect(chart.locator('.storage-chart__error')).toHaveCount(0, { timeout: 10_000 });
+  await chart.getByRole('button', { name: 'Now', exact: true }).click();
+
+  // Legend: at least one chip starts visible (a pool/parity always
+  // does) and at least one starts hidden (12+ lines calm) for the fake
+  // fleet's 8-disk array; clicking a chip flips its own state.
+  const chips = chart.locator('.storage-chart__chip');
+  await expect.poll(() => chips.count()).toBeGreaterThan(1);
+  const offChips = chart.locator('.storage-chart__chip.storage-chart__chip--off');
+  const onChips = chart.locator('.storage-chart__chip:not(.storage-chart__chip--off)');
+  await expect.poll(() => offChips.count()).toBeGreaterThan(0);
+  await expect.poll(() => onChips.count()).toBeGreaterThan(0);
+
+  const firstChip = chips.first();
+  const wasOff = (await firstChip.getAttribute('aria-pressed')) === 'false';
+  await firstChip.hover();
+  await firstChip.click();
+  await expect(firstChip).toHaveAttribute('aria-pressed', wasOff ? 'true' : 'false');
+  await firstChip.click();
+  await expect(firstChip).toHaveAttribute('aria-pressed', wasOff ? 'false' : 'true');
+
+  // Hovering the chart itself pins a tooltip listing only the currently
+  // visible lines (never a hidden one) -- expect.poll rather than a
+  // single assertion since the live chart keeps re-rendering under the
+  // cursor every tick, and this is the exact interaction that used to
+  // throw each_key_duplicate (see the test's own doc above). uPlot
+  // layers its own cursor-tracking overlay (.u-over) directly on top of
+  // the canvas -- that's the real hit target, not the canvas itself.
+  await chart.locator('.u-over').hover();
+  const tooltipRows = page.locator('.time-chart__tooltip .time-chart__tooltip-row');
+  await expect.poll(() => tooltipRows.count(), { timeout: 10_000 }).toBeGreaterThan(0);
+  const [visibleChipNames, tooltipText] = await Promise.all([onChips.allTextContents(), tooltipRows.allTextContents()]);
+  await expect(tooltipRows).toHaveCount(visibleChipNames.length);
+  for (const name of visibleChipNames) {
+    expect(tooltipText.some((row) => row.includes(name.trim()))).toBe(true);
+  }
+
+  expect(pageErrors, `uncaught page errors: ${pageErrors.join('\n')}`).toEqual([]);
+});
+
+// Clickable events (eventHref, lib/eventHref.ts): mocked rather than
+// waiting on the fake generator's own real-time schedule (its first
+// event fires 2 real minutes into uptime) -- deterministic and instant,
+// and exercises the exact same rendering path a real event would.
+test('events: container/storage events are clickable and navigate; image/unknown stay plain rows', async ({ page }) => {
+  const now = Math.floor(Date.now() / 1000);
+  await page.route('**/api/events*', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { ID: 1, TS: now, Kind: 'container.start', Entity: 'jellyfin', Severity: 'info', Detail: '' },
+        { ID: 2, TS: now - 5, Kind: 'disk.errors', Entity: 'disk2', Severity: 'alert', Detail: 'errors 0 → 1' },
+        { ID: 3, TS: now - 10, Kind: 'image.pull', Entity: 'demo/paperless:latest', Severity: 'info', Detail: '' },
+      ]),
+    }),
+  );
+
+  await page.goto('#/events');
+
+  const containerRow = page.locator('.event-feed-item', { hasText: 'jellyfin' });
+  await expect(containerRow).toHaveAttribute('href', '#/containers/jellyfin');
+
+  const diskRow = page.locator('.event-feed-item', { hasText: 'disk.errors' });
+  await expect(diskRow).toHaveAttribute('href', '#/storage');
+
+  const imageRow = page.locator('.event-feed-item', { hasText: 'image.pull' });
+  await expect(imageRow).not.toHaveAttribute('href');
+  expect(await imageRow.evaluate((el) => el.tagName)).toBe('DIV');
+
+  await containerRow.click();
+  await expect(page).toHaveURL(/#\/containers\/jellyfin$/);
+  await expect(page.locator('h1.page-title')).toHaveText('jellyfin');
 });
 
 test('theme toggle flips data-theme and persists across reload', async ({ page }) => {

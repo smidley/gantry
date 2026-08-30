@@ -91,14 +91,14 @@ func TestRegistryLookupAndRunningAfterInventory(t *testing.T) {
 	require.Equal(t, "aaa", running[0].Name, "Running() must be name-sorted")
 	require.Equal(t, "bbb", running[1].Name)
 
-	require.Empty(t, sink.snapshot(), "first-ever inventory snapshot is a baseline, not a diff")
-	require.Empty(t, ev.snapshot())
-
 	all := r.all()
-	require.Len(t, all, 3, "all() must include the exited container running() excludes")
-	require.Equal(t, "aaa", all[0].Name, "all() must be name-sorted")
+	require.Len(t, all, 3, "exited container MUST appear in All()")
+	require.Equal(t, "aaa", all[0].Name, "All() must be name-sorted")
 	require.Equal(t, "bbb", all[1].Name)
 	require.Equal(t, "ccc", all[2].Name)
+
+	require.Empty(t, sink.snapshot(), "first-ever inventory snapshot is a baseline, not a diff")
+	require.Empty(t, ev.snapshot())
 }
 
 func TestApplyInventoryFirstRefreshEmitsNoEvents(t *testing.T) {
@@ -302,6 +302,17 @@ func TestApplyEventTranslatesStart(t *testing.T) {
 	require.Equal(t, store.Event{Kind: "container.start", Entity: "web", Severity: "info"}, got[0])
 }
 
+// TestApplyEventDieSeverityOnExitCode pins the exit-code -> severity
+// table, including the one deliberate exception: 143 (SIGTERM, docker
+// stop's own graceful-stop convention) reads as "info" like a clean 0
+// exit, not "warning" -- a planned stop/restart (Unraid's Appdata Backup
+// plugin and the CA auto-update plugin both stop-then-restart every
+// container on their own overnight schedule) must not read as a problem
+// just because the exit code happens to be nonzero. 137 (SIGKILL -- a
+// forced kill after the container ignored SIGTERM, or an OOM) and any
+// other nonzero code stay "warning": alert/engine.go's churn-probation
+// window on container-exit-nonzero is the second line of defense for a
+// 137 that's ALSO routine (a slow container force-killed mid-backup).
 func TestApplyEventDieSeverityOnExitCode(t *testing.T) {
 	r := newRegistry()
 	sink := &fakeEventSink{}
@@ -309,11 +320,15 @@ func TestApplyEventDieSeverityOnExitCode(t *testing.T) {
 
 	r.applyEvent(msg(events.ActionDie, "abc", map[string]string{"name": "/web", "exitCode": "1"}), sink, ev.evict)
 	r.applyEvent(msg(events.ActionDie, "abc", map[string]string{"name": "/web", "exitCode": "0"}), sink, ev.evict)
+	r.applyEvent(msg(events.ActionDie, "abc", map[string]string{"name": "/web", "exitCode": "143"}), sink, ev.evict)
+	r.applyEvent(msg(events.ActionDie, "abc", map[string]string{"name": "/web", "exitCode": "137"}), sink, ev.evict)
 
 	got := sink.snapshot()
-	require.Len(t, got, 2)
+	require.Len(t, got, 4)
 	require.Equal(t, store.Event{Kind: "container.die", Entity: "web", Severity: "warning", Detail: "exit code 1"}, got[0])
 	require.Equal(t, store.Event{Kind: "container.die", Entity: "web", Severity: "info", Detail: "exit code 0"}, got[1])
+	require.Equal(t, store.Event{Kind: "container.die", Entity: "web", Severity: "info", Detail: "exit code 143"}, got[2], "SIGTERM: a graceful stop by convention, not a problem")
+	require.Equal(t, store.Event{Kind: "container.die", Entity: "web", Severity: "warning", Detail: "exit code 137"}, got[3], "SIGKILL: might be a forced kill or an OOM, stays a warning")
 }
 
 func TestApplyEventOOMIsAlertSeverity(t *testing.T) {
@@ -691,6 +706,49 @@ func TestMetaFromInspectIconEmptyWhenLabelAbsent(t *testing.T) {
 	m := metaFromInspect(resp, nil)
 
 	require.Equal(t, "", m.Icon)
+}
+
+// TestMetaFromInspectExtractsComposeProjectLabel pins ComposeProject's
+// extraction from the com.docker.compose.project label docker compose
+// sets on every container it creates -- same hand-built-InspectResponse
+// pattern as TestMetaFromInspectExtractsUnraidIconLabel above.
+func TestMetaFromInspectExtractsComposeProjectLabel(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:    "abc123",
+			Name:  "/gridmind-api",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{
+			Image:  "gridmind/api:latest",
+			Labels: map[string]string{composeProjectLabel: "gridmind-cloud"},
+		},
+	}
+
+	m := metaFromInspect(resp, nil)
+
+	require.Equal(t, "gridmind-cloud", m.ComposeProject)
+}
+
+// TestMetaFromInspectComposeProjectEmptyWhenLabelAbsent pins the fallback
+// half: a container not created via docker compose (anything run
+// standalone, or with no labels at all) comes back with ComposeProject ==
+// "" rather than panicking on a nil Labels map -- the frontend's Groups
+// chip row depends on this being reliably "", not merely absent, so it
+// can tell a compose member apart from a standalone container.
+func TestMetaFromInspectComposeProjectEmptyWhenLabelAbsent(t *testing.T) {
+	resp := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:    "abc123",
+			Name:  "/jellyfin",
+			State: &container.State{Status: "running"},
+		},
+		Config: &container.Config{Image: "jellyfin/jellyfin:latest"}, // Labels left nil
+	}
+
+	m := metaFromInspect(resp, nil)
+
+	require.Equal(t, "", m.ComposeProject)
 }
 
 // TestAllocFromHostConfigNanoCPUsToCores pins docker's own units:

@@ -19,9 +19,10 @@
   import { theme, resolveToken } from '../lib/theme.svelte';
   import { fmtRelTime } from '../lib/format';
   import { needsRebuild } from '../lib/chartRebuild';
-  import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC, HEAD_EASE_MS } from '../lib/streamdriver';
+  import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC } from '../lib/streamdriver';
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
-  import { prefersReducedMotion } from 'svelte/motion';
+  import { live as liveStore } from '../lib/sse.svelte';
+  import { motion } from '../lib/motion.svelte';
 
   // formatValue (additive, optional -- Task 14-17's own fold-in note:
   // "views pre-format tooltip values (or formatter callback) -- TimeChart
@@ -39,7 +40,39 @@
   // SSE-tick this chart has always done. A caller passes true only for
   // its OWN live range (e.g. `live={activeRange === 'live'}`) -- a
   // fetched/historical range must stay exactly as static as it is today.
-  let { series = [], unit = '', height = 220, markers = [], syncKey = undefined, formatValue = undefined, live = false } = $props();
+  // showLegend (additive, optional, default true): the Metrics page's own
+  // multi-line hero (up to 9 series -- top-8 containers + a muted host
+  // total) drives an external legend of its own (icon+name chips tied to
+  // the ranked list below, see TopConsumers.svelte), so uPlot's plain
+  // text-table legend would just be a second, redundant one underneath
+  // it. Every other caller (ContainerDetail, GPU, ...) has no chip row
+  // of its own and keeps relying on this one exactly as before.
+  //
+  // focusSeries/toggleSeries (exported, additive) are the hero's own
+  // hook for driving THAT external legend's hover/click straight into
+  // uPlot's already-built-in per-series dimming/hide, rather than
+  // reimplementing either: uPlot indexes series from 1 (0 is the shared
+  // x-axis), matching `series`'s own array position + 1 -- callers pass
+  // that same 1-based index back in.
+  let {
+    series = [],
+    unit = '',
+    height = 220,
+    markers = [],
+    syncKey = undefined,
+    formatValue = undefined,
+    live = false,
+    showLegend = true,
+  } = $props();
+
+  export function focusSeries(idx) {
+    chart?.setSeries(idx, { focus: idx !== null });
+  }
+
+  export function toggleSeries(idx) {
+    if (!chart) return;
+    chart.setSeries(idx, { show: !chart.series[idx]?.show });
+  }
 
   // FOCUS_DIM_ALPHA/FOCUS_PROX_PX (hover-scrub design's "per-series
   // focus"): uPlot's own built-in cursor.focus mechanism handles this
@@ -164,26 +197,28 @@
   }
 
   // applyHeadState patches only the LAST index of each series to its
-  // current eased value, MUTATING `aligned` in place rather than
+  // current glided value, MUTATING `aligned` in place rather than
   // returning a copy -- safe because `alignedData` is only ever the
   // pristine target array immediately after the data effect rebuilds it
   // wholesale via buildAlignedData(); every read of a series' true raw
   // tail (tailValue, above) happens before this runs again for that
   // series, so patching the disposable last slot here can never leak a
-  // stale eased value back out as if it were real data. Skips the
+  // stale glided value back out as if it were real data. Skips the
   // per-tick array-clone this would otherwise cost at up to 30fps across
-  // every series of every live chart on screen. durationMs defaults to
-  // the real ease (HEAD_EASE_MS); callers under reduced motion pass 0 so
-  // headValue snaps straight to targetValue -- the driver's own ticks
-  // never run in that state (see streamdriver.svelte.ts), so without this
-  // the tail would otherwise freeze one arrival stale forever instead of
-  // tracking each new value immediately.
-  function applyHeadState(aligned, state, nowMs, durationMs = HEAD_EASE_MS) {
+  // every series of every live chart on screen. No durationMs parameter:
+  // each state's own durationMs (fixed at the instant advanceHeadState
+  // created that leg -- see its doc) is what headValue must read: under
+  // reduced motion that's always 0, so headValue snaps straight to
+  // targetValue -- the driver's own ticks never run in that state (see
+  // streamdriver.svelte.ts), so without this the tail would otherwise
+  // freeze one arrival stale forever instead of tracking each new value
+  // immediately.
+  function applyHeadState(aligned, state, nowMs) {
     for (let i = 0; i < state.length; i++) {
       const s = state[i];
       if (!s) continue;
       const oneSeries = aligned[i + 1];
-      oneSeries[oneSeries.length - 1] = headValue(s.prevValue, s.targetValue, s.arrivalMs, nowMs, durationMs);
+      oneSeries[oneSeries.length - 1] = headValue(s.prevValue, s.targetValue, s.arrivalMs, nowMs, s.durationMs);
     }
     return aligned;
   }
@@ -213,6 +248,32 @@
       ctx.stroke();
     }
     ctx.restore();
+  }
+
+  // directionDetail (additive, optional -- the Metrics hero's own
+  // directional resources): a series can carry directionPoints ([RingPoint[],
+  // RingPoint[]], its down/up or read/write pair -- the SAME two values
+  // the drawn line itself sums together) plus directionLabels for the
+  // short prefix each side renders with (['↓','↑'], ['r','w'], matching
+  // TopBarList's own ROW_DIRECTION_LABELS convention). Rendering only the
+  // sum on the line but the full split in the tooltip keeps the chart
+  // itself readable at up to 9 lines while a hover still answers "how
+  // much of this was download vs. upload" -- exactly topFromFrame's own
+  // row.direction, just looked up at the hovered instant instead of now.
+  // Looked up by exact timestamp match (points are ring buffers, already
+  // sorted ascending) rather than aligned into uPlot's own data arrays --
+  // it's tooltip-only, never drawn, so it doesn't need to live on the
+  // same shared x-axis buildAlignedData computes for the real series.
+  function directionDetail(s, ts) {
+    if (!s.directionPoints || ts == null) return undefined;
+    const [ptsA, ptsB] = s.directionPoints;
+    const valueAt = (pts) => pts.find((p) => p[0] === ts)?.[1];
+    const a = valueAt(ptsA);
+    const b = valueAt(ptsB);
+    if (a === undefined && b === undefined) return undefined;
+    const fmt = (v) => (v === undefined ? '—' : formatValue ? formatValue(v) : v);
+    const [labelA, labelB] = s.directionLabels ?? ['A', 'B'];
+    return `${labelA} ${fmt(a)} · ${labelB} ${fmt(b)}`;
   }
 
   // handleCursor is a uPlot "setCursor" hook: recomputes the tooltip
@@ -245,6 +306,7 @@
                 label: s.label,
                 color: resolveToken(s.colorVar),
                 value: raw == null ? null : formatValue ? formatValue(raw) : raw,
+                detail: directionDetail(s, u.data[0][idx]),
               };
             }),
           };
@@ -310,7 +372,8 @@
           ...series.map((s) => ({
             label: s.label,
             stroke: resolveToken(s.colorVar),
-            width: 2,
+            width: s.width ?? 2,
+            dash: s.dash,
             points: { show: false },
           })),
         ],
@@ -320,7 +383,7 @@
           ...(syncKey ? { sync: { key: syncKey } } : {}),
         },
         focus: { alpha: FOCUS_DIM_ALPHA },
-        legend: { show: series.length >= 2 },
+        legend: { show: showLegend && series.length >= 2 },
         hooks: {
           draw: [drawMarkers],
           setCursor: [handleCursor],
@@ -337,10 +400,11 @@
   // change never needs more than the setData path below).
   function currentShape() {
     return {
-      series: series.map((s) => ({ label: s.label, colorVar: s.colorVar })),
+      series: series.map((s) => ({ label: s.label, colorVar: s.colorVar, width: s.width, dash: s.dash })),
       theme: theme.resolved,
       unit,
       hasFormatValue: !!formatValue,
+      showLegend,
     };
   }
 
@@ -374,7 +438,12 @@
       // rather than skipping it post-rebuild is what keeps this branch
       // simple.
       const nowMs = Date.now();
-      const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
+      // durationMs is THIS arrival's own leg duration: the shared
+      // driver's freshly-measured cadence EMA (liveStore.glideMs), or 0
+      // to snap under reduced motion -- see streamdriver.ts's
+      // "Cadence-driven glide" doc for why this varies per arrival
+      // instead of a fixed guess.
+      const durationMs = motion.reduced ? 0 : liveStore.glideMs;
       // The shared driver's own ticks also step this chart's x-window
       // (see the animation-tick effect below), far more often than this
       // effect re-runs -- but that subscription is gated behind
@@ -398,7 +467,7 @@
       chart.setScale('x', { min, max });
       alignedData = buildAlignedData(series);
       headState = advanceAll(alignedData.slice(1), nowMs, durationMs);
-      chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
+      chart.setData(applyHeadState(alignedData, headState, nowMs), false);
     } else if (!rebuilding) {
       chart.setData(buildAlignedData(series));
     }
@@ -422,8 +491,7 @@
         const [min, max] = liveWindowRange(nowMs, LIVE_WINDOW_SEC);
         chart.setScale('x', { min, max });
         if (headState.length > 0) {
-          const durationMs = prefersReducedMotion.current ? 0 : HEAD_EASE_MS;
-          chart.setData(applyHeadState(alignedData, headState, nowMs, durationMs), false);
+          chart.setData(applyHeadState(alignedData, headState, nowMs), false);
         }
       },
     );
@@ -456,6 +524,9 @@
             {row.value ?? '—'}{!formatValue && unit && row.value !== null ? ` ${unit}` : ''}
           </span>
         </div>
+        {#if row.detail}
+          <div class="time-chart__tooltip-detail tabular-nums">{row.detail}</div>
+        {/if}
       {/each}
     </div>
   {/if}
@@ -504,6 +575,11 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
+  }
+  .time-chart__tooltip-detail {
+    margin: 0 0 0 1.15rem; /* aligns under the row's own label, past the swatch */
+    color: var(--ink-2);
+    font-size: 0.68rem;
   }
   .time-chart__swatch {
     display: inline-block;

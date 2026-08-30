@@ -100,18 +100,13 @@ type ContainerPruneResult struct {
 // dockermanManagedLabel is the label Unraid's dockerman UI sets on every
 // container it manages directly (its own templates, not a plain `docker
 // run`) -- presence alone is the signal (the value carries no meaning
-// gantry uses), and it takes priority over composeProjectLabel below: a
-// container can only ever be managed by one system in practice, and
-// dockerman's own claim is the one that matters most here, since it's
-// the one the spec calls out as "the user probably wants to KEEP".
-//
-// composeProjectLabel is docker-compose's own convention, set on every
-// container a `docker compose up` creates, naming the compose project
-// (usually the directory/stack name) that owns it.
-const (
-	dockermanManagedLabel = "net.unraid.docker.managed"
-	composeProjectLabel   = "com.docker.compose.project"
-)
+// gantry uses), and it takes priority over composeProjectLabel (docker.
+// go's own const, shared verbatim with metaFromInspect's Meta.
+// ComposeProject extraction) below: a container can only ever be
+// managed by one system in practice, and dockerman's own claim is the
+// one that matters most here, since it's the one the spec calls out as
+// "the user probably wants to KEEP".
+const dockermanManagedLabel = "net.unraid.docker.managed"
 
 // managedHint reports what -- if anything -- besides a bare `docker run`
 // or `docker create` is responsible for a container, so the UI can warn

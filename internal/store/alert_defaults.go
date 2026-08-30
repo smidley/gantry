@@ -11,7 +11,8 @@ package store
 // health's own warning/alert calls in docker/registry.go, not a second
 // layer of string parsing here).
 //
-// Two deliberate traps, both from the plan:
+// A few deliberate traps -- the first three from the plan, the last
+// from later hardening against real-box false positives:
 //   - array-stopped uses op "<" on the 1/0 array.started metric rather
 //     than an array.state event rule: array.state only fires on a
 //     transition, so a box that booted with the array already stopped
@@ -20,8 +21,9 @@ package store
 //     or health-string parsing of their own -- min_severity alone does
 //     the predicate work, because docker/registry.go's diffEvents/
 //     translateEvent already assign container.die severity "warning"
-//     only for a nonzero exit and container.health severity "warning"
-//     only for "unhealthy". The one honest gap: diffEvents' 10s poll
+//     only for a nonzero exit (143/SIGTERM excepted -- a graceful stop
+//     by convention, stays "info" like 0) and container.health severity
+//     "warning" only for "unhealthy". The one honest gap: diffEvents' 10s poll
 //     path emits container.die at severity "info" with no exit code
 //     when the event-stream path has a gap, so a die caught only by the
 //     poll never clears this rule's floor -- degradation, not a bug.
@@ -32,17 +34,47 @@ package store
 //     only because the engine refreshes the clear timeout's anchor every
 //     tick Fleet() still reports the container unhealthy -- without
 //     that, the timeout would resolve a still-broken container hours
-//     before a renotify could ever fire. The other four event rules
-//     (container-oom, container-exit-nonzero, disk-errors, parity-
+//     before a renotify could ever fire. The other three event rules
+//     with no for_seconds below (container-oom, disk-errors, parity-
 //     errors) are true point events: clear_seconds counted from the one
 //     event that started them is already the correct, complete recovery
 //     signal, no sustain tracking needed.
+//   - container-exit-nonzero's for_seconds (120) is a second, unrelated
+//     meaning of that column: alert/engine.go's churn-probation window,
+//     not a threshold rule's sustained-for. for_seconds is otherwise
+//     dead weight on an event rule (ValidateRule's 3600s cap is the only
+//     thing that ever reads it), so reusing it needed no migration and
+//     comes for free as a per-rule, user-tunable number in the rule
+//     editor rather than a hardcoded Go constant. A fresh fire enters
+//     pending for this long; if Fleet() shows the entity running again
+//     before it elapses -- Unraid's Appdata Backup and CA auto-update
+//     plugins both stop-then-restart every container on their own
+//     overnight schedule, the exact false positive this rule exists to
+//     absorb -- it resolves silently as "restarted," never notified.
+//     The same fleet-running check also retroactively resolves an
+//     already-firing instance from before this existed, so a backlog of
+//     stale exit alerts cleans itself up on the first tick post-upgrade.
 //
 // UpdatedAt is left 0 on every rule; SeedAlertRules stamps it at insert
 // time, the same way AppendEvent/AddSilence stamp their own timestamp
 // fields when the caller leaves them zero.
-func DefaultAlertRules() []AlertRule {
-	return []AlertRule{
+//
+// fast, when true (fake-data mode only -- see cmd/gantry/main.go's own
+// boot-time seed call), compresses every THRESHOLD rule's for_seconds/
+// clear_seconds to 60s/60s so the Phase 4 Task 9 alert demo can go
+// pending -> firing -> resolved inside a short interactive session
+// instead of the real 5-15 minute windows below. threshold/clear_
+// threshold/warn_threshold/critical_threshold/band_family are untouched
+// either way, so a fast-mode fire is still evaluated against the exact
+// numbers thresholds.ts's bands show -- only how long a breach must be
+// sustained shrinks, never what counts as a breach. EVENT rules are
+// deliberately left alone: their ClearSeconds is a post-fire timeout,
+// not a sustained-for window, and the fake-mode container-oom demo
+// fires once and auto-resolves ~63 simulated minutes later purely from
+// its own unmodified 3600s timeout -- see internal/fake/fake.go's own
+// alertDemoOOMAt doc.
+func DefaultAlertRules(fast bool) []AlertRule {
+	rules := []AlertRule{
 		{
 			ID: "host-cpu-high", Name: "Host CPU high", Enabled: true, Builtin: true,
 			Type: "threshold", Kind: "host", EntityGlob: "*",
@@ -58,11 +90,11 @@ func DefaultAlertRules() []AlertRule {
 			ForSeconds: 600, ClearSeconds: 300, Severity: "warning",
 		},
 		{
-			// fs.used_pct doesn't exist as a persisted metric until Task 2
-			// (internal/collect/unraid/disks.go) lands -- this rule seeds
-			// with everyone else regardless; no series simply means no
-			// evaluation, the same "absent series, no alarm" degradation
-			// every other rule already tolerates when its metric hasn't
+			// fs.used_pct is emitted by internal/collect/unraid/disks.go
+			// (Task 2), alongside the existing fs.used_bytes/fs.free_bytes
+			// pair -- this rule was seeded ahead of that metric landing,
+			// tolerating the interim "absent series, no alarm" degradation
+			// every other rule already relies on when its metric hasn't
 			// reported yet.
 			ID: "disk-usage-high", Name: "Disk usage high", Enabled: true, Builtin: true,
 			Type: "threshold", Kind: "disk", EntityGlob: "*",
@@ -124,7 +156,7 @@ func DefaultAlertRules() []AlertRule {
 			ID: "container-exit-nonzero", Name: "Container exited nonzero", Enabled: true, Builtin: true,
 			Type: "event", Kind: "container", EntityGlob: "*",
 			EventKinds: "container.die", MinSeverity: "warning",
-			ClearSeconds: 3600, Severity: "warning",
+			ForSeconds: 120, ClearSeconds: 3600, Severity: "warning",
 		},
 		{
 			ID: "disk-errors", Name: "Disk errors", Enabled: true, Builtin: true,
@@ -133,16 +165,26 @@ func DefaultAlertRules() []AlertRule {
 			ClearSeconds: 86400, Severity: "alert", RenotifyHours: 24,
 		},
 		{
-			// parity.finish's Severity only ever reads "info" until Task 2
-			// enriches it on sbSyncErrs > 0 -- min_severity "warning" is
-			// forward-looking, same "seeds now, tolerates absence" posture
-			// as disk-usage-high's fs.used_pct above.
+			// parity.finish's Severity flips to "alert" on sbSyncErrs > 0
+			// (internal/collect/unraid/var.go, Task 2) -- min_severity
+			// "warning" is what actually gates this rule on that flip,
+			// same landed-metric posture as disk-usage-high's fs.used_pct
+			// above.
 			ID: "parity-errors", Name: "Parity check errors", Enabled: true, Builtin: true,
 			Type: "event", Kind: "unraid", EntityGlob: "array",
 			EventKinds: "parity.finish", MinSeverity: "warning",
 			ClearSeconds: 86400, Severity: "alert",
 		},
 	}
+	if fast {
+		for i := range rules {
+			if rules[i].Type == "threshold" {
+				rules[i].ForSeconds = 60
+				rules[i].ClearSeconds = 60
+			}
+		}
+	}
+	return rules
 }
 
 // SeedAlertRules inserts every rule in defaults whose id is not already

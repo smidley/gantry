@@ -4,13 +4,26 @@ import {
   etaFromProgress,
   GPU_ENGINE_ORDER,
   GPU_ENTITY_ENGINE_ORDER,
+  gpuTitle,
   keysByPattern,
+  niceCeiling,
   parityIsRunning,
   seqStep,
   sharesFromMetrics,
   sumMetricsByPattern,
   sumSeriesPoints,
 } from './metrics';
+
+describe('gpuTitle', () => {
+  it('builds "Vendor GPU (driver)" from a known entity meta', () => {
+    expect(gpuTitle('0000:00:02.0', { vendor: 'Intel', driver: 'i915' })).toBe('Intel GPU (i915)');
+    expect(gpuTitle('nvidia0', { vendor: 'NVIDIA', driver: 'nvidia' })).toBe('NVIDIA GPU (nvidia)');
+  });
+
+  it('falls back to the bare entity id when no meta is known for it', () => {
+    expect(gpuTitle('0000:00:02.0', undefined)).toBe('0000:00:02.0');
+  });
+});
 
 describe('sumMetricsByPattern', () => {
   it('sums a flat key with no dynamic middle segment (fake-mode shape)', () => {
@@ -277,5 +290,39 @@ describe('etaFromProgress', () => {
   it('returns null for non-finite input', () => {
     expect(etaFromProgress(NaN, 40, 60, 50)).toBeNull();
     expect(etaFromProgress(0, 40, 60, NaN)).toBeNull();
+  });
+});
+
+describe('niceCeiling', () => {
+  it('rounds up to the next 1-2-5 step within a decade', () => {
+    expect(niceCeiling(999)).toBe(1000);
+    expect(niceCeiling(1001)).toBe(2000);
+    expect(niceCeiling(2001)).toBe(5000);
+    expect(niceCeiling(5001)).toBe(10000);
+  });
+
+  it('matches the reported example: 13.9 KB/s max -> 20 KB/s scale', () => {
+    expect(niceCeiling(13_900)).toBe(20_000);
+  });
+
+  it('returns the value itself when it already lands exactly on a step', () => {
+    expect(niceCeiling(1)).toBe(1);
+    expect(niceCeiling(20)).toBe(20);
+    expect(niceCeiling(500)).toBe(500);
+    expect(niceCeiling(1000)).toBe(1000);
+  });
+
+  it('scales correctly across magnitudes from sub-1 B/s through GB/s', () => {
+    expect(niceCeiling(0.3)).toBe(0.5);
+    expect(niceCeiling(3)).toBe(5);
+    expect(niceCeiling(3_000_000)).toBe(5_000_000); // 3 MB/s -> 5 MB/s
+    expect(niceCeiling(3_000_000_000)).toBe(5_000_000_000); // 3 GB/s -> 5 GB/s
+  });
+
+  it('is 0 for a non-positive or non-finite max -- nothing to scale against', () => {
+    expect(niceCeiling(0)).toBe(0);
+    expect(niceCeiling(-5)).toBe(0);
+    expect(niceCeiling(NaN)).toBe(0);
+    expect(niceCeiling(Infinity)).toBe(0);
   });
 });

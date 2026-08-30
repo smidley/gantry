@@ -167,6 +167,18 @@ func (c *Collector) tickOneDisk(slot string, disk map[string]string, ts int64) {
 		}
 		c.sink.Record(store.SeriesKey{Kind: "disk", Entity: slot, Metric: "fs.used_bytes"}, ts, fsUsed*1024)
 		c.sink.Record(store.SeriesKey{Kind: "disk", Entity: slot, Metric: "fs.free_bytes"}, ts, fsFree*1024)
+
+		// fs.used_pct: byte-identical to web/src/lib/disks.ts:diskUsagePct
+		// (used/(used+free)*100) -- fsUsed/fsFree are still in their raw
+		// KB unit here, but the ratio is scale-invariant, so there's no
+		// need to redo this against the *1024 values just recorded above.
+		// Persisted (no "live:" prefix) so the alert engine's
+		// disk-usage-high rule and the Storage view's display band read
+		// the exact same number the frontend used to derive only for
+		// itself, client-side.
+		if total := fsUsed + fsFree; total > 0 {
+			c.sink.Record(store.SeriesKey{Kind: "disk", Entity: slot, Metric: "fs.used_pct"}, ts, fsUsed/total*100)
+		}
 	}
 }
 

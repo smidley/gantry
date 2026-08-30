@@ -9,14 +9,23 @@
   import { onMount } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { theme } from '../lib/theme.svelte';
+  import { motion } from '../lib/motion.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
-  import { fetchSeries, fetchSettings, fetchVersion, putSettings } from '../lib/api';
+  import { fetchSeries, fetchSettings, fetchVersion, putSettings, fetchWebhookTargets, putWebhookTargets } from '../lib/api';
   import { fmtBytes, fmtPct } from '../lib/format';
+  import { SOURCE_NOT_APPLICABLE } from '../lib/sourceStatus';
   import HealthDot from '../components/HealthDot.svelte';
   import StatTile from '../components/StatTile.svelte';
 
   const LIVE_WINDOW_SEC = 900;
+
+  // NOT_APPLICABLE_COPY: per-source friendly wording for a
+  // SOURCE_NOT_APPLICABLE row (NVIDIA presence gate) -- the raw sentinel
+  // string is never shown verbatim. Falls back to a generic sentence for
+  // any future source that starts using the sentinel without its own
+  // entry here yet.
+  const NOT_APPLICABLE_COPY = { nvidia: 'No NVIDIA GPU detected.' };
 
   const RETENTION_FIELDS = [
     { key: 'r1_hours', label: 'R1 (1 min resolution) retention, hours', min: 1, max: 168 },
@@ -28,6 +37,15 @@
     { key: 'system', label: 'System' },
     { key: 'light', label: 'Light' },
     { key: 'dark', label: 'Dark' },
+  ];
+  // MOTION_OPTIONS: on/off force animations regardless of the OS's own
+  // prefers-reduced-motion setting -- Scott's own ask, in case that OS
+  // setting (never confirmed either way) turns out to be part of why a
+  // real list reorder read as a hard swap for him.
+  const MOTION_OPTIONS = [
+    { key: 'system', label: 'System' },
+    { key: 'on', label: 'On' },
+    { key: 'off', label: 'Off' },
   ];
 
   let sources = $derived(live.frame?.sources ?? {});
@@ -156,10 +174,117 @@
     }
   }
 
+  // --- Webhook targets (Task 11/12: not built anywhere in the plan's own
+  // Tasks 9-12 file lists, but GET/PUT /api/alerts/webhooks (Task 7/8)
+  // has no other UI home either -- this lives here, alongside retention,
+  // as "editable integration config," rather than on the Alerts page
+  // with the alerting-domain rule editor. header_value is write-only
+  // end to end: GET never returns it (header_set stands in for it), and
+  // this editor never asks the user to re-type it just to keep it --
+  // the field starts blank and blank-on-submit means "leave the stored
+  // secret alone," matching webhookTargetInput's own contract server-side. ---
+  let webhookTargets = $state([]);
+  let webhookLoaded = $state(false);
+  let webhookLoadError = $state(null);
+  let webhookSaving = $state(false);
+  let webhookSaveError = $state(null);
+  let webhookEditingId = $state(null); // a target id, '__new__', or null
+
+  const NEW_WEBHOOK_TARGET = { id: '', name: '', url: '', enabled: true, header_name: '', header_set: false, timeout_s: 10 };
+
+  async function loadWebhookTargets() {
+    try {
+      const resp = await fetchWebhookTargets();
+      webhookTargets = resp.targets;
+      webhookLoadError = null;
+    } catch {
+      webhookLoadError = "Couldn't load webhook targets.";
+    } finally {
+      webhookLoaded = true;
+    }
+  }
+
+  // saveWebhookTargets sends the whole document back (the PUT /api/
+  // alerts/webhooks contract): `edits` is a Map from target id to the
+  // form's own pending id/name/url/enabled/header_name/timeout_s/
+  // headerValueInput/clearHeader, applied on top of the CURRENT target
+  // for that id (or a brand-new entry) so a field this editor didn't
+  // touch is never accidentally reset.
+  async function saveWebhookTarget(form, isNew) {
+    webhookSaving = true;
+    webhookSaveError = null;
+    const input = {
+      id: form.id,
+      name: form.name,
+      url: form.url,
+      enabled: form.enabled,
+      header_name: form.header_name,
+      timeout_s: form.timeout_s,
+    };
+    if (form.clearHeader) input.header_value = '';
+    else if (form.headerValueInput) input.header_value = form.headerValueInput;
+    const nextInputs = webhookTargets
+      .filter((t) => t.id !== form.id)
+      .map((t) => ({ id: t.id, name: t.name, url: t.url, enabled: t.enabled, header_name: t.header_name ?? '', timeout_s: t.timeout_s }));
+    nextInputs.push(input);
+    try {
+      const resp = await putWebhookTargets(nextInputs);
+      webhookTargets = resp.targets;
+      webhookEditingId = null;
+    } catch (err) {
+      webhookSaveError = err instanceof Error ? err.message : String(err);
+    } finally {
+      webhookSaving = false;
+    }
+  }
+
+  let webhookForm = $state({ id: '', name: '', url: '', enabled: true, header_name: '', headerValueInput: '', clearHeader: false, timeout_s: 10 });
+
+  function startEditWebhook(target) {
+    webhookForm = {
+      id: target.id,
+      name: target.name,
+      url: target.url,
+      enabled: target.enabled,
+      header_name: target.header_name ?? '',
+      headerValueInput: '',
+      clearHeader: false,
+      timeout_s: target.timeout_s,
+    };
+    webhookEditingId = target.id;
+  }
+
+  function startNewWebhook() {
+    webhookForm = { id: '', name: '', url: '', enabled: true, header_name: '', headerValueInput: '', clearHeader: false, timeout_s: 10 };
+    webhookEditingId = '__new__';
+  }
+
+  function submitWebhookForm(e) {
+    e.preventDefault();
+    saveWebhookTarget(webhookForm, webhookEditingId === '__new__');
+  }
+
+  async function deleteWebhookTarget(id) {
+    webhookSaving = true;
+    webhookSaveError = null;
+    const nextInputs = webhookTargets
+      .filter((t) => t.id !== id)
+      .map((t) => ({ id: t.id, name: t.name, url: t.url, enabled: t.enabled, header_name: t.header_name ?? '', timeout_s: t.timeout_s }));
+    try {
+      const resp = await putWebhookTargets(nextInputs);
+      webhookTargets = resp.targets;
+    } catch (err) {
+      webhookSaveError = err instanceof Error ? err.message : String(err);
+    } finally {
+      webhookSaving = false;
+    }
+  }
+
   // --- About -----------------------------------------------------------
   let version = $state(null);
   onMount(() => {
     loadSettings();
+    loadWebhookTargets();
     fetchVersion()
       .then((v) => {
         version = v.version;
@@ -179,11 +304,12 @@
       {#each sourceNames as name (name)}
         {@const detail = sources[name]}
         {@const ok = detail === 'ok'}
+        {@const notApplicable = detail === SOURCE_NOT_APPLICABLE}
         <li class="settings-sources__row">
-          <HealthDot status={ok ? 'good' : 'warning'} label={name} />
+          <HealthDot status={ok || notApplicable ? 'good' : 'warning'} label={name} />
           {#if !ok}
             <span class="settings-sources__detail">
-              {detail}
+              {notApplicable ? (NOT_APPLICABLE_COPY[name] ?? 'Not applicable on this system.') : detail}
               {#if name === 'pressure'}
                 <a
                   class="settings-sources__learn-more"
@@ -248,6 +374,145 @@
     {/if}
   </form>
 
+  <div class="card settings-webhooks">
+    <span class="microlabel">Webhook targets</span>
+    {#if webhookLoadError}
+      <p class="microlabel settings-webhooks__error">{webhookLoadError}</p>
+    {:else if !webhookLoaded}
+      <p class="microlabel">Loading…</p>
+    {:else}
+      {#if webhookTargets.length === 0}
+        <p class="microlabel settings-webhooks__empty">No webhook targets configured.</p>
+      {:else}
+        <ul class="settings-webhooks__list">
+          {#each webhookTargets as t (t.id)}
+            <li class="settings-webhooks__row-wrap" data-target-id={t.id}>
+              {#if webhookEditingId === t.id}
+                <!-- novalidate: same trap as the retention form's own doc above --
+                     a real min/max attr (timeout_s) would otherwise silently
+                     block submit for an out-of-range value with no feedback
+                     at all, before the server ever gets a chance to answer. -->
+                <form class="settings-webhooks__form" onsubmit={submitWebhookForm} novalidate>
+                  <div class="settings-webhooks__form-row">
+                    <label class="settings-webhooks__field">
+                      <span class="microlabel">Name</span>
+                      <input type="text" bind:value={webhookForm.name} disabled={t.env_overridden} />
+                    </label>
+                    <label class="settings-webhooks__field settings-webhooks__field--wide">
+                      <span class="microlabel">URL</span>
+                      <input type="text" bind:value={webhookForm.url} disabled={t.env_overridden} />
+                    </label>
+                  </div>
+                  <div class="settings-webhooks__form-row">
+                    <label class="settings-webhooks__field">
+                      <span class="microlabel">Header name</span>
+                      <input type="text" bind:value={webhookForm.header_name} placeholder="e.g. Authorization" />
+                    </label>
+                    <label class="settings-webhooks__field">
+                      <span class="microlabel">Header value</span>
+                      <input
+                        type="password"
+                        bind:value={webhookForm.headerValueInput}
+                        disabled={webhookForm.clearHeader}
+                        placeholder={t.header_set ? 'Leave blank to keep the current secret' : 'No secret set'}
+                      />
+                    </label>
+                    <label class="settings-webhooks__clear">
+                      <input type="checkbox" bind:checked={webhookForm.clearHeader} disabled={!t.header_set} />
+                      <span class="microlabel">Clear stored secret</span>
+                    </label>
+                    <label class="settings-webhooks__field">
+                      <span class="microlabel">Timeout (s)</span>
+                      <input type="number" min="1" max="30" bind:value={webhookForm.timeout_s} />
+                    </label>
+                  </div>
+                  <label class="settings-webhooks__enabled">
+                    <input type="checkbox" bind:checked={webhookForm.enabled} disabled={t.env_overridden} />
+                    <span>Enabled</span>
+                  </label>
+                  {#if t.env_overridden}
+                    <p class="microlabel settings-webhooks__env-note">
+                      URL/enabled/timeout are set by GANTRY_WEBHOOK_URL and can't be changed here.
+                    </p>
+                  {/if}
+                  <div class="settings-webhooks__actions">
+                    <button type="submit" class="settings-webhooks__save" disabled={webhookSaving}>
+                      {webhookSaving ? 'Saving…' : 'Save'}
+                    </button>
+                    <button type="button" class="settings-webhooks__cancel" onclick={() => (webhookEditingId = null)} disabled={webhookSaving}>
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              {:else}
+                <div class="settings-webhooks__row">
+                  <HealthDot status={t.enabled ? 'good' : 'warning'} label={t.name || t.id} />
+                  <span class="settings-webhooks__url">{t.url}</span>
+                  <span class="microlabel settings-webhooks__secret-state">
+                    {t.header_set ? 'Secret set' : 'No secret'}
+                  </span>
+                  {#if t.env_overridden}<span class="settings-webhooks__lock">Env locked</span>{/if}
+                  <div class="settings-webhooks__row-actions">
+                    <button type="button" onclick={() => startEditWebhook(t)}>Edit</button>
+                    {#if !t.env_overridden}
+                      <button type="button" onclick={() => deleteWebhookTarget(t.id)}>Delete</button>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+
+      {#if webhookEditingId === '__new__'}
+        <!-- novalidate: same trap as the retention form's own doc above. -->
+        <form class="settings-webhooks__form" onsubmit={submitWebhookForm} novalidate>
+          <div class="settings-webhooks__form-row">
+            <label class="settings-webhooks__field">
+              <span class="microlabel">Target ID</span>
+              <input type="text" bind:value={webhookForm.id} placeholder="e.g. home-assistant" />
+            </label>
+            <label class="settings-webhooks__field">
+              <span class="microlabel">Name</span>
+              <input type="text" bind:value={webhookForm.name} />
+            </label>
+            <label class="settings-webhooks__field settings-webhooks__field--wide">
+              <span class="microlabel">URL</span>
+              <input type="text" bind:value={webhookForm.url} placeholder="https://…" />
+            </label>
+          </div>
+          <div class="settings-webhooks__form-row">
+            <label class="settings-webhooks__field">
+              <span class="microlabel">Header name</span>
+              <input type="text" bind:value={webhookForm.header_name} placeholder="e.g. Authorization" />
+            </label>
+            <label class="settings-webhooks__field">
+              <span class="microlabel">Header value</span>
+              <input type="password" bind:value={webhookForm.headerValueInput} placeholder="optional" />
+            </label>
+            <label class="settings-webhooks__field">
+              <span class="microlabel">Timeout (s)</span>
+              <input type="number" min="1" max="30" bind:value={webhookForm.timeout_s} />
+            </label>
+          </div>
+          <div class="settings-webhooks__actions">
+            <button type="submit" class="settings-webhooks__save" disabled={webhookSaving}>
+              {webhookSaving ? 'Saving…' : 'Add target'}
+            </button>
+            <button type="button" class="settings-webhooks__cancel" onclick={() => (webhookEditingId = null)} disabled={webhookSaving}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      {:else}
+        <button type="button" class="settings-webhooks__add" onclick={startNewWebhook}>Add webhook target</button>
+      {/if}
+
+      {#if webhookSaveError}<p class="microlabel settings-webhooks__error">{webhookSaveError}</p>{/if}
+    {/if}
+  </div>
+
   <div class="settings-view__row">
     <div class="card settings-footprint">
       <span class="microlabel">Gantry footprint</span>
@@ -267,6 +532,20 @@
             class="segmented__btn"
             class:segmented__btn--active={theme.preference === opt.key}
             onclick={() => theme.set(opt.key)}
+          >
+            {opt.label}
+          </button>
+        {/each}
+      </div>
+
+      <span class="microlabel">Animations</span>
+      <div class="segmented" role="group" aria-label="Animations">
+        {#each MOTION_OPTIONS as opt (opt.key)}
+          <button
+            type="button"
+            class="segmented__btn"
+            class:segmented__btn--active={motion.preference === opt.key}
+            onclick={() => motion.set(opt.key)}
           >
             {opt.label}
           </button>
@@ -408,6 +687,156 @@
     color: var(--status-warning);
   }
 
+  .settings-webhooks {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .settings-webhooks__error {
+    color: var(--status-warning);
+    margin: 0;
+  }
+  .settings-webhooks__empty {
+    margin: 0;
+    color: var(--ink-2);
+  }
+  .settings-webhooks__list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+  }
+  .settings-webhooks__row-wrap {
+    padding: 0.5rem 0;
+    border-bottom: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+  }
+  .settings-webhooks__row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .settings-webhooks__url {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--ink-2);
+    overflow-wrap: anywhere;
+    flex: 1;
+    min-width: 10rem;
+  }
+  .settings-webhooks__secret-state {
+    white-space: nowrap;
+  }
+  .settings-webhooks__lock {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--ink) 8%, transparent);
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+  .settings-webhooks__row-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .settings-webhooks__row-actions button,
+  .settings-webhooks__add {
+    min-height: 40px;
+    padding: 0 0.75rem;
+    border-radius: 6px;
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    background: transparent;
+    color: var(--ink);
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .settings-webhooks__add {
+    align-self: flex-start;
+  }
+  .settings-webhooks__form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 0.6rem;
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--ink) 4%, transparent);
+  }
+  .settings-webhooks__form-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+  }
+  .settings-webhooks__field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    flex: 1 1 8rem;
+    min-width: 8rem;
+  }
+  .settings-webhooks__field--wide {
+    flex-basis: 100%;
+  }
+  .settings-webhooks__field input {
+    min-height: 40px;
+    padding: 0 0.6rem;
+    border-radius: 6px;
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 0.85rem;
+  }
+  .settings-webhooks__field input:disabled {
+    opacity: 0.6;
+  }
+  .settings-webhooks__clear {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .settings-webhooks__enabled {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+  }
+  .settings-webhooks__env-note {
+    margin: 0;
+    color: var(--ink-2);
+  }
+  .settings-webhooks__actions {
+    display: flex;
+    gap: 0.6rem;
+  }
+  .settings-webhooks__save,
+  .settings-webhooks__cancel {
+    min-height: 40px;
+    padding: 0 1.1rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .settings-webhooks__save {
+    border: 1px solid var(--series-1);
+    background: color-mix(in oklab, var(--series-1) 15%, transparent);
+    color: var(--series-1);
+    font-weight: 500;
+  }
+  .settings-webhooks__cancel {
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    background: transparent;
+    color: var(--ink);
+  }
+  .settings-webhooks__save:disabled,
+  .settings-webhooks__cancel:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
   .settings-view__row {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -419,11 +848,21 @@
       grid-template-columns: 1fr;
     }
   }
+  /* min-width:0 -- same released-minimum treatment as ContainerDetail's
+     chart cards (see that file's own longer doc): the tiles' sparkline
+     canvases bake their width in literal pixels, and this card's
+     default min-width:auto would otherwise pin its 1fr track at that
+     stale width when the row narrows, shoving the theme/about cards
+     past the viewport instead of letting Sparkline's own
+     ResizeObserver re-fit the canvas (reproduced at 1920 -> 1200:
+     first track stuck at 550px, About's right edge 16px past the
+     page). */
   .settings-footprint {
     padding: 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    min-width: 0;
   }
   /* bare rail rows (see StatTile's own doc), same instrument-rail
      treatment as Overview's metrics rail -- a hairline between CPU/

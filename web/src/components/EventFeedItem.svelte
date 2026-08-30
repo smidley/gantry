@@ -15,10 +15,18 @@
   reproduced live while building the Events view. Overview's compact
   feed leaves it false (its default), keeping that view's exact original
   single-line rendering untouched.
+
+  Clickable (Scott: "recent events should be clickable and take you to
+  the thing that's going on"): eventHref (pure, see its own doc) maps
+  this event's kind to wherever that "thing" lives -- a container's own
+  detail page, or the Storage page for anything array/disk-flavored.
+  null (image.* for now, or an unrecognized kind) renders the plain
+  <div> this always was.
 -->
 <script>
   import HealthDot from './HealthDot.svelte';
   import { fmtRelTime } from '../lib/format';
+  import { eventHref } from '../lib/eventHref';
 
   let { event, showAbsoluteTime = false } = $props();
 
@@ -31,9 +39,11 @@
     warning: 'warning',
     alert: 'critical',
   };
+
+  let href = $derived(eventHref(event.Kind, event.Entity));
 </script>
 
-<div class="event-feed-item">
+<svelte:element this={href ? 'a' : 'div'} {href} class="event-feed-item" class:event-feed-item--link={!!href}>
   <HealthDot status={SEVERITY_STATUS[event.Severity] ?? 'good'} />
   <div class="event-feed-item__body">
     <div class="event-feed-item__head">
@@ -48,7 +58,7 @@
       <div class="event-feed-item__detail">{event.Detail}</div>
     {/if}
   </div>
-</div>
+</svelte:element>
 
 <style>
   .event-feed-item {
@@ -56,6 +66,17 @@
     gap: 0.5rem;
     padding: 0.5rem 0;
     border-bottom: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+  }
+  /* href (clickable events): plain-anchor reset, same reason/rule as
+     StatTile's own .stat-tile--link -- the row's children already carry
+     their own colors. */
+  .event-feed-item--link {
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .event-feed-item--link:hover .event-feed-item__kind {
+    text-decoration: underline;
   }
   .event-feed-item__body {
     flex: 1;
@@ -85,9 +106,17 @@
     letter-spacing: normal;
     margin-top: 0.15rem;
   }
+  /* overflow-wrap: a container/image removal's own Detail carries a bare
+     64-hex-character id (docker's own full id has no natural break point
+     -- no spaces, hyphens, or word boundaries at all) -- reproduced live
+     once container.removed/image.removed events existed: the same
+     narrow-viewport overflow this component's own showAbsoluteTime fix
+     already hit once, for the same underlying reason (one unbroken run
+     of characters longer than the card is wide), just a different field. */
   .event-feed-item__detail {
     color: var(--ink-2);
     font-size: 0.85rem;
     margin-top: 0.15rem;
+    overflow-wrap: anywhere;
   }
 </style>

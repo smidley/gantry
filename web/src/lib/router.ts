@@ -11,10 +11,13 @@ export type RouteName =
   | 'overview'
   | 'containers'
   | 'container-detail'
+  | 'compare'
   | 'top'
   | 'storage'
+  | 'maintenance'
   | 'gpu'
   | 'events'
+  | 'alerts'
   | 'settings'
   | 'not-found';
 
@@ -34,6 +37,21 @@ const routeDefs: RouteDef[] = [
   { name: 'overview', pattern: [] },
   { name: 'containers', pattern: ['containers'] },
   { name: 'container-detail', pattern: ['containers', ':name'] },
+  // compare's own ":names" capture holds the RAW comma-joined segment
+  // (e.g. "jellyfin,plex") after this loop's ordinary single-decode pass
+  // -- lib/compareRoute.ts's parseCompareNames splits it the rest of the
+  // way; see that file's own doc for why a second decode per name isn't
+  // needed (every real docker container name is already restricted to a
+  // charset with no comma in it). A bare "#/compare" (or "#/compare/",
+  // its own trailing slash reducing to the same zero-segment tail --
+  // filtered out above like every other route's) has no :names segment
+  // at all -- same two-pattern shape as "top"/"top/:resource" above --
+  // so it still routes to the Compare view (params.names undefined,
+  // parseCompareNames(undefined) === []) rather than falling through to
+  // not-found: Compare's own "no containers selected" hint is the
+  // sensible landing for it, not a dead end.
+  { name: 'compare', pattern: ['compare'] },
+  { name: 'compare', pattern: ['compare', ':names'] },
   { name: 'top', pattern: ['top'] },
   // Overview's compact Top Consumers switcher deep-links "View all" to
   // the SAME resource, e.g. "#/top/mem" -- a second pattern for the same
@@ -42,8 +60,10 @@ const routeDefs: RouteDef[] = [
   // and every other param anywhere in this table is already a segment).
   { name: 'top', pattern: ['top', ':resource'] },
   { name: 'storage', pattern: ['storage'] },
+  { name: 'maintenance', pattern: ['maintenance'] },
   { name: 'gpu', pattern: ['gpu'] },
   { name: 'events', pattern: ['events'] },
+  { name: 'alerts', pattern: ['alerts'] },
   { name: 'settings', pattern: ['settings'] },
 ];
 
@@ -121,20 +141,31 @@ const ICON_TOP = strokeIcon('<path d="M4 20V10"/><path d="M12 20V4"/><path d="M2
 const ICON_STORAGE = strokeIcon(
   '<rect x="3" y="3" width="18" height="7" rx="1.5"/><rect x="3" y="14" width="18" height="7" rx="1.5"/><circle cx="7" cy="6.5" r="0.8" fill="currentColor" stroke="none"/><circle cx="7" cy="17.5" r="0.8" fill="currentColor" stroke="none"/>',
 );
+// ICON_MAINTENANCE: two open sockets on a shaft -- a plain wrench
+// abstraction (fill:none from strokeIcon already renders each circle as
+// a ring, not a disk), picked over a trash-can glyph so the nav itself
+// reads as "upkeep," not "delete" -- the page's own destructive weight
+// lives in its confirm dialogs, not the icon that gets you there.
+const ICON_MAINTENANCE = strokeIcon('<circle cx="6.5" cy="6.5" r="3.25"/><circle cx="17.5" cy="17.5" r="3.25"/><path d="M8.8 8.8l6.4 6.4"/>');
 const ICON_GPU = strokeIcon(
   '<rect x="4" y="6" width="16" height="12" rx="1.5"/><path d="M8 2v4M16 2v4M8 18v4M16 18v4M2 9h2M2 15h2M20 9h2M20 15h2"/>',
 );
 const ICON_EVENTS = strokeIcon(
   '<path d="M18 8a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M9.5 20a2.5 2.5 0 0 0 5 0"/>',
 );
+// ICON_ALERTS: a warning triangle with an exclamation mark -- distinct
+// from Events' own bell glyph just above (Events keeps the bell; Phase
+// 4's Alerts view gets the triangle, per the plan's own icon contract).
+const ICON_ALERTS = strokeIcon('<path d="M12 3.5 2.5 20h19L12 3.5Z"/><path d="M12 9.5v4.5"/><path d="M12 17.7v.01"/>');
 const ICON_SETTINGS = strokeIcon(
   '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>',
 );
 
-// routes is the single nav table -- 7 entries for Phase 3 (Alerts, the
-// spec's 7th view, arrives with Phase 4's alerting engine; the 8th
-// route below, container-detail, is reached by clicking a container
-// row rather than through nav).
+// routes is the single nav table -- 9 entries, the original spec's full
+// count plus Maintenance (new, outside that original count). Alerts
+// sits between Events and Settings (Task 10's own contract);
+// container-detail is reached by clicking a container row rather than
+// through nav, so it's never in this table at all.
 export const routes: NavItem[] = [
   { name: 'overview', hash: '#/', label: 'Overview', icon: ICON_OVERVIEW },
   {
@@ -144,9 +175,22 @@ export const routes: NavItem[] = [
     icon: ICON_CONTAINERS,
     mobileLabel: 'Contain­ers',
   },
-  { name: 'top', hash: '#/top', label: 'Top Consumers', icon: ICON_TOP, mobileLabel: 'Top Consum­ers' },
+  // label is "Metrics" (route/name stay "top"/"#/top" -- only the display
+  // text renamed, once the page stopped being just a leaderboard and
+  // grew a real per-metric chart): short enough on its own that it
+  // needs no mobileLabel soft-hyphen variant, unlike its "Top Consumers"
+  // predecessor.
+  { name: 'top', hash: '#/top', label: 'Metrics', icon: ICON_TOP },
   { name: 'storage', hash: '#/storage', label: 'Storage', icon: ICON_STORAGE },
+  {
+    name: 'maintenance',
+    hash: '#/maintenance',
+    label: 'Maintenance',
+    icon: ICON_MAINTENANCE,
+    mobileLabel: 'Mainte­nance',
+  },
   { name: 'gpu', hash: '#/gpu', label: 'GPU', icon: ICON_GPU },
   { name: 'events', hash: '#/events', label: 'Events', icon: ICON_EVENTS },
+  { name: 'alerts', hash: '#/alerts', label: 'Alerts', icon: ICON_ALERTS },
   { name: 'settings', hash: '#/settings', label: 'Settings', icon: ICON_SETTINGS },
 ];

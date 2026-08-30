@@ -35,12 +35,61 @@ func TestNvidiaProbeAvailableWhenBinaryOnPath(t *testing.T) {
 	require.True(t, c.Probe(context.Background()).Available)
 }
 
-func TestNvidiaProbeUnavailableWhenBinaryMissing(t *testing.T) {
+// TestNvidiaProbeNotApplicableWhenNoNvidiaHardwareAtAll pins Scott's own
+// report ("I don't have an nvidia GPU, so this shouldn't be showing up
+// for me"): no nvidia-smi on PATH AND no PCI device on this box reports
+// vendor 0x10de must read as NotApplicable, not the old plain-unavailable
+// shape -- that's what tells the frontend (SourcesBanner) to stay silent
+// instead of showing an actionable-looking hint for hardware that was
+// never there to begin with.
+func TestNvidiaProbeNotApplicableWhenNoNvidiaHardwareAtAll(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // empty dir: nvidia-smi can't be found
 	c := NewNvidia(newFakeSink(), t.TempDir(), func(string) (string, bool) { return "", false })
+	c.SysRoot = t.TempDir() // no vendor files at all -- e.g. an Intel-only box
 	st := c.Probe(context.Background())
 	require.False(t, st.Available)
+	require.True(t, st.NotApplicable)
 	require.NotEmpty(t, st.Detail)
+}
+
+// TestNvidiaProbeUnavailableWhenBinaryMissingButHardwarePresent is the
+// OTHER half of the same fixture split (item 5's own "fixture dir
+// with/without a 0x10de vendor file" ask): real Nvidia hardware, but no
+// working nvidia-smi integration (missing --runtime=nvidia, say) --
+// today's existing, actionable hint must stay exactly as it was, and
+// NotApplicable must stay false so the banner keeps showing it.
+func TestNvidiaProbeUnavailableWhenBinaryMissingButHardwarePresent(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // empty dir: nvidia-smi can't be found
+	c := NewNvidia(newFakeSink(), t.TempDir(), func(string) (string, bool) { return "", false })
+	c.SysRoot = t.TempDir()
+	writePCIVendorFile(t, c.SysRoot, "0000:01:00.0", "0x10de\n") // a real Nvidia dGPU is present
+	st := c.Probe(context.Background())
+	require.False(t, st.Available)
+	require.False(t, st.NotApplicable)
+	require.Contains(t, st.Detail, "nvidia-smi")
+}
+
+// TestNvidiaProbeAvailableIgnoresHardwarePresence confirms the hardware
+// scan is only ever consulted on the no-nvidia-smi path -- a working
+// nvidia-smi is Available=true regardless of what's in SysRoot (in
+// particular, without ever even reading it -- an unset/empty SysRoot,
+// the zero value a caller that skips wiring it would leave, must not
+// matter here).
+func TestNvidiaProbeAvailableIgnoresHardwarePresence(t *testing.T) {
+	stubOnPath(t, "nvidia-smi")
+	c := NewNvidia(newFakeSink(), t.TempDir(), func(string) (string, bool) { return "", false })
+	c.SysRoot = ""
+	st := c.Probe(context.Background())
+	require.True(t, st.Available)
+	require.False(t, st.NotApplicable)
+}
+
+// TestNvidiaGPUMeta pins the card-title fix's own Nvidia half: known
+// outright, no sysfs read involved (contrast the DRM path's own
+// GPUMeta, which does need one per pdev).
+func TestNvidiaGPUMeta(t *testing.T) {
+	c := NewNvidia(newFakeSink(), t.TempDir(), func(string) (string, bool) { return "", false })
+	require.Equal(t, map[string]EntityMeta{"nvidia0": {Vendor: "NVIDIA", Driver: "nvidia"}}, c.GPUMeta())
 }
 
 func TestParseGPUUtilValidLine(t *testing.T) {

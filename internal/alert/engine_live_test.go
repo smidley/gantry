@@ -31,7 +31,7 @@ import (
 // fire >85 for 600s, clear <70 for 300s) rather than a shortened stand-in.
 func mustDefaultRule(t *testing.T, id string) store.AlertRule {
 	t.Helper()
-	for _, r := range store.DefaultAlertRules() {
+	for _, r := range store.DefaultAlertRules(false) {
 		if r.ID == id {
 			return r
 		}

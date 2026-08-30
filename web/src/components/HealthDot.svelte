@@ -52,6 +52,7 @@
     font-family: var(--font-mono);
     font-size: 0.75rem;
     color: var(--ink-2);
+    white-space: nowrap;
   }
   .sr-only {
     position: absolute;

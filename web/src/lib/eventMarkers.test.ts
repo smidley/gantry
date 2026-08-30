@@ -35,6 +35,13 @@ describe('eventsToMarkers', () => {
     expect(eventsToMarkers([ev({ Kind: 'container.start', TS: 10, Detail: '' })])[0].label).toBe('Start');
   });
 
+  it('maps alert.fired to a critical marker, and alert.resolved to no marker at all', () => {
+    expect(eventsToMarkers([ev({ Kind: 'alert.fired', TS: 50, Detail: 'disk4 is at 57.0 C' })])).toEqual([
+      { ts: 50, severity: 'critical', label: 'Alert · disk4 is at 57.0 C' },
+    ]);
+    expect(eventsToMarkers([ev({ Kind: 'alert.resolved', TS: 60 })])).toEqual([]);
+  });
+
   it('skips event kinds with no marker mapping (e.g. array/disk events)', () => {
     expect(eventsToMarkers([ev({ Kind: 'array.state', TS: 10 }), ev({ Kind: 'disk.errors', TS: 20 })])).toEqual([]);
   });

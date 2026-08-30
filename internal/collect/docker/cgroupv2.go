@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,7 +56,14 @@ type alloc struct {
 	HasCPUQuota   bool
 
 	CPUSetCores int // cpuset.cpus.effective's core count; meaningful only when HasCPUSet
-	HasCPUSet   bool
+	// CPUSetRaw is the cpuset core-list string CPUSetCores was counted
+	// from (cpuset.cpus.effective, or the API fallback's HostConfig.
+	// CpusetCpus) -- kept alongside the count so a caller that wants the
+	// actual pinned core ids for display (CPUSetPin) doesn't need its own
+	// second read of the same file/field. Meaningless when HasCPUSet is
+	// false, same as CPUSetCores.
+	CPUSetRaw string
+	HasCPUSet bool
 
 	PidsLimit    uint64
 	HasPidsLimit bool
@@ -141,7 +149,7 @@ func readCgroupStats(dir string) (cgStats, error) {
 		Alloc: alloc{
 			MemLimitBytes: memLimit, HasMemLimit: hasMemLimit,
 			CPUQuotaCores: quotaCores, HasCPUQuota: hasQuota,
-			CPUSetCores: cpusetCores, HasCPUSet: hasCPUSet,
+			CPUSetCores: cpusetCores, CPUSetRaw: strings.TrimSpace(string(cpusetRaw)), HasCPUSet: hasCPUSet,
 			PidsLimit: pidsLimit, HasPidsLimit: hasPidsLimit,
 		},
 	}, nil
@@ -339,36 +347,84 @@ const maxCPUSetRangeSpan = 1 << 16
 // and the API fallback (HostConfig.CpusetCpus, docker.go's
 // allocFromHostConfig).
 func parseCPUSetCount(s string) (count int, ok bool) {
+	ids, ok := parseCPUSetIDList(s)
+	return len(ids), ok
+}
+
+// parseCPUSetIDList is parseCPUSetCount's own shared body, returning the
+// distinct core ids themselves (unsorted -- map iteration order) rather
+// than just their count -- CPUSetPin, below, needs the actual ids to
+// render a display string; parseCPUSetCount only ever needed how many.
+func parseCPUSetIDList(s string) (ids []int, ok bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, false
+		return nil, false
 	}
-	ids := map[int]struct{}{}
+	idSet := map[int]struct{}{}
 	for _, part := range strings.Split(s, ",") {
 		lo, hi, isRange := strings.Cut(part, "-")
 		loN, err := strconv.Atoi(lo)
 		if err != nil || loN < 0 {
-			return 0, false
+			return nil, false
 		}
 		if !isRange {
-			ids[loN] = struct{}{}
+			idSet[loN] = struct{}{}
 		} else {
 			hiN, err := strconv.Atoi(hi)
 			if err != nil || hiN < loN {
-				return 0, false
+				return nil, false
 			}
 			if hiN-loN >= maxCPUSetRangeSpan {
-				return 0, false
+				return nil, false
 			}
 			for i := loN; i <= hiN; i++ {
-				ids[i] = struct{}{}
+				idSet[i] = struct{}{}
 			}
 		}
-		if len(ids) > maxCPUSetRangeSpan {
-			return 0, false // per-part total cap: catches many disjoint under-cap ranges summing past it
+		if len(idSet) > maxCPUSetRangeSpan {
+			return nil, false // per-part total cap: catches many disjoint under-cap ranges summing past it
 		}
 	}
-	return len(ids), true
+	out := make([]int, 0, len(idSet))
+	for id := range idSet {
+		out = append(out, id)
+	}
+	return out, true
+}
+
+// CPUSetPin renders a raw cgroup cpuset core list (parseCPUSetIDList's
+// own syntax -- a user-typed --cpuset-cpus value or the kernel-normalized
+// cpuset.cpus.effective, either one) as a canonical, sorted, deduped
+// display string ("0-5, 13-15"), but only when it actually narrows the
+// container below hostCores -- "" (ok=false) for an unrestricted cpuset
+// (cpuset.cpus.effective defaults to every host core when nothing is
+// pinned, which must read as unlimited, not "pinned to every core" --
+// same rule effectiveCPUAllocCores applies to the alloc-cores number),
+// a malformed/empty raw string, or an unknown host core count
+// (hostCores<=0). Exported (unlike this file's other alloc helpers) so
+// fake.go -- which can't construct this package's own unexported `alloc`
+// type -- can still compute the identical display string for its own
+// synthetic pinned demo container.
+func CPUSetPin(raw string, hostCores int) (pin string, ok bool) {
+	ids, valid := parseCPUSetIDList(raw)
+	if !valid || hostCores <= 0 || len(ids) >= hostCores {
+		return "", false
+	}
+	sort.Ints(ids)
+	var parts []string
+	for i := 0; i < len(ids); {
+		j := i
+		for j+1 < len(ids) && ids[j+1] == ids[j]+1 {
+			j++
+		}
+		if i == j {
+			parts = append(parts, strconv.Itoa(ids[i]))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", ids[i], ids[j]))
+		}
+		i = j + 1
+	}
+	return strings.Join(parts, ", "), true
 }
 
 // fallbackAlloc merges the stats-API path's own allocation reading

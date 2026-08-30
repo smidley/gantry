@@ -74,13 +74,26 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		}
 	}()
 
+	// cfg is constructed here, ahead of the alert-rule seed just below,
+	// so fakeMode (env>settings>default, the same precedence every other
+	// cfg.Bool call in this function uses) is known in time to pick the
+	// right seed table -- config.New itself is a pure wrap of st+getenv
+	// with no side effects, so resolving it this early changes nothing
+	// else about boot order.
+	cfg := config.New(st, getenv)
+	fakeMode := cfg.Bool("fake_data", false)
+
 	// Seeded before anything else touches alert_rules: an id already
 	// present (a prior boot's seed, possibly since edited or disabled)
 	// is left untouched; only an id genuinely absent -- first boot, or a
 	// default introduced by a later upgrade -- gets inserted. There is
 	// no alert engine yet to gate this on (Task 4); "before the engine's
-	// first tick" is trivially satisfied by seeding at boot.
-	if err := st.SeedAlertRules(store.DefaultAlertRules()); err != nil {
+	// first tick" is trivially satisfied by seeding at boot. fast=
+	// fakeMode compresses every threshold rule's sustained-for window to
+	// 60s (Task 9's fake-mode alert demo) so it can go pending -> firing
+	// -> resolved inside a short interactive session; a real box always
+	// seeds the true, uncompressed numbers.
+	if err := st.SeedAlertRules(store.DefaultAlertRules(fakeMode)); err != nil {
 		return fmt.Errorf("seed alert rules: %w", err)
 	}
 	// GANTRY_WEBHOOK_URL (spec Sec5's documented single-webhook path) is
@@ -99,7 +112,6 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cfg := config.New(st, getenv)
 	port := cfg.Int("port", 8380)
 	// readOnly is Gantry's write-path kill switch (GANTRY_READ_ONLY=1,
 	// resolved through the same env>settings>default precedence every
@@ -117,22 +129,42 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// the store, never touching dc's registry, and disks.go's own
 	// unraid.Collector similarly never sees a real disks.ini in fake
 	// mode). fakeDiskMeta mirrors fakeMetas' shape for disk device/type
-	// metadata (see fake.Generator.DiskMetas' own doc). fk itself (nil
-	// outside fake-data mode) is kept for the image-inventory wiring
-	// below, once dc exists to default against.
+	// metadata (see fake.Generator.DiskMetas' own doc); fakeDeviceLabels
+	// is buildContainerStorage's own analogue, for the one device kind
+	// fakeDiskMeta's join can't cover (see fake.Generator.DeviceLabels'
+	// own doc); fakeSharePlacement is the same overlay again, for the
+	// share->cache-pool join (see fake.Generator.SharePlacements' own
+	// doc) -- real mode never sees a shares.ini in this closure at all,
+	// so there's nothing to overlay onto there either. fk itself (nil
+	// outside fake-data mode) is kept for the image-inventory and
+	// container-maintenance wiring below, once dc exists to default
+	// against.
 	var fakeMetas func() []docker.Meta
 	var fakeDiskMeta func() map[string]unraid.DiskMeta
+	var fakeDeviceLabels func() map[string]unraid.DeviceLabel
+	var fakeSharePlacement func() map[string]unraid.SharePlacement
 	var fk *fake.Generator
-	if cfg.Bool("fake_data", false) {
+	if fakeMode {
 		log.Println("fake data mode: synthesizing a demo fleet")
 		fk = fake.New(st, st, time.Now().UnixNano())
 		fakeMetas = fk.Metas
 		fakeDiskMeta = fk.DiskMetas
+		fakeDeviceLabels = fk.DeviceLabels
+		fakeSharePlacement = fk.SharePlacements
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			fk.Run(runCtx, 2*time.Second, nil)
 		}()
+
+		// Task 9: two webhook targets seeded (never overwritten once
+		// present, same idempotent-insert idiom as SeedAlertRules/
+		// seedWebhookTargetFromEnv) so the delivery ledger's SUCCESS and
+		// FAILURE paths both render in the Settings channels card with no
+		// external service required -- see seedFakeWebhookTargets' own doc.
+		if err := seedFakeWebhookTargets(st, port); err != nil {
+			return fmt.Errorf("seed fake webhook targets: %w", err)
+		}
 	}
 
 	// Collectors are always registered, fake-data mode or not — each one's
@@ -188,7 +220,9 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	}
 
 	gp := gpu.New(st, "/proc", gpuLookup)
+	gp.SysRoot = sysRoot
 	nv := gpu.NewNvidia(st, "/proc", gpuLookup)
+	nv.SysRoot = sysRoot
 	pr := pressure.New(st, "/proc", cgroupRoot, dc.Running)
 	ur := unraid.New(st, st, envOnly(getenv, "GANTRY_UNRAID_DIR", "/unraid"), "/proc")
 	du := docker.NewDiskUsage(st, dockerSock)
@@ -242,7 +276,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// phase's job, not this wiring's) plus one webhook channel per
 	// enabled, valid configured target. Its workers start lazily on the
 	// first Dispatch call; Run here only wires their shutdown to runCtx.
-	dispatcher, err := buildDispatcher(st, cfg, getenv, ver)
+	dispatcher, err := buildDispatcher(st, cfg, getenv, ver, fakeMode)
 	if err != nil {
 		return fmt.Errorf("build alert dispatcher: %w", err)
 	}
@@ -265,7 +299,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// snapshot (Options.Snapshot), /api/live's connect frame (Options.
 	// Current), and the publish loop below -- all three read the exact
 	// same assembly, just on different triggers (poll, connect, tick).
-	snapshotFn := buildSnapshot(st, dc, ur, registry.Sources, fakeMetas, fakeDiskMeta, dispatcher)
+	snapshotFn := buildSnapshot(st, dc, ur, gp, nv, registry.Sources, fakeMetas, fakeDiskMeta, dispatcher)
 	live := server.NewBroadcaster()
 
 	// SSE publish loop: every 2s, marshal the current snapshot and fan it
@@ -307,8 +341,9 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Live:       live,
 		Current:    func() []byte { b, _ := json.Marshal(snapshotFn()); return b },
 		Logs:       dc.StreamLogs,
-		Storage:    buildContainerStorage(dc, ur, st, fakeMetas),
+		Storage:    buildContainerStorage(dc, ur, st, fakeMetas, fakeDiskMeta, fakeDeviceLabels, fakeSharePlacement, sysRoot),
 		Settings:   settingsAdapter{st: st, cfg: cfg},
+		Groups:     groupsAdapter{st: st},
 
 		Images:       buildImages(imagesSrc),
 		RemoveImages: buildRemoveImages(removeImagesSrc),
@@ -359,28 +394,43 @@ const containerFrameMaxAge = 60
 // assembles the current SnapshotDTO from st.Live()'s latest sample per
 // series (grouped by SeriesKey Kind, then Entity where the DTO has an
 // entity dimension; live:-prefixed metrics are ring-only per flush.go and
-// never surfaced here), seeded with every currently-running container's
-// inventory metadata from dc.Running() (plus fakeMetas' synthetic fleet,
-// when GANTRY_FAKE_DATA=1 -- see fake.Generator.Metas' doc for why that's
-// needed at all) so a container with no metrics yet still appears, plus
-// ur.Version() and sources() (moved into the frame in v2 so an SSE client
-// sees a collector degrade live, not just on its next healthz poll).
+// never surfaced here), seeded with every container the registry
+// currently knows about, running or stopped, from dc.All() (plus
+// fakeMetas' synthetic fleet, when GANTRY_FAKE_DATA=1 -- see
+// fake.Generator.Metas' doc for why that's needed at all) so a container
+// with no metrics yet still appears, plus ur.Version() and sources()
+// (moved into the frame in v2 so an SSE client sees a collector degrade
+// live, not just on its next healthz poll).
 //
 // fakeMetas is nil outside fake-data mode; when non-nil its entries are
-// treated exactly like dc.Running()'s -- unconditionally seeded, not a
-// mere lookup fallback -- so the fake fleet survives the same filter a
-// real one does. fakeDiskMeta is its disk-metadata analogue: ur.DiskMeta()
+// treated exactly like dc.All()'s -- unconditionally seeded, not a mere
+// lookup fallback -- so the fake fleet survives the same filter a real
+// one does. fakeDiskMeta is its disk-metadata analogue: ur.DiskMeta()
 // (a real box's own unraid collector) is merged into dto.DiskMeta first,
 // then fakeDiskMeta's entries on top when wired -- see server.DiskMetaDTO's
 // own doc for why disk type/device strings ride their own map rather than
 // Disks' numeric one.
 //
-// Containers is filtered, not just seeded: an entity not in the merged
-// running set only stays in the frame while containerFrameEntities says
-// so (a live sample younger than containerFrameMaxAge AND a name
-// lookupByName still recognizes) — see containerFrameEntities' own doc
-// for why that's two different conditions, not one.
-func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta, dispatcher *alert.Dispatcher) func() server.SnapshotDTO {
+// A container's METRICS are still filtered even though its identity/meta
+// isn't: a "container"-kind sample only lands in dto.Containers when its
+// entity is one buildSnapshot just seeded (dc.All() no longer knows the
+// name at all once it's actually removed, not merely stopped) AND the
+// sample itself is younger than containerFrameMaxAge -- a stopped
+// container's last-recorded cpu/mem/etc. reading must not go on reading
+// as "current" forever just because the container entry itself sticks
+// around.
+//
+// gp/nv's own GPUMeta() calls merge into dto.GPUMeta the same "each
+// source populates its own entities" way as DiskMeta above -- the DRM
+// path (gp, pdev-keyed) and the nvidia-smi path (nv, fixed "nvidia0")
+// never share an entity id, so there's no real first/overlay ordering
+// concern the way fakeDiskMeta has, just two independent merges.
+//
+// dispatcher feeds dto.Alerts (buildAlertsBlock): the same firing-instance
+// and channel-health data GET /api/alerts serves on demand, assembled
+// fresh every tick so an SSE client sees an alert fire/resolve/channel
+// degrade live rather than on its next poll.
+func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, gp *gpu.Collector, nv *gpu.NvidiaCollector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta, dispatcher *alert.Dispatcher) func() server.SnapshotDTO {
 	return func() server.SnapshotDTO {
 		dto := server.SnapshotDTO{
 			TS:            time.Now().Unix(),
@@ -391,7 +441,14 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 			DiskMeta:      map[string]server.DiskMetaDTO{},
 			Unraid:        map[string]map[string]float64{},
 			GPU:           map[string]map[string]float64{},
+			GPUMeta:       map[string]server.GPUMetaDTO{},
 			Sources:       map[string]string{},
+		}
+		for pdev, m := range gp.GPUMeta() {
+			dto.GPUMeta[pdev] = server.GPUMetaDTO{Vendor: m.Vendor, Driver: m.Driver}
+		}
+		for entity, m := range nv.GPUMeta() {
+			dto.GPUMeta[entity] = server.GPUMetaDTO{Vendor: m.Vendor, Driver: m.Driver}
 		}
 		if sources != nil {
 			dto.Sources = sources()
@@ -410,53 +467,33 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 			}
 		}
 
-		metas := dc.Running()
+		metas := dc.All()
 		if fakeMetas != nil {
 			metas = append(metas, fakeMetas()...)
 		}
-		running := map[string]struct{}{}
 		for _, m := range metas {
-			running[m.Name] = struct{}{}
 			dto.Containers[m.Name] = server.ContainerDTO{
-				State:        m.State,
-				Health:       m.Health,
-				Image:        m.Image,
-				Icon:         m.Icon,
-				Created:      metaCreatedUnix(m.Created),
-				UpdateStatus: m.UpdateStatus,
-				ChangelogURL: m.ChangelogURL,
-				ProjectURL:   m.ProjectURL,
-				WebUIURL:     m.WebUIURL,
-				Networks:     convertNetworks(m.Networks),
-				Ports:        convertPorts(m.Ports),
-				Metrics:      map[string]float64{},
+				State:          m.State,
+				Health:         m.Health,
+				Image:          m.Image,
+				Icon:           m.Icon,
+				Created:        metaCreatedUnix(m.Created),
+				ComposeProject: m.ComposeProject,
+				Cpuset:         m.Cpuset,
+				ExitCode:       m.ExitCode,
+				UpdateStatus:   m.UpdateStatus,
+				ChangelogURL:   m.ChangelogURL,
+				ProjectURL:     m.ProjectURL,
+				WebUIURL:       m.WebUIURL,
+				Networks:       convertNetworks(m.Networks),
+				Ports:          convertPorts(m.Ports),
+				Metrics:        map[string]float64{},
 			}
 		}
 
 		live := st.Live()
 		snap := live.SnapshotLatest()
 		nowUnix := dto.TS // same instant as the frame's own timestamp, one call
-
-		// Freshest observed age per non-running container entity: the
-		// entity qualifies for inclusion if ANY of its "container"-kind
-		// samples is young enough, so the minimum (freshest) age is what
-		// containerFrameEntities needs, not every individual sample's age.
-		sampleAge := map[string]int64{}
-		for key, sample := range snap {
-			if key.Kind != "container" {
-				continue
-			}
-			age := nowUnix - sample.TS
-			if cur, ok := sampleAge[key.Entity]; !ok || age < cur {
-				sampleAge[key.Entity] = age
-			}
-		}
-		include := containerFrameEntities(running, sampleAge, containerFrameMaxAge, dc.LookupByName)
-		for name := range include {
-			if _, ok := dto.Containers[name]; !ok {
-				dto.Containers[name] = server.ContainerDTO{Metrics: map[string]float64{}}
-			}
-		}
 
 		for key, sample := range snap {
 			if strings.HasPrefix(key.Metric, "live:") {
@@ -466,8 +503,8 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 			case "host":
 				dto.Host[key.Metric] = sample.Val
 			case "container":
-				if _, ok := include[key.Entity]; !ok {
-					continue // filtered out: stopped, stale, or no longer known
+				if _, ok := dto.Containers[key.Entity]; !ok {
+					continue // not a container the registry (or fakeMetas) knows about at all -- fully removed, or never real
 				}
 				if nowUnix-sample.TS >= containerFrameMaxAge {
 					continue // this ONE sample is stale, even though its entity is still in the frame -- e.g. `docker update --memory 0` stops mem.limit_bytes without stopping the container, and the same gate covers container-attributed gpu.*.busy_pct going quiet
@@ -546,7 +583,7 @@ func buildAlertsBlock(st *store.Store, dispatcher *alert.Dispatcher) server.Aler
 		firing = append(firing, server.FiringAlertDTO{
 			RuleID: inst.RuleID, RuleName: ruleByID[inst.RuleID].Name, Severity: inst.Severity,
 			Kind: inst.Kind, Entity: inst.Entity, Metric: inst.Metric,
-			Value: inst.Value, Threshold: inst.Threshold, FiredAt: inst.FiredAt,
+			Value: inst.Value, Threshold: inst.Threshold, Summary: inst.Summary, FiredAt: inst.FiredAt,
 			Silenced: server.SilenceCovers(silences, inst.RuleID, inst.Entity),
 		})
 	}
@@ -619,38 +656,6 @@ func convertPorts(in []docker.PortInfo) []server.PortInfoDTO {
 	out := make([]server.PortInfoDTO, len(in))
 	for i, p := range in {
 		out[i] = server.PortInfoDTO{ContainerPort: p.ContainerPort, Proto: p.Proto, HostIP: p.HostIP, HostPort: p.HostPort}
-	}
-	return out
-}
-
-// containerFrameEntities decides which container entities belong in this
-// tick's frame: every name in running is always included; a name that's
-// merely referenced by a live sample gets one more chance, but only if
-// its freshest sample is younger than maxAge seconds AND lookupByName
-// still recognizes the name. Both conditions matter independently: age
-// alone would let a fully-removed container's still-fresh-but-orphaned
-// sample flicker back into view for up to maxAge seconds, and
-// lookupByName alone would let a long-stopped-but-not-removed
-// container's stale metrics linger for as long as its ring happens to
-// still hold data (~15 minutes) instead of the frame's own, much shorter
-// cutoff. Extracted as a pure function so it's testable without a real
-// docker daemon or *store.Store.
-func containerFrameEntities(running map[string]struct{}, sampleAge map[string]int64, maxAge int64, lookupByName func(string) (docker.Meta, bool)) map[string]struct{} {
-	out := make(map[string]struct{}, len(running))
-	for name := range running {
-		out[name] = struct{}{}
-	}
-	for name, age := range sampleAge {
-		if _, already := out[name]; already {
-			continue
-		}
-		if age >= maxAge {
-			continue
-		}
-		if _, known := lookupByName(name); !known {
-			continue
-		}
-		out[name] = struct{}{}
 	}
 	return out
 }
@@ -789,6 +794,64 @@ func seedWebhookTargetFromEnv(st *store.Store, url string) error {
 	return saveWebhookTargets(st, targets)
 }
 
+// fakeWebhookOKTargetID/fakeWebhookFailTargetID name Task 9's two demo
+// webhook targets -- fixed ids (not user-editable identity, the same
+// "stable slug" convention alert_rules.id uses) so an idempotent re-seed
+// on a later boot recognizes them.
+const (
+	fakeWebhookOKTargetID   = "fake-ok"
+	fakeWebhookFailTargetID = "fake-fail"
+)
+
+// seedFakeWebhookTargets inserts Task 9's two fake-mode demo webhook
+// targets -- one pointing at Gantry's OWN healthz endpoint (loopback,
+// always 200, so the SUCCESS path, its delivery-ledger row, and the
+// Settings channels card's "ok" reading all render with no external
+// service), one at a guaranteed-unreachable loopback port (1 is never a
+// listening service) so the FAILURE path, its ledger row, and the
+// channel card's failure text render just as reliably. Idempotent and
+// insert-only, the same convention SeedAlertRules/
+// seedWebhookTargetFromEnv already use: a target already present (this
+// boot or an earlier one) is left completely untouched, so a demo
+// session's own edits to either one survive a restart.
+//
+// server.go's healthz route deliberately answers any HTTP method, not
+// just GET, specifically so this loopback POST succeeds -- a health
+// check is read-only and side-effect-free regardless of verb, and
+// restricting it to GET would make this the one demo target that could
+// never actually succeed.
+func seedFakeWebhookTargets(st *store.Store, port int) error {
+	targets, err := loadWebhookTargets(st)
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		existing[t.ID] = true
+	}
+
+	changed := false
+	if !existing[fakeWebhookOKTargetID] {
+		targets = append(targets, alert.WebhookTarget{
+			ID: fakeWebhookOKTargetID, Name: "Fake mode: always succeeds",
+			URL:     fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port),
+			Enabled: true, TimeoutS: 5,
+		})
+		changed = true
+	}
+	if !existing[fakeWebhookFailTargetID] {
+		targets = append(targets, alert.WebhookTarget{
+			ID: fakeWebhookFailTargetID, Name: "Fake mode: always fails",
+			URL: "http://127.0.0.1:1/dead", Enabled: true, TimeoutS: 2,
+		})
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return saveWebhookTargets(st, targets)
+}
+
 // buildWebhookChannels turns every enabled, valid target into a Channel.
 // A target that fails validation is skipped with a log line rather than
 // aborting boot -- the same "one bad rule can't take the rest down"
@@ -810,18 +873,46 @@ func buildWebhookChannels(targets []alert.WebhookTarget, version string, clock f
 	return out
 }
 
+// resolveNotifyDir picks the notify-spool directory buildDispatcher's
+// channel writes to: GANTRY_NOTIFY_DIR when set (real mode and fake mode
+// alike -- an operator's explicit choice always wins), else "/notify"
+// (the CA template's own mount point) in real mode, else -- fake mode
+// only, Task 9's own contract -- a fresh temp directory, so the demo has
+// somewhere to write with zero configuration and the Alerts view's
+// channel strip reads "ok" rather than the unmounted-spool hint on a
+// box with no real /notify mount at all. The directory is never cleaned
+// up by this process; it's a demo aid for the life of one run, not a
+// durable path, and the OS reclaims temp storage on its own schedule.
+func resolveNotifyDir(getenv func(string) string, fakeMode bool) (string, error) {
+	if v := getenv("GANTRY_NOTIFY_DIR"); v != "" {
+		return v, nil
+	}
+	if !fakeMode {
+		return "/notify", nil
+	}
+	dir, err := os.MkdirTemp("", "gantry-fake-notify-")
+	if err != nil {
+		return "", fmt.Errorf("create fake notify dir: %w", err)
+	}
+	log.Printf("fake data mode: notify spool at %s", dir)
+	return dir, nil
+}
+
 // buildDispatcher assembles the alert.Dispatcher wired to
 // alert.Engine.Dispatch: the notify-spool channel is always present
 // (GANTRY_NOTIFY_DIR, default /notify -- the CA template's own mount
-// point, real mode and fake mode alike; fake mode defaulting it to a
-// temp dir so the demo has somewhere to write is a later phase's job,
-// not this wiring's), plus one Channel per enabled, valid configured
-// webhook target. alert.link_base and alert.notify_resolved are read
-// fresh on every call through their own closures -- a settings change
-// takes effect on the very next dispatch, no restart, the same
-// resolved-fresh-every-tick posture the retention settings above use.
-func buildDispatcher(st *store.Store, cfg *config.Config, getenv func(string) string, version string) (*alert.Dispatcher, error) {
-	notifyDir := envOnly(getenv, "GANTRY_NOTIFY_DIR", "/notify")
+// point in real mode; fake mode defaults it to a fresh temp dir instead
+// -- see fakeNotifyDir's own doc, Task 9), plus one Channel per enabled,
+// valid configured webhook target. alert.link_base and alert.
+// notify_resolved are read fresh on every call through their own
+// closures -- a settings change takes effect on the very next dispatch,
+// no restart, the same resolved-fresh-every-tick posture the retention
+// settings above use.
+func buildDispatcher(st *store.Store, cfg *config.Config, getenv func(string) string, version string, fakeMode bool) (*alert.Dispatcher, error) {
+	notifyDir, err := resolveNotifyDir(getenv, fakeMode)
+	if err != nil {
+		return nil, err
+	}
 	linkBase := func() string {
 		v, _, _ := st.SettingGet("alert.link_base")
 		return v
@@ -842,8 +933,26 @@ func buildDispatcher(st *store.Store, cfg *config.Config, getenv func(string) st
 // Storage -- like buildContainersList/buildSnapshot, dc.LookupByName
 // falls back to fakeMetas' synthetic fleet when GANTRY_FAKE_DATA=1, so a
 // fake container's storage panel resolves instead of 404ing (nil in
-// real mode).
-func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store.Store, fakeMetas func() []docker.Meta) func(name string) (server.StorageDTO, bool) {
+// real mode). fakeDiskMeta/fakeDeviceLabels are the same fake-data
+// overlay convention buildSnapshot's own DiskMeta merge uses (real
+// first, fake entries layered on top): fakeDiskMeta lets a fake
+// container's device rows join the demo fleet's own slot names (e.g.
+// nvme0n1 -> rocket_pool) through the exact same unraid.
+// ResolveDeviceLabel path a real box uses; fakeDeviceLabels covers the
+// one thing that path can't fake at all -- a loop device's backing_file
+// lives on a real host filesystem fake-data mode never has -- see fake.
+// Generator.DeviceLabels' own doc. sysRoot is threaded straight through
+// to ResolveDeviceLabel, unused by every other call in this function.
+func buildContainerStorage(
+	dc *docker.Collector,
+	ur *unraid.Collector,
+	st *store.Store,
+	fakeMetas func() []docker.Meta,
+	fakeDiskMeta func() map[string]unraid.DiskMeta,
+	fakeDeviceLabels func() map[string]unraid.DeviceLabel,
+	fakeSharePlacement func() map[string]unraid.SharePlacement,
+	sysRoot string,
+) func(name string) (server.StorageDTO, bool) {
 	lookup := dc.LookupByName
 	if fakeMetas != nil {
 		lookup = func(name string) (docker.Meta, bool) {
@@ -859,29 +968,78 @@ func buildContainerStorage(dc *docker.Collector, ur *unraid.Collector, st *store
 		}
 	}
 	return func(name string) (server.StorageDTO, bool) {
-		return containerStorage(lookup, ur.Slots, st.Live(), name, time.Now().Unix())
+		return containerStorage(lookup, ur.Slots, ur.DiskMeta, fakeDiskMeta, ur.SharePlacement, fakeSharePlacement, fakeDeviceLabels, sysRoot, st.Live(), name, time.Now().Unix())
 	}
 }
 
-func containerStorage(lookupMeta func(string) (docker.Meta, bool), poolSlots func() []string, live *store.Live, name string, now int64) (server.StorageDTO, bool) {
+func containerStorage(
+	lookupMeta func(string) (docker.Meta, bool),
+	poolSlots func() []string,
+	diskMeta func() map[string]unraid.DiskMeta,
+	fakeDiskMeta func() map[string]unraid.DiskMeta,
+	sharePlacement func() map[string]unraid.SharePlacement,
+	fakeSharePlacement func() map[string]unraid.SharePlacement,
+	fakeDeviceLabels func() map[string]unraid.DeviceLabel,
+	sysRoot string,
+	live *store.Live,
+	name string,
+	now int64,
+) (server.StorageDTO, bool) {
 	meta, ok := lookupMeta(name)
 	if !ok {
 		return server.StorageDTO{}, false
+	}
+
+	// placements: real first, fakeSharePlacement's overlay on top -- same
+	// merge order/rationale as knownDevices' disk_meta assembly just below
+	// (and buildSnapshot's own disk_meta merge).
+	placements := sharePlacement()
+	if fakeSharePlacement != nil {
+		for name, p := range fakeSharePlacement() {
+			placements[name] = p
+		}
 	}
 
 	pools := poolSlots()
 	mounts := make([]server.MountDTO, 0, len(meta.Mounts))
 	for _, m := range meta.Mounts {
 		ref := unraid.ResolveStoragePath(m.Source, pools)
-		mounts = append(mounts, server.MountDTO{
+		dto := server.MountDTO{
 			Source:      m.Source,
 			Destination: m.Destination,
 			RW:          m.RW,
 			Storage:     server.StorageRefDTO{Kind: ref.Kind, Name: ref.Name},
-		})
+		}
+		if ref.Kind == "share" {
+			if p, ok := placements[ref.Name]; ok {
+				dto.Storage.Placement = &server.SharePlacementDTO{Mode: p.Mode, Pool: p.Pool}
+			}
+		}
+		mounts = append(mounts, dto)
+	}
+
+	// meta (real) first, fakeDiskMeta's overlay on top -- same merge
+	// order/rationale as buildSnapshot's own disk_meta assembly.
+	knownDevices := diskMeta()
+	if fakeDiskMeta != nil {
+		for slot, m := range fakeDiskMeta() {
+			knownDevices[slot] = m
+		}
 	}
 
 	devices := deviceIOFromSamples(live.LatestByMetricPrefix("container", name, "live:io."), now)
+	var fakeLabels map[string]unraid.DeviceLabel
+	if fakeDeviceLabels != nil {
+		fakeLabels = fakeDeviceLabels()
+	}
+	for i := range devices {
+		label := unraid.ResolveDeviceLabel(devices[i].Device, sysRoot, knownDevices)
+		if override, ok := fakeLabels[devices[i].Device]; ok {
+			label = override
+		}
+		devices[i].Label, devices[i].Kind = label.Label, label.Kind
+	}
+
 	return server.StorageDTO{Mounts: mounts, Devices: devices}, true
 }
 
@@ -1133,6 +1291,46 @@ func (a settingsAdapter) Set(field string, value int) error {
 		return fmt.Errorf("settings: unknown field %q", field) // unreached: handler only calls Set with its own whitelisted names
 	}
 	return a.st.SettingSet(key, strconv.Itoa(value))
+}
+
+// groupsSettingsKey is the one settings-table row every saved group
+// lives under -- a single JSON-encoded blob, not one row per group
+// (there's no per-field env-override dance to support the way
+// retention's four keys have, so there's no reason to split it up).
+const groupsSettingsKey = "groups"
+
+// groupsAdapter implements server.GroupsIface: unlike settingsAdapter,
+// this talks straight to st.SettingGet/SettingSet with no *config.Config
+// in between -- groups are plain user data, not a tunable with an env
+// var equivalent, so there's nothing for config's env>settings>default
+// precedence to resolve. JSON marshal/unmarshal happens here, in main,
+// the same "server package stays store-shape-agnostic" reasoning
+// buildTop/buildContainersList/settingsAdapter itself already follow.
+type groupsAdapter struct {
+	st *store.Store
+}
+
+func (a groupsAdapter) Get() ([]server.Group, error) {
+	raw, ok, err := a.st.SettingGet(groupsSettingsKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return []server.Group{}, nil
+	}
+	var groups []server.Group
+	if err := json.Unmarshal([]byte(raw), &groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+func (a groupsAdapter) Set(groups []server.Group) error {
+	raw, err := json.Marshal(groups)
+	if err != nil {
+		return err
+	}
+	return a.st.SettingSet(groupsSettingsKey, string(raw))
 }
 
 // alertsAdapter implements server.AlertsIface (Task 8) over *store.Store

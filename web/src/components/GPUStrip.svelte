@@ -11,12 +11,21 @@
   Nvidia-only host's gpu entity has no render/video/video-enhance/copy
   keys at all, only "engine.gpu.busy_pct", which without this fallback
   this strip would silently never render a bar for.
+
+  gpuMeta (additive, optional -- GPU card title fix: the entity id IS a
+  raw PCI address for the DRM path, e.g. "0000:00:02.0" -- Scott's own
+  question, "what does this mean?") backs each entity's own title via
+  gpuTitle (metrics.ts): "Intel GPU (i915)" instead of the bare address,
+  with the address itself demoted to a small secondary line rather than
+  dropped outright. Absent meta (a snapshot that hasn't caught up yet)
+  falls back to today's exact behavior -- just the bare entity id, no
+  secondary line.
 -->
 <script>
   import { fmtPct } from '../lib/format';
-  import { enginesPresent, GPU_ENTITY_ENGINE_ORDER } from '../lib/metrics';
+  import { enginesPresent, GPU_ENTITY_ENGINE_ORDER, gpuTitle } from '../lib/metrics';
 
-  let { gpu = {} } = $props();
+  let { gpu = {}, gpuMeta = {} } = $props();
 
   const SERIES_VAR = {
     render: '--series-1',
@@ -45,7 +54,10 @@
     <span class="microlabel">GPU</span>
     {#each entities as { entity, engines } (entity)}
       <div class="gpu-strip__entity">
-        <span class="gpu-strip__entity-name">{entity}</span>
+        <div class="gpu-strip__entity-head">
+          <span class="gpu-strip__entity-name">{gpuTitle(entity, gpuMeta[entity])}</span>
+          {#if gpuMeta[entity]}<span class="microlabel gpu-strip__entity-id">{entity}</span>{/if}
+        </div>
         <div class="gpu-strip__engines">
           {#each engines as { engine, pct } (engine)}
             <div class="gpu-strip__engine">
@@ -77,10 +89,20 @@
     flex-direction: column;
     gap: 0.3rem;
   }
+  .gpu-strip__entity-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
   .gpu-strip__entity-name {
     font-family: var(--font-mono);
     font-size: 0.8rem;
     color: var(--ink);
+  }
+  /* The raw PCI address, demoted -- see the module doc's own gpuMeta
+     paragraph. */
+  .gpu-strip__entity-id {
+    font-size: 0.68rem;
   }
   .gpu-strip__engines {
     display: flex;

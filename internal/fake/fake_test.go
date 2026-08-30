@@ -1,6 +1,7 @@
 package fake
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -207,12 +208,55 @@ func TestSpunDownDiskEmitsNoTemp(t *testing.T) {
 	fsUsed := sink.recs[store.SeriesKey{Kind: "disk", Entity: "disk3", Metric: "fs.used_bytes"}]
 	require.NotEmpty(t, fsUsed, "a spun-down disk still reports cached filesystem usage")
 
-	for _, other := range []string{"parity", "disk1", "disk2", "disk4", "cache"} {
+	// disk4 is excluded from this generic-formula range check -- it's
+	// driven by the Task 9 alert-demo ramp instead (alertDemoDiskEntity),
+	// which deliberately runs well above 45°C; see the dedicated
+	// TestDisk4TempFollowsAlertDemoRampNotGenericFormula and
+	// TestAlertDemoDiskTempCRampsCrossesFireThenCoolsCrossesClear for its
+	// own contract. It still must report SOME temp.c, though -- it's
+	// spun up and has a sensor, same as every disk in this loop.
+	for _, other := range []string{"parity", "disk1", "disk2", "cache"} {
 		temps := sink.recs[store.SeriesKey{Kind: "disk", Entity: other, Metric: "temp.c"}]
 		require.NotEmpty(t, temps, "%s is spun up and must report temp.c", other)
 		for _, s := range temps {
 			require.GreaterOrEqual(t, s.Val, 32.0, "%s temp out of [32,45]", other)
 			require.LessOrEqual(t, s.Val, 45.0, "%s temp out of [32,45]", other)
+		}
+	}
+	disk4Temps := sink.recs[store.SeriesKey{Kind: "disk", Entity: "disk4", Metric: "temp.c"}]
+	require.NotEmpty(t, disk4Temps, "disk4 is spun up and must report temp.c")
+}
+
+// TestDiskFsUsedPctStaysWellClearOfDiskUsageHighThreshold pins fake
+// mode's deliberate safety margin, not just its formula: every disk's
+// baseUsed (highest is disk2's 0.71) plus the slow drift/jitter formula
+// must never approach disk-usage-high's 90% fire threshold, even across
+// a long simulated run. Unlike disk4's temp.c (Task 9's OWN deliberate
+// ramp into disk-temp-high), nothing here is meant to alert -- Task 9's
+// demo framework already owns the one alert Gantry's fake mode is
+// supposed to fire on purpose, and a second one firing here by accident
+// would be a permanent, undismissable false positive in every demo
+// session. Also pins the formula itself: fs.used_pct must be this
+// disk's used share of its OWN fixed size (used/(used+free)*100),
+// matching disks.go's real-collector formula.
+func TestDiskFsUsedPctStaysWellClearOfDiskUsageHighThreshold(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	tickEvery(g, time.Unix(1_000_000, 0), time.Minute, 60) // an hour simulated
+
+	for _, d := range disks {
+		if !d.hasFS {
+			continue
+		}
+		pcts := sink.recs[store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.used_pct"}]
+		used := sink.recs[store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.used_bytes"}]
+		free := sink.recs[store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.free_bytes"}]
+		require.NotEmpty(t, pcts, "%s must report fs.used_pct", d.name)
+		require.Len(t, pcts, len(used))
+		for i, s := range pcts {
+			require.Less(t, s.Val, 90.0, "%s fs.used_pct must stay clear of disk-usage-high's 90%% threshold", d.name)
+			want := used[i].Val / (used[i].Val + free[i].Val) * 100
+			require.InDelta(t, want, s.Val, 1e-9, "%s fs.used_pct must equal used/(used+free)*100", d.name)
 		}
 	}
 }
@@ -369,6 +413,17 @@ func TestMoverTogglesRoughlyEverySevenMinutes(t *testing.T) {
 // contract: a restart every ~3min and an OOM every ~10min, on two
 // distinct containers, edge-triggered (once per boundary crossed, not
 // once per tick).
+// TestPeriodicRestartAndOOMEvents pins the pre-existing periodic
+// restart/OOM schedule. Two container.oom sources now land inside an
+// 11-minute window: the Task 9 alert-demo one-shot on
+// alertDemoOOMContainer at alertDemoOOMAt (~3min), fired first, and the
+// separate periodic oomContainer/oomEvery schedule (~10min) -- two
+// independently-scheduled sources, not one schedule producing two
+// events. The demo OOM deliberately lands on the SAME container the
+// restart schedule already cycles (the plan's own explicit choice, see
+// alertDemoOOMContainer's doc): they're different event kinds, so
+// "restart and the PERIODIC OOM land on distinct containers" is still a
+// meaningful, checked invariant, it's just no longer true of ALL OOMs.
 func TestPeriodicRestartAndOOMEvents(t *testing.T) {
 	events := &eventCapture{}
 	g := New(&capture{}, events, 1)
@@ -379,14 +434,96 @@ func TestPeriodicRestartAndOOMEvents(t *testing.T) {
 	ooms := events.kinds("container.oom")
 
 	require.GreaterOrEqual(t, len(restarts), 3, "want restarts at ~3/6/9 minutes")
-	require.Len(t, ooms, 1, "want exactly one OOM by 11 minutes (next at ~20min)")
+	require.Len(t, ooms, 2, "want the alert-demo OOM at ~3min plus the periodic OOM at ~10min")
+	require.Equal(t, alertDemoOOMContainer, ooms[0].Entity, "the alert-demo OOM (fires first) lands on sonarr")
+	require.Equal(t, oomContainer, ooms[1].Entity, "the periodic OOM (fires second) still lands on minecraft")
 
 	restartEntity := restarts[0].Entity
-	oomEntity := ooms[0].Entity
-	require.NotEqual(t, restartEntity, oomEntity, "restart and OOM must land on distinct containers")
+	require.Equal(t, restartContainer, restartEntity)
+	require.NotEqual(t, restartEntity, oomContainer, "restart and the PERIODIC oom must land on distinct containers")
 	for _, e := range restarts {
 		require.Equal(t, restartEntity, e.Entity, "every restart must land on the same container")
 	}
+}
+
+// TestAlertDemoOOMFiresOnceOnSonarrAtThreeMinutes pins Task 9's own
+// timing contract in isolation: exactly one container.oom on
+// alertDemoOOMContainer, landing on the exact elapsed-time boundary
+// crossing (the same edge-triggered convention diskErrorsFired/
+// unhealthyEventFired use), well inside the "~3 minutes of boot"
+// fake-mode requirement. container-oom's own 3600s clear_seconds
+// timeout (store.DefaultAlertRules) is what resolves the resulting
+// alert instance ~63 simulated minutes later -- nothing here needs to
+// simulate that half; it's the engine's job, driven by this one event.
+func TestAlertDemoOOMFiresOnceOnSonarrAtThreeMinutes(t *testing.T) {
+	events := &eventCapture{}
+	g := New(&capture{}, events, 1)
+	boot := time.Unix(1_000_000, 0)
+	tickEvery(g, boot, 2*time.Second, 200) // 400 simulated seconds
+
+	var sonarrOOMs []store.Event
+	for _, e := range events.kinds("container.oom") {
+		if e.Entity == alertDemoOOMContainer {
+			sonarrOOMs = append(sonarrOOMs, e)
+		}
+	}
+	require.Len(t, sonarrOOMs, 1, "the alert-demo OOM must fire exactly once")
+	require.Equal(t, boot.Add(alertDemoOOMAt).Unix(), sonarrOOMs[0].TS, "must land on the exact elapsed-time boundary crossing")
+	require.Equal(t, "alert", sonarrOOMs[0].Severity, "must meet container-oom's own min_severity floor")
+}
+
+// TestAlertDemoDiskTempCRampsCrossesFireThenCoolsCrossesClear pins the
+// correctness property the whole demo depends on: once the ramp crosses
+// disk-temp-high's 55°C fire threshold it must never dip back to or
+// below it before cool-down deliberately begins, and once the cool-down
+// ramp crosses the 50°C clear threshold it must never rise back to or
+// above it -- a single spurious flicker either direction would reset
+// the sustained-for window and could make the demo flaky.
+func TestAlertDemoDiskTempCRampsCrossesFireThenCoolsCrossesClear(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+
+	require.InDelta(t, alertDemoTempStart, alertDemoDiskTempC(0, rng), 0.01, "t=0 must be the ramp's own starting temp")
+
+	crossedFire := false
+	for s := int64(0); s < int64(alertDemoCoolStart.Seconds()); s += 2 {
+		v := alertDemoDiskTempC(time.Duration(s)*time.Second, rng)
+		if v > 55 {
+			crossedFire = true
+		}
+		if crossedFire {
+			require.Greater(t, v, 55.0, "once above the fire threshold, must never dip back at/below it before cool-down (t=%ds)", s)
+		}
+	}
+	require.True(t, crossedFire, "the ramp must cross the 55°C fire threshold before cool-down begins")
+
+	crossedClear := false
+	coolWindowEnd := int64(alertDemoCoolStart.Seconds()) + int64(alertDemoCoolDuration.Seconds()) + 120
+	for s := int64(alertDemoCoolStart.Seconds()); s < coolWindowEnd; s += 2 {
+		v := alertDemoDiskTempC(time.Duration(s)*time.Second, rng)
+		if v < 50 {
+			crossedClear = true
+		}
+		if crossedClear {
+			require.Less(t, v, 50.0, "once below the clear threshold, must never rise back to/above it (t=%ds)", s)
+		}
+	}
+	require.True(t, crossedClear, "the cool-down ramp must cross the 50°C clear threshold")
+}
+
+// TestDisk4TempFollowsAlertDemoRampNotGenericFormula proves the emitDisks
+// wiring actually reaches alertDemoDiskTempC for disk4 (rather than the
+// generic tempBase-anchored sin+noise formula, which is clamped to
+// [32,45] and would never come near 48°C): the very first sample must
+// be the ramp's own starting value.
+func TestDisk4TempFollowsAlertDemoRampNotGenericFormula(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	temps := sink.recs[store.SeriesKey{Kind: "disk", Entity: "disk4", Metric: "temp.c"}]
+	require.NotEmpty(t, temps)
+	require.InDelta(t, alertDemoTempStart, temps[0].Val, 0.01,
+		"disk4's first sample must be the alert-demo ramp's own starting temp, not the generic formula")
 }
 
 // TestRareDiskErrorsEventFiresOnce pins the "one disk with a rare
@@ -425,22 +562,41 @@ func TestRareDiskErrorsEventFiresOnce(t *testing.T) {
 // TestMetasReturnsRunningHealthyDemoImagePerFleetMember pins Metas'
 // exact shape (Task 11's ledger-carried fake-mode DTO-v2 filter fix):
 // main wires this straight into buildSnapshot/buildContainersList as if
-// it were dc.Running()'s real output.
+// it were a real registry's own output. Every member gets Image; State/
+// Health follow its own archetype.stopped/archetype.created flag (the
+// stopped/created-containers demo coverage) rather than a blanket
+// "running"/"healthy".
 func TestMetasReturnsRunningHealthyDemoImagePerFleetMember(t *testing.T) {
 	g := New(&capture{}, nil, 1)
 	metas := g.Metas()
 
 	require.Len(t, metas, len(fleet))
-	seen := map[string]bool{}
-	for _, m := range metas {
-		require.Equal(t, "running", m.State)
-		require.Equal(t, "healthy", m.Health)
-		require.Equal(t, "demo/"+m.Name+":latest", m.Image)
-		seen[m.Name] = true
+	byName := map[string]int{}
+	for i, m := range metas {
+		byName[m.Name] = i
 	}
-	require.True(t, seen["jellyfin"])
-	require.True(t, seen["frigate"])
-	require.Len(t, seen, len(fleet), "every fleet member must have a distinct name")
+	require.Len(t, byName, len(fleet), "every fleet member must have a distinct name")
+
+	for _, a := range fleet {
+		m := metas[byName[a.name]]
+		require.Equal(t, "demo/"+a.name+":latest", m.Image)
+		switch {
+		case a.stopped:
+			require.Equal(t, "exited", m.State, "%s is modeled stopped", a.name)
+			require.Equal(t, "", m.Health, "%s: a stopped container has no health status", a.name)
+		case a.created:
+			require.Equal(t, "created", m.State, "%s is modeled created (never started)", a.name)
+			require.Equal(t, "", m.Health, "%s: a created container has no health status", a.name)
+		case a.unhealthy:
+			require.Equal(t, "running", m.State, "%s is modeled running", a.name)
+			require.Equal(t, "unhealthy", m.Health, "%s is modeled running but failing its healthcheck", a.name)
+		default:
+			require.Equal(t, "running", m.State, "%s is modeled running", a.name)
+			require.Equal(t, "healthy", m.Health, "%s is modeled running", a.name)
+		}
+	}
+	require.Equal(t, "running", metas[byName["jellyfin"]].State)
+	require.Equal(t, "running", metas[byName["frigate"]].State)
 }
 
 // TestMetasGivesAFewContainersUpdateStatusVarietyWithChangelogURL pins
@@ -568,6 +724,31 @@ func TestMetasIncludesPlausibleMounts(t *testing.T) {
 			require.True(t, isUnraidPath, "%s mount source %q must look like a real Unraid path", m.Name, mount.Source)
 		}
 	}
+}
+
+// TestMetasGridmindFamilySharesComposeProject pins the compare view's own
+// fake-mode fixture: the four gridmind-* archetypes must all report the
+// SAME ComposeProject ("gridmind-cloud"), and an unrelated standalone
+// archetype must report none at all -- the Containers view's Groups chip
+// row (>=2 containers sharing a project) needs a real multi-member group
+// to render against in fake mode, and must not see one where there isn't.
+func TestMetasGridmindFamilySharesComposeProject(t *testing.T) {
+	g := New(&capture{}, nil, 1)
+	metas := g.Metas()
+
+	byName := map[string]docker.Meta{}
+	for _, m := range metas {
+		byName[m.Name] = m
+	}
+
+	gridmindNames := []string{"gridmind-api", "gridmind-worker", "gridmind-scheduler", "gridmind-db"}
+	for _, name := range gridmindNames {
+		m, ok := byName[name]
+		require.True(t, ok, "%s must be part of the fake fleet", name)
+		require.Equal(t, "gridmind-cloud", m.ComposeProject, "%s must share the gridmind-cloud compose project", name)
+	}
+
+	require.Equal(t, "", byName["jellyfin"].ComposeProject, "a standalone archetype must report no compose project")
 }
 
 // TestTickEmitsContainerDeviceIOSeries pins that fake containers also emit live:io.<dev>.* samples per tick.
@@ -724,7 +905,7 @@ func TestFakePidsLimitOnEveryContainerWithLowUsage(t *testing.T) {
 	g := New(sink, nil, 3)
 	g.Tick(time.Unix(1_000_000, 0))
 
-	for _, name := range []string{"jellyfin", "postgres", "minecraft", "vaultwarden"} {
+	for _, name := range []string{"jellyfin", "postgres", "minecraft", "redis"} {
 		pids := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids"}]
 		limit := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids.limit"}]
 		pct := sink.recs[store.SeriesKey{Kind: "container", Entity: name, Metric: "pids.pct"}]

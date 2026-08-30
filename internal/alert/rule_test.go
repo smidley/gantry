@@ -197,8 +197,19 @@ func TestValidateRuleRejectsUnknownBandFamily(t *testing.T) {
 // always-empty Op or Threshold/ClearThreshold both sitting at their zero
 // value.
 func TestValidateRuleAcceptsEveryDefaultRule(t *testing.T) {
-	for _, r := range store.DefaultAlertRules() {
+	for _, r := range store.DefaultAlertRules(false) {
 		require.NoError(t, ValidateRule(r), "default rule %q", r.ID)
+	}
+}
+
+// TestValidateRuleAcceptsEveryDefaultRuleFast pins the same contract for
+// fake mode's compressed schedule (Task 9): a 60s for_seconds/
+// clear_seconds pair must still validate for every threshold rule -- the
+// smallest kind-specific maxProvableWindowSeconds bound (host/container/
+// gpu at their real 2s collector cadence) is still comfortably above 60s.
+func TestValidateRuleAcceptsEveryDefaultRuleFast(t *testing.T) {
+	for _, r := range store.DefaultAlertRules(true) {
+		require.NoError(t, ValidateRule(r), "fast default rule %q", r.ID)
 	}
 }
 

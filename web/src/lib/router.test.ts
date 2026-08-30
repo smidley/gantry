@@ -12,8 +12,10 @@ describe('parseHash', () => {
     expect(parseHash('#/containers')).toEqual({ name: 'containers', params: {} });
     expect(parseHash('#/top')).toEqual({ name: 'top', params: {} });
     expect(parseHash('#/storage')).toEqual({ name: 'storage', params: {} });
+    expect(parseHash('#/maintenance')).toEqual({ name: 'maintenance', params: {} });
     expect(parseHash('#/gpu')).toEqual({ name: 'gpu', params: {} });
     expect(parseHash('#/events')).toEqual({ name: 'events', params: {} });
+    expect(parseHash('#/alerts')).toEqual({ name: 'alerts', params: {} });
     expect(parseHash('#/settings')).toEqual({ name: 'settings', params: {} });
   });
 
@@ -26,6 +28,22 @@ describe('parseHash', () => {
 
   it('parses a top route with a resource param, for the Overview switcher deep link', () => {
     expect(parseHash('#/top/mem')).toEqual({ name: 'top', params: { resource: 'mem' } });
+  });
+
+  it('parses a compare route, capturing the raw comma-joined names segment', () => {
+    expect(parseHash('#/compare/jellyfin,plex')).toEqual({
+      name: 'compare',
+      params: { names: 'jellyfin,plex' },
+    });
+  });
+
+  it('parses a compare route with a single name', () => {
+    expect(parseHash('#/compare/jellyfin')).toEqual({ name: 'compare', params: { names: 'jellyfin' } });
+  });
+
+  it('parses a bare compare route (no names at all) rather than falling through to not-found', () => {
+    expect(parseHash('#/compare')).toEqual({ name: 'compare', params: {} });
+    expect(parseHash('#/compare/')).toEqual({ name: 'compare', params: {} });
   });
 
   it('URL-decodes a name param', () => {

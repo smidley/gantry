@@ -26,6 +26,10 @@
   let sources = $derived(live.frame?.sources ?? {});
   let gpuEntities = $derived(Object.entries(live.frame?.gpu ?? {}));
   let gpuEntityNames = $derived(gpuEntities.map(([entity]) => entity).sort());
+  // gpuMeta: each entity's own vendor+driver (GPU card title fix) --
+  // passed straight through to GPUEntityCard, keyed by entity, same
+  // convention as GPUStrip's own gpuMeta prop.
+  let gpuMeta = $derived(live.frame?.gpu_meta ?? {});
 
   // hasAnyEngineData gates the chart section: a gpu entity that exists
   // in the frame but carries none of the fixed engine keys (shouldn't
@@ -113,7 +117,7 @@
     </div>
     <div class="gpu-view__entities">
       {#each gpuEntityNames as entity (entity)}
-        <GPUEntityCard {entity} {activeRange} syncKey={SYNC_KEY} />
+        <GPUEntityCard {entity} meta={gpuMeta[entity]} {activeRange} syncKey={SYNC_KEY} />
       {/each}
     </div>
   {/if}

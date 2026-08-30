@@ -7,27 +7,51 @@
   404/unavailable (unknown container, or fake-data mode's no-docker-
   collector case -- see api_logs.go's own doc) renders a friendly empty
   state instead of a broken pane.
+
+  Severity filter (additive -- Scott's own ask: "make logs filterable by
+  type - Info, error, warning, etc."): each line's severity is classified
+  ONCE, when it's first appended (classifyLogLine, lib/logSeverity.ts),
+  not re-derived on every render -- lines is append-only up to MAX_LINES
+  and a line's own text never changes after the fact, so there's nothing
+  to re-classify later. severityFilter and the free-text filterText
+  compose (AND): a severity tab narrows which lines are eligible, the
+  text box further narrows those. The live per-severity counts
+  (severityCounts) are deliberately over ALL buffered lines regardless of
+  the text filter, so switching severity tabs while mid-search doesn't
+  show counts that jump around from what's currently typed.
 -->
 <script>
   import { onMount } from 'svelte';
   import { streamLogs } from '../lib/api';
   import { stripAnsi } from '../lib/ansi';
+  import { classifyLogLine, SEVERITY_ORDER } from '../lib/logSeverity';
 
   const MAX_LINES = 2000;
+  const SEVERITY_LABEL = { error: 'Error', warn: 'Warn', info: 'Info', debug: 'Debug', other: 'Other' };
 
   let { name } = $props();
 
+  // lines: {text, severity}[] -- see the module doc above for why
+  // severity rides alongside text instead of being recomputed later.
   let lines = $state([]);
   let follow = $state(true);
   let paused = $state(false);
   let filterText = $state('');
+  let severityFilter = $state('all'); // 'all' | LogSeverity
   let error = $state(null);
   let connecting = $state(true);
 
+  let severityCounts = $derived.by(() => {
+    const counts = { all: lines.length, error: 0, warn: 0, info: 0, debug: 0, other: 0 };
+    for (const line of lines) counts[line.severity]++;
+    return counts;
+  });
+
   let filteredLines = $derived.by(() => {
+    let base = severityFilter === 'all' ? lines : lines.filter((line) => line.severity === severityFilter);
     const needle = filterText.trim().toLowerCase();
-    if (!needle) return lines;
-    return lines.filter((line) => line.toLowerCase().includes(needle));
+    if (needle) base = base.filter((line) => line.text.toLowerCase().includes(needle));
+    return base;
   });
 
   let scrollEl = $state();
@@ -74,11 +98,11 @@
           const parts = withPending.split('\n');
           pendingPartial = parts.pop() ?? '';
           if (parts.length > 0) {
-            lines = [...lines, ...parts].slice(-MAX_LINES);
+            lines = [...lines, ...parts.map((text) => ({ text, severity: classifyLogLine(text) }))].slice(-MAX_LINES);
           }
         }
         if (pendingPartial) {
-          lines = [...lines, pendingPartial].slice(-MAX_LINES);
+          lines = [...lines, { text: pendingPartial, severity: classifyLogLine(pendingPartial) }].slice(-MAX_LINES);
         }
       } catch (err) {
         if (err?.name === 'AbortError') return; // unmounted, or the container name changed
@@ -121,6 +145,27 @@
     <span class="microlabel log-viewer__count">{filteredLines.length} / {lines.length} lines</span>
   </div>
 
+  <div class="segmented" role="group" aria-label="Log severity">
+    <button
+      type="button"
+      class="segmented__btn"
+      class:segmented__btn--active={severityFilter === 'all'}
+      onclick={() => (severityFilter = 'all')}
+    >
+      All ({severityCounts.all})
+    </button>
+    {#each SEVERITY_ORDER as sev (sev)}
+      <button
+        type="button"
+        class="segmented__btn"
+        class:segmented__btn--active={severityFilter === sev}
+        onclick={() => (severityFilter = sev)}
+      >
+        {SEVERITY_LABEL[sev]} ({severityCounts[sev]})
+      </button>
+    {/each}
+  </div>
+
   {#if error}
     <div class="log-viewer__empty">
       <p>Logs aren't available for "{name}".</p>
@@ -137,7 +182,7 @@
   {:else}
     <div class="log-viewer__pane" bind:this={scrollEl}>
       {#each filteredLines as line, i (i)}
-        <div class="log-viewer__line">{line}</div>
+        <div class="log-viewer__line log-viewer__line--{line.severity}">{line.text}</div>
       {/each}
     </div>
   {/if}
@@ -199,6 +244,21 @@
   .log-viewer__line {
     white-space: pre;
     color: var(--ink);
+  }
+  /* Severity tint (Scott: "make logs filterable by type"): text color
+     only, reusing the same status tokens HealthDot/status text already
+     use elsewhere -- info/other stay plain ink (the common case, no
+     tint at all so the pane doesn't turn into a rainbow), debug is
+     merely de-emphasized via --ink-2, matching every other muted-text
+     convention in this app. */
+  .log-viewer__line--error {
+    color: var(--status-critical);
+  }
+  .log-viewer__line--warn {
+    color: var(--status-warning);
+  }
+  .log-viewer__line--debug {
+    color: var(--ink-2);
   }
   .log-viewer__empty {
     padding: 2rem 1rem;

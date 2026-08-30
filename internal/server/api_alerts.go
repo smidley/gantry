@@ -371,7 +371,14 @@ func (s *Server) handleAlertsGet(w http.ResponseWriter, r *http.Request) {
 // answers even when Options.Alerts is nil.
 func (s *Server) handleAlertsRulesGet(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("defaults") == "1" {
-		writeJSON(w, alertRulesResponse{Rules: toAlertRuleDTOs(store.DefaultAlertRules())})
+		// Always the real (non-fast) numbers, even when this process is
+		// running under GANTRY_FAKE_DATA=1: "reset to default" restores a
+		// rule to what actually ships, not fake mode's own demo-only
+		// compressed for_seconds/clear_seconds (store.DefaultAlertRules'
+		// own fast-parameter doc) -- this handler has no notion of fake
+		// mode at all (server stays store/mode-agnostic, same as every
+		// other Options-backed route), which is exactly right here.
+		writeJSON(w, alertRulesResponse{Rules: toAlertRuleDTOs(store.DefaultAlertRules(false))})
 		return
 	}
 	if s.opts.Alerts == nil {

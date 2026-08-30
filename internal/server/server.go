@@ -157,6 +157,23 @@ type Options struct {
 	// don't wire one — a successful mutation then simply skips event
 	// logging rather than panicking.
 	AppendEvent func(e store.Event) (int64, error)
+
+	// Alerts backs GET/PUT /api/alerts/rules, GET /api/alerts,
+	// GET /api/alerts/history, and POST/DELETE /api/alerts/silences
+	// (main wiring: a small adapter over *store.Store plus the running
+	// *alert.Dispatcher's Channels — see api_alerts.go's AlertsIface for
+	// why the interface stays this minimal). Nil in tests that don't
+	// wire one: every GET route reports its own meaningful empty; every
+	// write route 404s, matching Settings' PUT.
+	Alerts AlertsIface
+	// Webhooks backs GET/PUT /api/alerts/webhooks (main wiring: a small
+	// adapter over the settings-blob-backed target list plus whether
+	// GANTRY_WEBHOOK_URL is set — see api_alerts.go's WebhooksIface).
+	// Nil in tests that don't wire one: GET reports an empty target
+	// list, PUT 404s. PUT is also gated by ReadOnly above — the one
+	// alerts write path READ_ONLY covers (see handleAlertsWebhooksPut's
+	// own doc for the asymmetry with Alerts' own writes).
+	Webhooks WebhooksIface
 }
 
 type Server struct {
@@ -208,6 +225,15 @@ func New(o Options) *Server {
 	s.mux.Handle("GET /api/containers/maintenance", withGzip(http.HandlerFunc(s.handleContainersMaintenanceList)))
 	s.mux.Handle("POST /api/containers/maintenance/remove", withGzip(http.HandlerFunc(s.handleContainersMaintenanceRemove)))
 	s.mux.Handle("POST /api/containers/maintenance/prune", withGzip(http.HandlerFunc(s.handleContainersMaintenancePrune)))
+
+	s.mux.Handle("GET /api/alerts", withGzip(http.HandlerFunc(s.handleAlertsGet)))
+	s.mux.Handle("GET /api/alerts/rules", withGzip(http.HandlerFunc(s.handleAlertsRulesGet)))
+	s.mux.Handle("PUT /api/alerts/rules", withGzip(http.HandlerFunc(s.handleAlertsRulesPut)))
+	s.mux.Handle("GET /api/alerts/history", withGzip(http.HandlerFunc(s.handleAlertsHistory)))
+	s.mux.Handle("POST /api/alerts/silences", withGzip(http.HandlerFunc(s.handleAlertsSilencesPost)))
+	s.mux.Handle("DELETE /api/alerts/silences/{id}", withGzip(http.HandlerFunc(s.handleAlertsSilencesDelete)))
+	s.mux.Handle("GET /api/alerts/webhooks", withGzip(http.HandlerFunc(s.handleAlertsWebhooksGet)))
+	s.mux.Handle("PUT /api/alerts/webhooks", withGzip(http.HandlerFunc(s.handleAlertsWebhooksPut)))
 
 	s.mux.Handle("GET /", withGzip(webHandler()))
 	return s

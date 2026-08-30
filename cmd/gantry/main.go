@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/smidley/gantry/internal/alert"
 	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/collect/gpu"
@@ -72,6 +73,28 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 			log.Println("store close:", cerr)
 		}
 	}()
+
+	// Seeded before anything else touches alert_rules: an id already
+	// present (a prior boot's seed, possibly since edited or disabled)
+	// is left untouched; only an id genuinely absent -- first boot, or a
+	// default introduced by a later upgrade -- gets inserted. There is
+	// no alert engine yet to gate this on (Task 4); "before the engine's
+	// first tick" is trivially satisfied by seeding at boot.
+	if err := st.SeedAlertRules(store.DefaultAlertRules()); err != nil {
+		return fmt.Errorf("seed alert rules: %w", err)
+	}
+	// GANTRY_WEBHOOK_URL (spec Sec5's documented single-webhook path) is
+	// re-synced into the "env" target on every boot, same "before
+	// anything else touches it" posture as the rule seed just above.
+	// webhookURLEnv is captured once here and reused below for
+	// webhooksAdapter's envLocked flag (Task 8): whether the var was set
+	// AT BOOT is what actually governs the "env" target's current
+	// stored values, since seedWebhookTargetFromEnv only resyncs on
+	// boot, not on every request.
+	webhookURLEnv := getenv("GANTRY_WEBHOOK_URL")
+	if err := seedWebhookTargetFromEnv(st, webhookURLEnv); err != nil {
+		return fmt.Errorf("seed webhook target: %w", err)
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -225,11 +248,37 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		}
 	}()
 
+	// dispatcher owns delivery: the notify-spool channel (always present;
+	// its own Health() degrades to the mount hint rather than an error
+	// when /notify isn't there, real mode and fake mode alike -- fake
+	// mode's own temp-dir default for GANTRY_NOTIFY_DIR is a later
+	// phase's job, not this wiring's) plus one webhook channel per
+	// enabled, valid configured target. Its workers start lazily on the
+	// first Dispatch call; Run here only wires their shutdown to runCtx.
+	dispatcher, err := buildDispatcher(st, cfg, getenv, ver)
+	if err != nil {
+		return fmt.Errorf("build alert dispatcher: %w", err)
+	}
+	dispatcher.Run(runCtx, &wg)
+
+	// Alert engine: one 10s ticker beside the collector registry and the
+	// maintenance loop above, reading the live ring through Match/ClassOf/
+	// Fleet exactly the way server.Options already takes Query/Top/Events
+	// -- store/config-shape-agnostic, wired here. Dispatch is now the
+	// real dispatcher above: every fired/resolved/renotify transition
+	// reaches whatever channels are configured.
+	alertEngine := alert.New(st, st.Live().MatchSince, buildClassOf(ur), buildFleet(dc, fakeMetas), dispatcher.Dispatch, time.Now)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		alertEngine.Run(runCtx, 10*time.Second)
+	}()
+
 	// snapshotFn is the one buildSnapshot instance shared by /api/live/
 	// snapshot (Options.Snapshot), /api/live's connect frame (Options.
 	// Current), and the publish loop below -- all three read the exact
 	// same assembly, just on different triggers (poll, connect, tick).
-	snapshotFn := buildSnapshot(st, dc, ur, gp, nv, registry.Sources, fakeMetas, fakeDiskMeta)
+	snapshotFn := buildSnapshot(st, dc, ur, gp, nv, registry.Sources, fakeMetas, fakeDiskMeta, dispatcher)
 	live := server.NewBroadcaster()
 
 	// SSE publish loop: every 2s, marshal the current snapshot and fan it
@@ -282,6 +331,9 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		ContainersMaintenance: buildContainersMaintenance(containersMaintenanceSrc),
 		RemoveContainers:      buildRemoveContainers(removeContainersSrc),
 		PruneContainers:       buildPruneContainers(pruneContainersSrc),
+
+		Alerts:   alertsAdapter{st: st, dispatcher: dispatcher},
+		Webhooks: webhooksAdapter{st: st, envLocked: webhookURLEnv != ""},
 
 		ReadOnly:    readOnly,
 		AppendEvent: st.AppendEvent,
@@ -352,7 +404,12 @@ const containerFrameMaxAge = 60
 // path (gp, pdev-keyed) and the nvidia-smi path (nv, fixed "nvidia0")
 // never share an entity id, so there's no real first/overlay ordering
 // concern the way fakeDiskMeta has, just two independent merges.
-func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, gp *gpu.Collector, nv *gpu.NvidiaCollector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta) func() server.SnapshotDTO {
+//
+// dispatcher feeds dto.Alerts (buildAlertsBlock): the same firing-instance
+// and channel-health data GET /api/alerts serves on demand, assembled
+// fresh every tick so an SSE client sees an alert fire/resolve/channel
+// degrade live rather than on its next poll.
+func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, gp *gpu.Collector, nv *gpu.NvidiaCollector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta, dispatcher *alert.Dispatcher) func() server.SnapshotDTO {
 	return func() server.SnapshotDTO {
 		dto := server.SnapshotDTO{
 			TS:            time.Now().Unix(),
@@ -457,8 +514,88 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 				g[key.Metric] = sample.Val
 			}
 		}
+
+		dto.Alerts = buildAlertsBlock(st, dispatcher)
 		return dto
 	}
+}
+
+// alertsFrameContext is the fixed background context every buildSnapshot
+// tick's alert reads run under: the closure this feeds (server.Options.
+// Snapshot/Current, and the 2s publish loop) has no per-call caller
+// context of its own to thread through, the same reasoning the shutdown
+// flush at the bottom of run() already documents for its own
+// context.Background() use.
+var alertsFrameContext = context.Background()
+
+// buildAlertsBlock assembles SnapshotDTO.Alerts (Task 8): every FIRING
+// instance (pending excluded -- engine bookkeeping, not user-facing, the
+// same rule GET /api/alerts' own handler applies), capped at
+// server.AlertsFrameCap with a truncated count, plus every channel's
+// current health. A read error is logged and treated as empty for this
+// one tick, never fatal to the frame -- the same "degrade, don't error"
+// posture Sources already models, and the next 2s tick tries again.
+func buildAlertsBlock(st *store.Store, dispatcher *alert.Dispatcher) server.AlertsBlockDTO {
+	rules, err := st.AlertRules(alertsFrameContext)
+	if err != nil {
+		log.Println("alerts frame: rules:", err)
+	}
+	ruleByID := make(map[string]store.AlertRule, len(rules))
+	for _, r := range rules {
+		ruleByID[r.ID] = r
+	}
+
+	active, err := st.ActiveAlertInstances(alertsFrameContext)
+	if err != nil {
+		log.Println("alerts frame: active instances:", err)
+	}
+	silences, err := st.Silences(alertsFrameContext, time.Now().Unix())
+	if err != nil {
+		log.Println("alerts frame: silences:", err)
+	}
+
+	var firing []server.FiringAlertDTO
+	for _, inst := range active {
+		if inst.State != "firing" {
+			continue
+		}
+		firing = append(firing, server.FiringAlertDTO{
+			RuleID: inst.RuleID, RuleName: ruleByID[inst.RuleID].Name, Severity: inst.Severity,
+			Kind: inst.Kind, Entity: inst.Entity, Metric: inst.Metric,
+			Value: inst.Value, Threshold: inst.Threshold, FiredAt: inst.FiredAt,
+			Silenced: server.SilenceCovers(silences, inst.RuleID, inst.Entity),
+		})
+	}
+
+	total := len(firing)
+	var truncated int
+	if total > server.AlertsFrameCap {
+		truncated = total - server.AlertsFrameCap
+		firing = firing[:server.AlertsFrameCap]
+	}
+	if firing == nil {
+		firing = []server.FiringAlertDTO{}
+	}
+
+	return server.AlertsBlockDTO{
+		Firing: firing, FiringCount: total, Truncated: truncated,
+		Channels: channelHealthMap(dispatcher),
+	}
+}
+
+// channelHealthMap reports every configured delivery channel's current
+// Health(), keyed by its own ID() -- shared by alertsAdapter.Channels
+// (GET /api/alerts) and buildAlertsBlock just above, the same data both
+// surfaces document (plan Task 8).
+func channelHealthMap(d *alert.Dispatcher) map[string]string {
+	out := map[string]string{}
+	if d == nil {
+		return out
+	}
+	for _, ch := range d.Channels {
+		out[ch.ID()] = ch.Health()
+	}
+	return out
 }
 
 // metaCreatedUnix converts a Meta.Created into ContainerDTO's wire form.
@@ -520,6 +657,169 @@ func buildContainersList(dc *docker.Collector, fakeMetas func() []docker.Meta) f
 		}
 		return out
 	}
+}
+
+// buildFleet returns the closure wired to alert.Engine.Fleet: dc.All()
+// (running or not, unlike buildContainersList's dc.Running()) so boot
+// seeding can see a stopped container's stale Health and correctly
+// decline to seed it, plus fakeMetas' synthetic fleet merged in the same
+// unconditional way every other fake-mode wiring in this file already
+// does (nil outside fake-data mode).
+func buildFleet(dc *docker.Collector, fakeMetas func() []docker.Meta) func() []alert.FleetMember {
+	return func() []alert.FleetMember {
+		metas := dc.All()
+		if fakeMetas != nil {
+			metas = append(metas, fakeMetas()...)
+		}
+		out := make([]alert.FleetMember, len(metas))
+		for i, m := range metas {
+			out[i] = alert.FleetMember{Name: m.Name, State: m.State, Health: m.Health}
+		}
+		return out
+	}
+}
+
+// buildClassOf returns the closure wired to alert.Engine.ClassOf: disk-
+// class scoping (entity_class "nvme"/"!nvme") resolves through the
+// unraid collector's own DiskMeta at evaluation time, so a rule's class
+// filter tracks whatever the box's disks actually are on this tick
+// rather than a value captured once. Every other kind has no notion of
+// class yet, so it reads as an empty string -- MatchClass treats an
+// empty spec or an empty class as a match, so an entity_class-scoped
+// rule simply never excludes a non-disk entity on class grounds, which
+// is exactly right (only disk-temp-high/disk-temp-nvme-high use
+// entity_class at all).
+func buildClassOf(ur *unraid.Collector) func(kind, entity string) string {
+	return func(kind, entity string) string {
+		if kind != "disk" {
+			return ""
+		}
+		return ur.DiskMeta()[entity].Kind
+	}
+}
+
+// webhookTargetsSettingsKey is where the whole []alert.WebhookTarget
+// list lives as one JSON blob in the settings table -- delivery config,
+// not alerting data the engine itself reads, so it rides the same
+// settings-table-as-JSON-blob convention every other domain-specific
+// config shape in this codebase uses rather than getting its own SQL
+// table.
+const webhookTargetsSettingsKey = "alert.webhook_targets"
+
+// loadWebhookTargets returns the configured targets, or nil (not an
+// error) when the setting has never been written -- the same "meaningful
+// empty" convention the rest of this codebase's optional config reads
+// use.
+func loadWebhookTargets(st *store.Store) ([]alert.WebhookTarget, error) {
+	raw, ok, err := st.SettingGet(webhookTargetsSettingsKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || raw == "" {
+		return nil, nil
+	}
+	var targets []alert.WebhookTarget
+	if err := json.Unmarshal([]byte(raw), &targets); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", webhookTargetsSettingsKey, err)
+	}
+	return targets, nil
+}
+
+func saveWebhookTargets(st *store.Store, targets []alert.WebhookTarget) error {
+	b, err := json.Marshal(targets)
+	if err != nil {
+		return err
+	}
+	return st.SettingSet(webhookTargetsSettingsKey, string(b))
+}
+
+// seedWebhookTargetFromEnv keeps a target named "env" in sync with
+// GANTRY_WEBHOOK_URL (spec Sec5's documented single-webhook path) on
+// every boot, in BOTH directions: set, it's added or its URL/Enabled/
+// TimeoutS pinned to whatever the env var currently says; blank, the
+// "env" target a previous boot created is removed -- an operator who
+// clears the variable means "stop delivering there", and a target that
+// quietly outlived its env var would keep posting alerts to a URL the
+// operator believes is gone. Every other target in the list is left
+// untouched either way. The env var is the source of truth for this
+// one target -- Task 8's API will enforce the same rule against a
+// conflicting PUT (409, per the plan), but there is no API on this
+// branch yet, so boot time is the only place that rule is enforced
+// today.
+func seedWebhookTargetFromEnv(st *store.Store, url string) error {
+	targets, err := loadWebhookTargets(st)
+	if err != nil {
+		return err
+	}
+	if url == "" {
+		for i, t := range targets {
+			if t.ID == "env" {
+				return saveWebhookTargets(st, append(targets[:i], targets[i+1:]...))
+			}
+		}
+		return nil // no env target to remove; leave the setting untouched (possibly never written at all)
+	}
+	found := false
+	for i, t := range targets {
+		if t.ID == "env" {
+			targets[i].URL, targets[i].Enabled, targets[i].TimeoutS = url, true, 10
+			found = true
+			break
+		}
+	}
+	if !found {
+		targets = append(targets, alert.WebhookTarget{ID: "env", Name: "Environment", URL: url, Enabled: true, TimeoutS: 10})
+	}
+	return saveWebhookTargets(st, targets)
+}
+
+// buildWebhookChannels turns every enabled, valid target into a Channel.
+// A target that fails validation is skipped with a log line rather than
+// aborting boot -- the same "one bad rule can't take the rest down"
+// posture engine.go's own per-rule recover already applies, here guarding
+// against a hand-edited settings blob (Task 8's API will run this same
+// validation at the door once it exists; nothing does yet).
+func buildWebhookChannels(targets []alert.WebhookTarget, version string, clock func() time.Time) []alert.Channel {
+	var out []alert.Channel
+	for _, t := range targets {
+		if !t.Enabled {
+			continue
+		}
+		if err := alert.ValidateWebhookTarget(t); err != nil {
+			log.Printf("alert: webhook target %q: %v", t.ID, err)
+			continue
+		}
+		out = append(out, alert.NewWebhookChannel(t, version, clock))
+	}
+	return out
+}
+
+// buildDispatcher assembles the alert.Dispatcher wired to
+// alert.Engine.Dispatch: the notify-spool channel is always present
+// (GANTRY_NOTIFY_DIR, default /notify -- the CA template's own mount
+// point, real mode and fake mode alike; fake mode defaulting it to a
+// temp dir so the demo has somewhere to write is a later phase's job,
+// not this wiring's), plus one Channel per enabled, valid configured
+// webhook target. alert.link_base and alert.notify_resolved are read
+// fresh on every call through their own closures -- a settings change
+// takes effect on the very next dispatch, no restart, the same
+// resolved-fresh-every-tick posture the retention settings above use.
+func buildDispatcher(st *store.Store, cfg *config.Config, getenv func(string) string, version string) (*alert.Dispatcher, error) {
+	notifyDir := envOnly(getenv, "GANTRY_NOTIFY_DIR", "/notify")
+	linkBase := func() string {
+		v, _, _ := st.SettingGet("alert.link_base")
+		return v
+	}
+	channels := []alert.Channel{alert.NewNotifyChannel(notifyDir, linkBase, time.Now)}
+
+	targets, err := loadWebhookTargets(st)
+	if err != nil {
+		return nil, fmt.Errorf("load webhook targets: %w", err)
+	}
+	channels = append(channels, buildWebhookChannels(targets, version, time.Now)...)
+
+	resolvedNotices := func() bool { return cfg.Bool("alert.notify_resolved", true) }
+	return alert.NewDispatcher(st, channels, time.Now, resolvedNotices), nil
 }
 
 // buildContainerStorage returns the closure wired to server.Options.
@@ -924,6 +1224,64 @@ func (a groupsAdapter) Set(groups []server.Group) error {
 		return err
 	}
 	return a.st.SettingSet(groupsSettingsKey, string(raw))
+}
+
+// alertsAdapter implements server.AlertsIface (Task 8) over *store.Store
+// plus the running *alert.Dispatcher's own Channels field for health --
+// kept in main, not the server package, the same reason settingsAdapter
+// is: server stays store/alert-shape-agnostic.
+type alertsAdapter struct {
+	st         *store.Store
+	dispatcher *alert.Dispatcher
+}
+
+func (a alertsAdapter) Active(ctx context.Context) ([]store.AlertInstance, error) {
+	return a.st.ActiveAlertInstances(ctx)
+}
+
+func (a alertsAdapter) History(ctx context.Context, from, to int64, limit int) ([]store.AlertInstance, error) {
+	return a.st.AlertHistory(ctx, from, to, limit)
+}
+
+func (a alertsAdapter) Rules(ctx context.Context) ([]store.AlertRule, error) {
+	return a.st.AlertRules(ctx)
+}
+
+func (a alertsAdapter) SaveRules(rules []store.AlertRule) error { return a.st.SaveAlertRules(rules) }
+
+func (a alertsAdapter) Silences(ctx context.Context) ([]store.Silence, error) {
+	return a.st.Silences(ctx, time.Now().Unix())
+}
+
+func (a alertsAdapter) AddSilence(sil store.Silence) (store.Silence, error) {
+	id, err := a.st.AddSilence(sil)
+	if err != nil {
+		return store.Silence{}, err
+	}
+	sil.ID = id
+	return sil, nil
+}
+
+func (a alertsAdapter) DeleteSilence(id int64) error { return a.st.DeleteSilence(id) }
+
+func (a alertsAdapter) Channels() map[string]string { return channelHealthMap(a.dispatcher) }
+
+// webhooksAdapter implements server.WebhooksIface (Task 8) over the same
+// settings-blob-backed target list Task 7 built (loadWebhookTargets/
+// saveWebhookTargets), plus whether GANTRY_WEBHOOK_URL was set at boot
+// (envLocked, resolved once in run() alongside readOnly).
+type webhooksAdapter struct {
+	st        *store.Store
+	envLocked bool
+}
+
+func (a webhooksAdapter) Targets() ([]alert.WebhookTarget, bool, error) {
+	targets, err := loadWebhookTargets(a.st)
+	return targets, a.envLocked, err
+}
+
+func (a webhooksAdapter) Replace(targets []alert.WebhookTarget) error {
+	return saveWebhookTargets(a.st, targets)
 }
 
 func healthcheck(getenv func(string) string) error {

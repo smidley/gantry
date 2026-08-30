@@ -36,6 +36,37 @@ func TestRingEmpty(t *testing.T) {
 	require.Empty(t, r.Since(0))
 }
 
+// TestRingOldestReportsTrueRetentionFloor pins Oldest as the ring's own
+// floor, independent of anything a caller later filters with Since --
+// this is the piece Live.MatchSince's oldestTS return needs (see F1):
+// samples filtered to a since window can't answer "how far back does the
+// ring actually go", only Oldest can.
+func TestRingOldestReportsTrueRetentionFloor(t *testing.T) {
+	r := NewRing(4)
+	for i := int64(1); i <= 3; i++ {
+		r.Append(Sample{TS: i * 10, Val: float64(i)})
+	}
+	oldest, ok := r.Oldest()
+	require.True(t, ok)
+	require.Equal(t, Sample{TS: 10, Val: 1}, oldest)
+}
+
+func TestRingOldestAfterWraparound(t *testing.T) {
+	r := NewRing(3)
+	for i := int64(1); i <= 5; i++ { // capacity 3: ts 10,20 evicted, 30/40/50 remain
+		r.Append(Sample{TS: i * 10, Val: float64(i)})
+	}
+	oldest, ok := r.Oldest()
+	require.True(t, ok)
+	require.Equal(t, Sample{TS: 30, Val: 3}, oldest)
+}
+
+func TestRingOldestEmpty(t *testing.T) {
+	r := NewRing(3)
+	_, ok := r.Oldest()
+	require.False(t, ok)
+}
+
 func TestNewRingClampsNonPositiveCapacity(t *testing.T) {
 	r := NewRing(0)
 	r.Append(Sample{TS: 1, Val: 1}) // must not panic

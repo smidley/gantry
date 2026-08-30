@@ -93,7 +93,9 @@ func TestRegistryLookupAndRunningAfterInventory(t *testing.T) {
 
 	all := r.all()
 	require.Len(t, all, 3, "exited container MUST appear in All()")
-	require.Equal(t, []string{"aaa", "bbb", "ccc"}, []string{all[0].Name, all[1].Name, all[2].Name}, "All() is name-sorted too")
+	require.Equal(t, "aaa", all[0].Name, "All() must be name-sorted")
+	require.Equal(t, "bbb", all[1].Name)
+	require.Equal(t, "ccc", all[2].Name)
 
 	require.Empty(t, sink.snapshot(), "first-ever inventory snapshot is a baseline, not a diff")
 	require.Empty(t, ev.snapshot())

@@ -156,9 +156,13 @@ func (r *registry) running() []Meta {
 // all returns a name-sorted snapshot of every Meta the registry currently
 // knows about, running or not -- a stopped-but-not-yet-removed container
 // stays here (see applyInventory/applyEvent's own removal docs) until it's
-// actually gone. Used by the snapshot frame (Task: stopped containers)
-// so a container the fleet turned off on purpose still shows up with its
-// real state/identity, not just while running.
+// actually gone. Used by the snapshot frame (Task: stopped containers) so
+// a container the fleet turned off on purpose still shows up with its
+// real state/identity, not just while running, and by the alert engine's
+// boot-seeding pass, which applies its own state=="running" gate itself
+// and needs a stopped-but-still-known container (possibly carrying a
+// lingering stale Health string) to run that gate against rather than
+// never seeing it at all.
 func (r *registry) all() []Meta {
 	r.mu.Lock()
 	out := make([]Meta, 0, len(r.byID))

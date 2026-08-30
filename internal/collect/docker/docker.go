@@ -181,7 +181,11 @@ func (c *Collector) Running() []Meta { return c.reg.running() }
 // All returns a name-sorted snapshot of every container the registry
 // currently knows about, running or stopped -- main's snapshot builder
 // seeds the live frame from this instead of Running() so a stopped-but-
-// known container still appears (state/identity/meta, no stale metrics).
+// known container still appears (state/identity/meta, no stale metrics),
+// and the alert engine's Fleet source uses the same method for its boot
+// seeding, which needs to see a stopped container carrying a stale
+// Health rather than just the running set Running() already serves
+// everything else.
 func (c *Collector) All() []Meta { return c.reg.all() }
 
 // Tick refreshes inventory every 10s, then records per-container stats

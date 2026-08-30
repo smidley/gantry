@@ -286,6 +286,24 @@ func TestWebhookChannelSecretNeverInErrorStringOnFailure(t *testing.T) {
 	require.NotContains(t, health, "super-secret-token-xyz")
 }
 
+// TestWebhookChannelTargetURLNeverInErrorOrHealth pins the transport-
+// error boundary: Discord/Slack/ntfy webhook URLs carry the credential
+// in the PATH, and Go's *url.Error stringifies the full URL, so a raw
+// transport error would leak it into every surface that renders the
+// error. The channel must identify itself by target id only.
+func TestWebhookChannelTargetURLNeverInErrorOrHealth(t *testing.T) {
+	target := testTarget("http://127.0.0.1:1/api/webhooks/1234/PATH-SECRET-TOKEN") // nothing listens on port 1
+	c := noJitterChannel(target)
+
+	res := c.Send(context.Background(), testNotification())
+	require.False(t, res.OK)
+	require.Error(t, res.Err)
+	require.NotContains(t, res.Err.Error(), "PATH-SECRET-TOKEN")
+	require.Contains(t, res.Err.Error(), `"home"`, "the target is identified by its id instead")
+	require.Contains(t, res.Err.Error(), "connection refused", "the inner transport error survives the unwrap")
+	require.NotContains(t, c.Health(), "PATH-SECRET-TOKEN")
+}
+
 func TestWebhookChannelSecretNeverInHealthString(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

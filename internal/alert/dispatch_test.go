@@ -430,6 +430,44 @@ func TestDispatcherDeliveryFailedEventRateLimitedPerChannelPerHour(t *testing.T)
 	require.Len(t, st.eventsOfKind("alert.delivery_failed"), 2)
 }
 
+// --- target URL never recorded ----------------------------------------------
+
+// TestDispatcherNeverRecordsWebhookURLAnywhere drives a real
+// WebhookChannel (secret-in-path URL, dead endpoint) through the full
+// Dispatcher and then greps every surface a delivery failure reaches --
+// ledger rows, events, and the channel's own health line. The path
+// secret must appear in none of them: alert_deliveries.error and
+// alert.delivery_failed's Detail are rendered verbatim in the UI, and
+// the health line is the Settings card's own text.
+func TestDispatcherNeverRecordsWebhookURLAnywhere(t *testing.T) {
+	const secret = "PATH-SECRET-TOKEN"
+	hook := NewWebhookChannel(WebhookTarget{
+		ID: "dead", Name: "Dead", URL: "http://127.0.0.1:1/api/webhooks/1234/" + secret,
+		Enabled: true, TimeoutS: 1,
+	}, "v-test", nil)
+	hook.Rand = nil
+	hook.Sleep = func(time.Duration) {}
+
+	st := &fakeDeliveryStore{}
+	d := NewDispatcher(st, []Channel{hook}, nil, nil)
+	t.Cleanup(d.Stop)
+
+	d.Dispatch(fireNotification("r", "e"))
+	require.Eventually(t, func() bool { return len(st.deliveriesSnapshot()) == 1 }, 2*time.Second, 5*time.Millisecond)
+
+	for _, del := range st.deliveriesSnapshot() {
+		require.NotContains(t, del.Error, secret, "ledger row must not carry the target URL")
+		require.NotEmpty(t, del.Error, "the failure reason itself must survive sanitizing")
+	}
+	st.mu.Lock()
+	events := append([]store.Event(nil), st.events...)
+	st.mu.Unlock()
+	for _, ev := range events {
+		require.NotContains(t, ev.Detail, secret, "event detail must not carry the target URL")
+	}
+	require.NotContains(t, hook.Health(), secret, "health line must not carry the target URL")
+}
+
 // --- queue overflow --------------------------------------------------------
 
 func TestDispatcherQueueOverflowDropsOldestAndRecordsIt(t *testing.T) {

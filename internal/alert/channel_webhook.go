@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -294,7 +295,7 @@ func (c *WebhookChannel) attempt(ctx context.Context, body []byte, timeout time.
 
 	req, err := http.NewRequestWithContext(actx, http.MethodPost, c.Target.URL, bytes.NewReader(body))
 	if err != nil {
-		return 0, err
+		return 0, c.sanitizeErr(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "gantry/"+c.Version)
@@ -304,11 +305,26 @@ func (c *WebhookChannel) attempt(ctx context.Context, body []byte, timeout time.
 
 	resp, err := c.client().Do(req)
 	if err != nil {
-		return 0, err
+		return 0, c.sanitizeErr(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection can be reused; the body's content is never needed
 	return resp.StatusCode, nil
+}
+
+// sanitizeErr is the channel's secret boundary for transport errors:
+// *url.Error stringifies the FULL target URL, and Discord/Slack/ntfy
+// URLs carry the credential in the path, so a raw transport error would
+// hand the secret to everything that renders it -- alert_deliveries.
+// error, alert.delivery_failed's Detail, and this channel's own Health
+// line. The rewrap names the target by id only and keeps the inner
+// error (dial/timeout/context), which never contains the path.
+func (c *WebhookChannel) sanitizeErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("webhook target %q: %s: %w", c.Target.ID, ue.Op, ue.Err)
+	}
+	return err
 }
 
 // shouldRetry: 5xx, 408, 429, and any transport error (including a

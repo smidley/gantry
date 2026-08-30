@@ -9,9 +9,12 @@ import { fmtDuration } from './format';
 // --- resolve reasons ---------------------------------------------------
 
 // RESOLVE_REASON_TEXT renders store.AlertInstance.ResolveReason's own
-// five wire values (internal/alert/engine.go's resolve* calls) in plain
+// six wire values (internal/alert/engine.go's resolve* calls) in plain
 // words for the History section -- never the raw machine string.
-const RESOLVE_REASON_TEXT: Record<string, string> = {
+// Exported so alerts.test.ts can check this map's own keys against the
+// engine's emitted set directly, the same cross-file discipline
+// describeRule's own DEFAULT_RULES test fixture already follows.
+export const RESOLVE_REASON_TEXT: Record<string, string> = {
   cleared: 'recovered',
   'no-data': 'stopped reporting',
   timeout: 'auto-closed',
@@ -21,6 +24,11 @@ const RESOLVE_REASON_TEXT: Record<string, string> = {
   // this was a routine stop/restart (Unraid's Appdata Backup/CA
   // auto-update plugins), never a real problem.
   restarted: 'routine restart',
+  // out-of-scope: a rule edit narrowed entity_glob/entity_class out from
+  // under a still-active instance (resolveOutOfScope) -- the rule
+  // itself is still live for everyone else, just not for this entity
+  // anymore.
+  'out-of-scope': 'no longer in scope',
 };
 
 export function describeResolveReason(reason: string): string {

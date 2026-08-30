@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   describeResolveReason,
+  RESOLVE_REASON_TEXT,
   firingDuration,
   silenceLabel,
   sortActiveAlerts,
@@ -32,16 +33,32 @@ describe('alertEntityHref', () => {
 });
 
 describe('describeResolveReason', () => {
-  it('renders the five known machine reasons in plain words', () => {
+  it('renders the six known machine reasons in plain words', () => {
     expect(describeResolveReason('cleared')).toBe('recovered');
     expect(describeResolveReason('no-data')).toBe('stopped reporting');
     expect(describeResolveReason('timeout')).toBe('auto-closed');
     expect(describeResolveReason('rule-disabled')).toBe('rule turned off');
     expect(describeResolveReason('restarted')).toBe('routine restart');
+    expect(describeResolveReason('out-of-scope')).toBe('no longer in scope');
   });
 
   it('passes an unknown reason through verbatim rather than dropping it', () => {
     expect(describeResolveReason('some-future-reason')).toBe('some-future-reason');
+  });
+
+  // ENGINE_RESOLVE_REASONS mirrors the exact set of ResolveReason string
+  // literals internal/alert/engine.go's resolve* calls ever emit --
+  // resolveDisabled ("rule-disabled"), resolveRestarted ("restarted"),
+  // resolveOutOfScope ("out-of-scope"), handleAbsentThreshold/
+  // evalThresholdEntity ("no-data"), evalThresholdEntity/
+  // processEventForRule ("cleared"), and tickEvents' own timeout sweep
+  // ("timeout"). Keep this list and RESOLVE_REASON_TEXT's own keys in
+  // lockstep with that file, the same DEFAULT_RULES-mirrors-Go
+  // discipline describeRule's own tests below already follow.
+  const ENGINE_RESOLVE_REASONS = ['cleared', 'no-data', 'timeout', 'rule-disabled', 'restarted', 'out-of-scope'];
+
+  it('covers exactly the reasons the engine emits -- nothing more, nothing less', () => {
+    expect(Object.keys(RESOLVE_REASON_TEXT).sort()).toEqual([...ENGINE_RESOLVE_REASONS].sort());
   });
 });
 

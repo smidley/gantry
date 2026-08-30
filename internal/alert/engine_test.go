@@ -691,9 +691,9 @@ func TestNoDataTimerResetsWhenSeriesReappears(t *testing.T) {
 
 func TestRuleOverAbsentMetricIsCleanlyInert(t *testing.T) {
 	rule := cpuRule()
-	rule.Metric = "fs.used_pct" // not collected in this branch's scope
+	rule.Metric = "totally.unmonitored.metric" // no collector anywhere emits this
 	st := newFakeStore(rule)
-	mr := newMatchRouter() // never populated for fs.used_pct: Match returns an empty map
+	mr := newMatchRouter() // never populated for this metric: Match returns an empty map
 	eng := newEngine(st, mr.fn, nil, nil, nil, func() time.Time { return time.Unix(2_000_000_000, 0) })
 
 	for i := 0; i < 5; i++ {
@@ -701,6 +701,86 @@ func TestRuleOverAbsentMetricIsCleanlyInert(t *testing.T) {
 	}
 	require.Equal(t, 0, st.activeCount())
 	require.Empty(t, st.events)
+}
+
+// TestDiskUsageHighFiresWithRealFsUsedPctData proves Task 2's own metric
+// addition actually lands: the real seeded disk-usage-high rule (fire
+// >90% for 900s) fires once fs.used_pct is present and sustained, using
+// Scott's own disk6 (95.2% full) as the entity -- this is the rule the
+// plan named as inert until this metric existed.
+func TestDiskUsageHighFiresWithRealFsUsedPctData(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := mustDefaultRule(t, "disk-usage-high") // fire >90 for 900s
+	st := newFakeStore(rule)
+	mr := newMatchRouter()
+	mr.set("disk", "fs.used_pct", "disk6", flat(now, 90, 11, 95.2)) // 90*10=900s window, exactly covered
+	eng := newEngine(st, mr.fn, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background()))
+
+	active := st.soleActive(t)
+	require.Equal(t, "disk-usage-high", active.RuleID)
+	require.Equal(t, "disk6", active.Entity)
+	require.Equal(t, "firing", active.State)
+	require.InDelta(t, 95.2, active.Value, 1e-9)
+}
+
+// TestDiskUsageHighStaysInertWhenFsUsedPctNeverReports covers the
+// companion case: a disk whose slot the collector never reported
+// fs.used_pct for (e.g. DISK_NP, or parity's fsSize==0) must never
+// produce an instance or an error -- the same generic absent-series
+// behavior TestRuleOverAbsentMetricIsCleanlyInert pins, exercised here
+// specifically against the real disk-usage-high rule rather than a
+// synthetic stand-in.
+func TestDiskUsageHighStaysInertWhenFsUsedPctNeverReports(t *testing.T) {
+	rule := mustDefaultRule(t, "disk-usage-high")
+	st := newFakeStore(rule)
+	mr := newMatchRouter() // fs.used_pct never set for any entity
+	eng := newEngine(st, mr.fn, nil, nil, nil, func() time.Time { return time.Unix(2_000_000_000, 0) })
+
+	for i := 0; i < 5; i++ {
+		require.NoError(t, eng.Tick(context.Background()))
+	}
+	require.Equal(t, 0, st.activeCount())
+	require.Empty(t, st.events)
+}
+
+// TestParityErrorsFiresOnEnrichedParityFinishEvent proves the seeded
+// parity-errors rule (EventKinds "parity.finish", MinSeverity "warning")
+// actually matches the enriched event Task 2's var.go now produces on a
+// parity check that found errors (Severity flips info->alert).
+func TestParityErrorsFiresOnEnrichedParityFinishEvent(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := mustDefaultRule(t, "parity-errors")
+	st := newFakeStore(rule)
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+	require.NoError(t, eng.Tick(context.Background())) // boot tick: no events exist yet, cursor clamps to 0
+
+	st.events = []store.Event{{ID: 1, TS: now, Kind: "parity.finish", Entity: "array", Severity: "alert", Detail: "reached 100.0% · 5h02m · 3 errors"}}
+	require.NoError(t, eng.Tick(context.Background()))
+
+	active := st.soleActive(t)
+	require.Equal(t, "parity-errors", active.RuleID)
+	require.Equal(t, "array", active.Entity)
+	require.Equal(t, "firing", active.State)
+}
+
+// TestParityErrorsIgnoresCleanParityFinishEvent is the companion case: a
+// clean run's parity.finish (Severity "info", the format var.go emits
+// when sbSyncErrs is 0) must not clear MinSeverity "warning" and so must
+// never fire this rule -- the seeded rule stays inert on ordinary,
+// error-free parity checks, exactly as intended.
+func TestParityErrorsIgnoresCleanParityFinishEvent(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := mustDefaultRule(t, "parity-errors")
+	st := newFakeStore(rule)
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+	require.NoError(t, eng.Tick(context.Background())) // boot tick
+
+	st.events = []store.Event{{ID: 1, TS: now, Kind: "parity.finish", Entity: "array", Severity: "info", Detail: "reached 100.0% · 0 errors"}}
+	require.NoError(t, eng.Tick(context.Background()))
+
+	require.Equal(t, 0, st.activeCount())
 }
 
 // --- scoping: glob + class negation ----------------------------------------

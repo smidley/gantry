@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/smidley/gantry/internal/alert"
 	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/collect/gpu"
@@ -220,6 +221,20 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 				}
 			}
 		}
+	}()
+
+	// Alert engine: one 10s ticker beside the collector registry and the
+	// maintenance loop above, reading the live ring through Match/ClassOf/
+	// Fleet exactly the way server.Options already takes Query/Top/Events
+	// -- store/config-shape-agnostic, wired here. Dispatch is nil: this
+	// phase evaluates and writes the pending/firing/resolved lifecycle
+	// through Store, it does not deliver anywhere yet (the notify-spool
+	// and webhook channels are a later phase).
+	alertEngine := alert.New(st, st.Live().MatchSince, buildClassOf(ur), buildFleet(dc, fakeMetas), nil, time.Now)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		alertEngine.Run(runCtx, 10*time.Second)
 	}()
 
 	// snapshotFn is the one buildSnapshot instance shared by /api/live/
@@ -550,6 +565,45 @@ func buildContainersList(dc *docker.Collector, fakeMetas func() []docker.Meta) f
 			out = append(out, server.ContainerInfo{Name: m.Name, State: m.State, Health: m.Health, Image: m.Image, Icon: m.Icon})
 		}
 		return out
+	}
+}
+
+// buildFleet returns the closure wired to alert.Engine.Fleet: dc.All()
+// (running or not, unlike buildContainersList's dc.Running()) so boot
+// seeding can see a stopped container's stale Health and correctly
+// decline to seed it, plus fakeMetas' synthetic fleet merged in the same
+// unconditional way every other fake-mode wiring in this file already
+// does (nil outside fake-data mode).
+func buildFleet(dc *docker.Collector, fakeMetas func() []docker.Meta) func() []alert.FleetMember {
+	return func() []alert.FleetMember {
+		metas := dc.All()
+		if fakeMetas != nil {
+			metas = append(metas, fakeMetas()...)
+		}
+		out := make([]alert.FleetMember, len(metas))
+		for i, m := range metas {
+			out[i] = alert.FleetMember{Name: m.Name, State: m.State, Health: m.Health}
+		}
+		return out
+	}
+}
+
+// buildClassOf returns the closure wired to alert.Engine.ClassOf: disk-
+// class scoping (entity_class "nvme"/"!nvme") resolves through the
+// unraid collector's own DiskMeta at evaluation time, so a rule's class
+// filter tracks whatever the box's disks actually are on this tick
+// rather than a value captured once. Every other kind has no notion of
+// class yet, so it reads as an empty string -- MatchClass treats an
+// empty spec or an empty class as a match, so an entity_class-scoped
+// rule simply never excludes a non-disk entity on class grounds, which
+// is exactly right (only disk-temp-high/disk-temp-nvme-high use
+// entity_class at all).
+func buildClassOf(ur *unraid.Collector) func(kind, entity string) string {
+	return func(kind, entity string) string {
+		if kind != "disk" {
+			return ""
+		}
+		return ur.DiskMeta()[entity].Kind
 	}
 }
 

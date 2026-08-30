@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smidley/gantry/internal/alert"
 	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/collect/host"
 	"github.com/smidley/gantry/internal/collect/unraid"
@@ -787,6 +788,55 @@ func TestBuildContainersListNilFakeMetasUnaffected(t *testing.T) {
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 
 	require.Empty(t, buildContainersList(dc, nil)())
+}
+
+// TestBuildFleetMergesFakeMetasAndSeesAllStates pins buildFleet's two
+// departures from buildContainersList: it merges fakeMetas the same
+// unconditional way, but sources from dc.All() rather than dc.Running(),
+// so the alert engine's boot seeding can see a container's real state
+// (not just "must be running, this list said so").
+func TestBuildFleetMergesFakeMetasAndSeesAllStates(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "sonarr", State: "exited", Health: "unhealthy"}}
+	}
+
+	fleet := buildFleet(dc, fakeMetas)()
+
+	require.Equal(t, []alert.FleetMember{{Name: "sonarr", State: "exited", Health: "unhealthy"}}, fleet)
+}
+
+// TestBuildFleetNilFakeMetasUnaffected pins real-mode behavior
+// (GANTRY_FAKE_DATA unset): a nil fakeMetas must not change buildFleet's
+// existing dc.All()-only contract.
+func TestBuildFleetNilFakeMetasUnaffected(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+
+	require.Empty(t, buildFleet(dc, nil)())
+}
+
+// TestBuildClassOfOnlyResolvesDiskKind pins the kind gate itself (every
+// other kind has no notion of class yet, so it must read as "" without
+// even consulting DiskMeta) -- disk1 also comes back "" here because no
+// var.ini/disks.ini exist under this bare temp dir for ur to have ever
+// ticked, which is exactly the "absent classification" MatchClass's own
+// negation semantics are written to tolerate.
+func TestBuildClassOfOnlyResolvesDiskKind(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+
+	classOf := buildClassOf(ur)
+
+	require.Equal(t, "", classOf("host", "disk1"), "non-disk kind never consults DiskMeta")
+	require.Equal(t, "", classOf("disk", "disk1"), "unclassified disk (no ini ticked yet) reads as unknown, not a crash")
 }
 
 // fakeMeta builds a minimal known-container answer for a lookupByName

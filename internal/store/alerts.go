@@ -1,6 +1,9 @@
 package store
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // AlertRule is one row of alert_rules -- one field per column, in schema
 // order. See migrations/003_alerts.sql for what each column means; the
@@ -202,13 +205,28 @@ func (s *Store) UpsertAlertInstance(i AlertInstance) (int64, error) {
 	return res.LastInsertId()
 }
 
-// ResolveAlertInstance closes out an instance: resolved_at and
-// resolve_reason are the only two columns a resolve ever touches (value/
+// ResolveAlertInstance closes out an instance: state, resolved_at, and
+// resolve_reason are the only columns a resolve ever touches (value/
 // severity/etc. keep whatever they last held while firing -- history is
-// a snapshot, not a live view).
+// a snapshot, not a live view). Returns an error if id doesn't match any
+// row -- a plain UPDATE...WHERE matches zero rows without erroring on
+// its own, which would otherwise hide a caller (Task 4's engine, which
+// may hold a cached instance id) racing a row that was already pruned or
+// never existed.
 func (s *Store) ResolveAlertInstance(id int64, at int64, reason string) error {
-	_, err := s.db.Exec(`UPDATE alert_instances SET resolved_at=?, resolve_reason=? WHERE id=?`, at, reason, id)
-	return err
+	res, err := s.db.Exec(`UPDATE alert_instances SET state='resolved', resolved_at=?, resolve_reason=? WHERE id=?`,
+		at, reason, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("alert instance %d: not found", id)
+	}
+	return nil
 }
 
 // AlertHistory returns resolved instances (resolved_at > 0; an active

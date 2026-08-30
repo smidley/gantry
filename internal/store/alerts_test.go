@@ -218,9 +218,12 @@ func TestActiveAlertInstancesExcludesResolved(t *testing.T) {
 	require.Equal(t, activeID, got[0].ID)
 }
 
-// TestResolveAlertInstanceSetsResolvedAtAndReason pins ResolveAlertInstance's
-// own two writes, read back through AlertHistory (the only reader of a
-// resolved row's resolve_reason).
+// TestResolveAlertInstanceSetsResolvedAtAndReason pins
+// ResolveAlertInstance's three writes -- state, resolved_at, and
+// resolve_reason -- read back through AlertHistory (the only reader of a
+// resolved row's resolve_reason). state must actually flip to
+// "resolved": AlertHistory and the frontend alike read state, not just
+// resolved_at's nonzero-ness, to tell an instance's lifecycle stage.
 func TestResolveAlertInstanceSetsResolvedAtAndReason(t *testing.T) {
 	s := newTestStore(t, nil)
 	id, err := s.UpsertAlertInstance(fullInstance("disk-errors", "disk1"))
@@ -230,8 +233,21 @@ func TestResolveAlertInstanceSetsResolvedAtAndReason(t *testing.T) {
 	got, err := s.AlertHistory(context.Background(), 0, 0, 100)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
+	require.Equal(t, "resolved", got[0].State)
 	require.Equal(t, int64(1756402000), got[0].ResolvedAt)
 	require.Equal(t, "timeout", got[0].ResolveReason)
+}
+
+// TestResolveAlertInstanceErrorsWhenIDDoesNotExist pins the RowsAffected
+// guard: resolving an id that isn't in alert_instances must return an
+// error, not silently succeed. SQLite's UPDATE ... WHERE id=? matches
+// zero rows without erroring on its own, which would otherwise hide a
+// caller (Task 4's engine, which may hold a cached instance id) racing a
+// row that was already pruned or never existed.
+func TestResolveAlertInstanceErrorsWhenIDDoesNotExist(t *testing.T) {
+	s := newTestStore(t, nil)
+	err := s.ResolveAlertInstance(999999, 1756402000, "timeout")
+	require.Error(t, err)
 }
 
 // TestAlertHistoryReturnsResolvedNewestFirstAndExcludesActive pins the

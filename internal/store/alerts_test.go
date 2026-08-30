@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -121,4 +122,155 @@ func TestReplaceAlertRulesWholeDocumentReplace(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, "new-rule", got[0].ID)
+}
+
+// fullInstance mirrors fullRule's reasoning: every field gets a distinct
+// non-zero-where-possible value so a round trip catches a transposed
+// column.
+func fullInstance(ruleID, entity string) AlertInstance {
+	return AlertInstance{
+		RuleID: ruleID, Kind: "disk", Entity: entity, Metric: "temp.c",
+		State: "firing", Severity: "warning", Value: 57.5, Threshold: 55,
+		Summary: "disk3 is at 57.5 C", StartedAt: 1756400000, FiredAt: 1756400600,
+		ResolvedAt: 0, ResolveReason: "", LastNotifiedAt: 1756400600, NotifyCount: 1,
+	}
+}
+
+// TestUpsertAlertInstanceInsertsAndRoundTripsEveryField pins the insert
+// half of the CRUD "U": ID==0 always inserts a new row and returns the
+// generated id; every other field survives unchanged.
+func TestUpsertAlertInstanceInsertsAndRoundTripsEveryField(t *testing.T) {
+	s := newTestStore(t, nil)
+	want := fullInstance("disk-temp-high", "disk3")
+	id, err := s.UpsertAlertInstance(want)
+	require.NoError(t, err)
+	require.Greater(t, id, int64(0))
+	want.ID = id
+
+	got, err := s.ActiveAlertInstances(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, want, got[0])
+}
+
+// TestUpsertAlertInstanceRejectsSecondActiveForSameRuleAndEntity is the
+// Task 1 test this schema exists to prove: idx_alert_active (a partial
+// unique index on (rule_id, entity) WHERE resolved_at = 0) rejects a
+// second concurrently-active instance for the same pair -- enforced by
+// the DB itself, not by any Go-side check -- and accepts a new one again
+// once the first resolves.
+func TestUpsertAlertInstanceRejectsSecondActiveForSameRuleAndEntity(t *testing.T) {
+	s := newTestStore(t, nil)
+	first := fullInstance("array-stopped", "array")
+	firstID, err := s.UpsertAlertInstance(first)
+	require.NoError(t, err)
+
+	_, err = s.UpsertAlertInstance(fullInstance("array-stopped", "array"))
+	require.Error(t, err, "a second active instance for the same (rule_id, entity) must be rejected")
+
+	require.NoError(t, s.ResolveAlertInstance(firstID, 1756401000, "cleared"))
+
+	thirdID, err := s.UpsertAlertInstance(fullInstance("array-stopped", "array"))
+	require.NoError(t, err, "a new active instance is accepted once the prior one has resolved")
+	require.NotEqual(t, firstID, thirdID)
+}
+
+// TestUpsertAlertInstanceWithIDUpdatesExistingRowInPlace is the CRUD "U"
+// path the engine (Task 4) uses on every tick a firing instance's value
+// changes: passing a non-zero ID updates that row rather than inserting
+// a new one, and the partial unique index is untouched by it (still just
+// the one active row).
+func TestUpsertAlertInstanceWithIDUpdatesExistingRowInPlace(t *testing.T) {
+	s := newTestStore(t, nil)
+	inst := fullInstance("disk-temp-high", "disk3")
+	id, err := s.UpsertAlertInstance(inst)
+	require.NoError(t, err)
+
+	inst.ID = id
+	inst.Value = 61.2
+	inst.NotifyCount = 2
+	returnedID, err := s.UpsertAlertInstance(inst)
+	require.NoError(t, err)
+	require.Equal(t, id, returnedID)
+
+	got, err := s.ActiveAlertInstances(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1, "must update in place, not insert a second row")
+	require.Equal(t, 61.2, got[0].Value)
+	require.Equal(t, int64(2), got[0].NotifyCount)
+}
+
+// TestActiveAlertInstancesExcludesResolved pins the resolved_at = 0
+// filter: a resolved instance never appears in ActiveAlertInstances,
+// regardless of how many other active ones exist.
+func TestActiveAlertInstancesExcludesResolved(t *testing.T) {
+	s := newTestStore(t, nil)
+	activeID, err := s.UpsertAlertInstance(fullInstance("host-cpu-high", ""))
+	require.NoError(t, err)
+	resolvedID, err := s.UpsertAlertInstance(fullInstance("host-mem-high", ""))
+	require.NoError(t, err)
+	require.NoError(t, s.ResolveAlertInstance(resolvedID, 1756401000, "cleared"))
+
+	got, err := s.ActiveAlertInstances(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, activeID, got[0].ID)
+}
+
+// TestResolveAlertInstanceSetsResolvedAtAndReason pins ResolveAlertInstance's
+// own two writes, read back through AlertHistory (the only reader of a
+// resolved row's resolve_reason).
+func TestResolveAlertInstanceSetsResolvedAtAndReason(t *testing.T) {
+	s := newTestStore(t, nil)
+	id, err := s.UpsertAlertInstance(fullInstance("disk-errors", "disk1"))
+	require.NoError(t, err)
+	require.NoError(t, s.ResolveAlertInstance(id, 1756402000, "timeout"))
+
+	got, err := s.AlertHistory(context.Background(), 0, 0, 100)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, int64(1756402000), got[0].ResolvedAt)
+	require.Equal(t, "timeout", got[0].ResolveReason)
+}
+
+// TestAlertHistoryReturnsResolvedNewestFirstAndExcludesActive pins the
+// history contract: only resolved instances, newest resolution first, an
+// active instance never appears no matter how old it started.
+func TestAlertHistoryReturnsResolvedNewestFirstAndExcludesActive(t *testing.T) {
+	s := newTestStore(t, nil)
+	oldID, err := s.UpsertAlertInstance(fullInstance("disk-errors", "disk1"))
+	require.NoError(t, err)
+	require.NoError(t, s.ResolveAlertInstance(oldID, 1000, "cleared"))
+
+	newID, err := s.UpsertAlertInstance(fullInstance("disk-errors", "disk2"))
+	require.NoError(t, err)
+	require.NoError(t, s.ResolveAlertInstance(newID, 2000, "cleared"))
+
+	_, err = s.UpsertAlertInstance(fullInstance("disk-errors", "disk3")) // stays active
+	require.NoError(t, err)
+
+	got, err := s.AlertHistory(context.Background(), 0, 0, 100)
+	require.NoError(t, err)
+	require.Len(t, got, 2, "the active instance must not appear in history")
+	require.Equal(t, []int64{newID, oldID}, []int64{got[0].ID, got[1].ID}, "newest resolution first")
+}
+
+// TestAlertHistoryRespectsFromToAndLimit pins the three query params
+// together: from/to filter on resolved_at, limit caps the result.
+func TestAlertHistoryRespectsFromToAndLimit(t *testing.T) {
+	s := newTestStore(t, nil)
+	for i, resolvedAt := range []int64{1000, 2000, 3000, 4000} {
+		id, err := s.UpsertAlertInstance(fullInstance("disk-errors", fmt.Sprintf("disk%d", i)))
+		require.NoError(t, err)
+		require.NoError(t, s.ResolveAlertInstance(id, resolvedAt, "cleared"))
+	}
+
+	windowed, err := s.AlertHistory(context.Background(), 1500, 3500, 100)
+	require.NoError(t, err)
+	require.Len(t, windowed, 2, "only resolved_at in [1500, 3500] should match")
+
+	limited, err := s.AlertHistory(context.Background(), 0, 0, 2)
+	require.NoError(t, err)
+	require.Len(t, limited, 2)
+	require.Equal(t, int64(4000), limited[0].ResolvedAt, "newest first, limit keeps the two newest")
 }

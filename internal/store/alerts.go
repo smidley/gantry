@@ -97,6 +97,130 @@ func (s *Store) UpsertAlertRule(r AlertRule) error {
 	return err
 }
 
+// AlertInstance is one row of alert_instances -- one field per column, in
+// schema order.
+type AlertInstance struct {
+	ID             int64
+	RuleID         string
+	Kind           string
+	Entity         string
+	Metric         string
+	State          string
+	Severity       string
+	Value          float64
+	Threshold      float64
+	Summary        string
+	StartedAt      int64
+	FiredAt        int64
+	ResolvedAt     int64
+	ResolveReason  string
+	LastNotifiedAt int64
+	NotifyCount    int64
+}
+
+const alertInstanceColumns = `id, rule_id, kind, entity, metric, state, severity, value, threshold, summary,
+	started_at, fired_at, resolved_at, resolve_reason, last_notified_at, notify_count`
+
+func scanAlertInstance(row rowScanner, i *AlertInstance) error {
+	return row.Scan(&i.ID, &i.RuleID, &i.Kind, &i.Entity, &i.Metric, &i.State, &i.Severity, &i.Value, &i.Threshold,
+		&i.Summary, &i.StartedAt, &i.FiredAt, &i.ResolvedAt, &i.ResolveReason, &i.LastNotifiedAt, &i.NotifyCount)
+}
+
+// ActiveAlertInstances returns every instance with resolved_at = 0 --
+// what the engine (Task 4) walks every tick and what the frame's `alerts`
+// block (Task 8) is filtered from.
+func (s *Store) ActiveAlertInstances(ctx context.Context) ([]AlertInstance, error) {
+	rows, err := s.readDB.QueryContext(ctx, `SELECT `+alertInstanceColumns+` FROM alert_instances WHERE resolved_at = 0 ORDER BY started_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []AlertInstance
+	for rows.Next() {
+		var i AlertInstance
+		if err := scanAlertInstance(rows, &i); err != nil {
+			return nil, err
+		}
+		out = append(out, i)
+	}
+	return out, rows.Err()
+}
+
+// UpsertAlertInstance inserts a new instance when ID is 0 (returning the
+// generated id) or updates the existing row in place otherwise. The
+// insert path is where idx_alert_active actually does its job: two
+// concurrently-active rows for the same (rule_id, entity) violate that
+// partial unique index and this returns the resulting constraint error
+// unchanged -- there is no Go-side pre-check, by design (see the index's
+// own comment in 003_alerts.sql).
+func (s *Store) UpsertAlertInstance(i AlertInstance) (int64, error) {
+	if i.ID != 0 {
+		_, err := s.db.Exec(`UPDATE alert_instances SET rule_id=?, kind=?, entity=?, metric=?, state=?, severity=?,
+			value=?, threshold=?, summary=?, started_at=?, fired_at=?, resolved_at=?, resolve_reason=?,
+			last_notified_at=?, notify_count=? WHERE id=?`,
+			i.RuleID, i.Kind, i.Entity, i.Metric, i.State, i.Severity, i.Value, i.Threshold, i.Summary,
+			i.StartedAt, i.FiredAt, i.ResolvedAt, i.ResolveReason, i.LastNotifiedAt, i.NotifyCount, i.ID)
+		return i.ID, err
+	}
+	res, err := s.db.Exec(`INSERT INTO alert_instances (rule_id, kind, entity, metric, state, severity, value,
+		threshold, summary, started_at, fired_at, resolved_at, resolve_reason, last_notified_at, notify_count)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		i.RuleID, i.Kind, i.Entity, i.Metric, i.State, i.Severity, i.Value, i.Threshold, i.Summary,
+		i.StartedAt, i.FiredAt, i.ResolvedAt, i.ResolveReason, i.LastNotifiedAt, i.NotifyCount)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ResolveAlertInstance closes out an instance: resolved_at and
+// resolve_reason are the only two columns a resolve ever touches (value/
+// severity/etc. keep whatever they last held while firing -- history is
+// a snapshot, not a live view).
+func (s *Store) ResolveAlertInstance(id int64, at int64, reason string) error {
+	_, err := s.db.Exec(`UPDATE alert_instances SET resolved_at=?, resolve_reason=? WHERE id=?`, at, reason, id)
+	return err
+}
+
+// AlertHistory returns resolved instances (resolved_at > 0; an active
+// instance never appears here regardless of how old it started) with
+// resolved_at in [from, to] when either bound is non-zero, newest
+// resolution first, capped at limit.
+func (s *Store) AlertHistory(ctx context.Context, from, to int64, limit int) ([]AlertInstance, error) {
+	q := `SELECT ` + alertInstanceColumns + ` FROM alert_instances WHERE resolved_at > 0`
+	var args []any
+	if from > 0 {
+		q += ` AND resolved_at >= ?`
+		args = append(args, from)
+	}
+	if to > 0 {
+		q += ` AND resolved_at <= ?`
+		args = append(args, to)
+	}
+	q += ` ORDER BY resolved_at DESC`
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := s.readDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []AlertInstance
+	for rows.Next() {
+		var i AlertInstance
+		if err := scanAlertInstance(rows, &i); err != nil {
+			return nil, err
+		}
+		out = append(out, i)
+	}
+	return out, rows.Err()
+}
+
 // ReplaceAlertRules replaces the entire alert_rules table with rules, in
 // one transaction. This is a mechanical whole-document replace only --
 // it does not enforce "a builtin rule can't be removed" or any other

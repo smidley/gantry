@@ -1,6 +1,7 @@
 package fake
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -207,7 +208,14 @@ func TestSpunDownDiskEmitsNoTemp(t *testing.T) {
 	fsUsed := sink.recs[store.SeriesKey{Kind: "disk", Entity: "disk3", Metric: "fs.used_bytes"}]
 	require.NotEmpty(t, fsUsed, "a spun-down disk still reports cached filesystem usage")
 
-	for _, other := range []string{"parity", "disk1", "disk2", "disk4", "cache"} {
+	// disk4 is excluded from this generic-formula range check -- it's
+	// driven by the Task 9 alert-demo ramp instead (alertDemoDiskEntity),
+	// which deliberately runs well above 45°C; see the dedicated
+	// TestDisk4TempFollowsAlertDemoRampNotGenericFormula and
+	// TestAlertDemoDiskTempCRampsCrossesFireThenCoolsCrossesClear for its
+	// own contract. It still must report SOME temp.c, though -- it's
+	// spun up and has a sensor, same as every disk in this loop.
+	for _, other := range []string{"parity", "disk1", "disk2", "cache"} {
 		temps := sink.recs[store.SeriesKey{Kind: "disk", Entity: other, Metric: "temp.c"}]
 		require.NotEmpty(t, temps, "%s is spun up and must report temp.c", other)
 		for _, s := range temps {
@@ -215,6 +223,8 @@ func TestSpunDownDiskEmitsNoTemp(t *testing.T) {
 			require.LessOrEqual(t, s.Val, 45.0, "%s temp out of [32,45]", other)
 		}
 	}
+	disk4Temps := sink.recs[store.SeriesKey{Kind: "disk", Entity: "disk4", Metric: "temp.c"}]
+	require.NotEmpty(t, disk4Temps, "disk4 is spun up and must report temp.c")
 }
 
 // TestDiskRotationalDistinguishesCacheAsSolidState pins the fake array's
@@ -369,6 +379,17 @@ func TestMoverTogglesRoughlyEverySevenMinutes(t *testing.T) {
 // contract: a restart every ~3min and an OOM every ~10min, on two
 // distinct containers, edge-triggered (once per boundary crossed, not
 // once per tick).
+// TestPeriodicRestartAndOOMEvents pins the pre-existing periodic
+// restart/OOM schedule. Two container.oom sources now land inside an
+// 11-minute window: the Task 9 alert-demo one-shot on
+// alertDemoOOMContainer at alertDemoOOMAt (~3min), fired first, and the
+// separate periodic oomContainer/oomEvery schedule (~10min) -- two
+// independently-scheduled sources, not one schedule producing two
+// events. The demo OOM deliberately lands on the SAME container the
+// restart schedule already cycles (the plan's own explicit choice, see
+// alertDemoOOMContainer's doc): they're different event kinds, so
+// "restart and the PERIODIC OOM land on distinct containers" is still a
+// meaningful, checked invariant, it's just no longer true of ALL OOMs.
 func TestPeriodicRestartAndOOMEvents(t *testing.T) {
 	events := &eventCapture{}
 	g := New(&capture{}, events, 1)
@@ -379,14 +400,96 @@ func TestPeriodicRestartAndOOMEvents(t *testing.T) {
 	ooms := events.kinds("container.oom")
 
 	require.GreaterOrEqual(t, len(restarts), 3, "want restarts at ~3/6/9 minutes")
-	require.Len(t, ooms, 1, "want exactly one OOM by 11 minutes (next at ~20min)")
+	require.Len(t, ooms, 2, "want the alert-demo OOM at ~3min plus the periodic OOM at ~10min")
+	require.Equal(t, alertDemoOOMContainer, ooms[0].Entity, "the alert-demo OOM (fires first) lands on sonarr")
+	require.Equal(t, oomContainer, ooms[1].Entity, "the periodic OOM (fires second) still lands on minecraft")
 
 	restartEntity := restarts[0].Entity
-	oomEntity := ooms[0].Entity
-	require.NotEqual(t, restartEntity, oomEntity, "restart and OOM must land on distinct containers")
+	require.Equal(t, restartContainer, restartEntity)
+	require.NotEqual(t, restartEntity, oomContainer, "restart and the PERIODIC oom must land on distinct containers")
 	for _, e := range restarts {
 		require.Equal(t, restartEntity, e.Entity, "every restart must land on the same container")
 	}
+}
+
+// TestAlertDemoOOMFiresOnceOnSonarrAtThreeMinutes pins Task 9's own
+// timing contract in isolation: exactly one container.oom on
+// alertDemoOOMContainer, landing on the exact elapsed-time boundary
+// crossing (the same edge-triggered convention diskErrorsFired/
+// unhealthyEventFired use), well inside the "~3 minutes of boot"
+// fake-mode requirement. container-oom's own 3600s clear_seconds
+// timeout (store.DefaultAlertRules) is what resolves the resulting
+// alert instance ~63 simulated minutes later -- nothing here needs to
+// simulate that half; it's the engine's job, driven by this one event.
+func TestAlertDemoOOMFiresOnceOnSonarrAtThreeMinutes(t *testing.T) {
+	events := &eventCapture{}
+	g := New(&capture{}, events, 1)
+	boot := time.Unix(1_000_000, 0)
+	tickEvery(g, boot, 2*time.Second, 200) // 400 simulated seconds
+
+	var sonarrOOMs []store.Event
+	for _, e := range events.kinds("container.oom") {
+		if e.Entity == alertDemoOOMContainer {
+			sonarrOOMs = append(sonarrOOMs, e)
+		}
+	}
+	require.Len(t, sonarrOOMs, 1, "the alert-demo OOM must fire exactly once")
+	require.Equal(t, boot.Add(alertDemoOOMAt).Unix(), sonarrOOMs[0].TS, "must land on the exact elapsed-time boundary crossing")
+	require.Equal(t, "alert", sonarrOOMs[0].Severity, "must meet container-oom's own min_severity floor")
+}
+
+// TestAlertDemoDiskTempCRampsCrossesFireThenCoolsCrossesClear pins the
+// correctness property the whole demo depends on: once the ramp crosses
+// disk-temp-high's 55°C fire threshold it must never dip back to or
+// below it before cool-down deliberately begins, and once the cool-down
+// ramp crosses the 50°C clear threshold it must never rise back to or
+// above it -- a single spurious flicker either direction would reset
+// the sustained-for window and could make the demo flaky.
+func TestAlertDemoDiskTempCRampsCrossesFireThenCoolsCrossesClear(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+
+	require.InDelta(t, alertDemoTempStart, alertDemoDiskTempC(0, rng), 0.01, "t=0 must be the ramp's own starting temp")
+
+	crossedFire := false
+	for s := int64(0); s < int64(alertDemoCoolStart.Seconds()); s += 2 {
+		v := alertDemoDiskTempC(time.Duration(s)*time.Second, rng)
+		if v > 55 {
+			crossedFire = true
+		}
+		if crossedFire {
+			require.Greater(t, v, 55.0, "once above the fire threshold, must never dip back at/below it before cool-down (t=%ds)", s)
+		}
+	}
+	require.True(t, crossedFire, "the ramp must cross the 55°C fire threshold before cool-down begins")
+
+	crossedClear := false
+	coolWindowEnd := int64(alertDemoCoolStart.Seconds()) + int64(alertDemoCoolDuration.Seconds()) + 120
+	for s := int64(alertDemoCoolStart.Seconds()); s < coolWindowEnd; s += 2 {
+		v := alertDemoDiskTempC(time.Duration(s)*time.Second, rng)
+		if v < 50 {
+			crossedClear = true
+		}
+		if crossedClear {
+			require.Less(t, v, 50.0, "once below the clear threshold, must never rise back to/above it (t=%ds)", s)
+		}
+	}
+	require.True(t, crossedClear, "the cool-down ramp must cross the 50°C clear threshold")
+}
+
+// TestDisk4TempFollowsAlertDemoRampNotGenericFormula proves the emitDisks
+// wiring actually reaches alertDemoDiskTempC for disk4 (rather than the
+// generic tempBase-anchored sin+noise formula, which is clamped to
+// [32,45] and would never come near 48°C): the very first sample must
+// be the ramp's own starting value.
+func TestDisk4TempFollowsAlertDemoRampNotGenericFormula(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	g.Tick(time.Unix(1_000_000, 0))
+
+	temps := sink.recs[store.SeriesKey{Kind: "disk", Entity: "disk4", Metric: "temp.c"}]
+	require.NotEmpty(t, temps)
+	require.InDelta(t, alertDemoTempStart, temps[0].Val, 0.01,
+		"disk4's first sample must be the alert-demo ramp's own starting temp, not the generic formula")
 }
 
 // TestRareDiskErrorsEventFiresOnce pins the "one disk with a rare

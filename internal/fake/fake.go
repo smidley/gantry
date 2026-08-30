@@ -317,6 +317,52 @@ const (
 	restartContainer = "sonarr"
 	oomContainer     = "minecraft"
 
+	// alertDemoOOMContainer/alertDemoOOMAt (Phase 4 Task 9): a SEPARATE,
+	// one-shot container.oom synthesized specifically so the alert
+	// engine's container-oom builtin rule has something to fire within
+	// the "~3 minutes of boot" fake-mode contract -- the pre-existing
+	// periodic oomContainer/oomEvery schedule above doesn't land until
+	// ~10min, too late for a short interactive demo session. Landing on
+	// the same container restartEvery already cycles (sonarr) is the
+	// plan's own explicit choice, not a collision to avoid: they're two
+	// independently-scheduled, differently-KINDED events (container.
+	// start vs container.oom), and container-oom has no rule watching
+	// container.start anyway. This is a genuinely separate event from
+	// oomContainer's own periodic one -- see alertOOMEventFired's doc.
+	alertDemoOOMContainer = "sonarr"
+	alertDemoOOMAt        = 3 * time.Minute
+
+	// alertDemoDiskEntity/alertDemo{Ramp,Cool}*/alertDemoTemp* (Phase 4
+	// Task 9): disk4's temp.c is driven by alertDemoDiskTempC instead of
+	// the generic per-disk sin+noise formula every other disk uses, so
+	// the alert engine's disk-temp-high builtin rule has a real,
+	// predictable fire-then-resolve story to demo. Schedule (all times
+	// relative to boot, elapsed==0):
+	//
+	//   t=0s -> 90s     ramp 48 -> 58°C (linear)
+	//   90s  -> 270s    hold ~57-59°C (safely above the 55°C fire
+	//                   threshold the whole time)
+	//   270s -> 360s    ramp back down 58 -> 40°C (linear)
+	//   360s onward     hold ~38-42°C (safely below the 50°C clear
+	//                   threshold the whole time)
+	//
+	// With fake mode's seeded builtins compressed to a 60s for_seconds/
+	// clear_seconds (store.DefaultAlertRules' fast parameter), the ramp
+	// crosses 55°C at t=63s and stays above it continuously afterward, so
+	// disk-temp-high's 60s sustained-for window is satisfied by ~t=124s
+	// (2m04s) -- comfortably inside the "~3 minutes of boot" fake-mode
+	// contract. The cool-down ramp crosses back below 50°C at ~t=310s and
+	// stays below it, satisfying the 60s clear window by ~t=370s (6m10s)
+	// -- a real resolve, a resolved notice, and a history row, matching
+	// the plan's own "~T+6min" timing.
+	alertDemoDiskEntity   = "disk4"
+	alertDemoRampDuration = 90 * time.Second
+	alertDemoTempStart    = 48.0
+	alertDemoTempPeak     = 58.0
+	alertDemoCoolStart    = 270 * time.Second
+	alertDemoCoolDuration = 90 * time.Second
+	alertDemoTempFloor    = 40.0
+
 	// unhealthyContainer is grafana (see its own archetype.unhealthy
 	// doc) -- the anomaly banner's evidence list needs at least one
 	// real container.health event to point to, fired once near boot
@@ -356,6 +402,12 @@ type Generator struct {
 	parityFinished      bool
 	diskErrorsFired     bool
 	unhealthyEventFired bool
+	// alertOOMEventFired guards the Task 9 alert-demo one-shot (see
+	// alertDemoOOMContainer/alertDemoOOMAt's own doc) -- a SEPARATE flag
+	// from lastOOMBoundary below, which tracks the pre-existing periodic
+	// oomContainer/oomEvery schedule; the two fire independently, on
+	// different containers, at different times.
+	alertOOMEventFired bool
 
 	// jellyfinBurstTicks counts down a GPU-usage burst in progress; 0
 	// means idle and eligible to roll a new burst.
@@ -570,7 +622,16 @@ func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 		g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + d.device + ".write_bps"}, ts, d.ioWriteScale*g.rng.Float64())
 
 		if !d.spunDown && !d.noSensor {
-			temp := clamp(d.tempBase+2.5*math.Sin(phase+float64(i))+(g.rng.Float64()-0.5)*1.5, 32, 45)
+			var temp float64
+			if d.name == alertDemoDiskEntity {
+				// The alert demo's own deterministic ramp/hold/cool/hold
+				// shape (Task 9) -- NOT the generic sin+noise formula
+				// every other disk uses -- see alertDemoDiskEntity's own
+				// doc for the full schedule and why.
+				temp = alertDemoDiskTempC(elapsed, g.rng)
+			} else {
+				temp = clamp(d.tempBase+2.5*math.Sin(phase+float64(i))+(g.rng.Float64()-0.5)*1.5, 32, 45)
+			}
 			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "temp.c"}, ts, temp)
 		}
 
@@ -593,6 +654,31 @@ func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 	if !g.diskErrorsFired && elapsed >= diskErrorsAt {
 		g.diskErrorsFired = true
 		g.appendEvent(ts, store.Event{Kind: "disk.errors", Entity: errorDiskEntity, Severity: "alert", Detail: "errors 0 → 1"})
+	}
+}
+
+// alertDemoDiskTempC drives disk4's temp.c through the deterministic
+// ramp/hold/cool/hold shape documented on alertDemoDiskEntity, pure in
+// elapsed time (like every other schedule in this file) so a test can
+// drive it with arbitrary injected durations. Monotonic within each
+// ramp -- no noise is added while the value is actually crossing a
+// threshold -- so disk-temp-high's hysteresis window can never
+// spuriously flicker back across the fire (55°C) or clear (50°C)
+// boundary mid-ramp; small noise only appears on the two HOLD phases,
+// and is clamped well clear of both boundaries (57-59°C while hot,
+// 38-42°C while cool) so it can never itself cross either one.
+func alertDemoDiskTempC(elapsed time.Duration, rng *rand.Rand) float64 {
+	switch {
+	case elapsed < alertDemoRampDuration:
+		frac := float64(elapsed) / float64(alertDemoRampDuration)
+		return alertDemoTempStart + (alertDemoTempPeak-alertDemoTempStart)*frac
+	case elapsed < alertDemoCoolStart:
+		return alertDemoTempPeak - 1 + rng.Float64()*2 // holds 57-59
+	case elapsed < alertDemoCoolStart+alertDemoCoolDuration:
+		frac := float64(elapsed-alertDemoCoolStart) / float64(alertDemoCoolDuration)
+		return alertDemoTempPeak - (alertDemoTempPeak-alertDemoTempFloor)*frac
+	default:
+		return alertDemoTempFloor - 2 + rng.Float64()*4 // holds 38-42
 	}
 }
 
@@ -724,6 +810,16 @@ func (g *Generator) emitContainerEvents(ts int64, elapsed time.Duration) {
 	if !g.unhealthyEventFired {
 		g.unhealthyEventFired = true
 		g.appendEvent(ts, store.Event{Kind: "container.health", Entity: unhealthyContainer, Severity: "warning", Detail: "unhealthy"})
+	}
+	// Task 9 alert demo: a single container.oom on sonarr, once, at
+	// alertDemoOOMAt -- see its own doc for why this is separate from
+	// the periodic oomContainer/lastOOMBoundary schedule just below.
+	// Severity "alert" matches container-oom's own min_severity floor
+	// (store.DefaultAlertRules) exactly, the same "collector already
+	// made the call" contract every other builtin event rule relies on.
+	if !g.alertOOMEventFired && elapsed >= alertDemoOOMAt {
+		g.alertOOMEventFired = true
+		g.appendEvent(ts, store.Event{Kind: "container.oom", Entity: alertDemoOOMContainer, Severity: "alert"})
 	}
 	if b := int64(elapsed / restartEvery); b > g.lastRestartBoundary {
 		g.lastRestartBoundary = b

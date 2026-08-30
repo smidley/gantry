@@ -814,7 +814,7 @@ func summarizeThreshold(r store.AlertRule, entity string, value float64) string 
 	if name == "" {
 		name = "host"
 	}
-	return fmt.Sprintf("%s is at %s (%s %s for %s)", name, formatNum(value), verb, formatNum(r.Threshold), formatDuration(r.ForSeconds))
+	return fmt.Sprintf("%s is at %s (%s %s for %s)", name, formatMetric(r, value), verb, formatMetric(r, r.Threshold), formatDuration(r.ForSeconds))
 }
 
 func summarizeEvent(ev store.Event) string {
@@ -844,3 +844,73 @@ func describeResolve(inst store.AlertInstance, reason string) string {
 func formatNum(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) }
 
 func formatDuration(seconds int64) string { return (time.Duration(seconds) * time.Second).String() }
+
+// pctBandFamilies/tempBandFamilies split validBandFamilies (rule.go) by
+// the unit their values carry -- every family is percent except the two
+// temperature ones, exactly as thresholds.ts renders them.
+var pctBandFamilies = map[string]bool{
+	"host.cpu":                true,
+	"host.mem":                true,
+	"disk.capacity":           true,
+	"container.mem_limit_pct": true,
+}
+
+var tempBandFamilies = map[string]bool{
+	"disk.temp":      true,
+	"disk.temp.nvme": true,
+}
+
+// formatMetric renders one metric value with the unit the rule implies:
+// band family first (the display system's own vocabulary), then the
+// metric name's suffix conventions for custom rules without one, else
+// the bare number formatNum always produced. Renderings mirror
+// web/src/lib/format.ts' formatters -- unspaced "%"/"°C", binary bytes
+// (KiB, MiB, ...), decimal rates (MB/s, docker's convention) -- so a
+// notification and the UI tile it points at can never disagree about
+// what a value reads as.
+func formatMetric(r store.AlertRule, v float64) string {
+	switch {
+	case pctBandFamilies[r.BandFamily],
+		strings.HasSuffix(r.Metric, "pct"), // covers both "_pct" and ".pct" series
+		r.Metric == "cpu.total":            // host CPU percent, the one pct series not named as one
+		return formatNum(v) + "%"
+	case tempBandFamilies[r.BandFamily], strings.HasPrefix(r.Metric, "temp."):
+		return formatNum(v) + "°C"
+	case strings.HasSuffix(r.Metric, "bytes"):
+		return humanBytes(v)
+	case strings.HasSuffix(r.Metric, "bps"):
+		return humanRate(v)
+	}
+	return formatNum(v)
+}
+
+// humanBytes mirrors format.ts' fmtBytes: binary units (1024-based),
+// one decimal at every magnitude.
+func humanBytes(v float64) string {
+	sign := ""
+	if v < 0 {
+		sign, v = "-", -v
+	}
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
+	i := 0
+	for v >= 1024 && i < len(units)-1 {
+		v /= 1024
+		i++
+	}
+	return sign + formatNum(v) + " " + units[i]
+}
+
+// humanRate mirrors format.ts' fmtRate: DECIMAL units (1000-based),
+// deliberately not binary, matching docker's own throughput convention.
+func humanRate(v float64) string {
+	if v < 0 {
+		v = 0
+	}
+	units := []string{"B/s", "KB/s", "MB/s", "GB/s", "TB/s"}
+	i := 0
+	for v >= 1000 && i < len(units)-1 {
+		v /= 1000
+		i++
+	}
+	return formatNum(v) + " " + units[i]
+}

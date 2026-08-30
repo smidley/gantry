@@ -1439,3 +1439,68 @@ func TestRunStopsOnContextCancelWithoutBlocking(t *testing.T) {
 		t.Fatal("Run did not stop after context cancellation")
 	}
 }
+
+// --- summary units -----------------------------------------------------------
+
+// TestSummarizeThresholdUnits pins the notification text's unit
+// handling: the rule's band family picks the unit first (the same six
+// families thresholds.ts renders display bands for), the metric name's
+// suffix conventions fill in for custom rules without one, and a metric
+// matching neither stays the bare number it always was. Unit renderings
+// follow web/src/lib/format.ts' own formatters, so a notification and
+// the UI tile it points at never disagree about what a value reads as.
+func TestSummarizeThresholdUnits(t *testing.T) {
+	cases := []struct {
+		name   string
+		rule   store.AlertRule
+		entity string
+		value  float64
+		want   string
+	}{
+		{
+			name:   "temperature via band family",
+			rule:   store.AlertRule{Metric: "temp.c", Op: ">", Threshold: 55, ForSeconds: 600, BandFamily: "disk.temp"},
+			entity: "disk3", value: 58.0,
+			want: "disk3 is at 58.0°C (over 55.0°C for 10m0s)",
+		},
+		{
+			name:   "percent via band family",
+			rule:   store.AlertRule{Metric: "cpu.total", Op: ">", Threshold: 85, ForSeconds: 600, BandFamily: "host.cpu"},
+			entity: "", value: 92.5,
+			want: "host is at 92.5% (over 85.0% for 10m0s)",
+		},
+		{
+			name:   "percent via metric suffix, no band family",
+			rule:   store.AlertRule{Metric: "swap.used_pct", Op: ">", Threshold: 50, ForSeconds: 300},
+			entity: "", value: 61.2,
+			want: "host is at 61.2% (over 50.0% for 5m0s)",
+		},
+		{
+			name:   "temperature via metric name, no band family",
+			rule:   store.AlertRule{Metric: "temp.c", Op: ">", Threshold: 70, ForSeconds: 600},
+			entity: "nvme0n1", value: 74.5,
+			want: "nvme0n1 is at 74.5°C (over 70.0°C for 10m0s)",
+		},
+		{
+			name:   "bytes humanized via metric suffix",
+			rule:   store.AlertRule{Metric: "share.appdata.used_bytes", Op: ">", Threshold: 500 * 1024 * 1024 * 1024, ForSeconds: 900},
+			entity: "appdata", value: 512.5 * 1024 * 1024 * 1024,
+			want: "appdata is at 512.5 GiB (over 500.0 GiB for 15m0s)",
+		},
+		{
+			name:   "byte rate in decimal units via metric suffix",
+			rule:   store.AlertRule{Metric: "diskio.read_bps", Op: ">", Threshold: 100_000_000, ForSeconds: 300},
+			entity: "sda", value: 125_800_000,
+			want: "sda is at 125.8 MB/s (over 100.0 MB/s for 5m0s)",
+		},
+		{
+			name:   "unitless metric stays a bare number",
+			rule:   store.AlertRule{Metric: "array.started", Op: "<", Threshold: 1, ForSeconds: 300},
+			entity: "array", value: 0,
+			want: "array is at 0.0 (under 1.0 for 5m0s)",
+		},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, summarizeThreshold(tc.rule, tc.entity, tc.value), tc.name)
+	}
+}

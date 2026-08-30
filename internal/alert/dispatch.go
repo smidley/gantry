@@ -107,6 +107,11 @@ type Dispatcher struct {
 	stopCancel context.CancelFunc
 	workersWG  sync.WaitGroup
 
+	// overflowMu serializes the overflow drop-then-resend pair in send()
+	// -- never held across a store write's completion path or a channel
+	// Send, only queue pops/pushes (see send's own comment).
+	overflowMu sync.Mutex
+
 	mu sync.Mutex // guards everything below
 
 	bucketTokens    float64
@@ -167,6 +172,16 @@ func (d *Dispatcher) ensureStarted() {
 func (d *Dispatcher) worker(ch Channel, q chan deliveryJob) {
 	defer d.workersWG.Done()
 	for {
+		// Stop takes priority over pending work: with both channels ready
+		// a bare select picks randomly, and a stopping worker must drain
+		// the remainder as recorded drops, not keep starting sends that
+		// would each abort against the already-cancelled stop context.
+		select {
+		case <-d.stop:
+			d.drainQueue(ch, q)
+			return
+		default:
+		}
 		select {
 		case <-d.stop:
 			d.drainQueue(ch, q)
@@ -276,14 +291,30 @@ func (d *Dispatcher) send(ch Channel, n AlertNotification) {
 		return
 	default:
 	}
-	select {
-	case dropped := <-q:
-		d.recordDrop(ch, dropped.n, errQueueOverflow)
-	default:
-	}
-	select {
-	case q <- deliveryJob{n}:
-	default: // lost a race with another producer; the queue is still saturated with useful work either way
+	// Overflow path, one producer at a time: unserialized, two producers
+	// hitting a full queue together each evicted a victim when one slot
+	// would have served, and a producer whose re-push then lost the race
+	// discarded its own job with no ledger row at all. Under the mutex
+	// the loop keeps evicting the oldest queued job (each one recorded)
+	// until this producer's push lands -- so every notification either
+	// delivers or leaves a row. The lock is uncontended except while a
+	// queue is actually overflowing, and never blocks on the store or a
+	// channel Send. The empty-queue eviction arm just re-loops: it means
+	// the worker drained the queue between our two selects, so the next
+	// push attempt will land.
+	d.overflowMu.Lock()
+	defer d.overflowMu.Unlock()
+	for {
+		select {
+		case q <- deliveryJob{n}:
+			return
+		default:
+		}
+		select {
+		case dropped := <-q:
+			d.recordDrop(ch, dropped.n, errQueueOverflow)
+		default:
+		}
 	}
 }
 

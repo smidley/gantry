@@ -470,7 +470,9 @@ func TestDispatcherDeliveryFailedEventRateLimitedPerChannelPerHour(t *testing.T)
 	clock.Advance(3601 * time.Second)
 	d.Dispatch(fireNotification("r3", "e"))
 	require.Eventually(t, func() bool { return len(st.deliveriesSnapshot()) == 3 }, time.Second, 5*time.Millisecond)
-	require.Len(t, st.eventsOfKind("alert.delivery_failed"), 2)
+	// Eventually, not Len: the worker appends the event AFTER the ledger
+	// row the wait above keys on, so a plain assertion races it.
+	require.Eventually(t, func() bool { return len(st.eventsOfKind("alert.delivery_failed")) == 2 }, time.Second, 5*time.Millisecond)
 }
 
 // --- target URL never recorded ----------------------------------------------
@@ -665,13 +667,20 @@ func TestDispatcherDispatchDoesNotBlockOnAWedgedChannel(t *testing.T) {
 }
 
 // TestDispatcherConcurrentDispatchIsRaceFree exercises Dispatch from
-// multiple goroutines at once (the shape a `go test -race` run needs to
-// actually exercise the mutex-guarded bucket/flap state) while a
-// background counter confirms nothing panics or deadlocks.
+// multiple goroutines at once against a cap-2 queue and a wedged
+// worker, so the overflow drop-then-resend path itself runs under the
+// race detector -- not just the mutex-guarded bucket/flap state. The
+// conservation assertion is the point: every one of the 200 dispatched
+// notifications must end as either a delivery or a recorded overflow
+// drop. Racing producers that double-pop, or a producer whose re-push
+// loses and silently discards its own job, both break the count.
 func TestDispatcherConcurrentDispatchIsRaceFree(t *testing.T) {
-	notify := newFakeChannel("notify")
+	hook := newFakeChannel("webhook:contended")
+	hook.block = make(chan struct{})
 	st := &fakeDeliveryStore{}
-	d := NewDispatcher(st, []Channel{notify}, nil, nil)
+	d := NewDispatcher(st, []Channel{hook}, nil, nil)
+	d.QueueCap = 2
+	t.Cleanup(d.Stop)
 
 	var wg sync.WaitGroup
 	var total atomic.Int64
@@ -687,4 +696,13 @@ func TestDispatcherConcurrentDispatchIsRaceFree(t *testing.T) {
 	}
 	wg.Wait()
 	require.EqualValues(t, 200, total.Load())
+
+	close(hook.block) // un-wedge: the worker delivers the in-flight job and whatever is still queued
+	require.Eventually(t, func() bool { return len(st.deliveriesSnapshot()) == 200 }, 2*time.Second, 5*time.Millisecond,
+		"every dispatched notification must be accounted for: delivered or recorded as an overflow drop")
+	for _, del := range st.deliveriesSnapshot() {
+		if !del.OK {
+			require.Equal(t, "queue overflow: dropped oldest", del.Error)
+		}
+	}
 }

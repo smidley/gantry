@@ -214,7 +214,7 @@ func testUserRule(id string) store.AlertRule {
 // code pointer), so this fails the moment the sharing regresses back
 // into a copy -- the behavioral cases themselves stay owned by
 // TestAlertsGetFiltersToFiringAndFlagsSilenced here and engine_test.go's
-// own silenced()/Silenced() cases on the alert package side.
+// own Silenced() cases on the alert package side.
 func TestSilenceCoversIsAlertSilenced(t *testing.T) {
 	require.Equal(t, reflect.ValueOf(alert.Silenced).Pointer(), reflect.ValueOf(SilenceCovers).Pointer())
 }
@@ -636,7 +636,7 @@ func TestAlertsSilencesPostRoundTripsThroughGetThenDelete(t *testing.T) {
 
 // TestAlertsSilencesPostBothEmptyWithoutScopeReturns400 pins the fix-round
 // policy decision: rule_id and entity both "" means "every rule, every
-// entity" (engine.go's silenced() reads it that way, unchanged) -- a mute
+// entity" (engine.go's Silenced() reads it that way, unchanged) -- a mute
 // broad enough that a client must ask for it on purpose. Omitting scope
 // entirely used to 200 and silently mute everything for up to 30 days;
 // now it 400s naming the gesture the client needs to add.

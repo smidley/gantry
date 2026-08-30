@@ -186,7 +186,7 @@ func toAlertInstanceDTO(i store.AlertInstance, silenced bool) AlertInstanceDTO {
 // existed). Scope is "all" when RuleID and Entity are both "" -- a mute
 // covering every rule and every entity -- and omitted otherwise. The
 // store representation is untouched: rule_id="" + entity="" has meant
-// "global" since engine.go's silenced() existed, and still does; Scope
+// "global" since engine.go's Silenced() existed, and still does; Scope
 // only makes that reading explicit on the wire so a client can render it
 // distinctly (see silenceCreateRequest's own doc on why POST now
 // requires the same gesture explicitly).
@@ -551,7 +551,7 @@ func (s *Server) handleAlertsHistory(w http.ResponseWriter, r *http.Request) {
 // Global Constraints).
 //
 // rule_id and entity both "" mutes every rule on every entity -- engine.
-// go's silenced() has always read that pair as "any" -- so a request
+// go's Silenced() has always read that pair as "any" -- so a request
 // leaving both blank must say so on purpose: scope must read exactly
 // "all", or this 400s naming the gesture it wants instead of silently
 // muting everything for up to 30 days. A scoped request (either field

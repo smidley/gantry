@@ -19,7 +19,7 @@
   import { onMount, untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
-  import { pushRing, seriesPointsToRing } from '../lib/livering';
+  import { appendAfterSeed, mergeSeed, pushRing, seriesPointsToRing } from '../lib/livering';
   import { fetchSeries, fetchSnapshot, fetchTop } from '../lib/api';
   import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
   import { keysByPattern, niceCeiling, sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
@@ -340,6 +340,13 @@
     let dirA = $state([]);
     let dirB = $state([]);
     let assigned = null;
+    // seeded gates tick()'s own append rule exactly like liveRing's own
+    // field of the same name (livering.svelte.ts) -- false until seed()
+    // below actually applies real history for whichever entity is
+    // assigned RIGHT NOW; a plain closure variable, not $state, for the
+    // identical reason theirs is (nothing needs to react to it changing
+    // on its own, only the ring writes that accompany it).
+    let seeded = false;
     return {
       get points() {
         return sum;
@@ -347,14 +354,56 @@
       get directionPoints() {
         return [dirA, dirB];
       },
+      // resetAssignment blanks this slot back to its pre-mount state --
+      // called on a resource/window switch (see that effect's own doc,
+      // below) even when the entity NAME happens not to change, because
+      // tick()'s own equality check alone can't tell "still the same
+      // container" apart from "same name, completely different resource"
+      // -- e.g. one container topping both CPU and Memory would otherwise
+      // carry cpu.pct values straight over as if they were mem.bytes the
+      // instant the tab switched.
+      resetAssignment() {
+        assigned = null;
+        sum = [];
+        dirA = [];
+        dirB = [];
+        seeded = false;
+      },
+      // seed folds a /api/series ring-tier fetch in as this slot's own
+      // initial contents, for whichever entity is assigned right now --
+      // mergeSeed's usual base-plus-already-live-held merge (see its own
+      // doc), applied to sum and, when given, each direction component. A
+      // stale response for an entity this slot has since moved on from is
+      // seedHeroSlot's own job to have already aborted; this method just
+      // trusts whatever it's handed.
+      seed(sumPoints, dirAPoints = [], dirBPoints = []) {
+        const heldSum = untrack(() => sum);
+        const mergedSum = mergeSeed(heldSum, sumPoints, LIVE_WINDOW_SEC);
+        if (mergedSum === heldSum) return; // empty/no-op seed -- see mergeSeed's own doc
+        seeded = true;
+        sum = mergedSum;
+        if (dirAPoints.length > 0) dirA = mergeSeed(untrack(() => dirA), dirAPoints, LIVE_WINDOW_SEC);
+        if (dirBPoints.length > 0) dirB = mergeSeed(untrack(() => dirB), dirBPoints, LIVE_WINDOW_SEC);
+      },
+      // tick's own reassignment reset also clears `seeded` (a fresh
+      // entity has no seed yet, no matter what the previous one had) and
+      // reports whether THIS call is the one that assigned a real
+      // (non-null) entity -- the driving $effect below uses that to fire
+      // this slot's own seed fetch exactly once per assignment, covering
+      // a brand new mount (every slot starts unassigned) and a
+      // rank-stability entry mid-view alike, with no separate "on mount"
+      // path needed.
       tick(ts, entity, value, a, b) {
+        let justAssigned = false;
         if (entity !== assigned) {
           assigned = entity;
           sum = [];
           dirA = [];
           dirB = [];
+          seeded = false;
+          justAssigned = entity !== null;
         }
-        if (entity === null || value === undefined) return;
+        if (entity === null || value === undefined) return justAssigned;
         // untrack: tick() runs from inside the driving $effect below, which
         // must depend on live.frame/heroTopNow ONLY -- reading sum/dirA/dirB
         // here (as pushRing's own first argument) would otherwise ALSO
@@ -363,13 +412,83 @@
         // (effect_update_depth_exceeded, reproduced live) -- the exact
         // self-referential loop livering.svelte.ts's own liveRing() already
         // documents and untracks for the identical reason.
-        sum = untrack(() => pushRing(sum, ts, value, LIVE_WINDOW_SEC));
-        if (a !== undefined) dirA = untrack(() => pushRing(dirA, ts, a, LIVE_WINDOW_SEC));
-        if (b !== undefined) dirB = untrack(() => pushRing(dirB, ts, b, LIVE_WINDOW_SEC));
+        sum = untrack(() =>
+          seeded ? appendAfterSeed(sum, ts, value, LIVE_WINDOW_SEC) : pushRing(sum, ts, value, LIVE_WINDOW_SEC),
+        );
+        if (a !== undefined) {
+          dirA = untrack(() =>
+            seeded ? appendAfterSeed(dirA, ts, a, LIVE_WINDOW_SEC) : pushRing(dirA, ts, a, LIVE_WINDOW_SEC),
+          );
+        }
+        if (b !== undefined) {
+          dirB = untrack(() =>
+            seeded ? appendAfterSeed(dirB, ts, b, LIVE_WINDOW_SEC) : pushRing(dirB, ts, b, LIVE_WINDOW_SEC),
+          );
+        }
+        return justAssigned;
       },
     };
   }
   const heroSlots = Array.from({ length: MAX_HERO_LINES }, () => makeHeroSlot());
+
+  // heroSeedControllers: one AbortController per hero slot's own
+  // in-flight seed fetch (Map, slot index -> controller) -- ad hoc rather
+  // than one controller per effect, because a slot's own seed fires from
+  // inside the driving tick effect below whenever THAT slot's entity is
+  // (re)assigned, not from a single per-resource effect the way the
+  // header rings' own seeding above is. abortHeroSeed cancels slot i's
+  // own pending fetch, if any -- called before starting a fresh one for
+  // the same slot (a second reassignment landing before the first fetch
+  // resolved must not let the stale one win) and by the reset effect
+  // below (a resource/window switch invalidates every slot's fetch at
+  // once).
+  const heroSeedControllers = new Map();
+  function abortHeroSeed(i) {
+    heroSeedControllers.get(i)?.abort();
+    heroSeedControllers.delete(i);
+  }
+  onMount(() => {
+    return () => {
+      for (let i = 0; i < MAX_HERO_LINES; i++) abortHeroSeed(i);
+    };
+  });
+
+  // seedHeroSlot fetches hero slot i's newly-assigned entity's own
+  // ring-tier history (last LIVE_WINDOW_SEC seconds -- the same window
+  // every other live ring on this page bounds itself to) and folds it in
+  // as that slot's own seed. Same kind/metrics shape as fetchedHeroSeries
+  // below, just against the ring tier instead of a fetched range, and
+  // sums resourceMetricKeys(res) the SAME way tick()'s own live math
+  // already does (topFromFrame's sumPresentMetrics) -- for a directional
+  // resource, each component is seeded on its own alongside their sum, so
+  // the seed matches exactly what heroSeries plots for both the combined
+  // line and its direction breakdown.
+  function seedHeroSlot(i, entity, res) {
+    abortHeroSeed(i);
+    const controller = new AbortController();
+    heroSeedControllers.set(i, controller);
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - LIVE_WINDOW_SEC;
+    const metrics = resourceMetricKeys(res);
+    fetchSeries({ kind: 'container', entity, metrics, from, to, signal: controller.signal })
+      .then((results) => {
+        heroSeedControllers.delete(i);
+        const byMetric = {};
+        for (const r of results) byMetric[r.metric] = r.points;
+        const dirKeys = resourceDirectionKeys(res);
+        if (dirKeys) {
+          const ptsA = byMetric[dirKeys[0]] ?? [];
+          const ptsB = byMetric[dirKeys[1]] ?? [];
+          heroSlots[i].seed(sumSeriesPoints([ptsA, ptsB]), seriesPointsToRing(ptsA), seriesPointsToRing(ptsB));
+        } else {
+          heroSlots[i].seed(sumSeriesPoints(metrics.map((m) => byMetric[m] ?? [])));
+        }
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // superseded -- a reset or a fresh reassignment beat this fetch back
+        heroSeedControllers.delete(i);
+      });
+  }
 
   // heroTopNow: the stable top-MAX_HERO_LINES entries of nowRows -- its
   // own rankStability selection, not merely the ranked list's own naive
@@ -385,9 +504,12 @@
     const frame = live.frame;
     if (!frame) return;
     const top = heroTopNow;
+    const r = resource;
     for (let i = 0; i < MAX_HERO_LINES; i++) {
       const row = top[i];
-      heroSlots[i].tick(frame.ts, row?.entity ?? null, row?.value, row?.direction?.[0], row?.direction?.[1]);
+      const entity = row?.entity ?? null;
+      const justAssigned = heroSlots[i].tick(frame.ts, entity, row?.value, row?.direction?.[0], row?.direction?.[1]);
+      if (justAssigned) seedHeroSlot(i, entity, r);
     }
   });
 
@@ -488,6 +610,22 @@
     resource;
     windowKey;
     hiddenHeroIdx = new Set();
+  });
+
+  // Same "new chart context" trigger, for the hero rings themselves:
+  // every slot forgets its current assignment so the very next tick()
+  // call (above) always sees a "new" entity -- even one it already had
+  // under the OLD resource -- and reseeds it fresh via seedHeroSlot,
+  // rather than risking the cross-resource collision resetAssignment's
+  // own doc describes. Also cancels whatever seed fetch was still
+  // in-flight for the resource/window we just left.
+  $effect(() => {
+    resource;
+    windowKey;
+    for (let i = 0; i < MAX_HERO_LINES; i++) {
+      abortHeroSeed(i);
+      heroSlots[i].resetAssignment();
+    }
   });
 
   function toggleHeroLine(i) {

@@ -220,21 +220,15 @@ func toSilenceDTOs(silences []store.Silence) []SilenceDTO {
 }
 
 // SilenceCovers reports whether any silence in the slice covers
-// (ruleID, entity): "" on either field means "any". Mirrors alert/
-// engine.go's own unexported silenced() helper (identical semantics --
-// that one decides whether the engine actually dispatches a
-// notification; this one only decides whether a wire response should
-// flag a row as dimmed). Exported so main.go's snapshot assembly (the
-// SSE frame's alerts block) can share this one copy instead of a third
-// private one.
-func SilenceCovers(silences []store.Silence, ruleID, entity string) bool {
-	for _, s := range silences {
-		if (s.RuleID == "" || s.RuleID == ruleID) && (s.Entity == "" || s.Entity == entity) {
-			return true
-		}
-	}
-	return false
-}
+// (ruleID, entity): "" on either field means "any". It's alert.Silenced
+// itself under this package's own name -- that one decides whether the
+// engine actually dispatches a notification; this call decides whether a
+// wire response should flag a row as dimmed, but it must always be the
+// SAME verdict, so this is a direct alias, not a second hand-maintained
+// copy of the logic (see TestSilenceCoversIsAlertSilenced). Exported so
+// main.go's snapshot assembly (the SSE frame's alerts block) can share it
+// too.
+var SilenceCovers = alert.Silenced
 
 // WebhookTargetDTO is GET /api/alerts/webhooks' per-target wire shape.
 // HeaderValue never appears here -- HeaderSet stands in for it, the only

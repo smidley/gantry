@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -202,6 +203,20 @@ func testUserRule(id string) store.AlertRule {
 		Metric: "cpu.pct", Op: ">", Threshold: 90, ClearThreshold: 80,
 		ForSeconds: 60, Severity: "warning",
 	}
+}
+
+// TestSilenceCoversIsAlertSilenced pins that this package carries no
+// second hand-copy of engine.go's silenced predicate: SilenceCovers must
+// be alert.Silenced itself, not a lookalike reimplementation that could
+// drift from it. Comparing the two as reflect.Value pointers only holds
+// if SilenceCovers really is the same top-level function value (a
+// wrapper that merely calls alert.Silenced would have its own, different
+// code pointer), so this fails the moment the sharing regresses back
+// into a copy -- the behavioral cases themselves stay owned by
+// TestAlertsGetFiltersToFiringAndFlagsSilenced here and engine_test.go's
+// own silenced()/Silenced() cases on the alert package side.
+func TestSilenceCoversIsAlertSilenced(t *testing.T) {
+	require.Equal(t, reflect.ValueOf(alert.Silenced).Pointer(), reflect.ValueOf(SilenceCovers).Pointer())
 }
 
 // --- GET /api/alerts ---------------------------------------------------

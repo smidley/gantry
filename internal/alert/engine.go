@@ -450,7 +450,7 @@ func (e *Engine) maybeRenotify(inst *store.AlertInstance, r store.AlertRule, now
 	if r.RenotifyHours <= 0 || now-inst.LastNotifiedAt < r.RenotifyHours*3600 {
 		return
 	}
-	if silenced(silences, r.ID, inst.Entity) {
+	if Silenced(silences, r.ID, inst.Entity) {
 		return
 	}
 	inst.LastNotifiedAt = now
@@ -470,7 +470,7 @@ func (e *Engine) maybeRenotify(inst *store.AlertInstance, r store.AlertRule, now
 // stamp bookkeeping and dispatch phase "fired". A tick that's STILL
 // silenced no-ops, same as fire() itself.
 func (e *Engine) catchUpSilencedFire(inst *store.AlertInstance, r store.AlertRule, now int64, silences []store.Silence) {
-	if silenced(silences, r.ID, inst.Entity) {
+	if Silenced(silences, r.ID, inst.Entity) {
 		return
 	}
 	inst.LastNotifiedAt = now
@@ -497,7 +497,7 @@ func (e *Engine) fire(r store.AlertRule, entity string, value float64, now int64
 	inst.FiredAt = now
 	inst.Summary = summarizeThreshold(r, entity, value)
 
-	if !silenced(silences, r.ID, entity) {
+	if !Silenced(silences, r.ID, entity) {
 		inst.LastNotifiedAt = now
 		inst.NotifyCount++
 	}
@@ -562,7 +562,7 @@ func (e *Engine) resolveNotify(inst store.AlertInstance, r store.AlertRule, now 
 	if _, err := e.Store.AppendEvent(store.Event{Kind: "alert.resolved", Entity: inst.Entity, Severity: "info", Detail: summary}); err != nil {
 		log.Printf("alert engine: append alert.resolved event: %v", err)
 	}
-	if !silenced(silences, r.ID, inst.Entity) && e.Dispatch != nil {
+	if !Silenced(silences, r.ID, inst.Entity) && e.Dispatch != nil {
 		e.Dispatch(AlertNotification{Phase: "resolved", Instance: inst, Rule: r, Summary: summary})
 	}
 }
@@ -582,11 +582,14 @@ func (e *Engine) upsert(inst *store.AlertInstance, activeIdx map[instanceKey]sto
 	activeIdx[keyOf(*inst)] = *inst
 }
 
-// silenced reports whether any silence in the slice covers (ruleID,
+// Silenced reports whether any silence in the slice covers (ruleID,
 // entity): "" on either field means "any". Silences never change a state
 // transition, only whether Dispatch is called for it -- see
-// resolveNotify/fire/maybeRenotify, the only three call sites.
-func silenced(silences []store.Silence, ruleID, entity string) bool {
+// resolveNotify/fire/maybeRenotify/catchUpSilencedFire/
+// processEventForRule below. Exported so server.SilenceCovers (the wire
+// response's "is this row dimmed" question) is this exact function, not
+// a second hand-maintained copy of the same logic.
+func Silenced(silences []store.Silence, ruleID, entity string) bool {
 	for _, s := range silences {
 		if (s.RuleID == "" || s.RuleID == ruleID) && (s.Entity == "" || s.Entity == entity) {
 			return true
@@ -736,7 +739,7 @@ func (e *Engine) processEventForRule(r store.AlertRule, ev store.Event, activeId
 		RuleID: r.ID, Kind: r.Kind, Entity: ev.Entity, State: "firing", Severity: r.Severity,
 		Summary: summarizeEvent(ev), StartedAt: now, FiredAt: now,
 	}
-	if !silenced(silences, r.ID, ev.Entity) {
+	if !Silenced(silences, r.ID, ev.Entity) {
 		inst.LastNotifiedAt = now
 		inst.NotifyCount = 1
 	}

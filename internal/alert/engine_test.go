@@ -500,11 +500,11 @@ func TestSilencedFireDispatchesExactlyOnceOnFirstUnsilencedTick(t *testing.T) {
 }
 
 func TestSilenceEmptyRuleAndEntityMeansAny(t *testing.T) {
-	require.True(t, silenced([]store.Silence{{RuleID: "", Entity: ""}}, "any-rule", "any-entity"))
-	require.True(t, silenced([]store.Silence{{RuleID: "r1", Entity: ""}}, "r1", "whatever"))
-	require.False(t, silenced([]store.Silence{{RuleID: "r1", Entity: ""}}, "r2", "whatever"))
-	require.True(t, silenced([]store.Silence{{RuleID: "", Entity: "e1"}}, "any-rule", "e1"))
-	require.False(t, silenced([]store.Silence{{RuleID: "", Entity: "e1"}}, "any-rule", "e2"))
+	require.True(t, Silenced([]store.Silence{{RuleID: "", Entity: ""}}, "any-rule", "any-entity"))
+	require.True(t, Silenced([]store.Silence{{RuleID: "r1", Entity: ""}}, "r1", "whatever"))
+	require.False(t, Silenced([]store.Silence{{RuleID: "r1", Entity: ""}}, "r2", "whatever"))
+	require.True(t, Silenced([]store.Silence{{RuleID: "", Entity: "e1"}}, "any-rule", "e1"))
+	require.False(t, Silenced([]store.Silence{{RuleID: "", Entity: "e1"}}, "any-rule", "e2"))
 }
 
 // --- rule disabled / deleted ----------------------------------------------

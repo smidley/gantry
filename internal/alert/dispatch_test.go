@@ -439,7 +439,7 @@ func TestDispatcherFlapGuardWindowIsRollingNotFixed(t *testing.T) {
 // TestDispatcherFlapSilenceForHostRuleScopesRuleWide pins the
 // empty-entity contract end to end: a host-kind rule dispatches with
 // Instance.Entity == "", the flap guard writes the silence with that
-// entity verbatim, and engine.go's silenced() treats Entity == "" as
+// entity verbatim, and engine.go's Silenced() treats Entity == "" as
 // "any entity" -- so the silence covers the whole rule. Correct for
 // today's host rules (one instance, entity ""), and the assertion
 // against a hypothetical named entity is here to trip loudly if a
@@ -458,11 +458,11 @@ func TestDispatcherFlapSilenceForHostRuleScopesRuleWide(t *testing.T) {
 	require.Equal(t, "host-cpu-high", sil.RuleID)
 	require.Equal(t, "", sil.Entity, "the silence carries the entity exactly as dispatched")
 
-	require.True(t, silenced([]store.Silence{sil}, "host-cpu-high", ""),
+	require.True(t, Silenced([]store.Silence{sil}, "host-cpu-high", ""),
 		"the host rule's own (single) instance is silenced")
-	require.True(t, silenced([]store.Silence{sil}, "host-cpu-high", "some-other-entity"),
+	require.True(t, Silenced([]store.Silence{sil}, "host-cpu-high", "some-other-entity"),
 		"Entity == \"\" scopes the silence to the WHOLE rule -- any entity it might ever dispatch")
-	require.False(t, silenced([]store.Silence{sil}, "another-rule", ""),
+	require.False(t, Silenced([]store.Silence{sil}, "another-rule", ""),
 		"other rules stay unaffected")
 }
 

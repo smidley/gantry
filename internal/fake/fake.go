@@ -642,6 +642,14 @@ func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 			used := d.sizeBytes * usedFrac
 			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.used_bytes"}, ts, used)
 			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.free_bytes"}, ts, d.sizeBytes-used)
+			// fs.used_pct = usedFrac*100 exactly (used+free == d.sizeBytes
+			// always here), matching disks.go's real-collector formula.
+			// Deliberately plain sub-threshold drift, not a demo: every
+			// disk's baseUsed above tops out at disk2's 0.71, nowhere
+			// near disk-usage-high's 90% fire threshold, so this can
+			// never become a second, accidental alert demo alongside
+			// Task 9's own deliberate disk4 temp.c ramp.
+			g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.used_pct"}, ts, usedFrac*100)
 		}
 
 		errCount := 0.0

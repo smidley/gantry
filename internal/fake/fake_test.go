@@ -227,6 +227,40 @@ func TestSpunDownDiskEmitsNoTemp(t *testing.T) {
 	require.NotEmpty(t, disk4Temps, "disk4 is spun up and must report temp.c")
 }
 
+// TestDiskFsUsedPctStaysWellClearOfDiskUsageHighThreshold pins fake
+// mode's deliberate safety margin, not just its formula: every disk's
+// baseUsed (highest is disk2's 0.71) plus the slow drift/jitter formula
+// must never approach disk-usage-high's 90% fire threshold, even across
+// a long simulated run. Unlike disk4's temp.c (Task 9's OWN deliberate
+// ramp into disk-temp-high), nothing here is meant to alert -- Task 9's
+// demo framework already owns the one alert Gantry's fake mode is
+// supposed to fire on purpose, and a second one firing here by accident
+// would be a permanent, undismissable false positive in every demo
+// session. Also pins the formula itself: fs.used_pct must be this
+// disk's used share of its OWN fixed size (used/(used+free)*100),
+// matching disks.go's real-collector formula.
+func TestDiskFsUsedPctStaysWellClearOfDiskUsageHighThreshold(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	tickEvery(g, time.Unix(1_000_000, 0), time.Minute, 60) // an hour simulated
+
+	for _, d := range disks {
+		if !d.hasFS {
+			continue
+		}
+		pcts := sink.recs[store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.used_pct"}]
+		used := sink.recs[store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.used_bytes"}]
+		free := sink.recs[store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "fs.free_bytes"}]
+		require.NotEmpty(t, pcts, "%s must report fs.used_pct", d.name)
+		require.Len(t, pcts, len(used))
+		for i, s := range pcts {
+			require.Less(t, s.Val, 90.0, "%s fs.used_pct must stay clear of disk-usage-high's 90%% threshold", d.name)
+			want := used[i].Val / (used[i].Val + free[i].Val) * 100
+			require.InDelta(t, want, s.Val, 1e-9, "%s fs.used_pct must equal used/(used+free)*100", d.name)
+		}
+	}
+}
+
 // TestDiskRotationalDistinguishesCacheAsSolidState pins the fake array's
 // rotational contract: every spinning array/parity disk reads 1, while
 // cache (an NVMe/SSD pool in a realistic Unraid layout) reads 0 -- so

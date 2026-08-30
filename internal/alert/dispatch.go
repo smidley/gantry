@@ -169,9 +169,27 @@ func (d *Dispatcher) worker(ch Channel, q chan deliveryJob) {
 	for {
 		select {
 		case <-d.stop:
+			d.drainQueue(ch, q)
 			return
 		case job := <-q:
 			d.deliver(ch, job.n)
+		}
+	}
+}
+
+// drainQueue records every queued-but-unstarted job as a dropped
+// delivery when the worker exits on Stop -- the ledger's whole point is
+// that no notification vanishes without a row saying what happened to
+// it. Best-effort against a Dispatch racing Stop itself: a job enqueued
+// after this drain returns is lost, the same line every post-Stop
+// enqueue already sits on.
+func (d *Dispatcher) drainQueue(ch Channel, q chan deliveryJob) {
+	for {
+		select {
+		case job := <-q:
+			d.recordDrop(ch, job.n, errShutdownDrop)
+		default:
+			return
 		}
 	}
 }
@@ -256,7 +274,7 @@ func (d *Dispatcher) send(ch Channel, n AlertNotification) {
 	}
 	select {
 	case dropped := <-q:
-		d.recordDrop(ch, dropped.n)
+		d.recordDrop(ch, dropped.n, errQueueOverflow)
 	default:
 	}
 	select {
@@ -315,11 +333,18 @@ func (d *Dispatcher) recordRateLimited(ch Channel, n AlertNotification, now int6
 	}
 }
 
-var errQueueOverflow = errors.New("queue overflow: dropped oldest")
+var (
+	errQueueOverflow = errors.New("queue overflow: dropped oldest")
+	errShutdownDrop  = errors.New("shutdown: dropped queued")
+)
 
-func (d *Dispatcher) recordDrop(ch Channel, n AlertNotification) {
-	d.recordDelivery(ch, n, SendResult{OK: false, Err: errQueueOverflow})
-	d.recordFailureEvent(ch.ID(), SendResult{OK: false, Err: errQueueOverflow})
+// recordDrop writes the ledger row + (rate-limited) failure event for a
+// notification that never reached its channel's Send at all -- reason
+// says why: displaced by a newer job on overflow, or still queued when
+// Stop drained the worker.
+func (d *Dispatcher) recordDrop(ch Channel, n AlertNotification, reason error) {
+	d.recordDelivery(ch, n, SendResult{OK: false, Err: reason})
+	d.recordFailureEvent(ch.ID(), SendResult{OK: false, Err: reason})
 }
 
 // recordFailureEvent appends alert.delivery_failed, rate-limited to once

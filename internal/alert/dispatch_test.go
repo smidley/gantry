@@ -25,8 +25,9 @@ type fakeChannel struct {
 	mu    sync.Mutex
 	sends []AlertNotification
 
-	result SendResult
-	block  chan struct{} // if non-nil, Send waits for a receive on this before returning
+	entered atomic.Int64 // Send calls begun, including ones still wedged on block
+	result  SendResult
+	block   chan struct{} // if non-nil, Send waits for a receive on this before returning
 }
 
 func newFakeChannel(id string) *fakeChannel {
@@ -36,9 +37,17 @@ func newFakeChannel(id string) *fakeChannel {
 func (c *fakeChannel) ID() string     { return c.id }
 func (c *fakeChannel) Health() string { return c.health }
 
-func (c *fakeChannel) Send(_ context.Context, n AlertNotification) SendResult {
+func (c *fakeChannel) Send(ctx context.Context, n AlertNotification) SendResult {
+	c.entered.Add(1)
 	if c.block != nil {
-		<-c.block
+		select {
+		case <-c.block:
+		case <-ctx.Done(): // mirror a real channel post-shutdown: abort and report the failure
+			c.mu.Lock()
+			c.sends = append(c.sends, n)
+			c.mu.Unlock()
+			return SendResult{OK: false, Attempts: 1, Err: ctx.Err()}
+		}
 	}
 	c.mu.Lock()
 	c.sends = append(c.sends, n)
@@ -571,6 +580,38 @@ func TestDispatcherStopInterruptsWebhookBackoff(t *testing.T) {
 	elapsed := stopAndAwaitWorkers(t, d, 2*time.Second)
 	require.Less(t, elapsed, time.Second, "a backoff wait must observe Stop, not sleep out its full duration")
 	require.EqualValues(t, 1, calls.Load(), "no further attempts after Stop")
+}
+
+// TestDispatcherStopDrainsQueuedJobsIntoLedger pins shutdown
+// accounting: jobs enqueued but never started when Stop() lands must
+// each get a dropped-delivery ledger row rather than vanish with the
+// queue -- the ledger's whole point is that no notification disappears
+// without a row saying what happened to it.
+func TestDispatcherStopDrainsQueuedJobsIntoLedger(t *testing.T) {
+	hook := newFakeChannel("webhook:slow")
+	hook.block = make(chan struct{}) // never released: the worker wedges on job 0 until Stop aborts it
+	st := &fakeDeliveryStore{}
+	d := NewDispatcher(st, []Channel{hook}, nil, nil)
+
+	// job 0 is picked up by the worker and wedges; jobs 1-3 sit queued.
+	for i := 0; i < 4; i++ {
+		d.Dispatch(fireNotification(fmt.Sprintf("r%d", i), "e"))
+	}
+	require.Eventually(t, func() bool { return hook.entered.Load() == 1 }, time.Second, 5*time.Millisecond,
+		"the worker must be wedged inside job 0's Send before Stop lands")
+
+	stopAndAwaitWorkers(t, d, 2*time.Second)
+
+	require.Eventually(t, func() bool { return len(st.deliveriesSnapshot()) == 4 }, time.Second, 5*time.Millisecond,
+		"every dispatched notification gets a ledger row: 1 aborted in-flight + 3 shutdown drops")
+	drops := 0
+	for _, del := range st.deliveriesSnapshot() {
+		require.False(t, del.OK)
+		if del.Error == "shutdown: dropped queued" {
+			drops++
+		}
+	}
+	require.Equal(t, 3, drops, "each queued-but-unstarted job records as a shutdown drop")
 }
 
 // --- non-blocking dispatch -------------------------------------------------

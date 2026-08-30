@@ -22,6 +22,7 @@ import (
 	"github.com/smidley/gantry/internal/collect/host"
 	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/config"
+	"github.com/smidley/gantry/internal/fake"
 	"github.com/smidley/gantry/internal/server"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
@@ -1629,7 +1630,7 @@ func TestBuildDispatcherIncludesNotifyAndConfiguredWebhookChannels(t *testing.T)
 	}))
 	cfg := config.New(st, func(string) string { return "" })
 
-	d, err := buildDispatcher(st, cfg, func(string) string { return "" }, "v-test")
+	d, err := buildDispatcher(st, cfg, func(string) string { return "" }, "v-test", false)
 	require.NoError(t, err)
 	t.Cleanup(d.Stop)
 
@@ -1658,7 +1659,7 @@ func TestAlertEngineFiresThroughDispatcherToNotifySpool(t *testing.T) {
 	}
 	cfg := config.New(st, getenv)
 
-	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test")
+	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test", false)
 	require.NoError(t, err)
 	t.Cleanup(dispatcher.Stop)
 
@@ -1826,4 +1827,297 @@ func TestRunWiresAlertsAndWebhooksAPIEndToEnd(t *testing.T) {
 	require.NoError(t, json.NewDecoder(snapResp.Body).Decode(&snap))
 	require.NotNil(t, snap.Alerts.Firing, "the frame's alerts block must always be a real (if empty) array")
 	require.Contains(t, snap.Alerts.Channels, "notify")
+}
+
+// --- Task 9: fake-mode alert demo -------------------------------------------
+
+func TestResolveNotifyDirEnvAlwaysWinsRegardlessOfMode(t *testing.T) {
+	for _, fakeMode := range []bool{false, true} {
+		dir, err := resolveNotifyDir(func(k string) string {
+			if k == "GANTRY_NOTIFY_DIR" {
+				return "/custom/notify"
+			}
+			return ""
+		}, fakeMode)
+		require.NoError(t, err)
+		require.Equal(t, "/custom/notify", dir, "fakeMode=%v", fakeMode)
+	}
+}
+
+func TestResolveNotifyDirRealModeDefaultsToNotifyMount(t *testing.T) {
+	dir, err := resolveNotifyDir(func(string) string { return "" }, false)
+	require.NoError(t, err)
+	require.Equal(t, "/notify", dir)
+}
+
+// TestResolveNotifyDirFakeModeCreatesFreshWritableTempDir pins Task 9's
+// own contract: with no override, fake mode gets a real, distinct,
+// writable directory each call -- never the unmounted "/notify" real
+// mode falls back to -- so the notify channel's own construction-time
+// probe (channel_notify.go's Health doc) finds it writable and reports
+// "ok" immediately, with no operator action.
+func TestResolveNotifyDirFakeModeCreatesFreshWritableTempDir(t *testing.T) {
+	dirA, err := resolveNotifyDir(func(string) string { return "" }, true)
+	require.NoError(t, err)
+	require.NotEqual(t, "/notify", dirA)
+	require.NoError(t, os.WriteFile(filepath.Join(dirA, "probe"), []byte("x"), 0o644))
+
+	dirB, err := resolveNotifyDir(func(string) string { return "" }, true)
+	require.NoError(t, err)
+	require.NotEqual(t, dirA, dirB, "each call with no override must get its own fresh directory")
+}
+
+func TestSeedFakeWebhookTargetsInsertsBothAndIsIdempotent(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedFakeWebhookTargets(st, 8380))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 2)
+	byID := map[string]alert.WebhookTarget{}
+	for _, tgt := range targets {
+		byID[tgt.ID] = tgt
+	}
+	require.Equal(t, "http://127.0.0.1:8380/api/healthz", byID[fakeWebhookOKTargetID].URL)
+	require.True(t, byID[fakeWebhookOKTargetID].Enabled)
+	require.Equal(t, "http://127.0.0.1:1/dead", byID[fakeWebhookFailTargetID].URL)
+	require.True(t, byID[fakeWebhookFailTargetID].Enabled)
+
+	// Idempotent: a second call (a later boot) must not duplicate either
+	// target, and must leave an in-between hand edit alone.
+	edited := byID[fakeWebhookOKTargetID]
+	edited.Enabled = false
+	require.NoError(t, saveWebhookTargets(st, []alert.WebhookTarget{edited, byID[fakeWebhookFailTargetID]}))
+	require.NoError(t, seedFakeWebhookTargets(st, 8380))
+
+	targets, err = loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 2, "re-seeding must not duplicate either target")
+	for _, tgt := range targets {
+		if tgt.ID == fakeWebhookOKTargetID {
+			require.False(t, tgt.Enabled, "re-seeding must not resurrect a hand-edited target")
+		}
+	}
+}
+
+// TestRunFakeModeSeedsFastRulesAndDemoWebhookTargets boots the real
+// server with GANTRY_FAKE_DATA=1 and no GANTRY_NOTIFY_DIR override, and
+// checks everything Task 9 promises at BOOT time (not the multi-minute
+// fire/resolve journey itself, which TestFakeModeAlertDemoFiresThenResolves
+// below proves against the engine directly, deterministically): every
+// threshold rule seeds with a 60s/60s window, both demo webhook targets
+// exist, and the notify channel already reads "ok" against its own
+// fresh temp dir with zero configuration.
+func TestRunFakeModeSeedsFastRulesAndDemoWebhookTargets(t *testing.T) {
+	port := freePort(t)
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   dbPath,
+		"GANTRY_FAKE_DATA": "1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("run did not shut down")
+		}
+	}()
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(base + "/api/healthz")
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	rulesResp, err := http.Get(base + "/api/alerts/rules")
+	require.NoError(t, err)
+	defer drainAndClose(rulesResp)
+	var rulesBody struct {
+		Rules []server.AlertRuleDTO `json:"rules"`
+	}
+	require.NoError(t, json.NewDecoder(rulesResp.Body).Decode(&rulesBody))
+	found := 0
+	for _, r := range rulesBody.Rules {
+		if r.Type != "threshold" {
+			continue
+		}
+		found++
+		require.EqualValues(t, 60, r.ForSeconds, "rule %q must seed fast in fake mode", r.ID)
+		require.EqualValues(t, 60, r.ClearSeconds, "rule %q must seed fast in fake mode", r.ID)
+	}
+	require.Equal(t, 7, found, "all seven threshold builtins must have compressed windows")
+
+	whResp, err := http.Get(base + "/api/alerts/webhooks")
+	require.NoError(t, err)
+	defer drainAndClose(whResp)
+	var whBody struct {
+		Targets []server.WebhookTargetDTO `json:"targets"`
+	}
+	require.NoError(t, json.NewDecoder(whResp.Body).Decode(&whBody))
+	ids := map[string]bool{}
+	for _, tgt := range whBody.Targets {
+		ids[tgt.ID] = true
+	}
+	require.True(t, ids[fakeWebhookOKTargetID], "the always-succeeds demo target must be seeded")
+	require.True(t, ids[fakeWebhookFailTargetID], "the always-fails demo target must be seeded")
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(base + "/api/alerts")
+		if err != nil {
+			return false
+		}
+		defer drainAndClose(resp)
+		var body struct {
+			Channels map[string]string `json:"channels"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&body) != nil {
+			return false
+		}
+		return body.Channels["notify"] == "ok"
+	}, 3*time.Second, 50*time.Millisecond, "the notify channel must read ok against fake mode's own temp-dir default, no configuration needed")
+}
+
+// TestFakeModeAlertDemoFiresThenResolves wires the real fake.Generator
+// straight into a real alert.Engine + the real buildDispatcher output --
+// the actual production pieces, not a re-implementation -- and drives
+// both through a synthetic clock advancing in the fake generator's own
+// 2s cadence, so the whole ~6-minute demo schedule (disk4's temp ramp
+// crossing disk-temp-high's fire threshold, then its cool-down crossing
+// the clear threshold) proves out in a fast, deterministic test rather
+// than a real wall-clock wait -- see internal/fake/fake.go's
+// alertDemoDiskEntity doc for the exact schedule these tick counts walk.
+func TestFakeModeAlertDemoFiresThenResolves(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(true)))
+
+	fk := fake.New(st, st, 1)
+
+	notifyDir := t.TempDir()
+	getenv := func(k string) string {
+		if k == "GANTRY_NOTIFY_DIR" {
+			return notifyDir
+		}
+		return ""
+	}
+	cfg := config.New(st, getenv)
+	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test", true)
+	require.NoError(t, err)
+	t.Cleanup(dispatcher.Stop)
+
+	fleet := func() []alert.FleetMember {
+		metas := fk.Metas()
+		out := make([]alert.FleetMember, len(metas))
+		for i, m := range metas {
+			out[i] = alert.FleetMember{Name: m.Name, State: m.State, Health: m.Health}
+		}
+		return out
+	}
+	noClass := func(string, string) string { return "" }
+
+	boot := time.Unix(1_700_000_000, 0)
+	now := boot
+	eng := alert.New(st, st.Live().MatchSince, noClass, fleet, dispatcher.Dispatch, func() time.Time { return now })
+
+	tick := func(elapsedSeconds int) {
+		now = boot.Add(time.Duration(elapsedSeconds) * time.Second)
+		fk.Tick(now)
+		require.NoError(t, eng.Tick(context.Background()))
+	}
+
+	// Ramp + hold: disk4 crosses disk-temp-high's 55°C fire threshold at
+	// ~t=64s and stays above it, satisfying the fast-mode 60s sustained-
+	// for window by ~t=124s (see alertDemoDiskEntity's own doc). 140s
+	// gives comfortable margin.
+	for s := 0; s <= 140; s += 2 {
+		tick(s)
+	}
+
+	active, err := st.ActiveAlertInstances(context.Background())
+	require.NoError(t, err)
+	var firing *store.AlertInstance
+	for i := range active {
+		if active[i].RuleID == "disk-temp-high" && active[i].Entity == "disk4" {
+			firing = &active[i]
+		}
+	}
+	require.NotNil(t, firing, "disk-temp-high must be firing on disk4 by t=140s")
+	require.Equal(t, "firing", firing.State)
+	require.Greater(t, firing.Value, 55.0)
+
+	// The frame's own alerts block (main.go's buildAlertsBlock) must
+	// also see it -- the same data the Overview headline/Alerts view
+	// read live, capped and joined with the rule name.
+	block := buildAlertsBlock(st, dispatcher)
+	sawDisk4 := false
+	for _, f := range block.Firing {
+		if f.RuleID == "disk-temp-high" && f.Entity == "disk4" {
+			sawDisk4 = true
+			require.Equal(t, "Disk temperature high", f.RuleName)
+		}
+	}
+	require.True(t, sawDisk4, "the frame's alerts block must carry the firing disk4 instance")
+
+	// At least one delivery (the "fired" notification, through the real
+	// notify-spool channel) must have landed by now.
+	require.Eventually(t, func() bool {
+		deliveries, derr := st.LastDeliveries(context.Background(), 20)
+		if derr != nil {
+			return false
+		}
+		for _, d := range deliveries {
+			if d.Channel == "notify" && d.OK {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 20*time.Millisecond, "the fired notification must reach the notify spool")
+
+	// Cool-down: disk4 crosses back below the 50°C clear threshold at
+	// ~t=310s and stays below it, satisfying the 60s clear window by
+	// ~t=370s. 420s gives comfortable margin.
+	for s := 142; s <= 420; s += 2 {
+		tick(s)
+	}
+
+	history, err := st.AlertHistory(context.Background(), 0, 0, 50)
+	require.NoError(t, err)
+	var resolved *store.AlertInstance
+	for i := range history {
+		if history[i].RuleID == "disk-temp-high" && history[i].Entity == "disk4" {
+			resolved = &history[i]
+		}
+	}
+	require.NotNil(t, resolved, "disk-temp-high on disk4 must have resolved by t=420s")
+	require.Equal(t, "resolved", resolved.State)
+	require.Equal(t, "cleared", resolved.ResolveReason)
+	require.Less(t, resolved.Value, 50.0)
+
+	activeAfter, err := st.ActiveAlertInstances(context.Background())
+	require.NoError(t, err)
+	for _, inst := range activeAfter {
+		require.False(t, inst.RuleID == "disk-temp-high" && inst.Entity == "disk4", "the resolved instance must no longer be active")
+	}
+
+	require.Eventually(t, func() bool {
+		deliveries, derr := st.LastDeliveries(context.Background(), 20)
+		if derr != nil {
+			return false
+		}
+		for _, d := range deliveries {
+			if d.Channel == "notify" && d.Phase == "resolved" && d.OK {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 20*time.Millisecond, "the resolved notification must also reach the notify spool")
 }

@@ -74,13 +74,26 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		}
 	}()
 
+	// cfg is constructed here, ahead of the alert-rule seed just below,
+	// so fakeMode (env>settings>default, the same precedence every other
+	// cfg.Bool call in this function uses) is known in time to pick the
+	// right seed table -- config.New itself is a pure wrap of st+getenv
+	// with no side effects, so resolving it this early changes nothing
+	// else about boot order.
+	cfg := config.New(st, getenv)
+	fakeMode := cfg.Bool("fake_data", false)
+
 	// Seeded before anything else touches alert_rules: an id already
 	// present (a prior boot's seed, possibly since edited or disabled)
 	// is left untouched; only an id genuinely absent -- first boot, or a
 	// default introduced by a later upgrade -- gets inserted. There is
 	// no alert engine yet to gate this on (Task 4); "before the engine's
-	// first tick" is trivially satisfied by seeding at boot.
-	if err := st.SeedAlertRules(store.DefaultAlertRules()); err != nil {
+	// first tick" is trivially satisfied by seeding at boot. fast=
+	// fakeMode compresses every threshold rule's sustained-for window to
+	// 60s (Task 9's fake-mode alert demo) so it can go pending -> firing
+	// -> resolved inside a short interactive session; a real box always
+	// seeds the true, uncompressed numbers.
+	if err := st.SeedAlertRules(store.DefaultAlertRules(fakeMode)); err != nil {
 		return fmt.Errorf("seed alert rules: %w", err)
 	}
 	// GANTRY_WEBHOOK_URL (spec Sec5's documented single-webhook path) is
@@ -99,7 +112,6 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cfg := config.New(st, getenv)
 	port := cfg.Int("port", 8380)
 	// readOnly is Gantry's write-path kill switch (GANTRY_READ_ONLY=1,
 	// resolved through the same env>settings>default precedence every
@@ -132,7 +144,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	var fakeDeviceLabels func() map[string]unraid.DeviceLabel
 	var fakeSharePlacement func() map[string]unraid.SharePlacement
 	var fk *fake.Generator
-	if cfg.Bool("fake_data", false) {
+	if fakeMode {
 		log.Println("fake data mode: synthesizing a demo fleet")
 		fk = fake.New(st, st, time.Now().UnixNano())
 		fakeMetas = fk.Metas
@@ -144,6 +156,15 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 			defer wg.Done()
 			fk.Run(runCtx, 2*time.Second, nil)
 		}()
+
+		// Task 9: two webhook targets seeded (never overwritten once
+		// present, same idempotent-insert idiom as SeedAlertRules/
+		// seedWebhookTargetFromEnv) so the delivery ledger's SUCCESS and
+		// FAILURE paths both render in the Settings channels card with no
+		// external service required -- see seedFakeWebhookTargets' own doc.
+		if err := seedFakeWebhookTargets(st, port); err != nil {
+			return fmt.Errorf("seed fake webhook targets: %w", err)
+		}
 	}
 
 	// Collectors are always registered, fake-data mode or not — each one's
@@ -255,7 +276,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// phase's job, not this wiring's) plus one webhook channel per
 	// enabled, valid configured target. Its workers start lazily on the
 	// first Dispatch call; Run here only wires their shutdown to runCtx.
-	dispatcher, err := buildDispatcher(st, cfg, getenv, ver)
+	dispatcher, err := buildDispatcher(st, cfg, getenv, ver, fakeMode)
 	if err != nil {
 		return fmt.Errorf("build alert dispatcher: %w", err)
 	}
@@ -773,6 +794,64 @@ func seedWebhookTargetFromEnv(st *store.Store, url string) error {
 	return saveWebhookTargets(st, targets)
 }
 
+// fakeWebhookOKTargetID/fakeWebhookFailTargetID name Task 9's two demo
+// webhook targets -- fixed ids (not user-editable identity, the same
+// "stable slug" convention alert_rules.id uses) so an idempotent re-seed
+// on a later boot recognizes them.
+const (
+	fakeWebhookOKTargetID   = "fake-ok"
+	fakeWebhookFailTargetID = "fake-fail"
+)
+
+// seedFakeWebhookTargets inserts Task 9's two fake-mode demo webhook
+// targets -- one pointing at Gantry's OWN healthz endpoint (loopback,
+// always 200, so the SUCCESS path, its delivery-ledger row, and the
+// Settings channels card's "ok" reading all render with no external
+// service), one at a guaranteed-unreachable loopback port (1 is never a
+// listening service) so the FAILURE path, its ledger row, and the
+// channel card's failure text render just as reliably. Idempotent and
+// insert-only, the same convention SeedAlertRules/
+// seedWebhookTargetFromEnv already use: a target already present (this
+// boot or an earlier one) is left completely untouched, so a demo
+// session's own edits to either one survive a restart.
+//
+// server.go's healthz route deliberately answers any HTTP method, not
+// just GET, specifically so this loopback POST succeeds -- a health
+// check is read-only and side-effect-free regardless of verb, and
+// restricting it to GET would make this the one demo target that could
+// never actually succeed.
+func seedFakeWebhookTargets(st *store.Store, port int) error {
+	targets, err := loadWebhookTargets(st)
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		existing[t.ID] = true
+	}
+
+	changed := false
+	if !existing[fakeWebhookOKTargetID] {
+		targets = append(targets, alert.WebhookTarget{
+			ID: fakeWebhookOKTargetID, Name: "Fake mode: always succeeds",
+			URL:     fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port),
+			Enabled: true, TimeoutS: 5,
+		})
+		changed = true
+	}
+	if !existing[fakeWebhookFailTargetID] {
+		targets = append(targets, alert.WebhookTarget{
+			ID: fakeWebhookFailTargetID, Name: "Fake mode: always fails",
+			URL: "http://127.0.0.1:1/dead", Enabled: true, TimeoutS: 2,
+		})
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return saveWebhookTargets(st, targets)
+}
+
 // buildWebhookChannels turns every enabled, valid target into a Channel.
 // A target that fails validation is skipped with a log line rather than
 // aborting boot -- the same "one bad rule can't take the rest down"
@@ -794,18 +873,46 @@ func buildWebhookChannels(targets []alert.WebhookTarget, version string, clock f
 	return out
 }
 
+// resolveNotifyDir picks the notify-spool directory buildDispatcher's
+// channel writes to: GANTRY_NOTIFY_DIR when set (real mode and fake mode
+// alike -- an operator's explicit choice always wins), else "/notify"
+// (the CA template's own mount point) in real mode, else -- fake mode
+// only, Task 9's own contract -- a fresh temp directory, so the demo has
+// somewhere to write with zero configuration and the Alerts view's
+// channel strip reads "ok" rather than the unmounted-spool hint on a
+// box with no real /notify mount at all. The directory is never cleaned
+// up by this process; it's a demo aid for the life of one run, not a
+// durable path, and the OS reclaims temp storage on its own schedule.
+func resolveNotifyDir(getenv func(string) string, fakeMode bool) (string, error) {
+	if v := getenv("GANTRY_NOTIFY_DIR"); v != "" {
+		return v, nil
+	}
+	if !fakeMode {
+		return "/notify", nil
+	}
+	dir, err := os.MkdirTemp("", "gantry-fake-notify-")
+	if err != nil {
+		return "", fmt.Errorf("create fake notify dir: %w", err)
+	}
+	log.Printf("fake data mode: notify spool at %s", dir)
+	return dir, nil
+}
+
 // buildDispatcher assembles the alert.Dispatcher wired to
 // alert.Engine.Dispatch: the notify-spool channel is always present
 // (GANTRY_NOTIFY_DIR, default /notify -- the CA template's own mount
-// point, real mode and fake mode alike; fake mode defaulting it to a
-// temp dir so the demo has somewhere to write is a later phase's job,
-// not this wiring's), plus one Channel per enabled, valid configured
-// webhook target. alert.link_base and alert.notify_resolved are read
-// fresh on every call through their own closures -- a settings change
-// takes effect on the very next dispatch, no restart, the same
-// resolved-fresh-every-tick posture the retention settings above use.
-func buildDispatcher(st *store.Store, cfg *config.Config, getenv func(string) string, version string) (*alert.Dispatcher, error) {
-	notifyDir := envOnly(getenv, "GANTRY_NOTIFY_DIR", "/notify")
+// point in real mode; fake mode defaults it to a fresh temp dir instead
+// -- see fakeNotifyDir's own doc, Task 9), plus one Channel per enabled,
+// valid configured webhook target. alert.link_base and alert.
+// notify_resolved are read fresh on every call through their own
+// closures -- a settings change takes effect on the very next dispatch,
+// no restart, the same resolved-fresh-every-tick posture the retention
+// settings above use.
+func buildDispatcher(st *store.Store, cfg *config.Config, getenv func(string) string, version string, fakeMode bool) (*alert.Dispatcher, error) {
+	notifyDir, err := resolveNotifyDir(getenv, fakeMode)
+	if err != nil {
+		return nil, err
+	}
 	linkBase := func() string {
 		v, _, _ := st.SettingGet("alert.link_base")
 		return v

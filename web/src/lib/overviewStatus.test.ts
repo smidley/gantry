@@ -158,6 +158,112 @@ describe('deriveOverviewStatus', () => {
   });
 });
 
+describe('deriveOverviewStatus alerts merge (Task 12)', () => {
+  it('a firing alert with no dedup match gets its own row', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [{ rule_id: 'host-cpu-high', rule_name: 'Host CPU high', severity: 'warning', entity: '', silenced: false }],
+    });
+    expect(status.anomalies).toEqual([
+      { kind: 'alert', ruleId: 'host-cpu-high', ruleName: 'Host CPU high', entity: '', severity: 'warning' },
+    ]);
+    expect(status.headline).toBe('1 thing needs you');
+  });
+
+  it('a silenced firing alert contributes nothing at all', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [{ rule_id: 'host-cpu-high', rule_name: 'Host CPU high', severity: 'warning', entity: '', silenced: true }],
+    });
+    expect(status.ok).toBe(true);
+    expect(status.anomalies).toEqual([]);
+  });
+
+  it('disk-usage-high on the SAME slot suppresses its own row and upgrades the existing one\'s severity', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      disks: { disk1: { 'fs.used_bytes': 91, 'fs.free_bytes': 9 } }, // frame anomaly: disk-usage, warning by default
+      alerts: [{ rule_id: 'disk-usage-high', rule_name: 'Disk usage high', severity: 'alert', entity: 'disk1', silenced: false }],
+    });
+    expect(status.anomalies).toHaveLength(1); // no separate 'alert' row
+    expect(status.anomalies[0]).toEqual({ kind: 'disk-usage', slot: 'disk1', usagePct: 91, severityOverride: 'critical' });
+    expect(describeAnomaly(status.anomalies[0]).severity).toBe('critical');
+  });
+
+  it('disk-usage-high on a DIFFERENT slot than the frame flagged does NOT dedup -- it is a distinct concern', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      disks: { disk1: { 'fs.used_bytes': 91, 'fs.free_bytes': 9 } },
+      alerts: [{ rule_id: 'disk-usage-high', rule_name: 'Disk usage high', severity: 'warning', entity: 'disk9', silenced: false }],
+    });
+    expect(status.anomalies).toHaveLength(2);
+    expect(status.anomalies).toContainEqual({ kind: 'disk-usage', slot: 'disk1', usagePct: 91 });
+    expect(status.anomalies).toContainEqual({
+      kind: 'alert',
+      ruleId: 'disk-usage-high',
+      ruleName: 'Disk usage high',
+      entity: 'disk9',
+      severity: 'warning',
+    });
+  });
+
+  it('container-unhealthy dedups against the SAME container name only -- no separate row, and the frame anomaly (already "critical", the ceiling) is unchanged', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['grafana'],
+      alerts: [{ rule_id: 'container-unhealthy', rule_name: 'Container unhealthy', severity: 'alert', entity: 'grafana', silenced: false }],
+    });
+    // No severityOverride here: 'unhealthy' already defaults to
+    // 'critical', the ceiling, so there is nothing left to upgrade to --
+    // the meaningful assertion is that no SECOND 'alert' row was added.
+    expect(status.anomalies).toEqual([{ kind: 'unhealthy', name: 'grafana' }]);
+    expect(describeAnomaly(status.anomalies[0]).severity).toBe('critical');
+  });
+
+  it('container-unhealthy on a DIFFERENT container than the frame flagged does NOT dedup', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['grafana'],
+      alerts: [{ rule_id: 'container-unhealthy', rule_name: 'Container unhealthy', severity: 'alert', entity: 'sonarr', silenced: false }],
+    });
+    expect(status.anomalies).toHaveLength(2);
+  });
+
+  it('array-stopped dedups regardless of entity (there is only ever one array)', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      arrayStarted: 0,
+      alerts: [{ rule_id: 'array-stopped', rule_name: 'Array stopped', severity: 'alert', entity: 'array', silenced: false }],
+    });
+    expect(status.anomalies).toEqual([{ kind: 'array-stopped', severityOverride: 'critical' }]);
+    expect(describeAnomaly(status.anomalies[0]).severity).toBe('critical');
+  });
+
+  it('an upgrade never DOWNGRADES: a lower-severity alert on an already-critical anomaly changes nothing', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['grafana'], // already 'critical' by default
+      alerts: [{ rule_id: 'container-unhealthy', rule_name: 'Container unhealthy', severity: 'warning', entity: 'grafana', silenced: false }],
+    });
+    expect(describeAnomaly(status.anomalies[0]).severity).toBe('critical');
+  });
+
+  it('disk-errors dedups per slot, same as disk-usage-high', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      disks: { disk2: { errors: 1 } },
+      alerts: [{ rule_id: 'disk-errors', rule_name: 'Disk errors', severity: 'alert', entity: 'disk2', silenced: false }],
+    });
+    expect(status.anomalies).toEqual([{ kind: 'disk-errors', slot: 'disk2', errors: 1, severityOverride: 'critical' }]);
+  });
+
+  it('a missing alerts field behaves exactly like an empty array -- pages that have not wired alerts through yet are unaffected', () => {
+    const withUndefined = deriveOverviewStatus(BASE);
+    const withEmpty = deriveOverviewStatus({ ...BASE, alerts: [] });
+    expect(withUndefined).toEqual(withEmpty);
+  });
+});
+
 describe('describeAnomaly', () => {
   it('unhealthy names the container and links to it', () => {
     const text = describeAnomaly({ kind: 'unhealthy', name: 'sonarr' });

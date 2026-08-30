@@ -21,13 +21,50 @@ import { diskUsagePct } from './disks';
 import { fmtPct } from './format';
 import type { HealthStatus } from './containerStatus';
 
+// AnomalyBase.severityOverride, when present, is the MAX of an anomaly's
+// own default severity and a firing alert's severity that the dedup
+// table below maps onto the same concern -- e.g. array-stopped's
+// frame-derived "serious" becomes "critical" once the array-stopped
+// ALERT RULE (severity "alert") is actually firing on it. describeAnomaly
+// takes the max, never a plain overwrite, so an edited rule with a
+// LOWER severity than the frame-derived floor can never read as less
+// urgent than the unconfigurable frame check already found it to be.
+// Absent (the overwhelming common case -- no matching alert firing) it
+// changes nothing.
+interface AnomalyBase {
+  severityOverride?: HealthStatus;
+}
+
+// Alerts and anomalies coexist as a fifth source, not a replacement (see
+// deriveOverviewStatus' own doc for the full rationale): the 'alert'
+// variant covers everything a firing alert reports that the frame-
+// derived checks above structurally cannot -- sustained-for, host CPU/
+// memory, both disk-temp bands, container memory-limit, OOM, nonzero
+// exit, parity errors -- each gets its own row linking to the Alerts
+// view. severity here is the alert's OWN mapped severity (there is no
+// "default" to override, unlike the five kinds above).
 export type OverviewAnomaly =
-  | { kind: 'unhealthy'; name: string }
-  | { kind: 'stopped'; count: number }
-  | { kind: 'disk-usage'; slot: string; usagePct: number }
-  | { kind: 'disk-errors'; slot: string; errors: number }
-  | { kind: 'array-stopped' }
-  | { kind: 'source-critical'; source: string; detail: string };
+  | ({ kind: 'unhealthy'; name: string } & AnomalyBase)
+  | ({ kind: 'stopped'; count: number } & AnomalyBase)
+  | ({ kind: 'disk-usage'; slot: string; usagePct: number } & AnomalyBase)
+  | ({ kind: 'disk-errors'; slot: string; errors: number } & AnomalyBase)
+  | ({ kind: 'array-stopped' } & AnomalyBase)
+  | ({ kind: 'source-critical'; source: string; detail: string } & AnomalyBase)
+  | ({ kind: 'alert'; ruleId: string; ruleName: string; entity: string; severity: HealthStatus } & AnomalyBase);
+
+// FiringAlertLike is the narrow slice of api.ts's FiringAlertDTO this
+// module actually needs -- kept local rather than importing the wider
+// API surface, the same "no dependency beyond what's used" convention
+// thresholds.ts's own AlertRuleBandLike follows.
+export interface FiringAlertLike {
+  rule_id: string;
+  rule_name: string;
+  // severity is store.Event's own three-slot wire vocabulary (info|
+  // warning|alert), NOT HealthStatus -- see alertSeverityToHealth.
+  severity: string;
+  entity: string;
+  silenced: boolean;
+}
 
 export interface OverviewStatusInput {
   unhealthyNames: string[];
@@ -38,7 +75,38 @@ export interface OverviewStatusInput {
   arrayStarted: number | undefined;
   disks: Record<string, Record<string, number>> | undefined | null;
   sources: Record<string, string> | undefined | null;
+  // alerts: the live frame's alerts.firing block (undefined on a page
+  // that hasn't wired alerts through yet -- treated as "nothing
+  // firing", not an error).
+  alerts?: FiringAlertLike[] | null;
 }
+
+// alertSeverityToHealth maps store.Event's three-slot vocabulary onto
+// the four-slot HealthStatus this file's anomalies use. "alert" maps to
+// "critical" (EventFeedItem.svelte's own identical mapping). "warning"
+// AND "info" both map to "warning", not "good": an anomaly appearing in
+// the "needs a look" list at all is definitionally not fine, and a
+// green-colored "needs attention" row would contradict itself -- no
+// default rule fires at severity "info" today, but a future
+// user-created one could, and this is the safer reading if it ever does.
+function alertSeverityToHealth(severity: string): HealthStatus {
+  return severity === 'alert' ? 'critical' : 'warning';
+}
+
+// DEDUP_RULE_TO_ANOMALY: a firing rule listed here whose concern a
+// frame-derived anomaly already covers suppresses its own 'alert' row
+// entirely and instead upgrades the matching row's severity (see
+// AnomalyBase.severityOverride) -- the frame-derived row is more
+// specific and already links correctly. Every other rule (host CPU/
+// memory, both disk-temp rules, container memory-limit, OOM, nonzero
+// exit, parity errors) has no entry here and always gets its own
+// 'alert' anomaly.
+const DEDUP_RULE_TO_ANOMALY: Record<string, (a: OverviewAnomaly, entity: string) => boolean> = {
+  'disk-usage-high': (a, entity) => a.kind === 'disk-usage' && a.slot === entity,
+  'disk-errors': (a, entity) => a.kind === 'disk-errors' && a.slot === entity,
+  'array-stopped': (a) => a.kind === 'array-stopped',
+  'container-unhealthy': (a, entity) => a.kind === 'unhealthy' && a.name === entity,
+};
 
 export interface OverviewStatus {
   ok: boolean;
@@ -118,6 +186,30 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
     }
   }
 
+  // Alerts merge (Task 12) -- see this function's own top-of-file doc
+  // for the full "coexist, not replace" rationale. A SILENCED firing
+  // alert contributes nothing here: silencing is a deliberate "don't
+  // nag me about this" gesture, and it would be a strange product to
+  // honor that everywhere except the one place a user can't dismiss it.
+  for (const alert of input.alerts ?? []) {
+    if (alert.silenced) continue;
+    const mappedSeverity = alertSeverityToHealth(alert.severity);
+    const matches = DEDUP_RULE_TO_ANOMALY[alert.rule_id];
+    const existing = matches ? anomalies.find((a) => matches(a, alert.entity)) : undefined;
+    if (existing) {
+      const currentSeverity = existing.severityOverride ?? describeAnomaly(existing).severity;
+      if (SEVERITY_RANK[mappedSeverity] > SEVERITY_RANK[currentSeverity]) {
+        existing.severityOverride = mappedSeverity;
+      }
+      continue;
+    }
+    anomalies.push({ kind: 'alert', ruleId: alert.rule_id, ruleName: alert.rule_name, entity: alert.entity, severity: mappedSeverity });
+  }
+
+  // The headline count stays anomalies.length either way (Task 12's own
+  // invariant, unchanged from before alerts existed): "N things need
+  // you" and the number of rows can never disagree, whether a row came
+  // from an instantaneous frame check or a sustained-for alert.
   const ok = anomalies.length === 0;
   const headline = ok
     ? 'Everything is running'
@@ -137,13 +229,21 @@ export interface AnomalyText {
   // (the row's own link target) need the bare name separately from the
   // human sentence it's embedded in.
   linkContainer?: string;
+  // Present only for an 'alert' anomaly -- links the row to the Alerts
+  // view (Task 12: "the callouts link to the Alerts view"). The other
+  // five kinds either link via linkContainer or don't link at all.
+  href?: string;
 }
 
-// describeAnomaly renders one anomaly's row text -- kept a separate pure
-// function (rather than inlined per-kind in the component template) so
-// the exact wording, including every pluralization boundary, is
-// unit-tested the same way format.ts's own formatters are.
-export function describeAnomaly(a: OverviewAnomaly): AnomalyText {
+// describeAnomalyCore renders one anomaly's row text from its OWN kind
+// alone -- kept a separate pure function (rather than inlined per-kind
+// in the component template) so the exact wording, including every
+// pluralization boundary, is unit-tested the same way format.ts's own
+// formatters are. describeAnomaly (below) is the public entry point;
+// this one exists separately so the severity-override check has a
+// "what would this kind's severity be on its own" to compare against
+// without recursing into itself.
+function describeAnomalyCore(a: OverviewAnomaly): AnomalyText {
   switch (a.kind) {
     case 'unhealthy':
       return {
@@ -174,7 +274,22 @@ export function describeAnomaly(a: OverviewAnomaly): AnomalyText {
       return { severity: 'serious', title: 'Array is stopped', detail: 'No parity protection while it is down.' };
     case 'source-critical':
       return { severity: 'critical', title: `${a.source} needs attention`, detail: a.detail };
+    case 'alert':
+      return { severity: a.severity, title: a.ruleName, detail: a.entity, href: '#/alerts' };
   }
+}
+
+// describeAnomaly is describeAnomalyCore plus AnomalyBase.severityOverride
+// applied on top, when present: an "upgrade", never a plain overwrite,
+// so a dedup-matched anomaly's severity can only ever end up AT LEAST as
+// severe as its own frame-derived default (see AnomalyBase's own doc for
+// why that direction matters).
+export function describeAnomaly(a: OverviewAnomaly): AnomalyText {
+  const base = describeAnomalyCore(a);
+  if (a.severityOverride && SEVERITY_RANK[a.severityOverride] > SEVERITY_RANK[base.severity]) {
+    return { ...base, severity: a.severityOverride };
+  }
+  return base;
 }
 
 // calloutTextBySlot aggregates every disk anomaly's own describeAnomaly()

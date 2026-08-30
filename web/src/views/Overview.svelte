@@ -379,6 +379,7 @@
       arrayStarted: started,
       disks,
       sources: live.frame?.sources ?? {},
+      alerts: live.frame?.alerts?.firing ?? [],
     }),
   );
   let statusColor = $derived(`var(--status-${worstSeverity(overviewStatus.anomalies)})`);
@@ -489,6 +490,8 @@
                 ></span>
                 {#if text.linkContainer}
                   <a class="overview__attn-title" href={`#/containers/${encodeURIComponent(text.linkContainer)}`}>{text.title}</a>
+                {:else if text.href}
+                  <a class="overview__attn-title" href={text.href}>{text.title}</a>
                 {:else}
                   <span class="overview__attn-title">{text.title}</span>
                 {/if}

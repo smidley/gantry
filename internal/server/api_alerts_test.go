@@ -337,7 +337,7 @@ func TestAlertsRulesGetDefaultsParamBypassesStore(t *testing.T) {
 
 	var body alertRulesResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
-	require.Equal(t, len(store.DefaultAlertRules()), len(body.Rules))
+	require.Equal(t, len(store.DefaultAlertRules(false)), len(body.Rules))
 	require.True(t, body.Rules[0].Builtin)
 }
 

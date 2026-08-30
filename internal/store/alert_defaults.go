@@ -41,8 +41,23 @@ package store
 // UpdatedAt is left 0 on every rule; SeedAlertRules stamps it at insert
 // time, the same way AppendEvent/AddSilence stamp their own timestamp
 // fields when the caller leaves them zero.
-func DefaultAlertRules() []AlertRule {
-	return []AlertRule{
+//
+// fast, when true (fake-data mode only -- see cmd/gantry/main.go's own
+// boot-time seed call), compresses every THRESHOLD rule's for_seconds/
+// clear_seconds to 60s/60s so the Phase 4 Task 9 alert demo can go
+// pending -> firing -> resolved inside a short interactive session
+// instead of the real 5-15 minute windows below. threshold/clear_
+// threshold/warn_threshold/critical_threshold/band_family are untouched
+// either way, so a fast-mode fire is still evaluated against the exact
+// numbers thresholds.ts's bands show -- only how long a breach must be
+// sustained shrinks, never what counts as a breach. EVENT rules are
+// deliberately left alone: their ClearSeconds is a post-fire timeout,
+// not a sustained-for window, and the fake-mode container-oom demo
+// fires once and auto-resolves ~63 simulated minutes later purely from
+// its own unmodified 3600s timeout -- see internal/fake/fake.go's own
+// alertDemoOOMAt doc.
+func DefaultAlertRules(fast bool) []AlertRule {
+	rules := []AlertRule{
 		{
 			ID: "host-cpu-high", Name: "Host CPU high", Enabled: true, Builtin: true,
 			Type: "threshold", Kind: "host", EntityGlob: "*",
@@ -143,6 +158,15 @@ func DefaultAlertRules() []AlertRule {
 			ClearSeconds: 86400, Severity: "alert",
 		},
 	}
+	if fast {
+		for i := range rules {
+			if rules[i].Type == "threshold" {
+				rules[i].ForSeconds = 60
+				rules[i].ClearSeconds = 60
+			}
+		}
+	}
+	return rules
 }
 
 // SeedAlertRules inserts every rule in defaults whose id is not already

@@ -132,6 +132,23 @@ func (r *registry) running() []Meta {
 	return out
 }
 
+// all returns a name-sorted snapshot of every known Meta regardless of
+// state -- unlike running(), a stopped container with a lingering stale
+// Health string is included. The alert engine's boot-seeding pass (Task
+// 4) needs exactly this: it applies its own state=="running" gate itself,
+// and needs a stopped-but-still-known container to run that gate against
+// rather than never seeing it at all.
+func (r *registry) all() []Meta {
+	r.mu.Lock()
+	out := make([]Meta, 0, len(r.byID))
+	for _, m := range r.byID {
+		out = append(out, m)
+	}
+	r.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // normalizeName strips docker's leading "/" from a container name.
 func normalizeName(name string) string {
 	return strings.TrimPrefix(name, "/")

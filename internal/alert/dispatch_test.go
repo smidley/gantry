@@ -268,6 +268,36 @@ func TestDispatcherWebhookChannelUnthrottledByNotifyBucket(t *testing.T) {
 	require.Eventually(t, func() bool { return hook.sendCount() == 20 }, time.Second, 5*time.Millisecond)
 }
 
+// TestDispatcherResolvedPhaseExemptFromNotifyBucket pins the accepted
+// policy: resolves never consume or get blocked by the notify token
+// bucket. Resolves are 1:1 bounded by fires that already paid a token,
+// so exempting them can't be amplified -- and suppressing them is
+// actively harmful: the human who saw "fired" would never learn the
+// alert cleared.
+func TestDispatcherResolvedPhaseExemptFromNotifyBucket(t *testing.T) {
+	clock := newTestClock(1_800_000_000)
+	notify := newFakeChannel("notify")
+	st := &fakeDeliveryStore{}
+	d := NewDispatcher(st, []Channel{notify}, clock.Now, nil)
+
+	for i := 0; i < 4; i++ {
+		d.Dispatch(fireNotification(fmt.Sprintf("rule-%d", i), "e"))
+	}
+	require.Eventually(t, func() bool { return notify.sendCount() == 4 }, time.Second, 5*time.Millisecond)
+
+	// Bucket exhausted: a fire is suppressed, but a resolve still lands.
+	d.Dispatch(fireNotification("rule-suppressed", "e"))
+	d.Dispatch(resolvedNotification("rule-0", "e"))
+	require.Eventually(t, func() bool { return notify.sendCount() == 5 }, time.Second, 5*time.Millisecond,
+		"the bucket-exhausted resolve must still deliver")
+	for _, n := range notify.sendsSnapshot() {
+		if n.Phase == "resolved" {
+			return
+		}
+	}
+	t.Fatal("expected the resolved notification among the delivered sends")
+}
+
 func TestDispatcherThrottleCoalescesSuppressedIntoOneSummaryPerHour(t *testing.T) {
 	clock := newTestClock(1_800_000_000)
 	notify := newFakeChannel("notify")
@@ -280,9 +310,13 @@ func TestDispatcherThrottleCoalescesSuppressedIntoOneSummaryPerHour(t *testing.T
 	require.Eventually(t, func() bool { return notify.sendCount() == 4 }, time.Second, 5*time.Millisecond)
 
 	// Two more, both suppressed -- both must be named in the eventual
-	// coalesced summary.
+	// coalesced summary, each with the phase that was suppressed (a
+	// swallowed renotify and a swallowed first fire read very
+	// differently to the person catching up).
 	d.Dispatch(fireNotification("suppressed-a", "entA"))
-	d.Dispatch(fireNotification("suppressed-b", "entB"))
+	renotify := fireNotification("suppressed-b", "entB")
+	renotify.Phase = "renotify"
+	d.Dispatch(renotify)
 	time.Sleep(10 * time.Millisecond)
 	require.Equal(t, 4, notify.sendCount())
 
@@ -302,10 +336,8 @@ func TestDispatcherThrottleCoalescesSuppressedIntoOneSummaryPerHour(t *testing.T
 	}
 	require.NotNil(t, summary, "expected exactly one coalesced summary notification")
 	require.Equal(t, "2 Gantry alerts suppressed", summary.Subject)
-	require.Contains(t, summary.Summary, "suppressed-a")
-	require.Contains(t, summary.Summary, "entA")
-	require.Contains(t, summary.Summary, "suppressed-b")
-	require.Contains(t, summary.Summary, "entB")
+	require.Contains(t, summary.Summary, "suppressed-a/entA (fired)")
+	require.Contains(t, summary.Summary, "suppressed-b/entB (renotify)")
 
 	throttled := st.eventsOfKind("alert.delivery_throttled")
 	require.Len(t, throttled, 1, "exactly one alert.delivery_throttled event per hour")

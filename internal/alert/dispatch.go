@@ -72,7 +72,7 @@ type deliveryJob struct{ n AlertNotification }
 
 type flapKey struct{ ruleID, entity string }
 
-type suppressedItem struct{ ruleName, entity, severity string }
+type suppressedItem struct{ ruleName, entity, severity, phase string }
 
 // Dispatcher is the policy layer between the engine's lifecycle machine
 // and every configured Channel: it owns the notify-only rate limiter and
@@ -245,8 +245,12 @@ func (d *Dispatcher) Dispatch(n AlertNotification) {
 
 // enqueue applies the notify-only bucket, then hands off to send. Every
 // other channel (every webhook target) is deliberately unthrottled here.
+// Resolves are exempt from the bucket too: they're 1:1 bounded by fires
+// that already paid a token, so the exemption can't be amplified -- and
+// suppressing one is actively harmful, leaving whoever saw the fire
+// believing the alert is still live.
 func (d *Dispatcher) enqueue(ch Channel, n AlertNotification, now int64) {
-	if ch.ID() == "notify" {
+	if ch.ID() == "notify" && n.Phase != "resolved" {
 		if !d.takeToken(now) {
 			d.suppress(n, now)
 			d.recordRateLimited(ch, n, now)
@@ -426,7 +430,7 @@ func (d *Dispatcher) suppress(n AlertNotification, now int64) {
 		d.windowStart = now
 	}
 	d.suppressedItems = append(d.suppressedItems, suppressedItem{
-		ruleName: n.Rule.Name, entity: n.Instance.Entity, severity: n.Rule.Severity,
+		ruleName: n.Rule.Name, entity: n.Instance.Entity, severity: n.Rule.Severity, phase: n.Phase,
 	})
 }
 
@@ -463,7 +467,10 @@ func (d *Dispatcher) flushThrottleIfDue(now int64) {
 		if rankOf(it.severity) > rankOf(maxSeverity) {
 			maxSeverity = it.severity
 		}
-		lines = append(lines, it.ruleName+"/"+it.entity)
+		// The phase travels into the summary line: a swallowed renotify
+		// and a swallowed first fire read very differently to whoever is
+		// catching up on the hour.
+		lines = append(lines, it.ruleName+"/"+it.entity+" ("+it.phase+")")
 	}
 	subject := fmt.Sprintf("%d Gantry alerts suppressed", len(items))
 	summary := strings.Join(lines, ", ")

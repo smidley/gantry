@@ -56,3 +56,29 @@ func TestQueryEventsCancelledContextReturnsPromptly(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+// TestEventIDNeverReusedAfterFullPrune pins the exact property an event
+// rule's cursor (QueryEventsSince/MaxEventID) depends on: events.id
+// keeps climbing across the table's whole lifetime, even across a full
+// DELETE FROM events -- PruneOnce's R3 cutoff can empty the table
+// completely once everything ages out. A plain `INTEGER PRIMARY KEY`
+// rowid alias resets to 1 the moment the table is empty again; only
+// INTEGER PRIMARY KEY AUTOINCREMENT (migrations/003_alerts.sql) keeps
+// the high-water mark, which is what stops a boot-seeded cursor from
+// going permanently deaf after its first full prune.
+func TestEventIDNeverReusedAfterFullPrune(t *testing.T) {
+	s := newTestStore(t, nil)
+	var maxID int64
+	for i := 0; i < 3; i++ {
+		id, err := s.AppendEvent(Event{Kind: "container.start", Entity: "e"})
+		require.NoError(t, err)
+		maxID = id
+	}
+
+	_, err := s.DB().Exec(`DELETE FROM events`)
+	require.NoError(t, err)
+
+	newID, err := s.AppendEvent(Event{Kind: "container.start", Entity: "e"})
+	require.NoError(t, err)
+	require.Greater(t, newID, maxID, "a fresh event's id must stay strictly greater than the pre-prune max, even after a full delete")
+}

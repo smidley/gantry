@@ -87,3 +87,44 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 	}
 	return out, rows.Err()
 }
+
+// QueryEventsSince reads forward by id (NOT ts) so an event rule's
+// cursor can never miss a row inserted with an equal or earlier
+// timestamp than one it already saw -- the clock is not monotonic
+// across an NTP step, but id is: events.id is INTEGER PRIMARY KEY
+// AUTOINCREMENT (migrations/003_alerts.sql), so SQLite never reissues an
+// id that has ever been used, even across PruneOnce's full-table
+// deletes. Defense in depth: a persisted cursor should still be clamped
+// to MaxEventID at boot rather than trusted blindly. limit <= 0 defaults
+// to 500 (an event rule's Tick reads in bounded pages, not the whole
+// backlog at once).
+func (s *Store) QueryEventsSince(ctx context.Context, afterID int64, limit int) ([]Event, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.readDB.QueryContext(ctx,
+		`SELECT id, ts, kind, entity, severity, detail FROM events WHERE id > ? ORDER BY id ASC LIMIT ?`,
+		afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Event
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ID, &e.TS, &e.Kind, &e.Entity, &e.Severity, &e.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// MaxEventID returns the highest event id, or 0 when the events table is
+// empty -- Task 4's engine seeds an event rule's cursor here at boot so a
+// restart doesn't replay the entire events table as fresh alerts.
+func (s *Store) MaxEventID(ctx context.Context) (int64, error) {
+	var id int64
+	err := s.readDB.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&id)
+	return id, err
+}

@@ -274,6 +274,57 @@ func (s *Store) DeleteSilence(id int64) error {
 	return err
 }
 
+// Delivery is one attempt at delivering one notification down one
+// channel -- the debugging ledger behind the Settings channels card's
+// "last delivery failed: ..." text (Task 7), not history (AlertHistory
+// reads alert_instances, never this table).
+type Delivery struct {
+	ID         int64
+	InstanceID int64
+	TS         int64
+	Channel    string
+	Target     string
+	Phase      string
+	Attempts   int64
+	OK         bool
+	Status     int64
+	Error      string
+}
+
+// RecordDelivery appends one delivery attempt's outcome.
+func (s *Store) RecordDelivery(d Delivery) error {
+	_, err := s.db.Exec(`INSERT INTO alert_deliveries (instance_id, ts, channel, target, phase, attempts, ok, status, error)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
+		d.InstanceID, d.TS, d.Channel, d.Target, d.Phase, d.Attempts, d.OK, d.Status, d.Error)
+	return err
+}
+
+// LastDeliveries returns the most recent deliveries, newest first,
+// capped at limit (default 100 for limit <= 0, matching QueryEvents'
+// own convention in events.go).
+func (s *Store) LastDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.readDB.QueryContext(ctx,
+		`SELECT id, instance_id, ts, channel, target, phase, attempts, ok, status, error
+		FROM alert_deliveries ORDER BY ts DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Delivery
+	for rows.Next() {
+		var d Delivery
+		if err := rows.Scan(&d.ID, &d.InstanceID, &d.TS, &d.Channel, &d.Target, &d.Phase, &d.Attempts, &d.OK, &d.Status, &d.Error); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 // ReplaceAlertRules replaces the entire alert_rules table with rules, in
 // one transaction. This is a mechanical whole-document replace only --
 // it does not enforce "a builtin rule can't be removed" or any other

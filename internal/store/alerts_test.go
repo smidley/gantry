@@ -319,3 +319,32 @@ func TestDeleteSilenceRemovesRow(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, got)
 }
+
+// TestRecordDeliveryRoundTripsEveryField pins RecordDelivery/LastDeliveries
+// end to end, including the boolean OK column.
+func TestRecordDeliveryRoundTripsEveryField(t *testing.T) {
+	s := newTestStore(t, nil)
+	want := Delivery{InstanceID: 42, TS: 1000, Channel: "webhook", Target: "home", Phase: "fired",
+		Attempts: 3, OK: false, Status: 500, Error: "server error"}
+	require.NoError(t, s.RecordDelivery(want))
+
+	got, err := s.LastDeliveries(context.Background(), 10)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	want.ID = got[0].ID
+	require.Equal(t, want, got[0])
+}
+
+// TestLastDeliveriesOrdersNewestFirstAndRespectsLimit pins the ordering
+// and cap LastDeliveries promises for the Settings channels card.
+func TestLastDeliveriesOrdersNewestFirstAndRespectsLimit(t *testing.T) {
+	s := newTestStore(t, nil)
+	for _, ts := range []int64{1000, 2000, 3000} {
+		require.NoError(t, s.RecordDelivery(Delivery{InstanceID: 1, TS: ts, Channel: "notify", Phase: "fired", OK: true}))
+	}
+
+	got, err := s.LastDeliveries(context.Background(), 2)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, []int64{3000, 2000}, []int64{got[0].TS, got[1].TS})
+}

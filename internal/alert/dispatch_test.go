@@ -351,8 +351,10 @@ func TestDispatcherThrottleCoalescesSuppressedIntoOneSummaryPerHour(t *testing.T
 	require.Contains(t, summary.Summary, "suppressed-a/entA (fired)")
 	require.Contains(t, summary.Summary, "suppressed-b/entB (renotify)")
 
-	throttled := st.eventsOfKind("alert.delivery_throttled")
-	require.Len(t, throttled, 1, "exactly one alert.delivery_throttled event per hour")
+	// Eventually, not Len: the event rides the async recorder while the
+	// summary send the wait above keyed on rides a worker.
+	require.Eventually(t, func() bool { return len(st.eventsOfKind("alert.delivery_throttled")) == 1 }, time.Second, 5*time.Millisecond,
+		"exactly one alert.delivery_throttled event per hour")
 }
 
 // --- per-(rule,entity) flap guard ---------------------------------------
@@ -368,6 +370,7 @@ func TestDispatcherFlapGuardDoesNotTripOnThirdCycle(t *testing.T) {
 		d.Dispatch(resolvedNotification("flappy", "disk4"))
 		clock.Advance(time.Second)
 	}
+	time.Sleep(20 * time.Millisecond) // let any (wrongly) recorded silence land before asserting it didn't
 	require.Empty(t, st.silencesSnapshot(), "3 cycles must not trip the flap guard")
 	require.Empty(t, st.eventsOfKind("alert.flapping"))
 }
@@ -392,7 +395,9 @@ func TestDispatcherFlapGuardTripsOnFourthCycleWithSilenceAndOneNotification(t *t
 	require.Equal(t, "disk4", sil.Entity)
 	require.Equal(t, "flapping", sil.Reason)
 
-	require.Len(t, st.eventsOfKind("alert.flapping"), 1)
+	// Eventually, not Len: the recorder writes the silence and the event
+	// in sequence, so a plain assertion can land between the two.
+	require.Eventually(t, func() bool { return len(st.eventsOfKind("alert.flapping")) == 1 }, time.Second, 5*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		for _, n := range notify.sendsSnapshot() {
@@ -427,6 +432,7 @@ func TestDispatcherFlapGuardWindowIsRollingNotFixed(t *testing.T) {
 		d.Dispatch(resolvedNotification("flappy", "disk4"))
 		clock.Advance(time.Second)
 	}
+	time.Sleep(20 * time.Millisecond) // let any (wrongly) recorded silence land before asserting it didn't
 	require.Empty(t, st.silencesSnapshot(), "the first, now-expired cycle must not count toward the threshold")
 }
 

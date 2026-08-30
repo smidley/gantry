@@ -179,8 +179,17 @@ func toAlertInstanceDTO(i store.AlertInstance, silenced bool) AlertInstanceDTO {
 	}
 }
 
-// SilenceDTO mirrors store.Silence exactly (see AlertRuleDTO's own doc
-// on the direct-conversion idiom this enables).
+// SilenceDTO mirrors store.Silence's own columns, plus Scope -- a label
+// computed fresh at response time (see AlertInstanceDTO's own Silenced
+// field for the identical "derived, not stored" idiom; AlertRuleDTO's
+// doc explains the direct-conversion idiom this DTO used before Scope
+// existed). Scope is "all" when RuleID and Entity are both "" -- a mute
+// covering every rule and every entity -- and omitted otherwise. The
+// store representation is untouched: rule_id="" + entity="" has meant
+// "global" since engine.go's silenced() existed, and still does; Scope
+// only makes that reading explicit on the wire so a client can render it
+// distinctly (see silenceCreateRequest's own doc on why POST now
+// requires the same gesture explicitly).
 type SilenceDTO struct {
 	ID        int64  `json:"id"`
 	RuleID    string `json:"rule_id"`
@@ -188,12 +197,24 @@ type SilenceDTO struct {
 	Reason    string `json:"reason"`
 	Until     int64  `json:"until"`
 	CreatedAt int64  `json:"created_at"`
+	Scope     string `json:"scope,omitempty"`
+}
+
+func toSilenceDTO(sil store.Silence) SilenceDTO {
+	dto := SilenceDTO{
+		ID: sil.ID, RuleID: sil.RuleID, Entity: sil.Entity, Reason: sil.Reason,
+		Until: sil.Until, CreatedAt: sil.CreatedAt,
+	}
+	if sil.RuleID == "" && sil.Entity == "" {
+		dto.Scope = "all"
+	}
+	return dto
 }
 
 func toSilenceDTOs(silences []store.Silence) []SilenceDTO {
 	out := make([]SilenceDTO, len(silences))
 	for i, sil := range silences {
-		out[i] = SilenceDTO(sil)
+		out[i] = toSilenceDTO(sil)
 	}
 	return out
 }
@@ -281,11 +302,18 @@ type alertRulesPutRequest struct {
 	Rules []AlertRuleDTO `json:"rules"`
 }
 
+// silenceCreateRequest is POST /api/alerts/silences' body. Scope is only
+// examined when RuleID and Entity are both "" -- handleAlertsSilencesPost
+// requires it to read exactly "all" in that case, an explicit gesture for
+// a mute broad enough to cover every rule and every entity at once (up to
+// 30 days); it's ignored otherwise, since a scoped request (either field
+// non-empty) was never the ambiguous case this guards.
 type silenceCreateRequest struct {
 	RuleID string `json:"rule_id"`
 	Entity string `json:"entity"`
 	Hours  int    `json:"hours"`
 	Reason string `json:"reason"`
+	Scope  string `json:"scope"`
 }
 
 type webhooksGetResponse struct {
@@ -527,6 +555,14 @@ func (s *Server) handleAlertsHistory(w http.ResponseWriter, r *http.Request) {
 // days). Not READ_ONLY-gated and no X-Gantry-Confirm -- config-shaped,
 // the same /api/settings precedent PUT /api/alerts/rules follows (plan
 // Global Constraints).
+//
+// rule_id and entity both "" mutes every rule on every entity -- engine.
+// go's silenced() has always read that pair as "any" -- so a request
+// leaving both blank must say so on purpose: scope must read exactly
+// "all", or this 400s naming the gesture it wants instead of silently
+// muting everything for up to 30 days. A scoped request (either field
+// non-empty) never needs scope at all; see silenceCreateRequest's own
+// doc.
 func (s *Server) handleAlertsSilencesPost(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Alerts == nil {
 		writeError(w, http.StatusNotFound, "alerts unavailable")
@@ -543,6 +579,10 @@ func (s *Server) handleAlertsSilencesPost(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("hours must be between %d and %d", minSilenceHours, maxSilenceHours))
 		return
 	}
+	if body.RuleID == "" && body.Entity == "" && body.Scope != "all" {
+		writeError(w, http.StatusBadRequest, `silencing every rule and every entity requires "scope":"all"`)
+		return
+	}
 
 	now := time.Now().Unix()
 	created, err := s.opts.Alerts.AddSilence(store.Silence{
@@ -553,7 +593,7 @@ func (s *Server) handleAlertsSilencesPost(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, SilenceDTO(created))
+	writeJSON(w, toSilenceDTO(created))
 }
 
 // handleAlertsSilencesDelete serves DELETE /api/alerts/silences/{id}:

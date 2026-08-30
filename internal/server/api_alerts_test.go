@@ -597,6 +597,7 @@ func TestAlertsSilencesPostRoundTripsThroughGetThenDelete(t *testing.T) {
 	require.NotZero(t, created.ID)
 	require.Equal(t, "disk-temp-high", created.RuleID)
 	require.Greater(t, created.Until, time.Now().Unix())
+	require.Empty(t, created.Scope, "a rule/entity-scoped silence must not be labeled scope:all")
 
 	getResp, err := http.Get(ts.URL + "/api/alerts")
 	require.NoError(t, err)
@@ -604,6 +605,7 @@ func TestAlertsSilencesPostRoundTripsThroughGetThenDelete(t *testing.T) {
 	var body alertsGetResponse
 	require.NoError(t, json.NewDecoder(getResp.Body).Decode(&body))
 	require.Len(t, body.Silences, 1)
+	require.Empty(t, body.Silences[0].Scope)
 
 	delResp := doAlertsRequest(t, http.MethodDelete, fmt.Sprintf("%s/api/alerts/silences/%d", ts.URL, created.ID), "")
 	defer func() { _ = delResp.Body.Close() }()
@@ -615,6 +617,58 @@ func TestAlertsSilencesPostRoundTripsThroughGetThenDelete(t *testing.T) {
 	var body2 alertsGetResponse
 	require.NoError(t, json.NewDecoder(getResp2.Body).Decode(&body2))
 	require.Empty(t, body2.Silences)
+}
+
+// TestAlertsSilencesPostBothEmptyWithoutScopeReturns400 pins the fix-round
+// policy decision: rule_id and entity both "" means "every rule, every
+// entity" (engine.go's silenced() reads it that way, unchanged) -- a mute
+// broad enough that a client must ask for it on purpose. Omitting scope
+// entirely used to 200 and silently mute everything for up to 30 days;
+// now it 400s naming the gesture the client needs to add.
+func TestAlertsSilencesPostBothEmptyWithoutScopeReturns400(t *testing.T) {
+	fa := newFakeAlerts()
+	s := New(Options{Version: "test-1", Started: time.Now(), Alerts: fa})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := doAlertsRequest(t, http.MethodPost, ts.URL+"/api/alerts/silences", `{"hours":8}`)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Empty(t, fa.silences, "a rejected request must not reach AddSilence")
+
+	var errBody struct {
+		Error string `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&errBody))
+	require.Contains(t, errBody.Error, `"scope"`, `the 400 must name the "scope":"all" gesture it wants`)
+}
+
+// TestAlertsSilencesPostScopeAllReturns200AndLabelsDTO pins the other
+// half: scope:"all" alongside both-empty rule_id/entity is accepted, and
+// the response DTO carries scope:"all" so the UI can render it distinctly
+// from an ordinary scoped silence. The store representation is untouched
+// -- no migration, no new column -- rule_id="" + entity="" already meant
+// "global" before this fix-round; AddSilence still receives exactly that,
+// proven here by reading it back off the fake's own store.
+func TestAlertsSilencesPostScopeAllReturns200AndLabelsDTO(t *testing.T) {
+	fa := newFakeAlerts()
+	s := New(Options{Version: "test-1", Started: time.Now(), Alerts: fa})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := doAlertsRequest(t, http.MethodPost, ts.URL+"/api/alerts/silences", `{"hours":8,"scope":"all"}`)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var created SilenceDTO
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	require.Equal(t, "all", created.Scope)
+	require.Empty(t, created.RuleID)
+	require.Empty(t, created.Entity)
+
+	require.Len(t, fa.silences, 1)
+	require.Empty(t, fa.silences[0].RuleID, "the stored row stays rule_id=\"\" -- no new column, no migration")
+	require.Empty(t, fa.silences[0].Entity)
 }
 
 func TestAlertsSilencesDeleteNonexistentStillReturns204(t *testing.T) {
@@ -856,7 +910,7 @@ func TestReadOnlyModeBlocksWebhooksPutButNotRulesPut(t *testing.T) {
 	defer func() { _ = rulesResp.Body.Close() }()
 	require.Equal(t, http.StatusOK, rulesResp.StatusCode, "rule writes are config-shaped and must stay open under READ_ONLY")
 
-	silenceResp := doAlertsRequest(t, http.MethodPost, ts.URL+"/api/alerts/silences", `{"hours":1}`)
+	silenceResp := doAlertsRequest(t, http.MethodPost, ts.URL+"/api/alerts/silences", `{"rule_id":"host-cpu-high","hours":1}`)
 	defer func() { _ = silenceResp.Body.Close() }()
 	require.Equal(t, http.StatusOK, silenceResp.StatusCode, "silence writes are config-shaped and must stay open under READ_ONLY")
 }

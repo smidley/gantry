@@ -86,7 +86,13 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// GANTRY_WEBHOOK_URL (spec Sec5's documented single-webhook path) is
 	// re-synced into the "env" target on every boot, same "before
 	// anything else touches it" posture as the rule seed just above.
-	if err := seedWebhookTargetFromEnv(st, getenv("GANTRY_WEBHOOK_URL")); err != nil {
+	// webhookURLEnv is captured once here and reused below for
+	// webhooksAdapter's envLocked flag (Task 8): whether the var was set
+	// AT BOOT is what actually governs the "env" target's current
+	// stored values, since seedWebhookTargetFromEnv only resyncs on
+	// boot, not on every request.
+	webhookURLEnv := getenv("GANTRY_WEBHOOK_URL")
+	if err := seedWebhookTargetFromEnv(st, webhookURLEnv); err != nil {
 		return fmt.Errorf("seed webhook target: %w", err)
 	}
 
@@ -259,7 +265,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// snapshot (Options.Snapshot), /api/live's connect frame (Options.
 	// Current), and the publish loop below -- all three read the exact
 	// same assembly, just on different triggers (poll, connect, tick).
-	snapshotFn := buildSnapshot(st, dc, ur, registry.Sources, fakeMetas, fakeDiskMeta)
+	snapshotFn := buildSnapshot(st, dc, ur, registry.Sources, fakeMetas, fakeDiskMeta, dispatcher)
 	live := server.NewBroadcaster()
 
 	// SSE publish loop: every 2s, marshal the current snapshot and fan it
@@ -311,6 +317,9 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		ContainersMaintenance: buildContainersMaintenance(containersMaintenanceSrc),
 		RemoveContainers:      buildRemoveContainers(removeContainersSrc),
 		PruneContainers:       buildPruneContainers(pruneContainersSrc),
+
+		Alerts:   alertsAdapter{st: st, dispatcher: dispatcher},
+		Webhooks: webhooksAdapter{st: st, envLocked: webhookURLEnv != ""},
 
 		ReadOnly:    readOnly,
 		AppendEvent: st.AppendEvent,
@@ -371,7 +380,7 @@ const containerFrameMaxAge = 60
 // so (a live sample younger than containerFrameMaxAge AND a name
 // lookupByName still recognizes) — see containerFrameEntities' own doc
 // for why that's two different conditions, not one.
-func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta) func() server.SnapshotDTO {
+func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta, dispatcher *alert.Dispatcher) func() server.SnapshotDTO {
 	return func() server.SnapshotDTO {
 		dto := server.SnapshotDTO{
 			TS:            time.Now().Unix(),
@@ -489,8 +498,88 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 				g[key.Metric] = sample.Val
 			}
 		}
+
+		dto.Alerts = buildAlertsBlock(st, dispatcher)
 		return dto
 	}
+}
+
+// alertsFrameContext is the fixed background context every buildSnapshot
+// tick's alert reads run under: the closure this feeds (server.Options.
+// Snapshot/Current, and the 2s publish loop) has no per-call caller
+// context of its own to thread through, the same reasoning the shutdown
+// flush at the bottom of run() already documents for its own
+// context.Background() use.
+var alertsFrameContext = context.Background()
+
+// buildAlertsBlock assembles SnapshotDTO.Alerts (Task 8): every FIRING
+// instance (pending excluded -- engine bookkeeping, not user-facing, the
+// same rule GET /api/alerts' own handler applies), capped at
+// server.AlertsFrameCap with a truncated count, plus every channel's
+// current health. A read error is logged and treated as empty for this
+// one tick, never fatal to the frame -- the same "degrade, don't error"
+// posture Sources already models, and the next 2s tick tries again.
+func buildAlertsBlock(st *store.Store, dispatcher *alert.Dispatcher) server.AlertsBlockDTO {
+	rules, err := st.AlertRules(alertsFrameContext)
+	if err != nil {
+		log.Println("alerts frame: rules:", err)
+	}
+	ruleByID := make(map[string]store.AlertRule, len(rules))
+	for _, r := range rules {
+		ruleByID[r.ID] = r
+	}
+
+	active, err := st.ActiveAlertInstances(alertsFrameContext)
+	if err != nil {
+		log.Println("alerts frame: active instances:", err)
+	}
+	silences, err := st.Silences(alertsFrameContext, time.Now().Unix())
+	if err != nil {
+		log.Println("alerts frame: silences:", err)
+	}
+
+	var firing []server.FiringAlertDTO
+	for _, inst := range active {
+		if inst.State != "firing" {
+			continue
+		}
+		firing = append(firing, server.FiringAlertDTO{
+			RuleID: inst.RuleID, RuleName: ruleByID[inst.RuleID].Name, Severity: inst.Severity,
+			Kind: inst.Kind, Entity: inst.Entity, Metric: inst.Metric,
+			Value: inst.Value, Threshold: inst.Threshold, FiredAt: inst.FiredAt,
+			Silenced: server.SilenceCovers(silences, inst.RuleID, inst.Entity),
+		})
+	}
+
+	total := len(firing)
+	var truncated int
+	if total > server.AlertsFrameCap {
+		truncated = total - server.AlertsFrameCap
+		firing = firing[:server.AlertsFrameCap]
+	}
+	if firing == nil {
+		firing = []server.FiringAlertDTO{}
+	}
+
+	return server.AlertsBlockDTO{
+		Firing: firing, FiringCount: total, Truncated: truncated,
+		Channels: channelHealthMap(dispatcher),
+	}
+}
+
+// channelHealthMap reports every configured delivery channel's current
+// Health(), keyed by its own ID() -- shared by alertsAdapter.Channels
+// (GET /api/alerts) and buildAlertsBlock just above, the same data both
+// surfaces document (plan Task 8).
+func channelHealthMap(d *alert.Dispatcher) map[string]string {
+	out := map[string]string{}
+	if d == nil {
+		return out
+	}
+	for _, ch := range d.Channels {
+		out[ch.ID()] = ch.Health()
+	}
+	return out
 }
 
 // metaCreatedUnix converts a Meta.Created into ContainerDTO's wire form.
@@ -1044,6 +1133,68 @@ func (a settingsAdapter) Set(field string, value int) error {
 		return fmt.Errorf("settings: unknown field %q", field) // unreached: handler only calls Set with its own whitelisted names
 	}
 	return a.st.SettingSet(key, strconv.Itoa(value))
+}
+
+// alertsAdapter implements server.AlertsIface (Task 8) over *store.Store
+// plus the running *alert.Dispatcher's own Channels field for health --
+// kept in main, not the server package, the same reason settingsAdapter
+// is: server stays store/alert-shape-agnostic.
+type alertsAdapter struct {
+	st         *store.Store
+	dispatcher *alert.Dispatcher
+}
+
+func (a alertsAdapter) Active(ctx context.Context) ([]store.AlertInstance, error) {
+	return a.st.ActiveAlertInstances(ctx)
+}
+
+func (a alertsAdapter) History(ctx context.Context, from, to int64, limit int) ([]store.AlertInstance, error) {
+	return a.st.AlertHistory(ctx, from, to, limit)
+}
+
+func (a alertsAdapter) Rules(ctx context.Context) ([]store.AlertRule, error) {
+	return a.st.AlertRules(ctx)
+}
+
+func (a alertsAdapter) UpsertRule(r store.AlertRule) error { return a.st.UpsertAlertRule(r) }
+
+func (a alertsAdapter) ReplaceRules(rules []store.AlertRule) error {
+	return a.st.ReplaceAlertRules(rules)
+}
+
+func (a alertsAdapter) Silences(ctx context.Context) ([]store.Silence, error) {
+	return a.st.Silences(ctx, time.Now().Unix())
+}
+
+func (a alertsAdapter) AddSilence(sil store.Silence) (store.Silence, error) {
+	id, err := a.st.AddSilence(sil)
+	if err != nil {
+		return store.Silence{}, err
+	}
+	sil.ID = id
+	return sil, nil
+}
+
+func (a alertsAdapter) DeleteSilence(id int64) error { return a.st.DeleteSilence(id) }
+
+func (a alertsAdapter) Channels() map[string]string { return channelHealthMap(a.dispatcher) }
+
+// webhooksAdapter implements server.WebhooksIface (Task 8) over the same
+// settings-blob-backed target list Task 7 built (loadWebhookTargets/
+// saveWebhookTargets), plus whether GANTRY_WEBHOOK_URL was set at boot
+// (envLocked, resolved once in run() alongside readOnly).
+type webhooksAdapter struct {
+	st        *store.Store
+	envLocked bool
+}
+
+func (a webhooksAdapter) Targets() ([]alert.WebhookTarget, bool, error) {
+	targets, err := loadWebhookTargets(a.st)
+	return targets, a.envLocked, err
+}
+
+func (a webhooksAdapter) Replace(targets []alert.WebhookTarget) error {
+	return saveWebhookTargets(a.st, targets)
 }
 
 func healthcheck(getenv func(string) string) error {

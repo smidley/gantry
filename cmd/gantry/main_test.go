@@ -491,7 +491,7 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
+	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
@@ -545,7 +545,7 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	require.Empty(t, dc.Running(), "dc's own registry never saw this container -- the fix must not depend on it")
 	c, ok := snap.Containers["jellyfin"]
@@ -586,7 +586,7 @@ func TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO(t *testing.T
 		}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["jellyfin"]
 	require.True(t, ok)
@@ -616,7 +616,7 @@ func TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running"}} // Created left at its zero value
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	require.Equal(t, int64(0), snap.Containers["jellyfin"].Created)
 }
@@ -647,7 +647,7 @@ func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
 		return []docker.Meta{{Name: "db", State: "running"}} // running unconditionally, per buildSnapshot's own entity-level contract
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -678,7 +678,7 @@ func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testin
 		return []docker.Meta{{Name: "db", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -708,7 +708,7 @@ func TestBuildSnapshotDropsStaleContainerGPUBusyPct(t *testing.T) {
 		return []docker.Meta{{Name: "plex", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["plex"]
 	require.True(t, ok)
@@ -753,10 +753,119 @@ rotational="1"
 		return map[string]unraid.DiskMeta{"flash": {Device: "sdi", Kind: "usb"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, fakeDiskMeta)()
+	snap := buildSnapshot(st, dc, ur, sources, nil, fakeDiskMeta, nil)()
 
 	require.Equal(t, server.DiskMetaDTO{Device: "sdc", Kind: "hdd"}, snap.DiskMeta["disk1"], "the real unraid collector's own DiskMeta must survive into the DTO")
 	require.Equal(t, server.DiskMetaDTO{Device: "sdi", Kind: "usb"}, snap.DiskMeta["flash"], "fake mode's own DiskMeta overlay must land alongside it, not replace it")
+}
+
+// TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced
+// pins Task 8's frame assembly against a real store: a "pending"
+// instance (engine bookkeeping, never user-facing) must not appear, a
+// "firing" one must carry its rule's Name (alert_instances itself only
+// stores rule_id) and Silenced when a covering silence exists.
+func TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	require.NoError(t, st.UpsertAlertRule(store.AlertRule{
+		ID: "host-cpu-high", Name: "Host CPU high", Enabled: true, Builtin: true,
+		Type: "threshold", Kind: "host", EntityGlob: "*", Metric: "cpu.total", Op: ">",
+		Threshold: 85, Severity: "warning", UpdatedAt: 1000,
+	}))
+	if _, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: "host-cpu-high", Kind: "host", State: "firing", Severity: "warning",
+		Value: 91, Threshold: 85, StartedAt: 900, FiredAt: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: "host-cpu-high", Kind: "host", Entity: "pending-entity", State: "pending",
+		Severity: "warning", Value: 86, Threshold: 85, StartedAt: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddSilence(store.Silence{RuleID: "host-cpu-high", Until: time.Now().Unix() + 3600, CreatedAt: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
+	}
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+
+	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)()
+
+	require.Len(t, snap.Alerts.Firing, 1, "the pending instance must be excluded from the frame")
+	f := snap.Alerts.Firing[0]
+	require.Equal(t, "host-cpu-high", f.RuleID)
+	require.Equal(t, "Host CPU high", f.RuleName, "the frame must join the rule's Name, not just carry rule_id")
+	require.Equal(t, 91.0, f.Value)
+	require.True(t, f.Silenced, "the rule-wide silence (entity \"\") must cover this instance")
+	require.Equal(t, 1, snap.Alerts.FiringCount)
+	require.Equal(t, 0, snap.Alerts.Truncated)
+}
+
+// TestBuildSnapshotAlertsBlockCapsAtTwentyAndReportsTruncated pins the
+// frame's own noise guard: a pathological rule cannot bloat every 2s
+// frame for every connected client.
+func TestBuildSnapshotAlertsBlockCapsAtTwentyAndReportsTruncated(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	require.NoError(t, st.UpsertAlertRule(store.AlertRule{
+		ID: "container-mem-limit-high", Name: "Container memory limit high", Enabled: true,
+		Type: "threshold", Kind: "container", EntityGlob: "*", Metric: "mem.limit_pct", Op: ">",
+		Threshold: 85, Severity: "warning", UpdatedAt: 1000,
+	}))
+	for i := 0; i < 25; i++ {
+		if _, err := st.UpsertAlertInstance(store.AlertInstance{
+			RuleID: "container-mem-limit-high", Kind: "container", Entity: fmt.Sprintf("c%d", i),
+			State: "firing", Severity: "warning", Value: 90, Threshold: 85, StartedAt: 900, FiredAt: 1000,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+
+	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)()
+
+	require.Len(t, snap.Alerts.Firing, server.AlertsFrameCap)
+	require.Equal(t, 25, snap.Alerts.FiringCount)
+	require.Equal(t, 5, snap.Alerts.Truncated)
+}
+
+// TestBuildSnapshotAlertsBlockEmptyChannelsWhenNoDispatcher pins the
+// nil-dispatcher degradation: main wiring always passes a real one, but
+// a test (or a future caller) that doesn't must get an empty map, never
+// a panic.
+func TestBuildSnapshotAlertsBlockEmptyChannelsWhenNoDispatcher(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+
+	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)()
+
+	require.Empty(t, snap.Alerts.Channels)
+	require.Empty(t, snap.Alerts.Firing)
+}
+
+// TestChannelHealthMapReportsEveryConfiguredChannel pins the small
+// shared helper both alertsAdapter.Channels (GET /api/alerts) and the
+// frame block call into.
+func TestChannelHealthMapReportsEveryConfiguredChannel(t *testing.T) {
+	notifyDir := t.TempDir()
+	d := alert.NewDispatcher(nil, []alert.Channel{alert.NewNotifyChannel(notifyDir, nil, nil)}, nil, nil)
+	require.Equal(t, map[string]string{"notify": "ok"}, channelHealthMap(d))
+	require.Empty(t, channelHealthMap(nil))
 }
 
 // TestBuildContainersListMergesFakeMetas pins the same fix for
@@ -1424,4 +1533,90 @@ func TestRunSeedsWebhookTargetFromEnvAtBoot(t *testing.T) {
 	require.Len(t, targets, 1)
 	require.Equal(t, "env", targets[0].ID)
 	require.Equal(t, "https://example.com/gantry-hook", targets[0].URL)
+}
+
+// TestRunWiresAlertsAndWebhooksAPIEndToEnd is Task 8's own end-to-end
+// pin: unlike api_alerts_test.go's handler tests (which exercise the
+// route logic against a fake AlertsIface/WebhooksIface), this drives the
+// REAL alertsAdapter/webhooksAdapter through a live run() -- the seeded
+// twelve builtins must be visible over HTTP, the frame must carry a
+// non-nil (if empty) alerts block, and the GANTRY_WEBHOOK_URL-seeded
+// "env" target must read back through GET /api/alerts/webhooks as
+// env_overridden with its header never present.
+func TestRunWiresAlertsAndWebhooksAPIEndToEnd(t *testing.T) {
+	port := freePort(t)
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+	env := map[string]string{
+		"GANTRY_PORT":        fmt.Sprint(port),
+		"GANTRY_DB_PATH":     dbPath,
+		"GANTRY_WEBHOOK_URL": "https://example.com/gantry-hook",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("run did not shut down")
+		}
+	}()
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(base + "/api/healthz")
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	rulesResp, err := http.Get(base + "/api/alerts/rules")
+	require.NoError(t, err)
+	defer drainAndClose(rulesResp)
+	require.Equal(t, http.StatusOK, rulesResp.StatusCode)
+	var rulesBody struct {
+		Rules []server.AlertRuleDTO `json:"rules"`
+	}
+	require.NoError(t, json.NewDecoder(rulesResp.Body).Decode(&rulesBody))
+	require.Len(t, rulesBody.Rules, 12, "the seeded builtins must be visible through the real adapter over HTTP")
+
+	alertsResp, err := http.Get(base + "/api/alerts")
+	require.NoError(t, err)
+	defer drainAndClose(alertsResp)
+	require.Equal(t, http.StatusOK, alertsResp.StatusCode)
+	var alertsBody struct {
+		Active   []server.AlertInstanceDTO `json:"active"`
+		Silences []server.SilenceDTO       `json:"silences"`
+		Channels map[string]string         `json:"channels"`
+	}
+	require.NoError(t, json.NewDecoder(alertsResp.Body).Decode(&alertsBody))
+	require.Empty(t, alertsBody.Active, "a fresh box has nothing firing yet")
+	require.Contains(t, alertsBody.Channels, "notify", "the notify-spool channel is always wired")
+
+	whResp, err := http.Get(base + "/api/alerts/webhooks")
+	require.NoError(t, err)
+	defer drainAndClose(whResp)
+	require.Equal(t, http.StatusOK, whResp.StatusCode)
+	raw, err := io.ReadAll(whResp.Body)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "header_value", "GET must never carry the secret field at all")
+	var whBody struct {
+		Targets []server.WebhookTargetDTO `json:"targets"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &whBody))
+	require.Len(t, whBody.Targets, 1)
+	require.Equal(t, "env", whBody.Targets[0].ID)
+	require.True(t, whBody.Targets[0].EnvOverridden)
+
+	snapResp, err := http.Get(base + "/api/live/snapshot")
+	require.NoError(t, err)
+	defer drainAndClose(snapResp)
+	var snap server.SnapshotDTO
+	require.NoError(t, json.NewDecoder(snapResp.Body).Decode(&snap))
+	require.NotNil(t, snap.Alerts.Firing, "the frame's alerts block must always be a real (if empty) array")
+	require.Contains(t, snap.Alerts.Channels, "notify")
 }

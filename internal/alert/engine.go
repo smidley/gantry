@@ -378,6 +378,13 @@ func (e *Engine) evalThresholdEntity(r store.AlertRule, entity string, samples [
 		switch {
 		case verdict == VerdictBreaching:
 			e.fire(r, entity, value, now, inst, false, activeIdx, silences)
+		case absent:
+			// Checked before !currentlyCrossing (F10): that check alone
+			// can't tell "the value dropped" from "the series vanished
+			// entirely" -- len(samples) > 0 is false for both an empty
+			// and a nil samples slice -- and a vanished series is not a
+			// real recovery.
+			e.resolveSilent(inst, now, "no-data", activeIdx)
 		case !currentlyCrossing:
 			e.resolveSilent(inst, now, "cleared", activeIdx)
 		default:

@@ -318,6 +318,37 @@ func TestPendingResolvesSilentlyWhenValueDropsBelowThresholdBeforeFiring(t *test
 	require.Equal(t, 0, dispatched, "and no dispatch")
 }
 
+// TestPendingResolvesNoDataNotClearedWhenSeriesVanishes pins F10: a
+// pending instance whose series disappears entirely (samples == nil, not
+// just a value that dropped below threshold) must resolve with reason
+// "no-data", not "cleared" -- currentlyCrossing is false either way
+// (len(samples) > 0 is false for both an empty and a nil samples slice),
+// so the absent case has to be checked separately and first, or the two
+// causes are indistinguishable in the API/UI.
+func TestPendingResolvesNoDataNotClearedWhenSeriesVanishes(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := cpuRule()
+	st := newFakeStore(rule)
+	id, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: rule.ID, Kind: "host", Entity: "", Metric: rule.Metric, State: "pending",
+		Severity: rule.Severity, Value: 90, Threshold: rule.Threshold, StartedAt: now - 10,
+	})
+	require.NoError(t, err)
+
+	mr := newMatchRouter() // never populated: the series vanished entirely, not merely dropped
+	dispatched := 0
+	eng := newEngine(st, mr.fn, nil, nil, func(AlertNotification) { dispatched++ }, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background()))
+
+	require.Equal(t, 0, st.activeCount())
+	resolved := st.instances[id]
+	require.Equal(t, "resolved", resolved.State)
+	require.Equal(t, "no-data", resolved.ResolveReason, "the series vanished -- not a real recovery")
+	require.Empty(t, st.events, "a pending alert that never fired produces no event either way")
+	require.Equal(t, 0, dispatched)
+}
+
 // --- firing: clear hysteresis -------------------------------------------
 
 // TestFiringStaysFiringOnDipAboveClearThreshold is the user's named clear-

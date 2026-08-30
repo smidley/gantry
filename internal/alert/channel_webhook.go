@@ -181,9 +181,11 @@ type WebhookChannel struct {
 	Version string
 	Clock   func() time.Time
 	Client  *http.Client
-	// Sleep stands in for time.Sleep between retry attempts -- tests
-	// inject a recording no-op so the backoff sequence is assertable
-	// without waiting through it in real time.
+	// Sleep, when non-nil, replaces the default wait between retry
+	// attempts -- tests inject a recording no-op so the backoff sequence
+	// is assertable without waiting through it in real time. The default
+	// (nil) waits on a timer and ctx together, so a shutting-down
+	// dispatcher cancels a pending backoff instead of sleeping it out.
 	Sleep func(time.Duration)
 	// Rand drives the ±20% backoff jitter; nil disables jitter entirely
 	// (exact 2s/8s), which is what every test but the one asserting the
@@ -219,7 +221,6 @@ func NewWebhookChannel(target WebhookTarget, version string, clock func() time.T
 	return &WebhookChannel{
 		Target: target, Version: version, Clock: clock,
 		Client: noRedirectClient,
-		Sleep:  time.Sleep,
 		Rand:   rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // retry jitter, not a security boundary
 	}
 }
@@ -278,7 +279,9 @@ func (c *WebhookChannel) Send(ctx context.Context, n AlertNotification) SendResu
 		if attempt == webhookMaxAttempts || !shouldRetry(status, sendErr) {
 			break
 		}
-		c.sleep(jitter(webhookBackoff[attempt-1], c.Rand))
+		if !c.sleep(ctx, jitter(webhookBackoff[attempt-1], c.Rand)) {
+			break // ctx died mid-backoff (shutdown): report the last real attempt's outcome, no further tries
+		}
 	}
 
 	errStr := ""
@@ -352,12 +355,24 @@ func jitter(base time.Duration, r *rand.Rand) time.Duration {
 	return time.Duration(float64(base) * factor)
 }
 
-func (c *WebhookChannel) sleep(d time.Duration) {
+// sleep waits out one backoff gap, or less if ctx is cancelled first;
+// the return value says whether the caller should keep retrying. An
+// injected Sleep is called instead of the timer, but the ctx check
+// still applies afterward, so cancellation semantics hold under a
+// stubbed clock too.
+func (c *WebhookChannel) sleep(ctx context.Context, d time.Duration) bool {
 	if c.Sleep != nil {
 		c.Sleep(d)
-		return
+		return ctx.Err() == nil
 	}
-	time.Sleep(d)
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 func (c *WebhookChannel) client() *http.Client {

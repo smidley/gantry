@@ -3,6 +3,8 @@ package alert
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -494,6 +496,81 @@ func TestDispatcherQueueOverflowDropsOldestAndRecordsIt(t *testing.T) {
 		}
 	}
 	require.True(t, dropped, "expected a recorded drop once the bounded queue overflowed")
+}
+
+// --- shutdown responsiveness -------------------------------------------------
+
+// stopAndAwaitWorkers stops d and waits for every worker to actually
+// finish -- the exact wait main's shutdown sequence performs through
+// Run(ctx, wg) -- failing the test if they take longer than limit.
+func stopAndAwaitWorkers(t *testing.T, d *Dispatcher, limit time.Duration) time.Duration {
+	t.Helper()
+	start := time.Now()
+	d.Stop()
+	done := make(chan struct{})
+	go func() { d.workersWG.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(limit):
+		t.Fatalf("workers still running %v after Stop()", limit)
+	}
+	return time.Since(start)
+}
+
+// TestDispatcherStopAbortsInFlightWebhookSend wedges a real webhook
+// channel mid-request (endpoint accepts and never responds, 30s
+// per-attempt timeout) and then stops the dispatcher: the in-flight
+// Send must abort via the dispatcher's stop context rather than
+// running out its full timeout-and-retry budget (~100s).
+func TestDispatcherStopAbortsInFlightWebhookSend(t *testing.T) {
+	inFlight := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inFlight <- struct{}{}
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	hook := NewWebhookChannel(WebhookTarget{ID: "wedged", URL: srv.URL, Enabled: true, TimeoutS: 30}, "v-test", nil)
+	st := &fakeDeliveryStore{}
+	d := NewDispatcher(st, []Channel{hook}, nil, nil)
+
+	d.Dispatch(fireNotification("r", "e"))
+	select {
+	case <-inFlight:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request never reached the wedged endpoint")
+	}
+
+	elapsed := stopAndAwaitWorkers(t, d, 2*time.Second)
+	require.Less(t, elapsed, time.Second, "an in-flight Send must observe Stop, not its 30s timeout")
+}
+
+// TestDispatcherStopInterruptsWebhookBackoff parks a real webhook
+// channel in its first REAL backoff gap (2s, endpoint answering 500)
+// and stops the dispatcher: the backoff wait must observe stop rather
+// than sleeping through the remaining 2s + 8s + attempts.
+func TestDispatcherStopInterruptsWebhookBackoff(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	hook := NewWebhookChannel(WebhookTarget{ID: "flaky", URL: srv.URL, Enabled: true, TimeoutS: 5}, "v-test", nil)
+	hook.Rand = nil // exact 2s first gap
+	st := &fakeDeliveryStore{}
+	d := NewDispatcher(st, []Channel{hook}, nil, nil)
+
+	d.Dispatch(fireNotification("r", "e"))
+	require.Eventually(t, func() bool { return calls.Load() >= 1 }, 2*time.Second, 5*time.Millisecond,
+		"first attempt must have failed and entered backoff")
+
+	elapsed := stopAndAwaitWorkers(t, d, 2*time.Second)
+	require.Less(t, elapsed, time.Second, "a backoff wait must observe Stop, not sleep out its full duration")
+	require.EqualValues(t, 1, calls.Load(), "no further attempts after Stop")
 }
 
 // --- non-blocking dispatch -------------------------------------------------

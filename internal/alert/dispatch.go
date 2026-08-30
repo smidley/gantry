@@ -97,9 +97,15 @@ type Dispatcher struct {
 	startOnce sync.Once
 	queues    map[string]chan deliveryJob
 
-	stop      chan struct{}
-	stopOnce  sync.Once
-	workersWG sync.WaitGroup
+	stop     chan struct{}
+	stopOnce sync.Once
+	// stopCtx mirrors stop as a context so it can flow into Channel.Send:
+	// an in-flight webhook attempt (up to 30s per try) or a pending retry
+	// backoff observes shutdown through it instead of running out its
+	// full timeout-and-retry budget.
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
+	workersWG  sync.WaitGroup
 
 	mu sync.Mutex // guards everything below
 
@@ -119,6 +125,7 @@ func NewDispatcher(store DeliveryStore, channels []Channel, clock func() time.Ti
 	if clock == nil {
 		clock = time.Now
 	}
+	stopCtx, stopCancel := context.WithCancel(context.Background())
 	return &Dispatcher{
 		Channels:        channels,
 		Store:           store,
@@ -126,6 +133,8 @@ func NewDispatcher(store DeliveryStore, channels []Channel, clock func() time.Ti
 		ResolvedNotices: resolvedNotices,
 		queues:          make(map[string]chan deliveryJob, len(channels)),
 		stop:            make(chan struct{}),
+		stopCtx:         stopCtx,
+		stopCancel:      stopCancel,
 	}
 }
 
@@ -167,12 +176,19 @@ func (d *Dispatcher) worker(ch Channel, q chan deliveryJob) {
 	}
 }
 
-// Stop signals every worker to exit once it finishes whatever it's
-// currently delivering; safe to call more than once or never (a
-// Dispatcher nobody Stop()s just leaks a handful of idle goroutines for
-// the process's lifetime, same as an un-Drain()ed Broadcaster would).
+// Stop signals every worker to exit and cancels the context every
+// in-flight Send is running under, so a wedged endpoint or a pending
+// retry backoff aborts promptly instead of being waited out; safe to
+// call more than once or never (a Dispatcher nobody Stop()s just leaks
+// a handful of idle goroutines for the process's lifetime, same as an
+// un-Drain()ed Broadcaster would).
 func (d *Dispatcher) Stop() {
-	d.stopOnce.Do(func() { close(d.stop) })
+	d.stopOnce.Do(func() {
+		close(d.stop)
+		if d.stopCancel != nil {
+			d.stopCancel()
+		}
+	})
 }
 
 // Run wires this Dispatcher's shutdown to ctx, the same Run(ctx, wg)
@@ -250,7 +266,15 @@ func (d *Dispatcher) send(ch Channel, n AlertNotification) {
 }
 
 func (d *Dispatcher) deliver(ch Channel, n AlertNotification) {
-	res := ch.Send(context.Background(), n)
+	// stopCtx, never context.Background(): a Send in flight when Stop()
+	// lands must abort with the shutdown, and its failure is recorded
+	// like any other -- a delivery cut short is a failed delivery, not
+	// a silent one.
+	ctx := d.stopCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	res := ch.Send(ctx, n)
 	d.recordDelivery(ch, n, res)
 	if !res.OK {
 		d.recordFailureEvent(ch.ID(), res)

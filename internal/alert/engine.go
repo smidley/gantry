@@ -209,6 +209,32 @@ func (e *Engine) resolveDisabled(inst store.AlertInstance, now int64) {
 	}
 }
 
+// resolveRestarted resolves any-state -> resolved("restarted"): a churn-
+// probation rule's (for_seconds > 0) active instance whose entity
+// Fleet() now shows running again -- see tickEvents' own probation
+// sweep for the "a running entity proves this was routine churn"
+// rationale. Mirrors resolveDisabled's any-state shape exactly: a
+// pending instance never fired, so it gets neither event nor dispatch
+// (resolveSilent's doctrine); a firing instance's own history should
+// still show why it closed, so it gets the alert.resolved event -- just
+// never a dispatched notification, the same "don't also page them"
+// reasoning resolveDisabled applies to a rule someone just turned off,
+// applied here to "this was already noise, and it must never become
+// MORE noise" (fix 4's backlog of already-delivered junk alerts).
+func (e *Engine) resolveRestarted(inst store.AlertInstance, now int64, activeIdx map[instanceKey]store.AlertInstance) {
+	delete(e.missingSince, inst.ID)
+	if err := e.Store.ResolveAlertInstance(inst.ID, now, "restarted"); err != nil {
+		log.Printf("alert engine: resolve instance %d (%s/%s) as restarted: %v", inst.ID, inst.RuleID, inst.Entity, err)
+	}
+	delete(activeIdx, keyOf(inst))
+	if inst.State == "pending" {
+		return
+	}
+	if _, err := e.Store.AppendEvent(store.Event{Kind: "alert.resolved", Entity: inst.Entity, Severity: "info", Detail: inst.Entity + " restarted"}); err != nil {
+		log.Printf("alert engine: append alert.resolved event: %v", err)
+	}
+}
+
 // bootSeed runs on every tick until it can report done=true: an event
 // rule can only ever see events appended after this process started, so
 // a container that was already unhealthy before boot would otherwise
@@ -660,6 +686,29 @@ func (e *Engine) tickEvents(ctx context.Context, ruleByID map[string]store.Alert
 		if !ok || r.Type != "event" {
 			continue
 		}
+
+		if r.ForSeconds > 0 {
+			// Churn probation: a currently-running entity proves this
+			// was routine churn, whether inst is a freshly pending
+			// instance still inside its own window or an already-
+			// firing one from before this check existed (fix 4's
+			// backlog) -- either way it resolves right here, never
+			// through the ordinary sustain/renotify/timeout path below.
+			if m, live := fleetByName[inst.Entity]; live && m.State == "running" {
+				e.resolveRestarted(inst, now, activeIdx)
+				continue
+			}
+			if inst.State == "pending" {
+				if now-inst.StartedAt >= r.ForSeconds {
+					e.fireEvent(r, inst, now, silences, activeIdx)
+				}
+				continue
+			}
+			// Firing, not (yet) confirmed restarted: falls through to
+			// the ordinary handling below, exactly like any other
+			// firing event-rule instance.
+		}
+
 		if sustained, tracked := sustainedEventRules[r.ID]; tracked {
 			if m, live := fleetByName[inst.Entity]; live && sustained(m) {
 				inst.FiredAt = now
@@ -736,16 +785,41 @@ func (e *Engine) processEventForRule(r store.AlertRule, ev store.Event, activeId
 	}
 
 	inst := store.AlertInstance{
-		RuleID: r.ID, Kind: r.Kind, Entity: ev.Entity, State: "firing", Severity: r.Severity,
-		Summary: summarizeEvent(ev), StartedAt: now, FiredAt: now,
+		RuleID: r.ID, Kind: r.Kind, Entity: ev.Entity, Severity: r.Severity,
+		Summary: summarizeEvent(ev), StartedAt: now,
 	}
-	if !Silenced(silences, r.ID, ev.Entity) {
+	if r.ForSeconds > 0 {
+		// Churn probation (container-exit-nonzero): a fresh match
+		// doesn't fire yet -- see tickEvents' own sweep for the fleet-
+		// running check that either resolves this silently as
+		// "restarted" or promotes it to firing once for_seconds
+		// elapses. Mirrors startPending's own "no event, no dispatch"
+		// contract.
+		inst.State = "pending"
+		e.upsert(&inst, activeIdx)
+		return
+	}
+	e.fireEvent(r, inst, now, silences, activeIdx)
+}
+
+// fireEvent marks inst firing and dispatches it -- the shared tail every
+// event-rule fire path ends in, whether an immediate match (for_seconds
+// <= 0, every event rule except container-exit-nonzero) or a pending
+// instance promoted after its own churn-probation window elapsed with no
+// resolving signal (tickEvents' own sweep). inst arrives with RuleID/
+// Kind/Entity/Severity/Summary/StartedAt already set; this sets State/
+// FiredAt and the usual silenced-aware notify bookkeeping, mirroring
+// fire()'s identical shape for a threshold rule.
+func (e *Engine) fireEvent(r store.AlertRule, inst store.AlertInstance, now int64, silences []store.Silence, activeIdx map[instanceKey]store.AlertInstance) {
+	inst.State = "firing"
+	inst.FiredAt = now
+	if !Silenced(silences, r.ID, inst.Entity) {
 		inst.LastNotifiedAt = now
-		inst.NotifyCount = 1
+		inst.NotifyCount++
 	}
 	e.upsert(&inst, activeIdx)
 
-	if _, err := e.Store.AppendEvent(store.Event{Kind: "alert.fired", Entity: ev.Entity, Severity: r.Severity, Detail: inst.Summary}); err != nil {
+	if _, err := e.Store.AppendEvent(store.Event{Kind: "alert.fired", Entity: inst.Entity, Severity: r.Severity, Detail: inst.Summary}); err != nil {
 		log.Printf("alert engine: append alert.fired event: %v", err)
 	}
 	if inst.LastNotifiedAt == now && e.Dispatch != nil {

@@ -33,11 +33,26 @@ package store
 //     only because the engine refreshes the clear timeout's anchor every
 //     tick Fleet() still reports the container unhealthy -- without
 //     that, the timeout would resolve a still-broken container hours
-//     before a renotify could ever fire. The other four event rules
-//     (container-oom, container-exit-nonzero, disk-errors, parity-
+//     before a renotify could ever fire. The other three event rules
+//     with no for_seconds below (container-oom, disk-errors, parity-
 //     errors) are true point events: clear_seconds counted from the one
 //     event that started them is already the correct, complete recovery
 //     signal, no sustain tracking needed.
+//   - container-exit-nonzero's for_seconds (120) is a second, unrelated
+//     meaning of that column: alert/engine.go's churn-probation window,
+//     not a threshold rule's sustained-for. for_seconds is otherwise
+//     dead weight on an event rule (ValidateRule's 3600s cap is the only
+//     thing that ever reads it), so reusing it needed no migration and
+//     comes for free as a per-rule, user-tunable number in the rule
+//     editor rather than a hardcoded Go constant. A fresh fire enters
+//     pending for this long; if Fleet() shows the entity running again
+//     before it elapses -- Unraid's Appdata Backup and CA auto-update
+//     plugins both stop-then-restart every container on their own
+//     overnight schedule, the exact false positive this rule exists to
+//     absorb -- it resolves silently as "restarted," never notified.
+//     The same fleet-running check also retroactively resolves an
+//     already-firing instance from before this existed, so a backlog of
+//     stale exit alerts cleans itself up on the first tick post-upgrade.
 //
 // UpdatedAt is left 0 on every rule; SeedAlertRules stamps it at insert
 // time, the same way AppendEvent/AddSilence stamp their own timestamp
@@ -140,7 +155,7 @@ func DefaultAlertRules(fast bool) []AlertRule {
 			ID: "container-exit-nonzero", Name: "Container exited nonzero", Enabled: true, Builtin: true,
 			Type: "event", Kind: "container", EntityGlob: "*",
 			EventKinds: "container.die", MinSeverity: "warning",
-			ClearSeconds: 3600, Severity: "warning",
+			ForSeconds: 120, ClearSeconds: 3600, Severity: "warning",
 		},
 		{
 			ID: "disk-errors", Name: "Disk errors", Enabled: true, Builtin: true,

@@ -83,7 +83,7 @@ func wantDefaultAlertRules() map[string]AlertRule {
 			ID: "container-exit-nonzero", Name: "Container exited nonzero", Enabled: true, Builtin: true,
 			Type: "event", Kind: "container", EntityGlob: "*",
 			EventKinds: "container.die", MinSeverity: "warning",
-			ClearSeconds: 3600, Severity: "warning",
+			ForSeconds: 120, ClearSeconds: 3600, Severity: "warning",
 		},
 		"disk-errors": {
 			ID: "disk-errors", Name: "Disk errors", Enabled: true, Builtin: true,

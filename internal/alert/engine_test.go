@@ -1038,6 +1038,175 @@ func TestEventRuleDuplicateMatchDoesNotCreateSecondActiveInstance(t *testing.T) 
 	require.Equal(t, 1, st.activeCount())
 }
 
+// --- churn probation (container-exit-nonzero) --------------------------
+
+// exitNonzeroRule mirrors the real container-exit-nonzero default
+// exactly (see store.DefaultAlertRules): for_seconds=120 is this rule's
+// OWN churn-probation window (engine.go's fireEvent/tickEvents), a
+// second, unrelated meaning of that column from a threshold rule's
+// sustained-for.
+func exitNonzeroRule() store.AlertRule {
+	return store.AlertRule{
+		ID: "container-exit-nonzero", Enabled: true, Type: "event", Kind: "container", EntityGlob: "*",
+		EventKinds: "container.die", MinSeverity: "warning",
+		ForSeconds: 120, ClearSeconds: 3600, Severity: "warning",
+	}
+}
+
+// TestChurnProbationEntersPendingNotFiringOnFreshMatch pins the core
+// behavior change: a probation-enabled rule's fresh match never fires
+// immediately the way every other event rule does -- it starts pending,
+// exactly like startPending's threshold-side "no event, no dispatch"
+// contract, giving a routine restart a chance to prove itself before
+// anyone is bothered.
+func TestChurnProbationEntersPendingNotFiringOnFreshMatch(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := exitNonzeroRule()
+	st := newFakeStore(rule)
+	var notes []string
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil,
+		func(n AlertNotification) { notes = append(notes, n.Phase) }, func() time.Time { return time.Unix(now, 0) })
+	require.NoError(t, eng.Tick(context.Background())) // boot tick
+
+	st.events = []store.Event{{ID: 1, TS: now, Kind: "container.die", Entity: "sonarr", Severity: "warning", Detail: "exit code 137"}}
+	require.NoError(t, eng.Tick(context.Background()))
+
+	inst := st.soleActive(t)
+	require.Equal(t, "pending", inst.State, "a probation-enabled rule's fresh match must not fire immediately")
+	require.Equal(t, "sonarr", inst.Entity)
+	require.Empty(t, notes, "pending never dispatches")
+	require.NotContains(t, st.eventKinds(), "alert.fired", "pending never appends alert.fired either")
+}
+
+// TestChurnProbationResolvesSilentlyWhenFleetShowsRestartedWithinWindow
+// is the fix's whole point: Unraid's Appdata Backup and CA auto-update
+// plugins both stop-then-restart every container on their own overnight
+// schedule. Once Fleet() shows the entity running again, the pending
+// instance resolves as "restarted" -- silently, since it never fired in
+// the first place (resolveSilent's own doctrine: nothing to announce
+// recovery from).
+func TestChurnProbationResolvesSilentlyWhenFleetShowsRestartedWithinWindow(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := exitNonzeroRule()
+	st := newFakeStore(rule)
+	running := false
+	fleet := func() []FleetMember {
+		state := "exited"
+		if running {
+			state = "running"
+		}
+		return []FleetMember{{Name: "sonarr", State: state}}
+	}
+	var notes []string
+	clk := &clockAt{t: now}
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet,
+		func(n AlertNotification) { notes = append(notes, n.Phase) }, clk.now)
+	require.NoError(t, eng.Tick(context.Background())) // boot tick
+
+	st.events = []store.Event{{ID: 1, TS: now, Kind: "container.die", Entity: "sonarr", Severity: "warning", Detail: "exit code 137"}}
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, "pending", st.soleActive(t).State)
+
+	// The routine restart, well inside the 120s probation window.
+	running = true
+	clk.t = now + 20
+	require.NoError(t, eng.Tick(context.Background()))
+
+	active, _ := st.ActiveAlertInstances(context.Background())
+	require.Empty(t, active, "must resolve, not stay pending")
+	require.Empty(t, notes, "zero dispatches -- this never fired")
+	for _, i := range st.instances {
+		require.Equal(t, "restarted", i.ResolveReason)
+	}
+	require.NotContains(t, st.eventKinds(), "alert.resolved", "a pending instance never fired, so it gets no resolved event either")
+}
+
+// TestChurnProbationPromotesToFiringAfterWindowWithNoRestart is the
+// other half: no start, ever, within the window -- a real problem, not
+// routine churn -- promotes to firing (and delivers) exactly once the
+// probation window elapses, same bookkeeping/dispatch shape as any other
+// fresh fire.
+func TestChurnProbationPromotesToFiringAfterWindowWithNoRestart(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := exitNonzeroRule()
+	st := newFakeStore(rule)
+	fleet := func() []FleetMember { return []FleetMember{{Name: "sonarr", State: "exited"}} }
+	var notes []string
+	clk := &clockAt{t: now}
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet,
+		func(n AlertNotification) { notes = append(notes, n.Phase) }, clk.now)
+	require.NoError(t, eng.Tick(context.Background())) // boot tick
+
+	st.events = []store.Event{{ID: 1, TS: now, Kind: "container.die", Entity: "sonarr", Severity: "warning", Detail: "exit code 137"}}
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, "pending", st.soleActive(t).State)
+
+	clk.t = now + 119
+	require.NoError(t, eng.Tick(context.Background()))
+	require.Equal(t, "pending", st.soleActive(t).State, "not yet 120s")
+
+	clk.t = now + 121
+	require.NoError(t, eng.Tick(context.Background()))
+	inst := st.soleActive(t)
+	require.Equal(t, "firing", inst.State)
+	require.Equal(t, int64(1), inst.NotifyCount)
+	require.Equal(t, []string{"fired"}, notes)
+	require.Contains(t, st.eventKinds(), "alert.fired")
+}
+
+// TestChurnProbationRetroactivelyResolvesAlreadyFiringBacklogInstance
+// pins fix 4's backfill: the same fleet-running check also sweeps an
+// already-FIRING instance created before this mechanism existed -- the
+// exact backlog of stale exit alerts sitting active on a real box, whose
+// containers have long since restarted. Unlike the pending case, this
+// instance DID fire (and possibly already notified), so its own history
+// still gets an alert.resolved event -- it just never dispatches a
+// SECOND notification for something that was already noise.
+func TestChurnProbationRetroactivelyResolvesAlreadyFiringBacklogInstance(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := exitNonzeroRule()
+	st := newFakeStore(rule)
+	staleID, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: rule.ID, Kind: "container", Entity: "sonarr", State: "firing",
+		Severity: "warning", Summary: "sonarr: container.die (exit code 137)",
+		StartedAt: now - 3600, FiredAt: now - 3600, LastNotifiedAt: now - 3600, NotifyCount: 1,
+	})
+	require.NoError(t, err)
+
+	fleet := func() []FleetMember { return []FleetMember{{Name: "sonarr", State: "running"}} }
+	var notes []string
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet,
+		func(n AlertNotification) { notes = append(notes, n.Phase) }, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background())) // the first tick after deploying the fix
+
+	active, _ := st.ActiveAlertInstances(context.Background())
+	require.Empty(t, active, "the running entity proves this was routine churn -- clean sweep on the first tick")
+	require.Equal(t, "restarted", st.instances[staleID].ResolveReason)
+	require.Empty(t, notes, "already-delivered junk must not ALSO get a resolved notification")
+	require.Contains(t, st.eventKinds(), "alert.resolved", "a firing instance's own history must still show why it closed")
+}
+
+// TestChurnProbationDoesNotAffectBootSeedingOfOtherEventRules guards the
+// tickEvents restructuring itself: an unrelated probation-enabled rule
+// coexisting in the same rule set must not perturb container-unhealthy's
+// own boot-seeding, which has nothing to do with container.die at all.
+func TestChurnProbationDoesNotAffectBootSeedingOfOtherEventRules(t *testing.T) {
+	now := int64(2_000_000_000)
+	st := newFakeStore(unhealthyRule(), exitNonzeroRule())
+	fleet := func() []FleetMember {
+		return []FleetMember{{Name: "sonarr", State: "running", Health: "unhealthy"}}
+	}
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet, nil, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background()))
+
+	active, _ := st.ActiveAlertInstances(context.Background())
+	require.Len(t, active, 1, "container-exit-nonzero's EventKinds never matches the synthetic container.health boot-seed event")
+	require.Equal(t, "container-unhealthy", active[0].RuleID)
+	require.Equal(t, "firing", active[0].State, "boot-seeding must still fire immediately, unaffected by an unrelated probation-enabled rule")
+}
+
 // --- event rule catch-up / renotify sweep ------------------------------
 
 // TestEventRuleCatchesUpSilencedFireOnceSilenceLifts pins N1: the

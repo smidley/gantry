@@ -128,8 +128,11 @@ type Dispatcher struct {
 	workersWG  sync.WaitGroup
 
 	// overflowMu serializes the overflow drop-then-resend pair in send()
-	// -- never held across a store write's completion path or a channel
-	// Send, only queue pops/pushes (see send's own comment).
+	// -- never held across a channel Send, only queue pops/pushes plus
+	// the drop bookkeeping (whose recorder can fall back to an inline
+	// store write when saturated; uncontended in production's
+	// single-producer shape, so that write costs the producer nothing
+	// it wouldn't already pay).
 	overflowMu sync.Mutex
 
 	mu sync.Mutex // guards everything below

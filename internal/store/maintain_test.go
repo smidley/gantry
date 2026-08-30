@@ -29,6 +29,89 @@ func TestMaintainFlushesBeforeDownsampling(t *testing.T) {
 	require.Equal(t, 9.0, max)
 }
 
+// TestMaintainPrunesAlertTablesButLeavesActiveInstancesAlone pins
+// pruneAlerts' three cutoffs in one pass: resolved instances past ret.R2
+// (the same knob PruneOnce uses for samples_10m), deliveries past a
+// fixed 7 days, and silences whose until has already passed -- while an
+// active instance (resolved_at = 0) survives regardless of how old its
+// started_at is, since the age filter only ever looks at resolved_at.
+func TestMaintainPrunesAlertTablesButLeavesActiveInstancesAlone(t *testing.T) {
+	s := newTestStore(t, nil)
+	ret := DefaultRetention()
+	now := at("12:00:00")
+	nowUnix := now.Unix()
+
+	oldResolvedID, err := s.UpsertAlertInstance(AlertInstance{RuleID: "r1", Kind: "disk", Entity: "d1", State: "resolved", Severity: "warning", StartedAt: 1})
+	require.NoError(t, err)
+	require.NoError(t, s.ResolveAlertInstance(oldResolvedID, nowUnix-int64(ret.R2.Seconds())-100, "cleared"))
+
+	recentResolvedID, err := s.UpsertAlertInstance(AlertInstance{RuleID: "r2", Kind: "disk", Entity: "d2", State: "resolved", Severity: "warning", StartedAt: 1})
+	require.NoError(t, err)
+	require.NoError(t, s.ResolveAlertInstance(recentResolvedID, nowUnix-100, "cleared"))
+
+	// Active, with a StartedAt far older than R2 -- proving the prune
+	// filter keys on resolved_at (0 here), never on started_at's age.
+	activeID, err := s.UpsertAlertInstance(AlertInstance{RuleID: "r3", Kind: "disk", Entity: "d3", State: "firing", Severity: "warning", StartedAt: 1})
+	require.NoError(t, err)
+
+	require.NoError(t, s.RecordDelivery(Delivery{InstanceID: oldResolvedID, TS: nowUnix - 7*24*3600 - 100, Channel: "notify", Phase: "fired", OK: true}))
+	require.NoError(t, s.RecordDelivery(Delivery{InstanceID: recentResolvedID, TS: nowUnix - 100, Channel: "notify", Phase: "fired", OK: true}))
+
+	expiredSilenceID, err := s.AddSilence(Silence{RuleID: "r1", Until: nowUnix - 100})
+	require.NoError(t, err)
+	activeSilenceID, err := s.AddSilence(Silence{RuleID: "r2", Until: nowUnix + 100})
+	require.NoError(t, err)
+
+	require.NoError(t, s.Maintain(context.Background(), now, ret))
+
+	remainingInstances, err := allAlertInstanceIDs(s)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{recentResolvedID, activeID}, remainingInstances, "old resolved instance pruned; recent resolved and active survive")
+
+	var deliveryCount int
+	require.NoError(t, s.DB().QueryRow(`SELECT count(*) FROM alert_deliveries`).Scan(&deliveryCount))
+	require.Equal(t, 1, deliveryCount, "only the recent delivery survives")
+
+	remainingSilences, err := allSilenceIDs(s)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{activeSilenceID}, remainingSilences)
+	require.NotContains(t, remainingSilences, expiredSilenceID)
+}
+
+func allAlertInstanceIDs(s *Store) ([]int64, error) {
+	rows, err := s.DB().Query(`SELECT id FROM alert_instances`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func allSilenceIDs(s *Store) ([]int64, error) {
+	rows, err := s.DB().Query(`SELECT id FROM alert_silences`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func TestRetentionFromConfig(t *testing.T) {
 	vals := map[string]int{"retention.r1_hours": 24, "retention.r3_days": 60, "retention.size_cap_mb": 128}
 	get := func(key string, def int) int {

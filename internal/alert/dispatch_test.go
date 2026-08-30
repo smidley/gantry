@@ -430,6 +430,79 @@ func TestDispatcherFlapGuardWindowIsRollingNotFixed(t *testing.T) {
 	require.Empty(t, st.silencesSnapshot(), "the first, now-expired cycle must not count toward the threshold")
 }
 
+// tripFlap drives (ruleID, entity) through flapThreshold fires so the
+// flap guard trips on the last one.
+func tripFlap(d *Dispatcher, ruleID, entity string) {
+	for i := 0; i < flapThreshold; i++ {
+		d.Dispatch(fireNotification(ruleID, entity))
+		d.Dispatch(resolvedNotification(ruleID, entity))
+	}
+}
+
+// TestDispatcherFlapExplanationsCappedGlobally pins the burst cap on
+// the per-pair "has been silenced" explanations: a daemon restart can
+// cycle every container on the box within a minute, tripping the flap
+// guard once per container, and without a global cap each trip writes
+// its own notification file. The first flapExplainMaxPerHour trips
+// explain themselves; the rest coalesce into one "N rules are
+// flapping" notice when the hour window closes. Silences and
+// alert.flapping events stay per-pair -- only the notifications
+// coalesce.
+func TestDispatcherFlapExplanationsCappedGlobally(t *testing.T) {
+	clock := newTestClock(1_800_000_000)
+	hook := newFakeChannel("webhook:home") // webhook: unthrottled by the notify bucket, so counts stay clean
+	st := &fakeDeliveryStore{}
+	d := NewDispatcher(st, []Channel{hook}, clock.Now, nil)
+	t.Cleanup(d.Stop)
+
+	for i := 0; i < 5; i++ {
+		tripFlap(d, fmt.Sprintf("flappy-%d", i), "e")
+		clock.Advance(time.Second)
+	}
+	require.Eventually(t, func() bool { return len(st.silencesSnapshot()) == 5 }, time.Second, 5*time.Millisecond,
+		"every tripped pair still gets its own silence")
+	require.Eventually(t, func() bool { return len(st.eventsOfKind("alert.flapping")) == 5 }, time.Second, 5*time.Millisecond,
+		"every tripped pair still gets its own alert.flapping event")
+
+	countFlapNotices := func() (perPair, coalesced int) {
+		for _, n := range hook.sendsSnapshot() {
+			if n.Phase != "flapping" {
+				continue
+			}
+			if n.Subject == "" {
+				perPair++
+			} else {
+				coalesced++
+			}
+		}
+		return
+	}
+	require.Eventually(t, func() bool { p, _ := countFlapNotices(); return p == 3 }, time.Second, 5*time.Millisecond,
+		"only the first 3 trips within the hour explain themselves")
+
+	// The window closes an hour after the first coalesced trip; the next
+	// Dispatch of any kind flushes the aggregate notice.
+	clock.Advance(3601 * time.Second)
+	d.Dispatch(fireNotification("unrelated", "e"))
+
+	require.Eventually(t, func() bool { _, c := countFlapNotices(); return c == 1 }, time.Second, 5*time.Millisecond,
+		"the suppressed trips coalesce into exactly one aggregate notice")
+	p, _ := countFlapNotices()
+	require.Equal(t, 3, p, "no further per-pair explanations after the cap")
+
+	var agg *AlertNotification
+	for _, n := range hook.sendsSnapshot() {
+		if n.Phase == "flapping" && n.Subject != "" {
+			cp := n
+			agg = &cp
+		}
+	}
+	require.NotNil(t, agg)
+	require.Equal(t, "2 Gantry rules are flapping", agg.Subject)
+	require.Contains(t, agg.Summary, "flappy-3/e")
+	require.Contains(t, agg.Summary, "flappy-4/e")
+}
+
 // --- delivery ledger -----------------------------------------------------
 
 func TestDispatcherRecordsSuccessfulDelivery(t *testing.T) {

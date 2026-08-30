@@ -65,6 +65,15 @@ const (
 	flapThreshold      = 4    // fire/resolve cycles within the window that trips it
 	flapSilenceSeconds = 3600 // auto-silence duration once tripped
 
+	// flapExplainMaxPerHour caps how many per-pair "has been silenced"
+	// explanations may go out per rolling hour ACROSS pairs: a daemon
+	// restart can cycle every container on the box inside a minute,
+	// tripping the flap guard once per container, and one notification
+	// file per container is exactly the burst the guard exists to stop.
+	// Trips past the cap coalesce into one "N rules are flapping" notice
+	// (see flushFlapExplainIfDue).
+	flapExplainMaxPerHour = 3
+
 	defaultChannelQueueCap = 256
 
 	// recorderQueueCap bounds the async store-write recorder; past it a
@@ -131,6 +140,10 @@ type Dispatcher struct {
 	windowStart     int64 // 0 => no open suppression window
 
 	flapFires map[flapKey][]int64
+
+	flapExplainTimes []int64  // send times of recent per-pair flap explanations, pruned to the rolling hour
+	flapPending      []string // "rule/entity" lines for trips past the cap, awaiting the coalesced notice
+	flapPendingStart int64    // 0 => no coalesce window open
 
 	lastFailureEvent map[string]int64 // channel id -> last alert.delivery_failed ts
 }
@@ -299,6 +312,7 @@ func (d *Dispatcher) Dispatch(n AlertNotification) {
 	d.ensureStarted()
 	now := d.now()
 	d.flushThrottleIfDue(now)
+	d.flushFlapExplainIfDue(now)
 
 	if n.Phase == "resolved" && !d.resolvedEnabled() {
 		return
@@ -647,11 +661,71 @@ func (d *Dispatcher) silenceFlapping(n AlertNotification, now int64) {
 	if entity == "" {
 		entity = "host"
 	}
+
+	// The explanations themselves are capped globally: past
+	// flapExplainMaxPerHour in the rolling hour, this trip joins the
+	// pending list for one coalesced notice instead (the silence and the
+	// alert.flapping event above stay per-pair regardless -- only the
+	// notification coalesces).
+	d.mu.Lock()
+	cutoff := now - throttleWindowSeconds
+	kept := d.flapExplainTimes[:0]
+	for _, ts := range d.flapExplainTimes {
+		if ts > cutoff {
+			kept = append(kept, ts)
+		}
+	}
+	d.flapExplainTimes = kept
+	direct := len(d.flapExplainTimes) < flapExplainMaxPerHour
+	if direct {
+		d.flapExplainTimes = append(d.flapExplainTimes, now)
+	} else {
+		if d.flapPendingStart == 0 {
+			d.flapPendingStart = now
+		}
+		d.flapPending = append(d.flapPending, n.Rule.Name+"/"+entity)
+	}
+	d.mu.Unlock()
+	if !direct {
+		return
+	}
+
 	explain := AlertNotification{
 		Phase: "flapping", Rule: n.Rule, Instance: n.Instance,
 		Summary: fmt.Sprintf("%s on %s fired %d times in the last hour and has been silenced for 1h", n.Rule.Name, entity, flapThreshold),
 	}
 	for _, ch := range d.Channels {
 		d.send(ch, explain)
+	}
+}
+
+// flushFlapExplainIfDue mirrors flushThrottleIfDue for the flap guard's
+// own explanations: once the coalesce window opened by the first
+// over-cap trip has run a full hour, one "N rules are flapping" notice
+// goes to every channel (through send directly, bypassing the notify
+// bucket for the same reason the per-pair explanation does). Lazy,
+// next-Dispatch-driven, with the same documented quiet-hour caveat.
+func (d *Dispatcher) flushFlapExplainIfDue(now int64) {
+	d.mu.Lock()
+	if d.flapPendingStart == 0 || now-d.flapPendingStart < throttleWindowSeconds {
+		d.mu.Unlock()
+		return
+	}
+	items := d.flapPending
+	d.flapPending = nil
+	d.flapPendingStart = 0
+	d.mu.Unlock()
+
+	if len(items) == 0 {
+		return
+	}
+	notice := AlertNotification{
+		Phase:   "flapping",
+		Subject: fmt.Sprintf("%d Gantry rules are flapping", len(items)),
+		Summary: strings.Join(items, ", ") + " (each auto-silenced for 1h when it tripped)",
+		Rule:    store.AlertRule{Severity: "warning"},
+	}
+	for _, ch := range d.Channels {
+		d.send(ch, notice)
 	}
 }

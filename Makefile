@@ -1,4 +1,10 @@
-VERSION ?= dev
+# release.yml passes VERSION explicitly (the pushed tag); locally, fall
+# back to `git describe` so a plain `make build` reports something more
+# useful than a bare "dev" -- e.g. "v0.1.0-4-gabc1234" a few commits
+# past a tag, or the short SHA alone once no tag is reachable at all.
+# The final `|| echo dev` only fires outside a git checkout entirely
+# (e.g. a source tarball with no .git).
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: build web release test lint fmt docker
 

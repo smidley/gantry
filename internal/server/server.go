@@ -203,7 +203,19 @@ func New(o Options) *Server {
 	// own doc). Registered individually (rather than one blanket
 	// wrapper around the whole mux) so that exclusion is visible right
 	// here, at the point each route is declared.
+	// Registered for both GET and POST (a bare method-agnostic "/api/
+	// healthz" pattern isn't an option: it conflicts at registration
+	// time with the SPA catch-all "GET /" below -- ServeMux can't order
+	// "matches every method, one specific path" against "matches one
+	// method, every path"). A health check is read-only and side-effect-
+	// free regardless of verb; POST is added specifically so fake mode's
+	// own "always succeeds" demo webhook target (Task 9, cmd/gantry/
+	// main.go's seedFakeWebhookTargets) has a same-process endpoint that
+	// reliably returns 200 with no external service -- GET-only would
+	// 405 that POST and turn the "healthy" demo target into a second
+	// failing one.
 	s.mux.Handle("GET /api/healthz", withGzip(http.HandlerFunc(s.handleHealthz)))
+	s.mux.Handle("POST /api/healthz", withGzip(http.HandlerFunc(s.handleHealthz)))
 	s.mux.Handle("GET /api/version", withGzip(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]string{"version": s.opts.Version})
 	})))

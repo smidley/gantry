@@ -1,3 +1,29 @@
+-- events was created by 001_core.sql as a plain `id INTEGER PRIMARY KEY`
+-- (a bare rowid alias): once downsample.go's PruneOnce empties the table
+-- completely (everything has aged past R3), SQLite has no memory that
+-- id ever reached anything higher than 0, so the very next insert reuses
+-- id 1. QueryEventsSince/MaxEventID need the opposite guarantee -- an id
+-- that, once used, is never handed out again -- so a boot-seeded cursor
+-- can't go permanently deaf after a full prune. Rebuild the table with
+-- INTEGER PRIMARY KEY AUTOINCREMENT, which keeps a persistent high-water
+-- mark in sqlite_sequence across any number of full deletes. Standard
+-- SQLite table-rebuild sequence (create-new/copy/drop/rename), inside
+-- this migration's own transaction, preserving every existing row and
+-- recreating the one index events already had.
+CREATE TABLE events_new (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       INTEGER NOT NULL,
+    kind     TEXT NOT NULL,
+    entity   TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'info',
+    detail   TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO events_new (id, ts, kind, entity, severity, detail)
+    SELECT id, ts, kind, entity, severity, detail FROM events;
+DROP TABLE events;
+ALTER TABLE events_new RENAME TO events;
+CREATE INDEX idx_events_ts ON events (ts);
+
 CREATE TABLE alert_rules (
     id                TEXT PRIMARY KEY,          -- stable slug, e.g. "disk-temp-high"
     name              TEXT NOT NULL,

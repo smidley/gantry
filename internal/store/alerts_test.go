@@ -378,7 +378,8 @@ func TestQueryEventsSinceReturnsRowsStrictlyAfterCursorOrderedAscending(t *testi
 // exists for: three events sharing one ts, walked by id cursor two pages
 // at a time, must all come back exactly once with none skipped and none
 // duplicated -- proving the cursor really is id-based, not ts-based (ts
-// is not monotonic across an NTP step; rowid is).
+// is not monotonic across an NTP step; id, backed by INTEGER PRIMARY KEY
+// AUTOINCREMENT, is).
 func TestQueryEventsSinceCursorAcrossTiedTimestampsMissesNothing(t *testing.T) {
 	s := newTestStore(t, func() time.Time { return at("12:00:00") })
 	var ids []int64

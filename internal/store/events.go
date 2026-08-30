@@ -91,9 +91,13 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 // QueryEventsSince reads forward by id (NOT ts) so an event rule's
 // cursor can never miss a row inserted with an equal or earlier
 // timestamp than one it already saw -- the clock is not monotonic
-// across an NTP step, but the rowid is. limit <= 0 defaults to 500 (an
-// event rule's Tick reads in bounded pages, not the whole backlog at
-// once).
+// across an NTP step, but id is: events.id is INTEGER PRIMARY KEY
+// AUTOINCREMENT (migrations/003_alerts.sql), so SQLite never reissues an
+// id that has ever been used, even across PruneOnce's full-table
+// deletes. Defense in depth: a persisted cursor should still be clamped
+// to MaxEventID at boot rather than trusted blindly. limit <= 0 defaults
+// to 500 (an event rule's Tick reads in bounded pages, not the whole
+// backlog at once).
 func (s *Store) QueryEventsSince(ctx context.Context, afterID int64, limit int) ([]Event, error) {
 	if limit <= 0 {
 		limit = 500

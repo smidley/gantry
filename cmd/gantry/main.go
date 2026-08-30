@@ -583,7 +583,7 @@ func buildAlertsBlock(st *store.Store, dispatcher *alert.Dispatcher) server.Aler
 		firing = append(firing, server.FiringAlertDTO{
 			RuleID: inst.RuleID, RuleName: ruleByID[inst.RuleID].Name, Severity: inst.Severity,
 			Kind: inst.Kind, Entity: inst.Entity, Metric: inst.Metric,
-			Value: inst.Value, Threshold: inst.Threshold, FiredAt: inst.FiredAt,
+			Value: inst.Value, Threshold: inst.Threshold, Summary: inst.Summary, FiredAt: inst.FiredAt,
 			Silenced: server.SilenceCovers(silences, inst.RuleID, inst.Entity),
 		})
 	}

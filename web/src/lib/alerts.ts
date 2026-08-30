@@ -9,13 +9,18 @@ import { fmtDuration } from './format';
 // --- resolve reasons ---------------------------------------------------
 
 // RESOLVE_REASON_TEXT renders store.AlertInstance.ResolveReason's own
-// four wire values (internal/alert/engine.go's resolve* calls) in plain
+// five wire values (internal/alert/engine.go's resolve* calls) in plain
 // words for the History section -- never the raw machine string.
 const RESOLVE_REASON_TEXT: Record<string, string> = {
   cleared: 'recovered',
   'no-data': 'stopped reporting',
   timeout: 'auto-closed',
   'rule-disabled': 'rule turned off',
+  // restarted: container-exit-nonzero's own churn-probation resolve
+  // (resolveRestarted) -- Fleet() showed the entity running again, so
+  // this was a routine stop/restart (Unraid's Appdata Backup/CA
+  // auto-update plugins), never a real problem.
+  restarted: 'routine restart',
 };
 
 export function describeResolveReason(reason: string): string {

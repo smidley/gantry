@@ -292,6 +292,8 @@
                 <div class="alerts-view__row-value">
                   {formatMetricValue(a.metric, a.value)} vs threshold {formatMetricValue(a.metric, a.threshold)}
                 </div>
+              {:else if a.summary}
+                <div class="alerts-view__row-value">{a.summary}</div>
               {/if}
               {#if a.silenced}
                 <div class="alerts-view__row-silence-status">

@@ -85,6 +85,11 @@ export interface SnapshotDTO {
 // below: just what the Overview headline and the Alerts view's live
 // section need, plus rule_name (the frame joins it against the current
 // rule list once per tick so no consumer has to).
+//
+// summary is the instance's own stored sentence -- the only meaningful
+// description for an EVENT alert, whose metric/value/threshold are all
+// the zero value (there is no metric to compare against a threshold).
+// Render summary instead of value/threshold whenever metric is "".
 export interface FiringAlertDTO {
   rule_id: string;
   rule_name: string;
@@ -94,6 +99,7 @@ export interface FiringAlertDTO {
   metric: string;
   value: number;
   threshold: number;
+  summary: string;
   fired_at: number;
   silenced: boolean;
 }

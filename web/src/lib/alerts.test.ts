@@ -32,11 +32,12 @@ describe('alertEntityHref', () => {
 });
 
 describe('describeResolveReason', () => {
-  it('renders the four known machine reasons in plain words', () => {
+  it('renders the five known machine reasons in plain words', () => {
     expect(describeResolveReason('cleared')).toBe('recovered');
     expect(describeResolveReason('no-data')).toBe('stopped reporting');
     expect(describeResolveReason('timeout')).toBe('auto-closed');
     expect(describeResolveReason('rule-disabled')).toBe('rule turned off');
+    expect(describeResolveReason('restarted')).toBe('routine restart');
   });
 
   it('passes an unknown reason through verbatim rather than dropping it', () => {

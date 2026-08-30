@@ -170,6 +170,42 @@ describe('deriveOverviewStatus alerts merge (Task 12)', () => {
     expect(status.headline).toBe('1 thing needs you');
   });
 
+  it('an EVENT alert (no metric) shows its own summary as the callout detail instead of the bare entity', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [
+        {
+          rule_id: 'container-exit-nonzero',
+          rule_name: 'Container exited nonzero',
+          severity: 'warning',
+          entity: 'sonarr',
+          silenced: false,
+          metric: '',
+          summary: 'sonarr: container.die (exit code 137)',
+        },
+      ],
+    });
+    expect(describeAnomaly(status.anomalies[0]).detail).toBe('sonarr: container.die (exit code 137)');
+  });
+
+  it('a THRESHOLD alert (metric present) keeps the bare entity as its callout detail, never the fuller summary sentence', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [
+        {
+          rule_id: 'host-cpu-high',
+          rule_name: 'Host CPU high',
+          severity: 'warning',
+          entity: 'sonarr',
+          silenced: false,
+          metric: 'mem.limit_pct',
+          summary: 'sonarr is at 91.0% (over 85.0% for 10m0s)',
+        },
+      ],
+    });
+    expect(describeAnomaly(status.anomalies[0]).detail).toBe('sonarr');
+  });
+
   it('a silenced firing alert contributes nothing at all', () => {
     const status = deriveOverviewStatus({
       ...BASE,

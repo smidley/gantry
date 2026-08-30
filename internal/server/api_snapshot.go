@@ -64,6 +64,15 @@ type AlertsBlockDTO struct {
 // (store.AlertInstance itself only carries RuleID; the frame assembly
 // joins it against the current rule list once per tick rather than
 // making every consumer do that lookup itself).
+//
+// Summary is the instance's own stored sentence (store.AlertInstance.
+// Summary) -- for a THRESHOLD rule it restates Value/Threshold in
+// words, but for an EVENT rule it's the only meaningful description at
+// all: Metric/Value/Threshold are all zero value for an event-type
+// instance (there is no metric to compare against a threshold), so a
+// naive "value vs threshold" render reads as a meaningless "0 vs 0".
+// Consumers must render Summary instead of Value/Threshold whenever
+// Metric is "" -- see web/src/views/Alerts.svelte and overviewStatus.ts.
 type FiringAlertDTO struct {
 	RuleID    string  `json:"rule_id"`
 	RuleName  string  `json:"rule_name"`
@@ -73,6 +82,7 @@ type FiringAlertDTO struct {
 	Metric    string  `json:"metric"`
 	Value     float64 `json:"value"`
 	Threshold float64 `json:"threshold"`
+	Summary   string  `json:"summary"`
 	FiredAt   int64   `json:"fired_at"`
 	Silenced  bool    `json:"silenced"`
 }

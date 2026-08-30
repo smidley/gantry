@@ -35,7 +35,15 @@ test('alerts view renders its heading and a real Active section (grafana is unhe
   await expect(page.locator('.alerts-view__rules')).toBeVisible();
 
   const active = page.locator('.alerts-view__active');
-  await expect(active.locator('.alerts-view__row', { hasText: 'Container unhealthy' })).toBeVisible({ timeout: 20_000 });
+  const row = active.locator('.alerts-view__row', { hasText: 'Container unhealthy' });
+  await expect(row).toBeVisible({ timeout: 20_000 });
+
+  // container-unhealthy is an EVENT rule -- it carries no metric, so it
+  // must never render the threshold row's "value vs threshold" shape
+  // (meaningless zeros for an event alert). It must instead show the
+  // instance's own summary as real detail text.
+  await expect(row.locator('.alerts-view__row-value')).toContainText('unhealthy at boot');
+  await expect(row.locator('.alerts-view__row-value')).not.toContainText('vs threshold');
 });
 
 test('channels strip renders the real notify (ok) and both fake webhook targets, one healthy one failing', async ({ page }) => {

@@ -50,7 +50,20 @@ export type OverviewAnomaly =
   | ({ kind: 'disk-errors'; slot: string; errors: number } & AnomalyBase)
   | ({ kind: 'array-stopped' } & AnomalyBase)
   | ({ kind: 'source-critical'; source: string; detail: string } & AnomalyBase)
-  | ({ kind: 'alert'; ruleId: string; ruleName: string; entity: string; severity: HealthStatus } & AnomalyBase);
+  | ({
+      kind: 'alert';
+      ruleId: string;
+      ruleName: string;
+      entity: string;
+      severity: HealthStatus;
+      // metric/summary ride along from the firing alert so
+      // describeAnomalyCore can tell a threshold alert (metric set --
+      // detail stays the bare entity, unchanged) from an event alert
+      // (metric "" -- there is no value/threshold to show at all, so
+      // detail becomes the instance's own summary sentence instead).
+      metric?: string;
+      summary?: string;
+    } & AnomalyBase);
 
 // FiringAlertLike is the narrow slice of api.ts's FiringAlertDTO this
 // module actually needs -- kept local rather than importing the wider
@@ -64,6 +77,11 @@ export interface FiringAlertLike {
   severity: string;
   entity: string;
   silenced: boolean;
+  // metric/summary: see OverviewAnomaly's 'alert' variant doc. Optional
+  // so a caller that hasn't wired the fuller FiringAlertDTO through yet
+  // (or a test fixture that doesn't care) still type-checks.
+  metric?: string;
+  summary?: string;
 }
 
 export interface OverviewStatusInput {
@@ -203,7 +221,10 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
       }
       continue;
     }
-    anomalies.push({ kind: 'alert', ruleId: alert.rule_id, ruleName: alert.rule_name, entity: alert.entity, severity: mappedSeverity });
+    anomalies.push({
+      kind: 'alert', ruleId: alert.rule_id, ruleName: alert.rule_name, entity: alert.entity, severity: mappedSeverity,
+      metric: alert.metric, summary: alert.summary,
+    });
   }
 
   // The headline count stays anomalies.length either way (Task 12's own
@@ -275,7 +296,12 @@ function describeAnomalyCore(a: OverviewAnomaly): AnomalyText {
     case 'source-critical':
       return { severity: 'critical', title: `${a.source} needs attention`, detail: a.detail };
     case 'alert':
-      return { severity: a.severity, title: a.ruleName, detail: a.entity, href: '#/alerts' };
+      // A threshold alert's metric is always non-empty -- detail stays
+      // the bare entity, unchanged. An event alert has no metric (and
+      // so no meaningful value/threshold at all -- see FiringAlertDTO's
+      // own doc): its summary sentence is the only real description,
+      // falling back to entity on the off chance summary is also empty.
+      return { severity: a.severity, title: a.ruleName, detail: a.metric ? a.entity : a.summary || a.entity, href: '#/alerts' };
   }
 }
 

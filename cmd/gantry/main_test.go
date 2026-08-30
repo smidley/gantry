@@ -923,7 +923,7 @@ func TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced(t *t
 	}))
 	if _, err := st.UpsertAlertInstance(store.AlertInstance{
 		RuleID: "host-cpu-high", Kind: "host", State: "firing", Severity: "warning",
-		Value: 91, Threshold: 85, StartedAt: 900, FiredAt: 1000,
+		Value: 91, Threshold: 85, Summary: "host is at 91.0% (over 85.0% for 0s)", StartedAt: 900, FiredAt: 1000,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -950,6 +950,7 @@ func TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced(t *t
 	require.Equal(t, "host-cpu-high", f.RuleID)
 	require.Equal(t, "Host CPU high", f.RuleName, "the frame must join the rule's Name, not just carry rule_id")
 	require.Equal(t, 91.0, f.Value)
+	require.Equal(t, "host is at 91.0% (over 85.0% for 0s)", f.Summary, "the instance's own Summary must carry through -- the Alerts view's event-alert detail line reads this")
 	require.True(t, f.Silenced, "the rule-wide silence (entity \"\") must cover this instance")
 	require.Equal(t, 1, snap.Alerts.FiringCount)
 	require.Equal(t, 0, snap.Alerts.Truncated)

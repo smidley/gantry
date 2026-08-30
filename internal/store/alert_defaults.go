@@ -90,11 +90,11 @@ func DefaultAlertRules(fast bool) []AlertRule {
 			ForSeconds: 600, ClearSeconds: 300, Severity: "warning",
 		},
 		{
-			// fs.used_pct doesn't exist as a persisted metric until Task 2
-			// (internal/collect/unraid/disks.go) lands -- this rule seeds
-			// with everyone else regardless; no series simply means no
-			// evaluation, the same "absent series, no alarm" degradation
-			// every other rule already tolerates when its metric hasn't
+			// fs.used_pct is emitted by internal/collect/unraid/disks.go
+			// (Task 2), alongside the existing fs.used_bytes/fs.free_bytes
+			// pair -- this rule was seeded ahead of that metric landing,
+			// tolerating the interim "absent series, no alarm" degradation
+			// every other rule already relies on when its metric hasn't
 			// reported yet.
 			ID: "disk-usage-high", Name: "Disk usage high", Enabled: true, Builtin: true,
 			Type: "threshold", Kind: "disk", EntityGlob: "*",
@@ -165,10 +165,11 @@ func DefaultAlertRules(fast bool) []AlertRule {
 			ClearSeconds: 86400, Severity: "alert", RenotifyHours: 24,
 		},
 		{
-			// parity.finish's Severity only ever reads "info" until Task 2
-			// enriches it on sbSyncErrs > 0 -- min_severity "warning" is
-			// forward-looking, same "seeds now, tolerates absence" posture
-			// as disk-usage-high's fs.used_pct above.
+			// parity.finish's Severity flips to "alert" on sbSyncErrs > 0
+			// (internal/collect/unraid/var.go, Task 2) -- min_severity
+			// "warning" is what actually gates this rule on that flip,
+			// same landed-metric posture as disk-usage-high's fs.used_pct
+			// above.
 			ID: "parity-errors", Name: "Parity check errors", Enabled: true, Builtin: true,
 			Type: "event", Kind: "unraid", EntityGlob: "array",
 			EventKinds: "parity.finish", MinSeverity: "warning",

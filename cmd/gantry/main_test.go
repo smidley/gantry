@@ -1219,6 +1219,38 @@ func TestSeedWebhookTargetFromEnvNoopWhenEnvEmpty(t *testing.T) {
 	require.Empty(t, targets)
 }
 
+// TestSeedWebhookTargetFromEnvRemovesEnvTargetWhenCleared pins the
+// unset direction: the env var is the source of truth for the "env"
+// target in BOTH directions, so clearing GANTRY_WEBHOOK_URL and
+// rebooting must remove the target a previous boot created -- not
+// leave it silently delivering to a URL the operator believes is gone.
+func TestSeedWebhookTargetFromEnvRemovesEnvTargetWhenCleared(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+
+	require.NoError(t, seedWebhookTargetFromEnv(st, ""))
+	targets, err = loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Empty(t, targets, "clearing the env var must remove the env target on the next boot")
+}
+
+func TestSeedWebhookTargetFromEnvClearingPreservesOtherTargets(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, saveWebhookTargets(st, []alert.WebhookTarget{
+		{ID: "home", Name: "Home Assistant", URL: "https://ha.local/hook", Enabled: true, TimeoutS: 10},
+	}))
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))
+	require.NoError(t, seedWebhookTargetFromEnv(st, ""))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1, "only the env target goes; hand-configured targets stay")
+	require.Equal(t, "home", targets[0].ID)
+}
+
 func TestSeedWebhookTargetFromEnvInsertsOnFirstBoot(t *testing.T) {
 	st := newAlertTestStore(t)
 	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))

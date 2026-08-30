@@ -662,21 +662,29 @@ func saveWebhookTargets(st *store.Store, targets []alert.WebhookTarget) error {
 
 // seedWebhookTargetFromEnv keeps a target named "env" in sync with
 // GANTRY_WEBHOOK_URL (spec Sec5's documented single-webhook path) on
-// every boot: absent, it's added; already present, its URL/Enabled/
-// TimeoutS are pinned to whatever the env var currently says. The env
-// var is the source of truth for this one target for as long as it's
-// set -- Task 8's API will enforce the same rule against a conflicting
-// PUT (409, per the plan), but there is no API on this branch yet, so
-// boot time is the only place that rule is enforced today. A blank env
-// var is a no-op: it neither removes a target a previous boot created
-// nor touches anything else in the list.
+// every boot, in BOTH directions: set, it's added or its URL/Enabled/
+// TimeoutS pinned to whatever the env var currently says; blank, the
+// "env" target a previous boot created is removed -- an operator who
+// clears the variable means "stop delivering there", and a target that
+// quietly outlived its env var would keep posting alerts to a URL the
+// operator believes is gone. Every other target in the list is left
+// untouched either way. The env var is the source of truth for this
+// one target -- Task 8's API will enforce the same rule against a
+// conflicting PUT (409, per the plan), but there is no API on this
+// branch yet, so boot time is the only place that rule is enforced
+// today.
 func seedWebhookTargetFromEnv(st *store.Store, url string) error {
-	if url == "" {
-		return nil
-	}
 	targets, err := loadWebhookTargets(st)
 	if err != nil {
 		return err
+	}
+	if url == "" {
+		for i, t := range targets {
+			if t.ID == "env" {
+				return saveWebhookTargets(st, append(targets[:i], targets[i+1:]...))
+			}
+		}
+		return nil // no env target to remove; leave the setting untouched (possibly never written at all)
 	}
 	found := false
 	for i, t := range targets {

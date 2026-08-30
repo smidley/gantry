@@ -121,12 +121,13 @@ func TestLiveMatchSinceGroupsByEntityForOneKindMetricPair(t *testing.T) {
 	l.Record(SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.used_pct"}, 100, 90.0) // wrong metric
 	l.Record(SeriesKey{Kind: "host", Entity: "", Metric: "temp.c"}, 100, 30.0)           // wrong kind
 
-	got := l.MatchSince("disk", "temp.c", 0)
+	got, oldest := l.MatchSince("disk", "temp.c", 0)
 
 	require.Equal(t, map[string][]Sample{
 		"disk1": {{TS: 100, Val: 40.0}, {TS: 200, Val: 42.0}},
 		"disk2": {{TS: 150, Val: 55.0}},
 	}, got)
+	require.Equal(t, map[string]int64{"disk1": 100, "disk2": 150}, oldest)
 }
 
 // TestLiveMatchSinceRespectsSince pins the window filter itself, and that
@@ -138,21 +139,59 @@ func TestLiveMatchSinceRespectsSince(t *testing.T) {
 	l.Record(SeriesKey{Kind: "host", Metric: "cpu.total"}, 100, 10.0)
 	l.Record(SeriesKey{Kind: "host", Metric: "cpu.total"}, 200, 20.0)
 
-	got := l.MatchSince("host", "cpu.total", 150)
+	got, _ := l.MatchSince("host", "cpu.total", 150)
 	require.Equal(t, map[string][]Sample{"": {{TS: 200, Val: 20.0}}}, got)
 
-	require.Empty(t, l.MatchSince("host", "cpu.total", 500))
+	got, _ = l.MatchSince("host", "cpu.total", 500)
+	require.Empty(t, got)
 }
 
 // TestLiveMatchSinceEmptyForUnknownPair pins the always-non-nil, empty-
-// map convention every other Live accessor already follows.
+// map convention every other Live accessor already follows -- for both
+// return values.
 func TestLiveMatchSinceEmptyForUnknownPair(t *testing.T) {
 	l := NewLive(8)
 	l.Record(SeriesKey{Kind: "host", Metric: "cpu.total"}, 100, 10.0)
 
-	got := l.MatchSince("gpu", "busy_pct", 0)
+	got, oldest := l.MatchSince("gpu", "busy_pct", 0)
 	require.NotNil(t, got)
 	require.Empty(t, got)
+	require.NotNil(t, oldest)
+	require.Empty(t, oldest)
+}
+
+// TestLiveMatchSinceOldestTSIsTheRingsTrueFloorNotClippedToSince pins the
+// F1 fix at its source: oldestTS reports the ring's actual retention
+// floor for an entity even when since clips the samples slice itself to
+// a narrower window. The alert engine needs the TRUE floor to tell "the
+// ring provably covers my whole window" from "this series just hasn't
+// been running that long" -- the samples slice alone can't say that once
+// it's already been filtered down to since..now.
+func TestLiveMatchSinceOldestTSIsTheRingsTrueFloorNotClippedToSince(t *testing.T) {
+	l := NewLive(8)
+	k := SeriesKey{Kind: "host", Metric: "cpu.total"}
+	l.Record(k, 100, 1.0) // the ring's true oldest retained sample
+	l.Record(k, 200, 2.0)
+	l.Record(k, 300, 3.0)
+
+	samples, oldest := l.MatchSince("host", "cpu.total", 250) // clips samples to TS>=250
+
+	require.Equal(t, map[string][]Sample{"": {{TS: 300, Val: 3.0}}}, samples, "samples themselves stay clipped to since")
+	require.Equal(t, map[string]int64{"": 100}, oldest, "but oldestTS reports the ring's real floor, not the clipped fetch")
+}
+
+// TestLiveMatchSinceOldestTSPresentEvenWhenSamplesEmptyForSince pins that
+// oldestTS is reported off the ring's own existence for this kind+metric,
+// independent of whatever the samples map excludes for having nothing in
+// [since, now] -- the two return values answer different questions.
+func TestLiveMatchSinceOldestTSPresentEvenWhenSamplesEmptyForSince(t *testing.T) {
+	l := NewLive(8)
+	k := SeriesKey{Kind: "host", Metric: "cpu.total"}
+	l.Record(k, 100, 1.0) // only sample; stale relative to the since below
+
+	samples, oldest := l.MatchSince("host", "cpu.total", 500)
+	require.Empty(t, samples)
+	require.Equal(t, map[string]int64{"": 100}, oldest)
 }
 
 func TestLiveEvict(t *testing.T) {

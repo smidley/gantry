@@ -56,7 +56,7 @@ type AlertNotification struct {
 // channel wired -- there is simply nowhere to send the notification yet.
 type Engine struct {
 	Store    Store
-	Match    func(kind, metric string, since int64) map[string][]store.Sample
+	Match    func(kind, metric string, since int64) (samples map[string][]store.Sample, oldestTS map[string]int64)
 	ClassOf  func(kind, entity string) string
 	Fleet    func() []FleetMember
 	Dispatch func(AlertNotification)
@@ -77,7 +77,7 @@ type Engine struct {
 
 // New wires an Engine. clock defaults to time.Now when nil, the same
 // nil-default convention store.Open's own clock parameter uses.
-func New(st Store, match func(kind, metric string, since int64) map[string][]store.Sample, classOf func(kind, entity string) string, fleet func() []FleetMember, dispatch func(AlertNotification), clock func() time.Time) *Engine {
+func New(st Store, match func(kind, metric string, since int64) (map[string][]store.Sample, map[string]int64), classOf func(kind, entity string) string, fleet func() []FleetMember, dispatch func(AlertNotification), clock func() time.Time) *Engine {
 	if clock == nil {
 		clock = time.Now
 	}
@@ -241,11 +241,12 @@ func (e *Engine) tickThresholds(rules []store.AlertRule, activeIdx map[instanceK
 			}
 		}
 		var byEntity map[string][]store.Sample
+		var oldestByEntity map[string]int64
 		if e.Match != nil {
-			byEntity = e.Match(g.kind, g.metric, now-maxWindow)
+			byEntity, oldestByEntity = e.Match(g.kind, g.metric, now-maxWindow)
 		}
 		for _, r := range grules {
-			e.evalThresholdRule(r, byEntity, activeIdx, silences, now)
+			e.evalThresholdRule(r, byEntity, oldestByEntity, activeIdx, silences, now)
 		}
 	}
 }
@@ -263,7 +264,7 @@ func (e *Engine) tickThresholds(rules []store.AlertRule, activeIdx map[instanceK
 // into a glob or a ClassOf callback) must never take the rest of the
 // tick down with it, mirroring collect.safeTick's own per-collector
 // isolation.
-func (e *Engine) evalThresholdRule(r store.AlertRule, byEntity map[string][]store.Sample, activeIdx map[instanceKey]store.AlertInstance, silences []store.Silence, now int64) {
+func (e *Engine) evalThresholdRule(r store.AlertRule, byEntity map[string][]store.Sample, oldestByEntity map[string]int64, activeIdx map[instanceKey]store.AlertInstance, silences []store.Silence, now int64) {
 	defer func() {
 		if p := recover(); p != nil {
 			log.Printf("alert engine: rule %q panicked: %v", r.ID, p)
@@ -287,15 +288,11 @@ func (e *Engine) evalThresholdRule(r store.AlertRule, byEntity map[string][]stor
 	}
 
 	for entity := range candidates {
-		e.evalThresholdEntity(r, entity, byEntity[entity], activeIdx, silences, now)
+		e.evalThresholdEntity(r, entity, byEntity[entity], oldestByEntity[entity], activeIdx, silences, now)
 	}
 }
 
-func (e *Engine) evalThresholdEntity(r store.AlertRule, entity string, samples []store.Sample, activeIdx map[instanceKey]store.AlertInstance, silences []store.Silence, now int64) {
-	var oldest int64
-	if len(samples) > 0 {
-		oldest = samples[0].TS
-	}
+func (e *Engine) evalThresholdEntity(r store.AlertRule, entity string, samples []store.Sample, oldest int64, activeIdx map[instanceKey]store.AlertInstance, silences []store.Silence, now int64) {
 	verdict, value := EvaluateThreshold(r, samples, oldest, now)
 	currentlyCrossing := len(samples) > 0 && crosses(r.Op, samples[len(samples)-1].Val, r.Threshold)
 	absent := samples == nil

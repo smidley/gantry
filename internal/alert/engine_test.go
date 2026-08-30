@@ -135,7 +135,11 @@ func (f *fakeStore) eventKinds() []string {
 // matchRouter is the Match stub: data[{kind,metric}][entity] -> samples,
 // filtered to TS >= since on every call, the same contract
 // Live.MatchSince documents (an entity with nothing in-window is simply
-// absent as a key).
+// absent as a key). Every fixture built through flat()/series() happens
+// to store exactly one window's worth of history, so its oldest sample
+// always sits precisely on since -- this stub's oldestTS return reflects
+// that faithfully, which is exactly why it could never have caught F1 on
+// its own; see engine_live_test.go for the family that does.
 type matchRouter struct {
 	data map[[2]string]map[string][]store.Sample
 }
@@ -152,9 +156,13 @@ func (m *matchRouter) set(kind, metric, entity string, samples []store.Sample) {
 	m.data[key][entity] = samples
 }
 
-func (m *matchRouter) fn(kind, metric string, since int64) map[string][]store.Sample {
+func (m *matchRouter) fn(kind, metric string, since int64) (map[string][]store.Sample, map[string]int64) {
 	out := map[string][]store.Sample{}
+	oldest := map[string]int64{}
 	for entity, samples := range m.data[[2]string{kind, metric}] {
+		if len(samples) > 0 {
+			oldest[entity] = samples[0].TS // ascending, matching Ring.Since/Oldest's convention; independent of since
+		}
 		var win []store.Sample
 		for _, s := range samples {
 			if s.TS >= since {
@@ -165,7 +173,7 @@ func (m *matchRouter) fn(kind, metric string, since int64) map[string][]store.Sa
 			out[entity] = win
 		}
 	}
-	return out
+	return out, oldest
 }
 
 // flat builds `count` samples, `spacing` seconds apart, ending at end
@@ -184,7 +192,7 @@ type clockAt struct{ t int64 }
 
 func (c *clockAt) now() time.Time { return time.Unix(c.t, 0) }
 
-func newEngine(st Store, match func(kind, metric string, since int64) map[string][]store.Sample, classOf func(kind, entity string) string, fleet func() []FleetMember, dispatch func(AlertNotification), clock func() time.Time) *Engine {
+func newEngine(st Store, match func(kind, metric string, since int64) (map[string][]store.Sample, map[string]int64), classOf func(kind, entity string) string, fleet func() []FleetMember, dispatch func(AlertNotification), clock func() time.Time) *Engine {
 	return New(st, match, classOf, fleet, dispatch, clock)
 }
 
@@ -440,7 +448,7 @@ func TestDisabledRuleResolvesActiveInstanceWithEventButNoDispatch(t *testing.T) 
 	require.NoError(t, err)
 
 	dispatched := 0
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil,
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil,
 		func(AlertNotification) { dispatched++ }, func() time.Time { return time.Unix(now, 0) })
 
 	require.NoError(t, eng.Tick(context.Background()))
@@ -460,7 +468,7 @@ func TestDeletedRuleResolvesOrphanedInstance(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
 	require.NoError(t, eng.Tick(context.Background()))
 
 	require.Equal(t, "resolved", st.instances[id].State)
@@ -669,7 +677,7 @@ func TestEventRuleFiresImmediatelyOnMatchingEvent(t *testing.T) {
 	rule := unhealthyRule()
 	st := newFakeStore(rule)
 	var notes []string
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil,
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil,
 		func(n AlertNotification) { notes = append(notes, n.Phase) }, func() time.Time { return time.Unix(now, 0) })
 	require.NoError(t, eng.Tick(context.Background())) // boot tick: no events exist yet, cursor clamps to 0
 
@@ -688,7 +696,7 @@ func TestEventRuleIgnoresEventBelowMinSeverityFloor(t *testing.T) {
 	now := int64(2_000_000_000)
 	rule := unhealthyRule() // MinSeverity: warning
 	st := newFakeStore(rule)
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
 	require.NoError(t, eng.Tick(context.Background())) // boot tick
 
 	st.events = []store.Event{{ID: 1, TS: now, Kind: "container.health", Entity: "sonarr", Severity: "info", Detail: "healthy"}}
@@ -701,7 +709,7 @@ func TestEventRuleClearsOnMatchingClearEvent(t *testing.T) {
 	rule := unhealthyRule()
 	st := newFakeStore(rule)
 	clk := &clockAt{t: now - 10}
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil, nil, clk.now)
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, clk.now)
 	require.NoError(t, eng.Tick(context.Background())) // boot tick
 
 	st.events = []store.Event{{ID: 1, TS: clk.t, Kind: "container.health", Entity: "sonarr", Severity: "warning", Detail: "unhealthy"}}
@@ -720,7 +728,7 @@ func TestEventRuleClearsOnTimeoutWhenNoClearEventArrives(t *testing.T) {
 	rule := unhealthyRule() // ClearSeconds: 21600
 	st := newFakeStore(rule)
 	clk := &clockAt{t: 2_000_000_000}
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil, nil, clk.now)
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, clk.now)
 	require.NoError(t, eng.Tick(context.Background())) // boot tick
 
 	st.events = []store.Event{{ID: 1, TS: clk.t, Kind: "container.health", Entity: "sonarr", Severity: "warning"}}
@@ -744,7 +752,7 @@ func TestEventRuleDuplicateMatchDoesNotCreateSecondActiveInstance(t *testing.T) 
 	now := int64(2_000_000_000)
 	rule := unhealthyRule()
 	st := newFakeStore(rule)
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
 	require.NoError(t, eng.Tick(context.Background())) // boot tick
 
 	st.events = []store.Event{
@@ -769,7 +777,7 @@ func TestEventCursorStartsAtMaxEventIDNoReplayOfPreexistingEvents(t *testing.T) 
 	for i := 1; i <= 50; i++ {
 		st.events = append(st.events, store.Event{ID: int64(i), TS: now - int64(50-i), Kind: "container.health", Entity: "sonarr", Severity: "warning"})
 	}
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
 
 	require.NoError(t, eng.Tick(context.Background()))
 	require.Equal(t, 0, st.activeCount(), "50 pre-existing events must not replay as fresh alerts")
@@ -786,7 +794,7 @@ func TestEventCursorPersistsAcrossTicksSameEngineNeverReplays(t *testing.T) {
 	now := int64(2_000_000_000)
 	rule := unhealthyRule()
 	st := newFakeStore(rule)
-	eng1 := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+	eng1 := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
 	require.NoError(t, eng1.Tick(context.Background())) // eng1 boots: cursor clamps to 0, nothing to seed
 
 	st.events = []store.Event{{ID: 1, TS: now, Kind: "container.health", Entity: "sonarr", Severity: "warning"}}
@@ -798,7 +806,7 @@ func TestEventCursorPersistsAcrossTicksSameEngineNeverReplays(t *testing.T) {
 	// by now) -- it must not create a second instance for the same
 	// event, the exact replay a bare persisted cursor (or none at all)
 	// would risk.
-	eng2 := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil, nil, func() time.Time { return time.Unix(now+10, 0) })
+	eng2 := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, func() time.Time { return time.Unix(now+10, 0) })
 	require.NoError(t, eng2.Tick(context.Background()))
 	require.Equal(t, 1, st.activeCount(), "the restarted engine must not re-fire event id 1 again")
 }
@@ -812,7 +820,7 @@ func TestBootSeedingFiresForPreexistingUnhealthyRunningContainer(t *testing.T) {
 	fleet := func() []FleetMember {
 		return []FleetMember{{Name: "sonarr", State: "running", Health: "unhealthy"}}
 	}
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, fleet, nil, func() time.Time { return time.Unix(now, 0) })
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet, nil, func() time.Time { return time.Unix(now, 0) })
 
 	require.NoError(t, eng.Tick(context.Background()))
 
@@ -828,7 +836,7 @@ func TestBootSeedingDoesNotFireForStoppedContainerWithStaleUnhealthy(t *testing.
 	fleet := func() []FleetMember {
 		return []FleetMember{{Name: "sonarr", State: "exited", Health: "unhealthy"}}
 	}
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, fleet, nil, func() time.Time { return time.Unix(now, 0) })
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet, nil, func() time.Time { return time.Unix(now, 0) })
 
 	require.NoError(t, eng.Tick(context.Background()))
 
@@ -844,7 +852,7 @@ func TestBootSeedingRunsOnlyOnce(t *testing.T) {
 		calls++
 		return []FleetMember{{Name: "sonarr", State: "running", Health: "unhealthy"}}
 	}
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, fleet, nil, func() time.Time { return time.Unix(now, 0) })
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, fleet, nil, func() time.Time { return time.Unix(now, 0) })
 
 	require.NoError(t, eng.Tick(context.Background()))
 	require.NoError(t, eng.Tick(context.Background()))
@@ -856,7 +864,7 @@ func TestBootSeedingRunsOnlyOnce(t *testing.T) {
 
 func TestRunStopsOnContextCancelWithoutBlocking(t *testing.T) {
 	st := newFakeStore()
-	eng := newEngine(st, func(string, string, int64) map[string][]store.Sample { return nil }, nil, nil, nil, time.Now)
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil, nil, time.Now)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan struct{})

@@ -34,6 +34,18 @@ func (r *Ring) Latest() (Sample, bool) {
 	return r.buf[(r.head+r.n-1)%len(r.buf)], true
 }
 
+// Oldest returns the oldest sample the ring still retains, regardless of
+// any window a caller might filter with -- head always indexes it
+// directly, full or not. This is the ring's true floor: Since(ts) tells
+// you what fell inside a window, Oldest tells you how far back the
+// window could possibly reach.
+func (r *Ring) Oldest() (Sample, bool) {
+	if r.n == 0 {
+		return Sample{}, false
+	}
+	return r.buf[r.head], true
+}
+
 // AppendSince appends every sample with TS >= ts, oldest first, onto dst
 // and returns the resulting slice, the same way append() does. A caller
 // that walks many rings for the same ts (FlushMinutes, catching up

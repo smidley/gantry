@@ -3,7 +3,11 @@
 // extracting a dynamic-name family of keys (per-share usage), a fixed
 // display order for GPU engines, a magnitude->color-ramp step, and a
 // parity-progress ETA estimate. Kept framework-free and dependency-free
-// so every one of these is trivially unit-testable.
+// so every one of these is trivially unit-testable. The one type import
+// (SeriesPoint, for sumSeriesByMetric's own {metric -> points} lookup
+// shape) is a type-only import, so it carries none of api.ts's actual
+// fetch machinery along with it.
+import type { SeriesPoint } from './api';
 
 // GPU_ENGINE_ORDER is the one fixed display/series-slot order for GPU
 // engines used everywhere the UI shows more than one (Overview's GPU
@@ -85,6 +89,26 @@ export function sumSeriesPoints(pointArrays: [number, number, number][][]): [num
     }
   }
   return Array.from(sums.entries()).sort((a, b) => a[0] - b[0]);
+}
+
+// sumSeriesByMetric is sumSeriesPoints' one fixed entry point for "sum
+// this resource's own declared metric keys out of an already-fetched
+// {metric -> points} lookup" -- every /api/series-backed composition in
+// this app builds that lookup the same way first (`for (const r of
+// results) byMetric[r.metric] = r.points`), then needs to fold some
+// subset of keys back together into one line; a missing key contributes
+// nothing (sumSeriesPoints' own graceful-partial rule) rather than
+// throwing, the series-shaped mirror of sumPresentMetrics' identical
+// tolerance for a live frame missing one of a resource's metrics.
+// Existing PURPOSE: this is the one place TopConsumers' ring-tier hero
+// seed and its fetched-window hero line both call to compose a
+// resource's multi-metric sum (gpu's four engines, net/io's two
+// directions), so a resource's own metric set (resourceMetricKeys)
+// can't drift into "sum all of them" in one path and "just the first"
+// in the other again -- see TopConsumers.svelte's heroSeries doc for the
+// bug this fixes.
+export function sumSeriesByMetric(byMetric: Record<string, SeriesPoint[]>, metricKeys: string[]): [number, number][] {
+  return sumSeriesPoints(metricKeys.map((k) => byMetric[k] ?? []));
 }
 
 // keysByPattern is sumMetricsByPattern's discovery-side sibling, same

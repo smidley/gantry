@@ -22,7 +22,7 @@
   import { appendAfterSeed, mergeSeed, pushRing, seriesPointsToRing } from '../lib/livering';
   import { fetchSeries, fetchSnapshot, fetchTop } from '../lib/api';
   import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
-  import { keysByPattern, niceCeiling, sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
+  import { keysByPattern, niceCeiling, sumMetricsByPattern, sumSeriesByMetric, sumSeriesPoints } from '../lib/metrics';
   import { buildCoreBudget } from '../lib/coreBudget';
   import {
     hostSeriesMetricKeys,
@@ -481,7 +481,7 @@
           const ptsB = byMetric[dirKeys[1]] ?? [];
           heroSlots[i].seed(sumSeriesPoints([ptsA, ptsB]), seriesPointsToRing(ptsA), seriesPointsToRing(ptsB));
         } else {
-          heroSlots[i].seed(sumSeriesPoints(metrics.map((m) => byMetric[m] ?? [])));
+          heroSlots[i].seed(sumSeriesByMetric(byMetric, metrics));
         }
       })
       .catch((err) => {
@@ -588,7 +588,20 @@
             directionLabels: rowDirLabels,
           };
         }
-        return { entity: entry.entity, label: entry.entity, points: byMetric[resourceMetricKeys(resource)[0]] ?? [], colorVar: `--series-${i + 1}` };
+        return {
+          entity: entry.entity,
+          label: entry.entity,
+          // sumSeriesByMetric, not a bare byMetric[key[0]] -- gpu's own
+          // four engines (resourceMetricKeys('gpu')) need summing here
+          // exactly like sumPresentMetrics already sums them for Now
+          // mode and seedHeroSlot already sums them for Now's own seed,
+          // above: this fetched-window branch used to read only the
+          // FIRST key's points, silently dropping the other three
+          // engines' contribution the instant a container's hero line
+          // came from a 1h/24h/7d fetch instead of the live frame.
+          points: sumSeriesByMetric(byMetric, resourceMetricKeys(resource)),
+          colorVar: `--series-${i + 1}`,
+        };
       });
     }
     if (hasHostTotal) {

@@ -13,6 +13,7 @@ import {
   unattributedValue,
 } from './topFromFrame';
 import type { SnapshotDTO } from './api';
+import { sumSeriesByMetric } from './metrics';
 
 describe('TOP_RESOURCES', () => {
   it('lists every resource resourceMetricKeys knows about, in the fixed CPU/Mem/Net/IO/GPU order', () => {
@@ -314,5 +315,44 @@ describe('unattributedValue', () => {
 
   it('is zero when the containers sum exactly matches the host total', () => {
     expect(unattributedValue(50, 50)).toBe(0);
+  });
+});
+
+// The bug this section unit-tests: TopConsumers' fetched-window (1h/24h/
+// 7d) hero line used to read only resourceMetricKeys(resource)[0] out of
+// its own /api/series results instead of summing all of them the way
+// topFromFrame already sums a live frame's per-container metrics --
+// invisible for cpu/mem (one key each) but silently dropping 3 of gpu's
+// 4 engines. sumSeriesByMetric (metrics.ts) is now the ONE composition
+// both paths call, so this proves they can't diverge again: for every
+// TOP_RESOURCES entry, summing a live frame via topFromFrame and summing
+// an equivalent one-point-per-metric series batch via sumSeriesByMetric
+// must land on the exact same total.
+describe('sumSeriesByMetric parity with the live-frame composition (topFromFrame)', () => {
+  const ts = 1000;
+
+  for (const resource of TOP_RESOURCES.map((r) => r.key)) {
+    it(`sums the same total as the live frame when every metric is present (${resource})`, () => {
+      const keys = resourceMetricKeys(resource);
+      const metrics: Record<string, number> = {};
+      const byMetric: Record<string, [number, number, number][]> = {};
+      keys.forEach((key, i) => {
+        const value = (i + 1) * 3; // distinct, nonzero per key -- a real sum, not an accidental 0+0
+        metrics[key] = value;
+        byMetric[key] = [[ts, value, value]];
+      });
+      const frame = frameWith({ a: { state: 'running', health: '', image: '', metrics } });
+      const [row] = topFromFrame(frame, resource);
+      expect(sumSeriesByMetric(byMetric, keys)).toEqual([[ts, row.value]]);
+    });
+  }
+
+  it('still agrees on a PARTIALLY-present multi-metric resource -- fake mode\'s own gpu shape (only gpu.video.busy_pct ever populated, the other 3 engines never present for any container)', () => {
+    const frame = frameWith({
+      a: { state: 'running', health: '', image: '', metrics: { 'gpu.video.busy_pct': 20 } },
+    });
+    const [row] = topFromFrame(frame, 'gpu');
+    const byMetric = { 'gpu.video.busy_pct': [[ts, 20, 20]] as [number, number, number][] };
+    expect(sumSeriesByMetric(byMetric, resourceMetricKeys('gpu'))).toEqual([[ts, row.value]]);
   });
 });

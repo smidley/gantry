@@ -56,6 +56,8 @@
     'parity.start',
     'parity.finish',
     'disk.errors',
+    'alert.fired',
+    'alert.resolved',
   ];
   const TIME_PRESETS = [
     { key: '1h', label: '1h', seconds: 3600 },

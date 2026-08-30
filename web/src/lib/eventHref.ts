@@ -5,13 +5,21 @@
 // container.*/docker.* names a container, so it needs the entity itself
 // to link anywhere; disk.*/array.*/parity.*/mover.* all land on the one
 // Storage page (no per-slot deep link -- Storage isn't addressable below
-// the page level today); image.* is a plain row for now (the images view
-// doesn't exist yet); anything else unrecognized is a plain row too.
+// the page level today); alert.* (Phase 4: alert.fired/alert.resolved,
+// internal/alert/engine.go's fire/resolveNotify calls) lands on the
+// Alerts view -- its own dot-namespaced prefix ("alert"), distinct from
+// every kind above even though the underlying rule may itself be about
+// a container or a disk; image.* is a plain row for now (the images
+// view doesn't exist yet); anything else unrecognized is a plain row
+// too.
 const CONTAINER_KIND_PREFIXES: ReadonlySet<string> = new Set(['container', 'docker']);
 const STORAGE_KIND_PREFIXES: ReadonlySet<string> = new Set(['disk', 'array', 'parity', 'mover']);
 
 export function eventHref(kind: string, entity: string): string | null {
   const prefix = kind.split('.')[0];
+  if (prefix === 'alert') {
+    return '#/alerts';
+  }
   if (CONTAINER_KIND_PREFIXES.has(prefix)) {
     return entity ? `#/containers/${encodeURIComponent(entity)}` : null;
   }

@@ -26,6 +26,12 @@ describe('eventHref', () => {
     expect(eventHref('mover.start', 'array')).toBe('#/storage');
   });
 
+  it('links alert.* to the Alerts view, even when the entity is a container/disk name that would otherwise misroute', () => {
+    expect(eventHref('alert.fired', 'disk4')).toBe('#/alerts');
+    expect(eventHref('alert.resolved', 'sonarr')).toBe('#/alerts');
+    expect(eventHref('alert.fired', '')).toBe('#/alerts');
+  });
+
   it('is null for image.* -- plain row for now, the images view does not exist yet', () => {
     expect(eventHref('image.pull', 'demo/jellyfin:latest')).toBeNull();
   });

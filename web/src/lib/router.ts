@@ -17,6 +17,7 @@ export type RouteName =
   | 'maintenance'
   | 'gpu'
   | 'events'
+  | 'alerts'
   | 'settings'
   | 'not-found';
 
@@ -62,6 +63,7 @@ const routeDefs: RouteDef[] = [
   { name: 'maintenance', pattern: ['maintenance'] },
   { name: 'gpu', pattern: ['gpu'] },
   { name: 'events', pattern: ['events'] },
+  { name: 'alerts', pattern: ['alerts'] },
   { name: 'settings', pattern: ['settings'] },
 ];
 
@@ -151,15 +153,19 @@ const ICON_GPU = strokeIcon(
 const ICON_EVENTS = strokeIcon(
   '<path d="M18 8a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M9.5 20a2.5 2.5 0 0 0 5 0"/>',
 );
+// ICON_ALERTS: a warning triangle with an exclamation mark -- distinct
+// from Events' own bell glyph just above (Events keeps the bell; Phase
+// 4's Alerts view gets the triangle, per the plan's own icon contract).
+const ICON_ALERTS = strokeIcon('<path d="M12 3.5 2.5 20h19L12 3.5Z"/><path d="M12 9.5v4.5"/><path d="M12 17.7v.01"/>');
 const ICON_SETTINGS = strokeIcon(
   '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>',
 );
 
-// routes is the single nav table -- 8 entries (Alerts, the original
-// spec's 7th view, arrives with Phase 4's alerting engine; Maintenance is
-// new, outside that original count; container-detail is reached by
-// clicking a container row rather than through nav, so it's never in
-// this table at all).
+// routes is the single nav table -- 9 entries, the original spec's full
+// count plus Maintenance (new, outside that original count). Alerts
+// sits between Events and Settings (Task 10's own contract);
+// container-detail is reached by clicking a container row rather than
+// through nav, so it's never in this table at all.
 export const routes: NavItem[] = [
   { name: 'overview', hash: '#/', label: 'Overview', icon: ICON_OVERVIEW },
   {
@@ -185,5 +191,6 @@ export const routes: NavItem[] = [
   },
   { name: 'gpu', hash: '#/gpu', label: 'GPU', icon: ICON_GPU },
   { name: 'events', hash: '#/events', label: 'Events', icon: ICON_EVENTS },
+  { name: 'alerts', hash: '#/alerts', label: 'Alerts', icon: ICON_ALERTS },
   { name: 'settings', hash: '#/settings', label: 'Settings', icon: ICON_SETTINGS },
 ];

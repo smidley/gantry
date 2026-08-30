@@ -8,6 +8,7 @@
   import Layout from './components/Layout.svelte';
   import { route } from './lib/router';
   import { live } from './lib/sse.svelte';
+  import { alertRules } from './lib/alertRules.svelte';
 
   import Overview from './views/Overview.svelte';
   import Containers from './views/Containers.svelte';
@@ -18,11 +19,22 @@
   import Maintenance from './views/Maintenance.svelte';
   import GPU from './views/GPU.svelte';
   import Events from './views/Events.svelte';
+  import Alerts from './views/Alerts.svelte';
   import Settings from './views/Settings.svelte';
 
   onMount(() => {
     live.connect();
     return () => live.disconnect();
+  });
+
+  // Band unification (Task 12): one boot fetch of the current alert
+  // rules, so thresholds.ts's band() reads the SAME numbers the alert
+  // engine fires and clears on from the very first render -- see
+  // alertRules.svelte.ts's own doc for why this is the only place that
+  // ever calls ensureLoaded() at boot (the rule editor's own save()
+  // re-derives the band table itself, on every successful PUT).
+  onMount(() => {
+    alertRules.ensureLoaded();
   });
 
   const ROUTE_TITLES = {
@@ -58,6 +70,8 @@
     <GPU />
   {:else if $route.name === 'events'}
     <Events />
+  {:else if $route.name === 'alerts'}
+    <Alerts />
   {:else if $route.name === 'settings'}
     <Settings />
   {:else}

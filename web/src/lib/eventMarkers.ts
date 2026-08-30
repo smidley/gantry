@@ -30,6 +30,15 @@ const KIND_MARKER: Record<string, { severity: MarkerSeverity; label: string }> =
   'container.oom': { severity: 'critical', label: 'OOM' },
   'container.health': { severity: 'serious', label: 'Health' },
   'container.die': { severity: 'warning', label: 'Stopped' },
+  // alert.fired (Phase 4, internal/alert/engine.go's fire calls): a
+  // rule's own severity (info/warning/alert) isn't threaded into the
+  // event at all -- see store.Event's own Severity field on the
+  // appended alert.fired row -- but a fired alert earns the chart's
+  // most prominent marker regardless of which rule fired, the same way
+  // container.oom already does. alert.resolved deliberately has NO
+  // marker of its own: the fired marker plus the chart's own data
+  // recovering already tells that story without a second glyph.
+  'alert.fired': { severity: 'critical', label: 'Alert' },
 };
 
 export function eventsToMarkers(events: GantryEvent[] | null | undefined): ChartMarker[] {

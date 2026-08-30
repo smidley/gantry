@@ -76,6 +76,258 @@ export interface SnapshotDTO {
   gpu: Record<string, Record<string, number>>;
   gpu_meta: Record<string, GPUMetaDTO>; // pdev (or "gpu0"/"nvidia0") -> vendor+driver meta
   sources: Record<string, string>;
+  alerts: AlertsBlockDTO;
+}
+
+// FiringAlertDTO mirrors server.FiringAlertDTO -- one firing instance's
+// frame-sized summary, carried live in SnapshotDTO.alerts.firing on
+// every 2s tick (no polling). A narrower cousin of AlertInstanceDTO
+// below: just what the Overview headline and the Alerts view's live
+// section need, plus rule_name (the frame joins it against the current
+// rule list once per tick so no consumer has to).
+export interface FiringAlertDTO {
+  rule_id: string;
+  rule_name: string;
+  severity: string;
+  kind: string;
+  entity: string;
+  metric: string;
+  value: number;
+  threshold: number;
+  fired_at: number;
+  silenced: boolean;
+}
+
+// AlertsBlockDTO mirrors server.AlertsBlockDTO. firing is always a real
+// (if empty) array, capped at 20 entries server-side; truncated + firing_count
+// mean the headline's own count and the visible row count can disagree
+// only in the rare case where more than 20 things are firing at once --
+// firing_count is the true total to show, truncated the amount cut.
+export interface AlertsBlockDTO {
+  firing: FiringAlertDTO[];
+  firing_count: number;
+  truncated: number;
+  channels: Record<string, string>;
+}
+
+// AlertRuleDTO mirrors server.AlertRuleDTO field-for-field (identical
+// names/order to internal/store.AlertRule) -- see that Go struct's own
+// doc and internal/store/migrations/003_alerts.sql for what each field
+// means. A rule with type "event" carries the zero value ("", 0, false)
+// for every threshold-only field (metric/op/threshold/...), and vice
+// versa.
+export interface AlertRuleDTO {
+  id: string;
+  name: string;
+  enabled: boolean;
+  builtin: boolean;
+  type: 'threshold' | 'event';
+  kind: string;
+  entity_glob: string;
+  entity_class: string;
+  metric: string;
+  op: string;
+  threshold: number;
+  clear_threshold: number;
+  warn_threshold: number;
+  critical_threshold: number;
+  band_family: string;
+  for_seconds: number;
+  clear_seconds: number;
+  event_kinds: string;
+  min_severity: string;
+  clear_event_kinds: string;
+  clear_max_severity: string;
+  severity: string;
+  channels: string;
+  renotify_hours: number;
+  updated_at: number;
+}
+
+export interface AlertRulesResponse {
+  rules: AlertRuleDTO[];
+}
+
+// AlertInstanceDTO mirrors server.AlertInstanceDTO -- one alert_instances
+// row plus silenced, computed fresh from the current silence list at
+// response time (always false on a history row: "currently silenced"
+// isn't meaningful for something already resolved).
+export interface AlertInstanceDTO {
+  id: number;
+  rule_id: string;
+  kind: string;
+  entity: string;
+  metric: string;
+  state: string;
+  severity: string;
+  value: number;
+  threshold: number;
+  summary: string;
+  started_at: number;
+  fired_at: number;
+  resolved_at: number;
+  resolve_reason: string;
+  last_notified_at: number;
+  notify_count: number;
+  silenced: boolean;
+}
+
+// SilenceDTO mirrors server.SilenceDTO. scope is "all" only for a
+// global mute (rule_id and entity both ""), omitted otherwise.
+export interface SilenceDTO {
+  id: number;
+  rule_id: string;
+  entity: string;
+  reason: string;
+  until: number;
+  created_at: number;
+  scope?: 'all';
+}
+
+export interface AlertsGetResponse {
+  active: AlertInstanceDTO[];
+  silences: SilenceDTO[];
+  channels: Record<string, string>;
+}
+
+// WebhookTargetDTO mirrors server.WebhookTargetDTO. header_value is
+// NEVER present on the wire (header_set stands in for it) -- see
+// WebhookTargetInput's own doc for how a PUT edits a secret without
+// ever echoing it back first.
+export interface WebhookTargetDTO {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  header_name?: string;
+  header_set: boolean;
+  timeout_s: number;
+  env_overridden?: boolean;
+}
+
+export interface WebhooksGetResponse {
+  targets: WebhookTargetDTO[];
+}
+
+// WebhookTargetInput is PUT /api/alerts/webhooks' per-target wire shape.
+// header_value is optional and three-way: omitted keeps whatever secret
+// is already stored for this id, "" clears it, anything else sets it --
+// the only way to edit a write-only secret without ever reading it back.
+export interface WebhookTargetInput {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  header_name: string;
+  header_value?: string;
+  timeout_s: number;
+}
+
+export function fetchAlerts(): Promise<AlertsGetResponse> {
+  return getJSON<AlertsGetResponse>('/api/alerts');
+}
+
+// fetchAlertRules fetches the live configured rule set, or (defaults:
+// true) the compiled-in seed list -- the exact GET /api/alerts/
+// rules?defaults=1 path Task 11's "reset to default" control uses, so
+// this component never hardcodes the defaults table itself.
+export function fetchAlertRules(opts: { defaults?: boolean } = {}): Promise<AlertRulesResponse> {
+  const qs = opts.defaults ? '?defaults=1' : '';
+  return getJSON<AlertRulesResponse>(`/api/alerts/rules${qs}`);
+}
+
+// AlertRulesPutError mirrors SettingsPutError's own shape: a plain
+// Error carrying the server's message, thrown on any non-2xx response
+// (400 field-shaped validation failures from alert.ValidateRule, or the
+// builtin-identity 400s handleAlertsRulesPut's own doc names) -- the
+// rule editor surfaces message verbatim, since the server's messages
+// already name the offending rule id and the exact bound violated.
+export type AlertRulesPutError = Error;
+
+// putAlertRules performs the whole-document replace: the caller submits
+// its own already-edited full list (builtins included, exactly as GET
+// returned them, edited numbers and all) -- see handleAlertsRulesPut's
+// own doc for why a partial submission can't work (an omitted builtin
+// reads as an attempted deletion and 400s).
+export async function putAlertRules(rules: AlertRuleDTO[]): Promise<AlertRulesResponse> {
+  const res = await fetch('/api/alerts/rules', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rules }),
+  });
+  const body = (await res.json()) as AlertRulesResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `PUT /api/alerts/rules: ${res.status} ${res.statusText}`);
+  }
+  return body;
+}
+
+export function fetchAlertHistory(
+  params: { from?: number; to?: number; limit?: number; signal?: AbortSignal } = {},
+): Promise<AlertInstanceDTO[]> {
+  const q = new URLSearchParams();
+  if (params.from !== undefined) q.set('from', String(params.from));
+  if (params.to !== undefined) q.set('to', String(params.to));
+  if (params.limit !== undefined) q.set('limit', String(params.limit));
+  const qs = q.toString();
+  return getJSON<AlertInstanceDTO[]>(`/api/alerts/history${qs ? `?${qs}` : ''}`, params.signal);
+}
+
+// createSilence backs the Alerts view's snooze control: rule_id and/or
+// entity "" scope it wider (rule-wide or entity-wide); leaving BOTH ""
+// requires scope:"all" (handleAlertsSilencesPost's own guard against an
+// accidental global mute) -- Task 10 deliberately never offers that
+// gesture from the Active row itself, only Settings' own explicit
+// global-silence control does.
+export async function createSilence(body: {
+  rule_id?: string;
+  entity?: string;
+  hours: number;
+  reason?: string;
+  scope?: 'all';
+}): Promise<SilenceDTO> {
+  const res = await fetch('/api/alerts/silences', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rule_id: body.rule_id ?? '', entity: body.entity ?? '', hours: body.hours, reason: body.reason ?? '', scope: body.scope ?? '' }),
+  });
+  const parsed = (await res.json()) as SilenceDTO & { error?: string };
+  if (!res.ok) {
+    throw new Error(parsed.error ?? `POST /api/alerts/silences: ${res.status} ${res.statusText}`);
+  }
+  return parsed;
+}
+
+// deleteSilence lifts a silence early ("lift" in the Alerts view) --
+// 204 whether or not the id still existed, so this never throws for an
+// already-expired/already-lifted silence.
+export async function deleteSilence(id: number): Promise<void> {
+  const res = await fetch(`/api/alerts/silences/${id}`, { method: 'DELETE' });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`DELETE /api/alerts/silences/${id}: ${res.status} ${res.statusText}`);
+  }
+}
+
+export function fetchWebhookTargets(): Promise<WebhooksGetResponse> {
+  return getJSON<WebhooksGetResponse>('/api/alerts/webhooks');
+}
+
+// putWebhookTargets is READ_ONLY-gated server-side (a 403 there is
+// exactly as real an outcome as a 400/409, surfaced the same way) --
+// the one alerting write path GANTRY_READ_ONLY actually blocks (webhook
+// targets configure an outbound side-effect capability; rules/silences
+// don't -- see handleAlertsWebhooksPut's own doc for the asymmetry).
+export async function putWebhookTargets(targets: WebhookTargetInput[]): Promise<WebhooksGetResponse> {
+  const res = await fetch('/api/alerts/webhooks', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targets }),
+  });
+  const body = (await res.json()) as WebhooksGetResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `PUT /api/alerts/webhooks: ${res.status} ${res.statusText}`);
+  }
+  return body;
 }
 
 export interface ContainerInfo {

@@ -18,9 +18,12 @@ import (
 
 // fakeAlerts is a minimal in-memory AlertsIface double -- the same
 // hand-rolled-fake convention fakeSettings uses in api_settings_test.go,
-// just with enough bookkeeping (nextSilenceID, replace/upsert call logs)
-// to assert the rules-PUT split between UpsertRule (builtins) and
-// ReplaceRules (everything else) without a real *store.Store.
+// just with enough bookkeeping (nextSilenceID, a save call log) to assert
+// handleAlertsRulesPut's behavior without a real *store.Store. It has no
+// need to model SaveRules' atomicity (a single Go-level assignment can't
+// fail partway through the way a SQL transaction can) -- that guarantee
+// is store.SaveAlertRules' own, pinned directly against a real *store.
+// Store in internal/store/alerts_test.go.
 type fakeAlerts struct {
 	rules    []store.AlertRule
 	active   []store.AlertInstance
@@ -31,12 +34,11 @@ type fakeAlerts struct {
 	nextSilenceID int64
 
 	rulesErr, activeErr, historyErr, silencesErr error
-	replaceErr, upsertErr                        error
+	saveErr                                      error
 	addSilenceErr, deleteSilenceErr              error
 
-	replaceCalls [][]store.AlertRule
-	upsertCalls  []store.AlertRule
-	historyArgs  struct {
+	saveCalls   [][]store.AlertRule
+	historyArgs struct {
 		from, to int64
 		limit    int
 	}
@@ -57,32 +59,30 @@ func (f *fakeAlerts) History(_ context.Context, from, to int64, limit int) ([]st
 
 func (f *fakeAlerts) Rules(context.Context) ([]store.AlertRule, error) { return f.rules, f.rulesErr }
 
-// UpsertRule mirrors store.UpsertAlertRule's own insert-or-overwrite
-// semantics closely enough for the handler tests: same id updates in
-// place, a new id appends.
-func (f *fakeAlerts) UpsertRule(r store.AlertRule) error {
-	f.upsertCalls = append(f.upsertCalls, r)
-	if f.upsertErr != nil {
-		return f.upsertErr
+// SaveRules mirrors store.SaveAlertRules' own doc: every Builtin row in
+// rules is upserted in place (same id updates, a new id appends) and the
+// entire non-builtin set is replaced wholesale by rules' non-builtin
+// rows.
+func (f *fakeAlerts) SaveRules(rules []store.AlertRule) error {
+	f.saveCalls = append(f.saveCalls, rules)
+	if f.saveErr != nil {
+		return f.saveErr
 	}
-	for i, er := range f.rules {
-		if er.ID == r.ID {
-			f.rules[i] = r
-			return nil
+	for _, r := range rules {
+		if !r.Builtin {
+			continue
 		}
-	}
-	f.rules = append(f.rules, r)
-	return nil
-}
-
-// ReplaceRules mirrors store.ReplaceAlertRules' own doc exactly: every
-// builtin row already in f.rules survives untouched, every non-builtin
-// row in rules replaces the whole non-builtin set, and a stray
-// builtin-flagged row in rules is silently skipped.
-func (f *fakeAlerts) ReplaceRules(rules []store.AlertRule) error {
-	f.replaceCalls = append(f.replaceCalls, rules)
-	if f.replaceErr != nil {
-		return f.replaceErr
+		updated := false
+		for i, er := range f.rules {
+			if er.ID == r.ID {
+				f.rules[i] = r
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			f.rules = append(f.rules, r)
+		}
 	}
 	kept := make([]store.AlertRule, 0, len(f.rules)+len(rules))
 	for _, er := range f.rules {
@@ -345,7 +345,7 @@ func TestAlertsRulesPutRejectsUnknownField(t *testing.T) {
 	resp := doAlertsRequest(t, http.MethodPut, ts.URL+"/api/alerts/rules", `{"rules":[],"bogus":1}`)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Empty(t, fa.replaceCalls)
+	require.Empty(t, fa.saveCalls)
 }
 
 // TestAlertsRulesPutUserRuleCRUDRoundTrips is the plain, no-builtins-
@@ -365,8 +365,8 @@ func TestAlertsRulesPutUserRuleCRUDRoundTrips(t *testing.T) {
 	var out alertRulesResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	require.Len(t, out.Rules, 2)
-	require.Len(t, fa.replaceCalls, 1)
-	require.Empty(t, fa.upsertCalls, "no builtin in this request; UpsertRule must never be called")
+	require.Len(t, fa.saveCalls, 1, "the whole submission must reach SaveRules in one call")
+	require.Len(t, fa.saveCalls[0], 2)
 
 	// UpdatedAt is server-assigned, never trusted from the client.
 	for _, r := range out.Rules {
@@ -374,9 +374,9 @@ func TestAlertsRulesPutUserRuleCRUDRoundTrips(t *testing.T) {
 	}
 }
 
-// TestAlertsRulesPutBuiltinEditAllowed pins the split: a builtin id
-// resubmitted with Builtin:true and a changed threshold goes through
-// UpsertRule, and the edit is visible on the very next GET.
+// TestAlertsRulesPutBuiltinEditAllowed pins that a builtin id resubmitted
+// with Builtin:true and a changed threshold reaches SaveRules (whose
+// upsert half applies it), and the edit is visible on the very next GET.
 func TestAlertsRulesPutBuiltinEditAllowed(t *testing.T) {
 	fa := newFakeAlerts()
 	fa.rules = []store.AlertRule{testBuiltinRule("host-cpu-high", 85)}
@@ -388,8 +388,8 @@ func TestAlertsRulesPutBuiltinEditAllowed(t *testing.T) {
 	resp := doAlertsRequest(t, http.MethodPut, ts.URL+"/api/alerts/rules", marshalRules(t, edited))
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Len(t, fa.upsertCalls, 1)
-	require.Equal(t, 90.0, fa.upsertCalls[0].Threshold)
+	require.Len(t, fa.saveCalls, 1)
+	require.Equal(t, 90.0, fa.saveCalls[0][0].Threshold)
 
 	getResp, err := http.Get(ts.URL + "/api/alerts/rules")
 	require.NoError(t, err)
@@ -404,7 +404,7 @@ func TestAlertsRulesPutBuiltinEditAllowed(t *testing.T) {
 // TestAlertsRulesPutBuiltinTamperReturns400NotServerError pins the
 // store-review carry-forward this task named explicitly: a submitted
 // rule whose id matches an existing BUILTIN but whose own Builtin field
-// reads false must 400 at the API layer, never reach ReplaceRules (whose
+// reads false must 400 at the API layer, never reach SaveRules (whose
 // plain INSERT would otherwise collide with alert_rules' PRIMARY KEY and
 // surface as an opaque 500).
 func TestAlertsRulesPutBuiltinTamperReturns400NotServerError(t *testing.T) {
@@ -419,8 +419,7 @@ func TestAlertsRulesPutBuiltinTamperReturns400NotServerError(t *testing.T) {
 	resp := doAlertsRequest(t, http.MethodPut, ts.URL+"/api/alerts/rules", marshalRules(t, tampered))
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Empty(t, fa.replaceCalls, "a tampered request must be rejected before any write")
-	require.Empty(t, fa.upsertCalls)
+	require.Empty(t, fa.saveCalls, "a tampered request must be rejected before any write")
 
 	var errBody struct {
 		Error string `json:"error"`
@@ -444,7 +443,7 @@ func TestAlertsRulesPutOmittingBuiltinReturns400(t *testing.T) {
 	resp := doAlertsRequest(t, http.MethodPut, ts.URL+"/api/alerts/rules", marshalRules(t, testBuiltinRule("host-cpu-high", 85)))
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Empty(t, fa.replaceCalls)
+	require.Empty(t, fa.saveCalls)
 
 	var errBody struct {
 		Error string `json:"error"`
@@ -465,8 +464,7 @@ func TestAlertsRulesPutClaimingUnknownBuiltinReturns400(t *testing.T) {
 	resp := doAlertsRequest(t, http.MethodPut, ts.URL+"/api/alerts/rules", marshalRules(t, testBuiltinRule("not-a-real-builtin", 85)))
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Empty(t, fa.replaceCalls)
-	require.Empty(t, fa.upsertCalls)
+	require.Empty(t, fa.saveCalls)
 }
 
 func TestAlertsRulesPutValidationErrorReturns400WithValidatorMessage(t *testing.T) {
@@ -480,7 +478,7 @@ func TestAlertsRulesPutValidationErrorReturns400WithValidatorMessage(t *testing.
 	resp := doAlertsRequest(t, http.MethodPut, ts.URL+"/api/alerts/rules", marshalRules(t, bad))
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Empty(t, fa.replaceCalls)
+	require.Empty(t, fa.saveCalls)
 
 	var errBody struct {
 		Error string `json:"error"`
@@ -500,7 +498,7 @@ func TestAlertsRulesPutRejectsDuplicateIDs(t *testing.T) {
 	resp := doAlertsRequest(t, http.MethodPut, ts.URL+"/api/alerts/rules", marshalRules(t, testUserRule("dup"), testUserRule("dup")))
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Empty(t, fa.replaceCalls)
+	require.Empty(t, fa.saveCalls)
 }
 
 func TestAlertsRulesPutRejectsTooManyRules(t *testing.T) {
@@ -516,7 +514,7 @@ func TestAlertsRulesPutRejectsTooManyRules(t *testing.T) {
 	resp := doAlertsRequest(t, http.MethodPut, ts.URL+"/api/alerts/rules", marshalRules(t, rules...))
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Empty(t, fa.replaceCalls)
+	require.Empty(t, fa.saveCalls)
 }
 
 // --- GET /api/alerts/history ---------------------------------------------

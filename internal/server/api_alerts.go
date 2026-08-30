@@ -52,17 +52,17 @@ type AlertsIface interface {
 	// Rules returns every configured rule, builtin and user, for GET
 	// /api/alerts/rules.
 	Rules(ctx context.Context) ([]store.AlertRule, error)
-	// UpsertRule edits one existing builtin rule's numbers in place --
-	// the only path a builtin ever changes through (store.
-	// UpsertAlertRule is ReplaceRules' counterpart for a row ReplaceRules
-	// itself always skips; see ReplaceRules' own doc below).
-	UpsertRule(r store.AlertRule) error
-	// ReplaceRules performs the store.ReplaceAlertRules-shaped whole-
-	// document write for every USER rule; a builtin-flagged row in
-	// rules is silently skipped by the store itself, so
-	// handleAlertsRulesPut calls UpsertRule for builtins separately and
-	// hands this the complete submitted list.
-	ReplaceRules(rules []store.AlertRule) error
+	// SaveRules persists a whole PUT /api/alerts/rules submission in one
+	// atomic operation (store.SaveAlertRules): every Builtin row in rules
+	// is upserted in place -- the only path a builtin ever changes
+	// through -- and the entire non-builtin set is replaced wholesale, a
+	// builtin-flagged row itself always skipped by that second half.
+	// handleAlertsRulesPut hands this the complete validated submission
+	// in one call, rather than one store call per builtin plus a
+	// separate whole-document replace: that N+1-commit split could leave
+	// builtins durably rewritten while the non-builtin set stayed on its
+	// stale pre-request contents if a write failed partway through.
+	SaveRules(rules []store.AlertRule) error
 	// Silences returns every silence not yet expired (store.Silences,
 	// with "now" resolved by the adapter), for GET /api/alerts.
 	Silences(ctx context.Context) ([]store.Silence, error)
@@ -370,20 +370,20 @@ func (s *Server) handleAlertsRulesGet(w http.ResponseWriter, r *http.Request) {
 // docker mutation; see Options.ReadOnly's own doc and the plan's Global
 // Constraints). The submitted list is expected to carry every rule,
 // builtin included, since the UI always PUTs back its own already-
-// edited full GET -- but a submitted builtin=true row is applied
-// through UpsertRule, never ReplaceRules, matching store.
-// ReplaceAlertRules' own doc: it silently skips any builtin-flagged row
-// rather than inserting or overwriting it.
+// edited full GET -- but a submitted builtin=true row is applied through
+// SaveRules' upsert half, never its replace half, matching store.
+// SaveAlertRules' own doc: the replace half silently skips any
+// builtin-flagged row rather than inserting or overwriting it.
 //
 // Three builtin-identity shapes are rejected 400 before anything is
 // written: an existing builtin id missing from the submitted list
 // entirely (deletion-by-omission -- builtins are disable-only, never
 // deletable); an existing builtin id resubmitted with builtin=false
-// (identity tampering -- ReplaceRules' plain INSERT would otherwise
-// collide with alert_rules' PRIMARY KEY and surface as an opaque 500,
-// the store review's carry-forward this fixes at the door instead); and
-// a submitted builtin=true row whose id isn't a builtin the store
-// actually knows about (a client can't invent a new one).
+// (identity tampering -- SaveRules' plain INSERT would otherwise collide
+// with alert_rules' PRIMARY KEY and surface as an opaque 500, the store
+// review's carry-forward this fixes at the door instead); and a
+// submitted builtin=true row whose id isn't a builtin the store actually
+// knows about (a client can't invent a new one).
 func (s *Server) handleAlertsRulesPut(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Alerts == nil {
 		writeError(w, http.StatusNotFound, "alerts unavailable")
@@ -458,15 +458,7 @@ func (s *Server) handleAlertsRulesPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, rule := range submitted {
-		if rule.Builtin {
-			if err := s.opts.Alerts.UpsertRule(rule); err != nil {
-				writeError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-		}
-	}
-	if err := s.opts.Alerts.ReplaceRules(submitted); err != nil {
+	if err := s.opts.Alerts.SaveRules(submitted); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

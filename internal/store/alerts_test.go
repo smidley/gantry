@@ -209,6 +209,65 @@ func TestReplaceAlertRulesIgnoresBuiltinFlaggedIncomingRows(t *testing.T) {
 	require.Equal(t, original, got[0], "a builtin-flagged incoming row must be ignored, not applied")
 }
 
+// TestSaveAlertRulesHappyPathUpsertsBuiltinsAndReplacesNonBuiltins pins
+// SaveAlertRules' basic contract: every Builtin row in rules is upserted
+// in place (UpsertAlertRule's own semantics) and the entire non-builtin
+// set is replaced wholesale by rules' non-builtin rows (ReplaceAlertRules'
+// own semantics) -- both in the one call, matching what
+// handleAlertsRulesPut used to do as two separate store operations. See
+// TestSaveAlertRulesMidWriteFailureLeavesStoreUnchanged below for why
+// that split was unsafe.
+func TestSaveAlertRulesHappyPathUpsertsBuiltinsAndReplacesNonBuiltins(t *testing.T) {
+	s := newTestStore(t, nil)
+	builtin := fullRule("host-cpu-high")
+	require.NoError(t, s.UpsertAlertRule(builtin))
+	require.NoError(t, s.UpsertAlertRule(userRule("old-user-rule")))
+
+	editedBuiltin := builtin
+	editedBuiltin.Threshold = 95
+	require.NoError(t, s.SaveAlertRules([]AlertRule{editedBuiltin, userRule("new-user-rule")}))
+
+	got, err := s.AlertRules(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	byID := make(map[string]AlertRule, len(got))
+	for _, r := range got {
+		byID[r.ID] = r
+	}
+	require.Equal(t, 95.0, byID["host-cpu-high"].Threshold, "builtin must be upserted in place")
+	require.Contains(t, byID, "new-user-rule")
+	require.NotContains(t, byID, "old-user-rule", "the non-builtin set must be replaced wholesale")
+}
+
+// TestSaveAlertRulesMidWriteFailureLeavesStoreUnchanged pins the fix-round
+// finding this method exists for: handleAlertsRulesPut used to call
+// UpsertRule once per builtin (each its own commit) and then ReplaceRules
+// separately -- N+1 transactions, so a failure partway through (a crash,
+// a disk error) could leave builtins durably rewritten while the
+// non-builtin set stayed on its stale pre-request contents. Forcing a
+// PRIMARY KEY collision in the non-builtin half -- which runs AFTER the
+// builtin upsert inside the same SaveAlertRules call -- proves the
+// builtin write rolls back too: one transaction, all or nothing.
+func TestSaveAlertRulesMidWriteFailureLeavesStoreUnchanged(t *testing.T) {
+	s := newTestStore(t, nil)
+	builtin := fullRule("host-cpu-high")
+	require.NoError(t, s.UpsertAlertRule(builtin))
+	require.NoError(t, s.UpsertAlertRule(userRule("existing-user-rule")))
+
+	before, err := s.AlertRules(context.Background())
+	require.NoError(t, err)
+
+	editedBuiltin := builtin
+	editedBuiltin.Threshold = 999 // would-be change; must not survive the rollback
+	dup := userRule("dup-id")
+	err = s.SaveAlertRules([]AlertRule{editedBuiltin, dup, dup}) // second dup collides on PRIMARY KEY
+	require.Error(t, err, "a duplicate non-builtin id must fail the whole call")
+
+	after, err := s.AlertRules(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, before, after, "a mid-write failure must leave the store byte-identical to before the call")
+}
+
 // fullInstance mirrors fullRule's reasoning: every field gets a distinct
 // non-zero-where-possible value so a round trip catches a transposed
 // column.

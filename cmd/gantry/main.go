@@ -1156,11 +1156,7 @@ func (a alertsAdapter) Rules(ctx context.Context) ([]store.AlertRule, error) {
 	return a.st.AlertRules(ctx)
 }
 
-func (a alertsAdapter) UpsertRule(r store.AlertRule) error { return a.st.UpsertAlertRule(r) }
-
-func (a alertsAdapter) ReplaceRules(rules []store.AlertRule) error {
-	return a.st.ReplaceAlertRules(rules)
-}
+func (a alertsAdapter) SaveRules(rules []store.AlertRule) error { return a.st.SaveAlertRules(rules) }
 
 func (a alertsAdapter) Silences(ctx context.Context) ([]store.Silence, error) {
 	return a.st.Silences(ctx, time.Now().Unix())

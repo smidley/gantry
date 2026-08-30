@@ -66,6 +66,10 @@ const (
 	flapSilenceSeconds = 3600 // auto-silence duration once tripped
 
 	defaultChannelQueueCap = 256
+
+	// recorderQueueCap bounds the async store-write recorder; past it a
+	// write runs inline on the caller (see record) rather than being lost.
+	recorderQueueCap = 1024
 )
 
 type deliveryJob struct{ n AlertNotification }
@@ -96,6 +100,13 @@ type Dispatcher struct {
 
 	startOnce sync.Once
 	queues    map[string]chan deliveryJob
+	// recCh feeds the recorder goroutine: store bookkeeping scheduled
+	// from the Dispatch caller's own goroutine (rate-limited rows,
+	// overflow drops, flap silences, throttle events) so a slow store
+	// can never stall the engine's tick. Worker-side writes (deliver,
+	// shutdown drains) stay synchronous -- the worker is already the
+	// async side.
+	recCh chan func()
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -137,6 +148,7 @@ func NewDispatcher(store DeliveryStore, channels []Channel, clock func() time.Ti
 		Clock:           clock,
 		ResolvedNotices: resolvedNotices,
 		queues:          make(map[string]chan deliveryJob, len(channels)),
+		recCh:           make(chan func(), recorderQueueCap),
 		stop:            make(chan struct{}),
 		stopCtx:         stopCtx,
 		stopCancel:      stopCancel,
@@ -166,7 +178,48 @@ func (d *Dispatcher) ensureStarted() {
 			d.workersWG.Add(1)
 			go d.worker(ch, q)
 		}
+		d.workersWG.Add(1)
+		go d.recorder()
 	})
+}
+
+// recorder executes store bookkeeping scheduled by record() off the
+// Dispatch caller's goroutine, draining whatever is still queued when
+// Stop lands -- the same exit contract the channel workers follow.
+func (d *Dispatcher) recorder() {
+	defer d.workersWG.Done()
+	for {
+		select {
+		case <-d.stop:
+			for {
+				select {
+				case f := <-d.recCh:
+					f()
+				default:
+					return
+				}
+			}
+		case f := <-d.recCh:
+			f()
+		}
+	}
+}
+
+// record schedules one store write onto the recorder so the Dispatch
+// caller never waits on the store. When the recorder is saturated the
+// write runs inline instead -- bookkeeping is worth a rare stall, never
+// a silent gap. A write scheduled by a Dispatch racing Stop itself is
+// best-effort, the same line every post-Stop enqueue already sits on.
+func (d *Dispatcher) record(f func()) {
+	if d.recCh == nil { // zero-value Dispatcher: stay synchronous
+		f()
+		return
+	}
+	select {
+	case d.recCh <- f:
+	default:
+		f()
+	}
 }
 
 func (d *Dispatcher) worker(ch Channel, q chan deliveryJob) {
@@ -268,7 +321,7 @@ func (d *Dispatcher) enqueue(ch Channel, n AlertNotification, now int64) {
 	if ch.ID() == "notify" && n.Phase != "resolved" {
 		if !d.takeToken(now) {
 			d.suppress(n, now)
-			d.recordRateLimited(ch, n, now)
+			d.record(func() { d.recordRateLimited(ch, n, now) })
 			return
 		}
 	}
@@ -312,7 +365,7 @@ func (d *Dispatcher) send(ch Channel, n AlertNotification) {
 		}
 		select {
 		case dropped := <-q:
-			d.recordDrop(ch, dropped.n, errQueueOverflow)
+			d.record(func() { d.recordDrop(ch, dropped.n, errQueueOverflow) })
 		default:
 		}
 	}
@@ -516,12 +569,14 @@ func (d *Dispatcher) flushThrottleIfDue(now int64) {
 		})
 	}
 	if d.Store != nil {
-		if _, err := d.Store.AppendEvent(store.Event{
-			Kind: "alert.delivery_throttled", Severity: "info",
-			Detail: fmt.Sprintf("%d notifications suppressed: %s", len(items), summary),
-		}); err != nil {
-			log.Printf("alert dispatch: append alert.delivery_throttled: %v", err)
-		}
+		d.record(func() {
+			if _, err := d.Store.AppendEvent(store.Event{
+				Kind: "alert.delivery_throttled", Severity: "info",
+				Detail: fmt.Sprintf("%d notifications suppressed: %s", len(items), summary),
+			}); err != nil {
+				log.Printf("alert dispatch: append alert.delivery_throttled: %v", err)
+			}
+		})
 	}
 }
 
@@ -572,18 +627,20 @@ func (d *Dispatcher) trackFlap(n AlertNotification, now int64) {
 // gets coalesced away.
 func (d *Dispatcher) silenceFlapping(n AlertNotification, now int64) {
 	if d.Store != nil {
-		if _, err := d.Store.AddSilence(store.Silence{
-			RuleID: n.Rule.ID, Entity: n.Instance.Entity, Until: now + flapSilenceSeconds,
-			Reason: "flapping", CreatedAt: now,
-		}); err != nil {
-			log.Printf("alert dispatch: add flap-guard silence (%s/%s): %v", n.Rule.ID, n.Instance.Entity, err)
-		}
-		if _, err := d.Store.AppendEvent(store.Event{
-			Kind: "alert.flapping", Entity: n.Instance.Entity, Severity: "warning",
-			Detail: fmt.Sprintf("%s fired %d times in the last hour; silenced for 1h", n.Rule.Name, flapThreshold),
-		}); err != nil {
-			log.Printf("alert dispatch: append alert.flapping: %v", err)
-		}
+		d.record(func() {
+			if _, err := d.Store.AddSilence(store.Silence{
+				RuleID: n.Rule.ID, Entity: n.Instance.Entity, Until: now + flapSilenceSeconds,
+				Reason: "flapping", CreatedAt: now,
+			}); err != nil {
+				log.Printf("alert dispatch: add flap-guard silence (%s/%s): %v", n.Rule.ID, n.Instance.Entity, err)
+			}
+			if _, err := d.Store.AppendEvent(store.Event{
+				Kind: "alert.flapping", Entity: n.Instance.Entity, Severity: "warning",
+				Detail: fmt.Sprintf("%s fired %d times in the last hour; silenced for 1h", n.Rule.Name, flapThreshold),
+			}); err != nil {
+				log.Printf("alert dispatch: append alert.flapping: %v", err)
+			}
+		})
 	}
 
 	entity := n.Instance.Entity

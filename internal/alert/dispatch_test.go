@@ -72,8 +72,11 @@ func (c *fakeChannel) sendsSnapshot() []AlertNotification {
 // fakeDeliveryStore is a minimal in-memory DeliveryStore recording every
 // call, mirroring engine_test.go's fakeStore convention for the same
 // reason: a real *store.Store is unnecessary weight for logic that never
-// touches SQL.
+// touches SQL. A non-zero delay stalls every write, standing in for a
+// store held up by checkpointing or a busy disk.
 type fakeDeliveryStore struct {
+	delay time.Duration
+
 	mu         sync.Mutex
 	deliveries []store.Delivery
 	silences   []store.Silence
@@ -81,7 +84,14 @@ type fakeDeliveryStore struct {
 	nextID     int64
 }
 
+func (f *fakeDeliveryStore) stall() {
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
+}
+
 func (f *fakeDeliveryStore) RecordDelivery(d store.Delivery) error {
+	f.stall()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deliveries = append(f.deliveries, d)
@@ -89,6 +99,7 @@ func (f *fakeDeliveryStore) RecordDelivery(d store.Delivery) error {
 }
 
 func (f *fakeDeliveryStore) AddSilence(s store.Silence) (int64, error) {
+	f.stall()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
@@ -98,6 +109,7 @@ func (f *fakeDeliveryStore) AddSilence(s store.Silence) (int64, error) {
 }
 
 func (f *fakeDeliveryStore) AppendEvent(e store.Event) (int64, error) {
+	f.stall()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
@@ -664,6 +676,30 @@ func TestDispatcherDispatchDoesNotBlockOnAWedgedChannel(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 	require.Less(t, elapsed, 200*time.Millisecond, "Dispatch must enqueue and return promptly even while the channel's worker is wedged")
+}
+
+// TestDispatcherDispatchStaysFastWithSlowStore pins that Dispatch never
+// waits on the store: the rate-limited ledger row each suppressed
+// notification writes used to run inline on the caller's goroutine, so
+// a store held up by checkpointing stalled the engine's whole tick. Ten
+// suppressed notifications at 50ms per write would cost 500ms inline;
+// the recorder absorbs them instead.
+func TestDispatcherDispatchStaysFastWithSlowStore(t *testing.T) {
+	clock := newTestClock(1_800_000_000)
+	notify := newFakeChannel("notify")
+	st := &fakeDeliveryStore{delay: 50 * time.Millisecond}
+	d := NewDispatcher(st, []Channel{notify}, clock.Now, nil)
+	t.Cleanup(d.Stop)
+
+	start := time.Now()
+	for i := 0; i < 14; i++ { // 4 pass the bucket; 10 rate-limited, each owing a ledger row
+		d.Dispatch(fireNotification(fmt.Sprintf("r%d", i), "e"))
+	}
+	elapsed := time.Since(start)
+	require.Less(t, elapsed, 250*time.Millisecond, "Dispatch must enqueue bookkeeping, not wait out store writes")
+
+	require.Eventually(t, func() bool { return len(st.deliveriesSnapshot()) == 14 }, 3*time.Second, 10*time.Millisecond,
+		"every row still lands once the recorder and worker catch up")
 }
 
 // TestDispatcherConcurrentDispatchIsRaceFree exercises Dispatch from

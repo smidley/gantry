@@ -54,6 +54,8 @@ func TestTickDisksExactValuesAcrossSlots(t *testing.T) {
 	require.False(t, ok, "parity has fsSize 0, so fs byte metrics must not be emitted")
 	_, ok = sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: "fs.free_bytes"}]
 	require.False(t, ok)
+	_, ok = sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: "fs.used_pct"}]
+	require.False(t, ok, "parity has no filesystem view, so fs.used_pct must not be emitted either")
 
 	// disk1: normal present disk with full fs math.
 	require.InDelta(t, 31, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "temp.c"}], 1e-9)
@@ -62,6 +64,7 @@ func TestTickDisksExactValuesAcrossSlots(t *testing.T) {
 	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 6144000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.used_bytes"}], 1e-9)
 	require.InDelta(t, 4096000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.free_bytes"}], 1e-9)
+	require.InDelta(t, 60.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.used_pct"}], 1e-9)
 
 	// disk2: spun down, temp "*" -- absence is the signal, not a 0 reading.
 	// rotational is a static hardware property, unrelated to spin state, so
@@ -73,9 +76,10 @@ func TestTickDisksExactValuesAcrossSlots(t *testing.T) {
 	require.InDelta(t, 1, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk2", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 4096000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk2", Metric: "fs.used_bytes"}], 1e-9)
 	require.InDelta(t, 6144000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk2", Metric: "fs.free_bytes"}], 1e-9)
+	require.InDelta(t, 40.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk2", Metric: "fs.used_pct"}], 1e-9)
 
 	// disk3: DISK_NP (empty slot) -- must emit nothing at all.
-	for _, metric := range []string{"temp.c", "spun_up", "errors", "rotational", "fs.used_bytes", "fs.free_bytes"} {
+	for _, metric := range []string{"temp.c", "spun_up", "errors", "rotational", "fs.used_bytes", "fs.free_bytes", "fs.used_pct"} {
 		_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "disk3", Metric: metric}]
 		require.False(t, ok, "DISK_NP slot disk3 must emit nothing for metric %s", metric)
 	}
@@ -86,6 +90,33 @@ func TestTickDisksExactValuesAcrossSlots(t *testing.T) {
 	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 1536000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.used_bytes"}], 1e-9)
 	require.InDelta(t, 512000000, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.free_bytes"}], 1e-9)
+	require.InDelta(t, 75.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.used_pct"}], 1e-9)
+}
+
+// TestTickDisksFsUsedPctMatchesFrontendFormula pins fs.used_pct's formula
+// against the exact numbers web/src/lib/disks.test.ts uses for its own
+// diskUsagePct test (fs.used_bytes 30 / fs.free_bytes 70 -> 30) -- the
+// plan requires the two be byte-identical, since the alert engine's
+// disk-usage-high rule and the Storage view's display band now both
+// read this one persisted number instead of each deriving their own.
+func TestTickDisksFsUsedPctMatchesFrontendFormula(t *testing.T) {
+	dir := t.TempDir()
+	content := `["disk1"]
+name="disk1"
+status="DISK_OK"
+spundown="0"
+temp="30"
+numErrors="0"
+fsSize="100"
+fsFree="70"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "disks.ini"), []byte(content), 0o644))
+	sink := newFakeSink()
+	c := New(sink, &fakeEvents{}, dir, t.TempDir())
+
+	c.tickDisks(time.Unix(1000, 0))
+
+	require.InDelta(t, 30.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.used_pct"}], 1e-9)
 }
 
 func TestTickDisksErrorIncreaseEmitsAlertButFirstSightAndUnchangedDoNot(t *testing.T) {
@@ -194,7 +225,7 @@ func TestTickDisksRealCaptureFromLiveUnraidBox(t *testing.T) {
 	c.tickDisks(time.Unix(1000, 0))
 
 	// parity: DISK_NP_DSBL on this real box (no active parity disk) -- must emit nothing.
-	for _, metric := range []string{"temp.c", "spun_up", "errors", "rotational", "fs.used_bytes", "fs.free_bytes"} {
+	for _, metric := range []string{"temp.c", "spun_up", "errors", "rotational", "fs.used_bytes", "fs.free_bytes", "fs.used_pct"} {
 		_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "parity", Metric: metric}]
 		require.False(t, ok, "DISK_NP_DSBL slot parity must emit nothing for metric %s", metric)
 	}
@@ -216,17 +247,23 @@ func TestTickDisksRealCaptureFromLiveUnraidBox(t *testing.T) {
 	require.InDelta(t, 1302864769024.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "disk6", Metric: "fs.free_bytes"}], 1e-6)
 
 	// disk9: DISK_NP empty data slot -- must emit nothing.
-	for _, metric := range []string{"temp.c", "spun_up", "errors", "rotational", "fs.used_bytes", "fs.free_bytes"} {
+	for _, metric := range []string{"temp.c", "spun_up", "errors", "rotational", "fs.used_bytes", "fs.free_bytes", "fs.used_pct"} {
 		_, ok := sink.records[store.SeriesKey{Kind: "disk", Entity: "disk9", Metric: metric}]
 		require.False(t, ok, "DISK_NP slot disk9 must emit nothing for metric %s", metric)
 	}
 
 	// cache: present, btrfs pool, nvme transport -- fsUsed diverges from
 	// fsSize-fsFree (fsUsed must win) and rotational reads 0 (solid-state).
+	// fs.used_pct must be the AUTHORITATIVE fsUsed's own share of the
+	// total, i.e. computed from these same two already-pinned byte
+	// figures -- matches diskUsagePct's value for this real box's cache
+	// pool (the plan's own named test target for this fixture).
 	require.InDelta(t, 36, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "temp.c"}], 1e-9)
 	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "rotational"}], 1e-9)
 	require.InDelta(t, 625070358528.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.used_bytes"}], 1e-6)
 	require.InDelta(t, 372920500224.0, sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.free_bytes"}], 1e-6)
+	require.InDelta(t, 625070358528.0/(625070358528.0+372920500224.0)*100,
+		sink.records[store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "fs.used_pct"}], 1e-9)
 
 	// rocket_pool: a second, differently-named btrfs pool, also nvme --
 	// proves the collector doesn't special-case the literal name "cache",

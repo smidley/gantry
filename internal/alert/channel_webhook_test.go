@@ -237,6 +237,37 @@ func TestWebhookChannelNoHeaderWhenTargetHasNone(t *testing.T) {
 	require.Empty(t, captured.headers.Get("X-Api-Key"))
 }
 
+// --- redirects never followed ------------------------------------------------
+
+func TestWebhookChannelNeverFollowsRedirect(t *testing.T) {
+	var followed atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		followed.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Redirect(w, r, other.URL, http.StatusFound)
+	}))
+	defer srv.Close()
+
+	target := testTarget(srv.URL)
+	target.HeaderName = "Authorization"
+	target.HeaderValue = "Bearer super-secret-token-xyz"
+	c := noJitterChannel(target)
+
+	res := c.Send(context.Background(), testNotification())
+	require.False(t, res.OK, "a 3xx is a non-2xx failure, never a hop to follow")
+	require.Equal(t, http.StatusFound, res.Status)
+	require.Equal(t, 1, res.Attempts, "3xx is a configuration mistake, not retryable")
+	require.EqualValues(t, 0, followed.Load(), "the redirect target must never see a request (it would receive the secret header)")
+	require.EqualValues(t, 1, calls.Load())
+	require.Contains(t, c.Health(), "302")
+}
+
 // --- secret never leaked ----------------------------------------------------
 
 func TestWebhookChannelSecretNeverInErrorStringOnFailure(t *testing.T) {

@@ -195,17 +195,29 @@ type WebhookChannel struct {
 	failErr    string
 }
 
-// NewWebhookChannel constructs a channel ready to send: a shared
-// *http.Client with no fixed Timeout (each attempt's own context
-// deadline drives it, since TimeoutS is per-attempt, not per-Send), real
-// jitter from a time-seeded Rand, and clock defaulting to time.Now.
+// noRedirectClient is every webhook channel's HTTP client: a webhook
+// POST never follows redirects. Go's default client would replay the
+// request -- custom secret header included -- against whatever host a
+// 3xx points at, so a compromised or misconfigured endpoint could
+// exfiltrate the credential with one Location header. ErrUseLastResponse
+// hands the 3xx itself back instead, and Send treats it like any other
+// non-2xx failure.
+var noRedirectClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+// NewWebhookChannel constructs a channel ready to send: the shared
+// redirect-refusing client with no fixed Timeout (each attempt's own
+// context deadline drives it, since TimeoutS is per-attempt, not
+// per-Send), real jitter from a time-seeded Rand, and clock defaulting
+// to time.Now.
 func NewWebhookChannel(target WebhookTarget, version string, clock func() time.Time) *WebhookChannel {
 	if clock == nil {
 		clock = time.Now
 	}
 	return &WebhookChannel{
 		Target: target, Version: version, Clock: clock,
-		Client: &http.Client{},
+		Client: noRedirectClient,
 		Sleep:  time.Sleep,
 		Rand:   rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // retry jitter, not a security boundary
 	}
@@ -336,5 +348,5 @@ func (c *WebhookChannel) client() *http.Client {
 	if c.Client != nil {
 		return c.Client
 	}
-	return http.DefaultClient
+	return noRedirectClient // never http.DefaultClient: it follows redirects, secret header and all
 }

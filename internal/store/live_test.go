@@ -108,6 +108,53 @@ func TestLiveLatestByMetricPrefixEmptyWhenNoMatch(t *testing.T) {
 	require.Empty(t, got)
 }
 
+// TestLiveMatchSinceGroupsByEntityForOneKindMetricPair pins the alert
+// engine's data-source shape (Task 4): every entity currently carrying a
+// kind+metric series comes back keyed by entity, filtered to samples at
+// or after since, in one read-lock pass -- the N+1-avoiding counterpart
+// to calling Keys() then Since() per matching key.
+func TestLiveMatchSinceGroupsByEntityForOneKindMetricPair(t *testing.T) {
+	l := NewLive(8)
+	l.Record(SeriesKey{Kind: "disk", Entity: "disk1", Metric: "temp.c"}, 100, 40.0)
+	l.Record(SeriesKey{Kind: "disk", Entity: "disk1", Metric: "temp.c"}, 200, 42.0)
+	l.Record(SeriesKey{Kind: "disk", Entity: "disk2", Metric: "temp.c"}, 150, 55.0)
+	l.Record(SeriesKey{Kind: "disk", Entity: "disk1", Metric: "fs.used_pct"}, 100, 90.0) // wrong metric
+	l.Record(SeriesKey{Kind: "host", Entity: "", Metric: "temp.c"}, 100, 30.0)           // wrong kind
+
+	got := l.MatchSince("disk", "temp.c", 0)
+
+	require.Equal(t, map[string][]Sample{
+		"disk1": {{TS: 100, Val: 40.0}, {TS: 200, Val: 42.0}},
+		"disk2": {{TS: 150, Val: 55.0}},
+	}, got)
+}
+
+// TestLiveMatchSinceRespectsSince pins the window filter itself, and that
+// an entity with no samples in the window is simply absent as a key --
+// the alert engine's own contract for "series absent" (see
+// internal/alert/engine.go's no-data handling).
+func TestLiveMatchSinceRespectsSince(t *testing.T) {
+	l := NewLive(8)
+	l.Record(SeriesKey{Kind: "host", Metric: "cpu.total"}, 100, 10.0)
+	l.Record(SeriesKey{Kind: "host", Metric: "cpu.total"}, 200, 20.0)
+
+	got := l.MatchSince("host", "cpu.total", 150)
+	require.Equal(t, map[string][]Sample{"": {{TS: 200, Val: 20.0}}}, got)
+
+	require.Empty(t, l.MatchSince("host", "cpu.total", 500))
+}
+
+// TestLiveMatchSinceEmptyForUnknownPair pins the always-non-nil, empty-
+// map convention every other Live accessor already follows.
+func TestLiveMatchSinceEmptyForUnknownPair(t *testing.T) {
+	l := NewLive(8)
+	l.Record(SeriesKey{Kind: "host", Metric: "cpu.total"}, 100, 10.0)
+
+	got := l.MatchSince("gpu", "busy_pct", 0)
+	require.NotNil(t, got)
+	require.Empty(t, got)
+}
+
 func TestLiveEvict(t *testing.T) {
 	l := NewLive(8)
 	k1 := SeriesKey{Kind: "container", Entity: "app1", Metric: "cpu"}

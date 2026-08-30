@@ -112,6 +112,32 @@ func (l *Live) LatestByMetricPrefix(kind, entity, prefix string) map[string]Samp
 	return out
 }
 
+// MatchSince returns, for every currently-known series of this kind and
+// metric, the samples at or after since, keyed by entity -- one read-lock
+// pass regardless of how many entities match. This is the alert engine's
+// data source (internal/alert/engine.go): it asks once per (kind, metric)
+// pair shared across every enabled rule, not once per entity, so an N+1
+// shape (Keys() then Since() per matching key) would multiply by entity
+// count every tick. Always non-nil; an unknown (kind, metric) pair or an
+// entity with zero samples in [since, now] is simply absent as a key --
+// the engine's own no-data handling reads that absence directly, so this
+// deliberately does not distinguish "no such series" from "series
+// exists but nothing fell in the window."
+func (l *Live) MatchSince(kind, metric string, since int64) map[string][]Sample {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make(map[string][]Sample)
+	for k, r := range l.rings {
+		if k.Kind != kind || k.Metric != metric {
+			continue
+		}
+		if s := r.Since(since); len(s) > 0 {
+			out[k.Entity] = s
+		}
+	}
+	return out
+}
+
 // Evict deletes every ring whose SeriesKey matches kind and entity.
 func (l *Live) Evict(kind, entity string) {
 	l.mu.Lock()

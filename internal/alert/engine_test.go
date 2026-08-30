@@ -516,6 +516,93 @@ func TestDeletedRuleResolvesOrphanedInstance(t *testing.T) {
 	require.Equal(t, "rule-disabled", st.instances[id].ResolveReason)
 }
 
+// TestDisabledRulePendingInstanceResolvesSilently pins F8: a pending
+// instance that never fired must leave the same way it does everywhere
+// else in this file (resolveSilent's doctrine) -- no event, no dispatch --
+// even when the reason it's leaving is the rule being disabled rather
+// than clearing or falling out of scope.
+func TestDisabledRulePendingInstanceResolvesSilently(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := cpuRule()
+	rule.Enabled = false
+	st := newFakeStore(rule)
+	id, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: rule.ID, Kind: "host", Entity: "", State: "pending", Severity: "warning", StartedAt: now - 10,
+	})
+	require.NoError(t, err)
+
+	dispatched := 0
+	eng := newEngine(st, func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }, nil, nil,
+		func(AlertNotification) { dispatched++ }, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background()))
+
+	inst := st.instances[id]
+	require.Equal(t, "resolved", inst.State)
+	require.Equal(t, "rule-disabled", inst.ResolveReason)
+	require.Empty(t, st.events, "a pending instance that never fired must not get an event either")
+	require.Equal(t, 0, dispatched)
+}
+
+// TestMissingSinceClearedWhenRuleDisabledWhileAbsent pins F9: the
+// per-instance absence timer (missingSince, keyed by instance id) must
+// not survive the instance it was tracking on EVERY resolve path -- not
+// just the no-data timeout that originally set it. resolveDisabled
+// bypasses that timeout entirely, so without its own cleanup the entry
+// leaks for the rest of the engine's lifetime.
+func TestMissingSinceClearedWhenRuleDisabledWhileAbsent(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := cpuRule()
+	st := newFakeStore(rule)
+	id, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: rule.ID, Kind: "host", Entity: "", Metric: rule.Metric, State: "firing",
+		Severity: rule.Severity, Value: 90, Threshold: rule.Threshold, StartedAt: now - 300, FiredAt: now - 300,
+	})
+	require.NoError(t, err)
+
+	mr := newMatchRouter() // metric produces nothing: entity absent
+	eng := newEngine(st, mr.fn, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background())) // absent tick 1: starts the no-data timer
+	require.Contains(t, eng.missingSince, id, "the absence timer must be tracking this instance")
+
+	rule.Enabled = false
+	st.rules = []store.AlertRule{rule}
+	require.NoError(t, eng.Tick(context.Background())) // now resolved via resolveDisabled instead
+
+	require.Equal(t, "resolved", st.instances[id].State)
+	require.NotContains(t, eng.missingSince, id, "resolveDisabled must clean up the absence timer too")
+}
+
+// TestMissingSinceClearedWhenResolvedOutOfScopeWhileAbsent is F9's other
+// named gap: resolveOutOfScope (F6) also bypasses the no-data timeout,
+// and is a second path that never touched missingSince before this fix.
+func TestMissingSinceClearedWhenResolvedOutOfScopeWhileAbsent(t *testing.T) {
+	now := int64(2_000_000_000)
+	rule := cpuRule()
+	rule.Kind, rule.Metric, rule.EntityGlob = "container", "cpu.total", "*"
+	st := newFakeStore(rule)
+	id, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: rule.ID, Kind: "container", Entity: "plex", Metric: rule.Metric, State: "firing",
+		Severity: rule.Severity, Value: 90, Threshold: rule.Threshold, StartedAt: now - 300, FiredAt: now - 300,
+	})
+	require.NoError(t, err)
+
+	mr := newMatchRouter() // plex absent from the very first tick
+	eng := newEngine(st, mr.fn, nil, nil, nil, func() time.Time { return time.Unix(now, 0) })
+
+	require.NoError(t, eng.Tick(context.Background())) // still in scope, absent: starts the timer
+	require.Contains(t, eng.missingSince, id)
+
+	rule.EntityGlob = "jelly*" // narrowed: plex falls out of scope
+	st.rules = []store.AlertRule{rule}
+	require.NoError(t, eng.Tick(context.Background()))
+
+	require.Equal(t, "resolved", st.instances[id].State)
+	require.Equal(t, "out-of-scope", st.instances[id].ResolveReason)
+	require.NotContains(t, eng.missingSince, id, "resolveOutOfScope must clean up the absence timer too")
+}
+
 // --- no-data ---------------------------------------------------------------
 
 func TestNoDataResolvesOnlyAfterClearSecondsNotOnFirstMissingTick(t *testing.T) {

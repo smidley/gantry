@@ -177,14 +177,23 @@ func (e *Engine) Tick(ctx context.Context) error {
 	return nil
 }
 
-// resolveDisabled resolves any-state -> resolved(rule-disabled): an event
-// is appended (the alert's own history should show why it closed) but
-// nothing is dispatched -- a rule someone just disabled should not also
-// page them. A resolve error is logged and the tick continues; see
-// resolveNotify's own doc for why this can never abort the pass.
+// resolveDisabled resolves any-state -> resolved(rule-disabled): for a
+// FIRING instance an event is appended (the alert's own history should
+// show why it closed) but nothing is dispatched -- a rule someone just
+// disabled should not also page them. A pending instance never fired, so
+// it gets neither, matching resolveSilent's doctrine everywhere else in
+// this file (F8). A resolve error is logged and the tick continues; see
+// resolveNotify's own doc for why this can never abort the pass. This
+// bypasses the no-data timeout entirely, so it cleans up missingSince
+// itself too (F9) -- see resolveSilent/resolveNotify for the same sweep
+// on every other resolve path.
 func (e *Engine) resolveDisabled(inst store.AlertInstance, now int64) {
+	delete(e.missingSince, inst.ID)
 	if err := e.Store.ResolveAlertInstance(inst.ID, now, "rule-disabled"); err != nil {
 		log.Printf("alert engine: resolve instance %d (%s/%s) for disabled/deleted rule: %v", inst.ID, inst.RuleID, inst.Entity, err)
+	}
+	if inst.State == "pending" {
+		return
 	}
 	if _, err := e.Store.AppendEvent(store.Event{Kind: "alert.resolved", Entity: inst.Entity, Severity: "info", Detail: inst.RuleID + " rule disabled"}); err != nil {
 		log.Printf("alert engine: append alert.resolved event: %v", err)
@@ -410,8 +419,7 @@ func (e *Engine) handleAbsentThreshold(r store.AlertRule, inst store.AlertInstan
 		return
 	}
 	if now-first >= r.ClearSeconds {
-		delete(e.missingSince, inst.ID)
-		e.resolveNotify(inst, r, now, "no-data", silences, activeIdx)
+		e.resolveNotify(inst, r, now, "no-data", silences, activeIdx) // clears missingSince itself
 	}
 }
 
@@ -504,8 +512,11 @@ func (e *Engine) startPending(r store.AlertRule, entity string, value float64, n
 
 // resolveSilent resolves pending->resolved with no event and no dispatch:
 // a pending alert never fired, so there is nothing to announce recovery
-// from.
+// from. Also clears missingSince (F9): harmless here today (nothing ever
+// sets it for a pending instance), but every resolve path sweeps it so
+// none of them has to reason about whether IT specifically needs to.
 func (e *Engine) resolveSilent(inst store.AlertInstance, now int64, reason string, activeIdx map[instanceKey]store.AlertInstance) {
+	delete(e.missingSince, inst.ID)
 	if err := e.Store.ResolveAlertInstance(inst.ID, now, reason); err != nil {
 		log.Printf("alert engine: resolve pending instance %d (%s/%s): %v", inst.ID, inst.RuleID, inst.Entity, err)
 	}
@@ -517,8 +528,14 @@ func (e *Engine) resolveSilent(inst store.AlertInstance, now int64, reason strin
 // ResolveAlertInstance error (the carry-forward fix: it now errors on an
 // unknown id, e.g. a row Maintain already pruned out from under a stale
 // engine handle) is logged, not returned -- one instance's stale id must
-// never abort the rest of this tick's evaluation.
+// never abort the rest of this tick's evaluation. Also clears
+// missingSince (F9): the "cleared" and "timeout" reasons never had one
+// to begin with, but "no-data" (handleAbsentThreshold) and "out-of-scope"
+// (resolveOutOfScope, F6) both resolve a possibly-still-tracked instance
+// through here, and this is the one place that's true regardless of
+// which of those called it.
 func (e *Engine) resolveNotify(inst store.AlertInstance, r store.AlertRule, now int64, reason string, silences []store.Silence, activeIdx map[instanceKey]store.AlertInstance) {
+	delete(e.missingSince, inst.ID)
 	if err := e.Store.ResolveAlertInstance(inst.ID, now, reason); err != nil {
 		log.Printf("alert engine: resolve instance %d (%s/%s): %v", inst.ID, inst.RuleID, inst.Entity, err)
 	}

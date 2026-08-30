@@ -93,6 +93,13 @@ func TestInterpretVarRealCaptureToleratesEveryUnreadKey(t *testing.T) {
 	require.InDelta(t, 0, state.ParityProgress, 1e-9)
 	require.InDelta(t, 0, state.ParitySpeedBps, 1e-9)
 	require.Equal(t, "7.3.2", state.Version)
+	// This real box's own sbSyncErrs/sbSynced/sbSynced2/sbSyncExit are all
+	// "0" -- a clean capture, never a nonzero error count observed live --
+	// but they are present in the file and must parse rather than error.
+	require.InDelta(t, 0, state.SyncErrs, 1e-9)
+	require.Zero(t, state.SyncStart)
+	require.Zero(t, state.SyncFinish)
+	require.Zero(t, state.SyncExit)
 }
 
 func TestInterpretVarProgressGuardsZeroSize(t *testing.T) {
@@ -136,6 +143,30 @@ func TestInterpretVarSpeedZeroWhenKeysAbsent(t *testing.T) {
 	require.InDelta(t, 0, state.ParitySpeedBps, 1e-9, "absent mdResyncDb/mdResyncDt must default to 0, not error")
 }
 
+// TestInterpretVarParsesSyncFields pins sbSyncErrs/sbSynced/sbSynced2/
+// sbSyncExit -- present in testdata/var_real.ini and, until now, never
+// read -- onto ArrayState's four new fields.
+func TestInterpretVarParsesSyncFields(t *testing.T) {
+	state := interpretVar(map[string]map[string]string{"": {
+		"sbSyncErrs": "3",
+		"sbSynced":   "1700000000",
+		"sbSynced2":  "1700018120",
+		"sbSyncExit": "0",
+	}})
+	require.InDelta(t, 3, state.SyncErrs, 1e-9)
+	require.Equal(t, int64(1700000000), state.SyncStart)
+	require.Equal(t, int64(1700018120), state.SyncFinish)
+	require.Equal(t, 0, state.SyncExit)
+}
+
+func TestInterpretVarSyncFieldsZeroWhenAbsent(t *testing.T) {
+	state := interpretVar(map[string]map[string]string{"": {"mdState": "STARTED"}})
+	require.InDelta(t, 0, state.SyncErrs, 1e-9, "absent sbSyncErrs must default to 0, not error")
+	require.Zero(t, state.SyncStart)
+	require.Zero(t, state.SyncFinish)
+	require.Zero(t, state.SyncExit)
+}
+
 // --- transitionEvents: pure edge-detector tests ---
 
 func TestTransitionEventsStateChangeToStartedIsInfo(t *testing.T) {
@@ -175,11 +206,53 @@ func TestTransitionEventsParityFinishReportsThePreviousTicksProgress(t *testing.
 	// next's own ParityProgress is 0 here because emhttp's mdResyncPos has
 	// already reset by the time the run shows as stopped — the finish
 	// event must report how far the run had gotten (prev), not that 0.
+	// next's SyncErrs/SyncStart/SyncFinish are all their zero value here
+	// (a clean run whose duration wasn't captured) -- the error count
+	// still always renders ("0 errors"), the duration segment does not.
 	prev := ArrayState{State: "STARTED", ParityRunning: true, ParityProgress: 99.9}
 	next := ArrayState{State: "STARTED", ParityRunning: false, ParityProgress: 0}
 	events := transitionEvents(prev, next)
 	require.Equal(t, []store.Event{
-		{Kind: "parity.finish", Entity: "array", Severity: "info", Detail: "reached 99.9%"},
+		{Kind: "parity.finish", Entity: "array", Severity: "info", Detail: "reached 99.9% · 0 errors"},
+	}, events)
+}
+
+// TestTransitionEventsParityFinishIncludesDurationWhenBothSyncTimestampsPresent
+// pins the enriched Detail's middle segment: sbSynced/sbSynced2 (next's
+// SyncStart/SyncFinish) render as "%dh%02dm" when both are present and
+// SyncFinish is after SyncStart -- 1700018120-1700000000 = 18120s = 5h02m.
+func TestTransitionEventsParityFinishIncludesDurationWhenBothSyncTimestampsPresent(t *testing.T) {
+	prev := ArrayState{State: "STARTED", ParityRunning: true, ParityProgress: 100}
+	next := ArrayState{State: "STARTED", ParityRunning: false, SyncStart: 1700000000, SyncFinish: 1700018120}
+	events := transitionEvents(prev, next)
+	require.Equal(t, []store.Event{
+		{Kind: "parity.finish", Entity: "array", Severity: "info", Detail: "reached 100.0% · 5h02m · 0 errors"},
+	}, events)
+}
+
+// TestTransitionEventsParityFinishFlipsToAlertSeverityOnSyncErrors pins
+// the other half of the enrichment: any sbSyncErrs > 0 flips Severity
+// from "info" to "alert", which is what actually arms the seeded
+// parity-errors rule's "warning" floor.
+func TestTransitionEventsParityFinishFlipsToAlertSeverityOnSyncErrors(t *testing.T) {
+	prev := ArrayState{State: "STARTED", ParityRunning: true, ParityProgress: 100}
+	next := ArrayState{State: "STARTED", ParityRunning: false, SyncStart: 1700000000, SyncFinish: 1700018120, SyncErrs: 3}
+	events := transitionEvents(prev, next)
+	require.Equal(t, []store.Event{
+		{Kind: "parity.finish", Entity: "array", Severity: "alert", Detail: "reached 100.0% · 5h02m · 3 errors"},
+	}, events)
+}
+
+// TestTransitionEventsParityFinishOmitsDurationWhenSynced2IsZero pins the
+// "never a fabricated duration" rule: SyncFinish absent (sbSynced2="0")
+// must drop the middle segment entirely rather than print an "0h00m" it
+// never actually measured.
+func TestTransitionEventsParityFinishOmitsDurationWhenSynced2IsZero(t *testing.T) {
+	prev := ArrayState{State: "STARTED", ParityRunning: true, ParityProgress: 100}
+	next := ArrayState{State: "STARTED", ParityRunning: false, SyncStart: 1700000000, SyncFinish: 0, SyncErrs: 1}
+	events := transitionEvents(prev, next)
+	require.Equal(t, []store.Event{
+		{Kind: "parity.finish", Entity: "array", Severity: "alert", Detail: "reached 100.0% · 1 errors"},
 	}, events)
 }
 
@@ -189,7 +262,7 @@ func TestTransitionEventsStateAndParityCanBothFireInOneTick(t *testing.T) {
 	events := transitionEvents(prev, next)
 	require.Equal(t, []store.Event{
 		{Kind: "array.state", Entity: "array", Severity: "warning", Detail: "STOPPED"},
-		{Kind: "parity.finish", Entity: "array", Severity: "info", Detail: "reached 100.0%"},
+		{Kind: "parity.finish", Entity: "array", Severity: "info", Detail: "reached 100.0% · 0 errors"},
 	}, events)
 }
 
@@ -301,7 +374,7 @@ func TestTickThriceEmitsParityStartThenFinishWithoutStateNoise(t *testing.T) {
 	require.NoError(t, c.Tick(context.Background(), time.Unix(1030, 0)))
 	require.Equal(t, []store.Event{
 		{Kind: "parity.start", Entity: "array", Severity: "info"},
-		{Kind: "parity.finish", Entity: "array", Severity: "info", Detail: "reached 50.0%"},
+		{Kind: "parity.finish", Entity: "array", Severity: "info", Detail: "reached 50.0% · 0 errors"},
 	}, events.events, "STARTED throughout means only the parity edge should fire, isolated from any state event")
 
 	// On the same finish tick, the collector must overwrite both parity
@@ -316,6 +389,56 @@ func TestTickThriceEmitsParityStartThenFinishWithoutStateNoise(t *testing.T) {
 		"finish must overwrite parity.progress_pct with an explicit 0, not leave the last running sample in place")
 	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}], 1e-9,
 		"finish must overwrite parity.speed_bps with an explicit 0, not leave the last running sample in place")
+}
+
+// TestTickAlwaysEmitsParityErrorsMetric pins parity.errors as an
+// unconditional-every-tick metric, the same convention array.started
+// already uses (see its own doc): the live frame needs a value even on
+// a box that has never once run a parity check, not only once one
+// finishes.
+func TestTickAlwaysEmitsParityErrorsMetric(t *testing.T) {
+	dir := t.TempDir()
+	sink := newFakeSink()
+	c := New(sink, &fakeEvents{}, dir, t.TempDir())
+
+	copyFixture(t, "testdata/var_started.ini", filepath.Join(dir, "var.ini"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	_, ok := sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.errors"}]
+	require.True(t, ok, "parity.errors must be recorded every tick, unconditional like array.started")
+	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.errors"}], 1e-9)
+}
+
+// TestTickParityFinishWithRealErrorsFixtureEnrichesEventAndRecordsMetric
+// replays a real-shaped var.ini sequence (running, then finished with
+// sbSyncErrs="3" -- the same key vocabulary testdata/var_real.ini proved
+// exists and parses, just never captured live with a nonzero count)
+// through the actual collector Tick, proving the wiring end to end: the
+// parity.errors metric and the enriched parity.finish event both come
+// out of one real file read, not only the pure interpretVar/
+// transitionEvents unit tests above.
+func TestTickParityFinishWithRealErrorsFixtureEnrichesEventAndRecordsMetric(t *testing.T) {
+	dir := t.TempDir()
+	events := &fakeEvents{}
+	sink := newFakeSink()
+	c := New(sink, events, dir, t.TempDir())
+
+	copyFixture(t, "testdata/var_started.ini", filepath.Join(dir, "var.ini"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	copyFixture(t, "testdata/var_parity_running.ini", filepath.Join(dir, "var.ini"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1015, 0)))
+	require.InDelta(t, 0, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.errors"}], 1e-9,
+		"no prior completed check on record yet, so parity.errors must read 0 while this one is still in progress")
+
+	copyFixture(t, "testdata/var_parity_finished_errors.ini", filepath.Join(dir, "var.ini"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1030, 0)))
+
+	require.InDelta(t, 3, sink.records[store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.errors"}], 1e-9)
+	require.Equal(t, []store.Event{
+		{Kind: "parity.start", Entity: "array", Severity: "info"},
+		{Kind: "parity.finish", Entity: "array", Severity: "alert", Detail: "reached 50.0% · 5h02m · 3 errors"},
+	}, events.events)
 }
 
 func TestTickMissingVarIniReturnsError(t *testing.T) {

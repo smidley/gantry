@@ -18,6 +18,10 @@ type ArrayState struct {
 	ParityProgress float64 // mdResyncPos / mdResyncSize * 100
 	ParitySpeedBps float64 // (mdResyncDb / mdResyncDt) * 1024; 0 if Dt absent or 0
 	Version        string
+	SyncErrs       float64 // sbSyncErrs: the last (or currently running) check's error count
+	SyncStart      int64   // sbSynced: unix epoch the last check started, 0 if never run
+	SyncFinish     int64   // sbSynced2: unix epoch the last check finished, 0 while running or never run
+	SyncExit       int     // sbSyncExit: emhttp's own exit status for the last check
 }
 
 // interpretVar derives ArrayState from a parsed var.ini. mdResyncPos and
@@ -38,6 +42,10 @@ func interpretVar(kv map[string]map[string]string) ArrayState {
 	size, _ := parseFloatOK(v["mdResyncSize"])
 	db, _ := parseFloatOK(v["mdResyncDb"])
 	dt, _ := parseFloatOK(v["mdResyncDt"])
+	syncErrs, _ := parseFloatOK(v["sbSyncErrs"])
+	syncStart, _ := parseFloatOK(v["sbSynced"])
+	syncFinish, _ := parseFloatOK(v["sbSynced2"])
+	syncExit, _ := parseFloatOK(v["sbSyncExit"])
 
 	var progress float64
 	if size > 0 {
@@ -55,6 +63,10 @@ func interpretVar(kv map[string]map[string]string) ArrayState {
 		ParityProgress: progress,
 		ParitySpeedBps: speedBps,
 		Version:        v["version"],
+		SyncErrs:       syncErrs,
+		SyncStart:      int64(syncStart),
+		SyncFinish:     int64(syncFinish),
+		SyncExit:       int(syncExit),
 	}
 }
 
@@ -69,7 +81,10 @@ func interpretVar(kv map[string]map[string]string) ArrayState {
 // back toward 0, so next.ParityProgress is not "how far it got" — it's
 // "the not-running baseline". prev.ParityProgress is the last progress
 // figure observed while the run was still active, which is what "reached
-// N.N%" means.
+// N.N%" means. next's SyncErrs/SyncStart/SyncFinish, by contrast, ARE
+// already the freshly-written values by this tick -- emhttp updates
+// sbSyncErrs/sbSynced/sbSynced2 at the same moment it resets
+// mdResyncPos -- so the enrichment below reads next, not prev.
 func transitionEvents(prev, next ArrayState) []store.Event {
 	var out []store.Event
 
@@ -86,12 +101,43 @@ func transitionEvents(prev, next ArrayState) []store.Event {
 		out = append(out, store.Event{Kind: "parity.start", Entity: "array", Severity: "info"})
 	case !next.ParityRunning && prev.ParityRunning:
 		out = append(out, store.Event{
-			Kind: "parity.finish", Entity: "array", Severity: "info",
-			Detail: fmt.Sprintf("reached %.1f%%", prev.ParityProgress),
+			Kind: "parity.finish", Entity: "array", Severity: parityFinishSeverity(next),
+			Detail: parityFinishDetail(prev, next),
 		})
 	}
 
 	return out
+}
+
+// parityFinishSeverity is "alert" once the just-finished check found any
+// errors (sbSyncErrs > 0), "info" otherwise -- this is what actually
+// arms the seeded parity-errors rule's min_severity "warning" floor.
+func parityFinishSeverity(next ArrayState) string {
+	if next.SyncErrs > 0 {
+		return "alert"
+	}
+	return "info"
+}
+
+// parityFinishDetail renders "reached N.N%[ · HhMMm] · N errors": the
+// duration segment is included only when both sbSynced/sbSynced2 (next's
+// SyncStart/SyncFinish) are present and ordered -- never a fabricated
+// "0h00m" when the timestamps simply weren't captured. The error count
+// always renders, including "0 errors" on a clean run.
+func parityFinishDetail(prev, next ArrayState) string {
+	detail := fmt.Sprintf("reached %.1f%%", prev.ParityProgress)
+	if next.SyncStart > 0 && next.SyncFinish > next.SyncStart {
+		detail += " · " + formatSyncDuration(next.SyncFinish-next.SyncStart)
+	}
+	return fmt.Sprintf("%s · %d errors", detail, int64(next.SyncErrs))
+}
+
+// formatSyncDuration renders a parity run's wall-clock time as "%dh%02dm"
+// (e.g. "2h14m", "5h02m") -- time.Duration.String() doesn't zero-pad
+// minutes and always appends seconds, neither of which matches this
+// display shape.
+func formatSyncDuration(secs int64) string {
+	return fmt.Sprintf("%dh%02dm", secs/3600, (secs%3600)/60)
 }
 
 // tickArray reads var.ini, records parity metrics while a run is active,
@@ -129,6 +175,11 @@ func (c *Collector) tickArray(now time.Time) error {
 		started = 1.0
 	}
 	c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "array.started"}, ts, started)
+	// parity.errors mirrors array.started's own unconditional-every-tick
+	// convention (see its comment just above): the current/last-known
+	// check's error count needs a live-frame value even on a box that has
+	// never once run a parity check, not only once one finishes.
+	c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.errors"}, ts, next.SyncErrs)
 	if next.ParityRunning {
 		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.progress_pct"}, ts, next.ParityProgress)
 		c.sink.Record(store.SeriesKey{Kind: "unraid", Entity: "array", Metric: "parity.speed_bps"}, ts, next.ParitySpeedBps)

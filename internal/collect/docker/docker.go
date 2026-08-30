@@ -178,6 +178,12 @@ func (c *Collector) evictContainer(kind, name string) {
 // container's Meta.
 func (c *Collector) Running() []Meta { return c.reg.running() }
 
+// All returns a name-sorted snapshot of every known container's Meta,
+// running or not -- the alert engine's Fleet source (Task 4's boot
+// seeding needs to see a stopped container carrying a stale Health, not
+// just the running set Running() already serves everything else).
+func (c *Collector) All() []Meta { return c.reg.all() }
+
 // Tick refreshes inventory every 10s, then records per-container stats
 // (cgroupv2.go, falling back to apistats.go) and network (net.go). The
 // event stream itself is started lazily from Probe, not here — see

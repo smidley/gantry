@@ -16,9 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smidley/gantry/internal/alert"
 	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/collect/host"
 	"github.com/smidley/gantry/internal/collect/unraid"
+	"github.com/smidley/gantry/internal/config"
 	"github.com/smidley/gantry/internal/server"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
@@ -489,7 +491,7 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	ur := unraid.New(st, st, t.TempDir(), "/proc")
 	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
+	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
@@ -543,7 +545,7 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	require.Empty(t, dc.Running(), "dc's own registry never saw this container -- the fix must not depend on it")
 	c, ok := snap.Containers["jellyfin"]
@@ -584,7 +586,7 @@ func TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO(t *testing.T
 		}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["jellyfin"]
 	require.True(t, ok)
@@ -614,7 +616,7 @@ func TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running"}} // Created left at its zero value
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	require.Equal(t, int64(0), snap.Containers["jellyfin"].Created)
 }
@@ -645,7 +647,7 @@ func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
 		return []docker.Meta{{Name: "db", State: "running"}} // running unconditionally, per buildSnapshot's own entity-level contract
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -676,7 +678,7 @@ func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testin
 		return []docker.Meta{{Name: "db", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -706,7 +708,7 @@ func TestBuildSnapshotDropsStaleContainerGPUBusyPct(t *testing.T) {
 		return []docker.Meta{{Name: "plex", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil)()
+	snap := buildSnapshot(st, dc, ur, sources, fakeMetas, nil, nil)()
 
 	c, ok := snap.Containers["plex"]
 	require.True(t, ok)
@@ -751,10 +753,119 @@ rotational="1"
 		return map[string]unraid.DiskMeta{"flash": {Device: "sdi", Kind: "usb"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, sources, nil, fakeDiskMeta)()
+	snap := buildSnapshot(st, dc, ur, sources, nil, fakeDiskMeta, nil)()
 
 	require.Equal(t, server.DiskMetaDTO{Device: "sdc", Kind: "hdd"}, snap.DiskMeta["disk1"], "the real unraid collector's own DiskMeta must survive into the DTO")
 	require.Equal(t, server.DiskMetaDTO{Device: "sdi", Kind: "usb"}, snap.DiskMeta["flash"], "fake mode's own DiskMeta overlay must land alongside it, not replace it")
+}
+
+// TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced
+// pins Task 8's frame assembly against a real store: a "pending"
+// instance (engine bookkeeping, never user-facing) must not appear, a
+// "firing" one must carry its rule's Name (alert_instances itself only
+// stores rule_id) and Silenced when a covering silence exists.
+func TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	require.NoError(t, st.UpsertAlertRule(store.AlertRule{
+		ID: "host-cpu-high", Name: "Host CPU high", Enabled: true, Builtin: true,
+		Type: "threshold", Kind: "host", EntityGlob: "*", Metric: "cpu.total", Op: ">",
+		Threshold: 85, Severity: "warning", UpdatedAt: 1000,
+	}))
+	if _, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: "host-cpu-high", Kind: "host", State: "firing", Severity: "warning",
+		Value: 91, Threshold: 85, StartedAt: 900, FiredAt: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertAlertInstance(store.AlertInstance{
+		RuleID: "host-cpu-high", Kind: "host", Entity: "pending-entity", State: "pending",
+		Severity: "warning", Value: 86, Threshold: 85, StartedAt: 1000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddSilence(store.Silence{RuleID: "host-cpu-high", Until: time.Now().Unix() + 3600, CreatedAt: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
+	}
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+
+	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)()
+
+	require.Len(t, snap.Alerts.Firing, 1, "the pending instance must be excluded from the frame")
+	f := snap.Alerts.Firing[0]
+	require.Equal(t, "host-cpu-high", f.RuleID)
+	require.Equal(t, "Host CPU high", f.RuleName, "the frame must join the rule's Name, not just carry rule_id")
+	require.Equal(t, 91.0, f.Value)
+	require.True(t, f.Silenced, "the rule-wide silence (entity \"\") must cover this instance")
+	require.Equal(t, 1, snap.Alerts.FiringCount)
+	require.Equal(t, 0, snap.Alerts.Truncated)
+}
+
+// TestBuildSnapshotAlertsBlockCapsAtTwentyAndReportsTruncated pins the
+// frame's own noise guard: a pathological rule cannot bloat every 2s
+// frame for every connected client.
+func TestBuildSnapshotAlertsBlockCapsAtTwentyAndReportsTruncated(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	require.NoError(t, st.UpsertAlertRule(store.AlertRule{
+		ID: "container-mem-limit-high", Name: "Container memory limit high", Enabled: true,
+		Type: "threshold", Kind: "container", EntityGlob: "*", Metric: "mem.limit_pct", Op: ">",
+		Threshold: 85, Severity: "warning", UpdatedAt: 1000,
+	}))
+	for i := 0; i < 25; i++ {
+		if _, err := st.UpsertAlertInstance(store.AlertInstance{
+			RuleID: "container-mem-limit-high", Kind: "container", Entity: fmt.Sprintf("c%d", i),
+			State: "firing", Severity: "warning", Value: 90, Threshold: 85, StartedAt: 900, FiredAt: 1000,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+
+	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)()
+
+	require.Len(t, snap.Alerts.Firing, server.AlertsFrameCap)
+	require.Equal(t, 25, snap.Alerts.FiringCount)
+	require.Equal(t, 5, snap.Alerts.Truncated)
+}
+
+// TestBuildSnapshotAlertsBlockEmptyChannelsWhenNoDispatcher pins the
+// nil-dispatcher degradation: main wiring always passes a real one, but
+// a test (or a future caller) that doesn't must get an empty map, never
+// a panic.
+func TestBuildSnapshotAlertsBlockEmptyChannelsWhenNoDispatcher(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	sources := func() map[string]string { return map[string]string{} }
+
+	snap := buildSnapshot(st, dc, ur, sources, nil, nil, nil)()
+
+	require.Empty(t, snap.Alerts.Channels)
+	require.Empty(t, snap.Alerts.Firing)
+}
+
+// TestChannelHealthMapReportsEveryConfiguredChannel pins the small
+// shared helper both alertsAdapter.Channels (GET /api/alerts) and the
+// frame block call into.
+func TestChannelHealthMapReportsEveryConfiguredChannel(t *testing.T) {
+	notifyDir := t.TempDir()
+	d := alert.NewDispatcher(nil, []alert.Channel{alert.NewNotifyChannel(notifyDir, nil, nil)}, nil, nil)
+	require.Equal(t, map[string]string{"notify": "ok"}, channelHealthMap(d))
+	require.Empty(t, channelHealthMap(nil))
 }
 
 // TestBuildContainersListMergesFakeMetas pins the same fix for
@@ -787,6 +898,55 @@ func TestBuildContainersListNilFakeMetasUnaffected(t *testing.T) {
 	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
 
 	require.Empty(t, buildContainersList(dc, nil)())
+}
+
+// TestBuildFleetMergesFakeMetasAndSeesAllStates pins buildFleet's two
+// departures from buildContainersList: it merges fakeMetas the same
+// unconditional way, but sources from dc.All() rather than dc.Running(),
+// so the alert engine's boot seeding can see a container's real state
+// (not just "must be running, this list said so").
+func TestBuildFleetMergesFakeMetasAndSeesAllStates(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	fakeMetas := func() []docker.Meta {
+		return []docker.Meta{{Name: "sonarr", State: "exited", Health: "unhealthy"}}
+	}
+
+	fleet := buildFleet(dc, fakeMetas)()
+
+	require.Equal(t, []alert.FleetMember{{Name: "sonarr", State: "exited", Health: "unhealthy"}}, fleet)
+}
+
+// TestBuildFleetNilFakeMetasUnaffected pins real-mode behavior
+// (GANTRY_FAKE_DATA unset): a nil fakeMetas must not change buildFleet's
+// existing dc.All()-only contract.
+func TestBuildFleetNilFakeMetasUnaffected(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+
+	require.Empty(t, buildFleet(dc, nil)())
+}
+
+// TestBuildClassOfOnlyResolvesDiskKind pins the kind gate itself (every
+// other kind has no notion of class yet, so it must read as "" without
+// even consulting DiskMeta) -- disk1 also comes back "" here because no
+// var.ini/disks.ini exist under this bare temp dir for ur to have ever
+// ticked, which is exactly the "absent classification" MatchClass's own
+// negation semantics are written to tolerate.
+func TestBuildClassOfOnlyResolvesDiskKind(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+
+	classOf := buildClassOf(ur)
+
+	require.Equal(t, "", classOf("host", "disk1"), "non-disk kind never consults DiskMeta")
+	require.Equal(t, "", classOf("disk", "disk1"), "unclassified disk (no ini ticked yet) reads as unknown, not a crash")
 }
 
 // fakeMeta builds a minimal known-container answer for a lookupByName
@@ -1128,4 +1288,335 @@ func TestWireDockerCollectorPinsHostCoresToHostCollector(t *testing.T) {
 
 	require.Equal(t, reflect.ValueOf(h.NumCPU).Pointer(), reflect.ValueOf(dc.HostCores).Pointer(),
 		"dc.HostCores must be wired to the host collector's own NumCPU")
+}
+
+// --- webhook target settings-blob adapter -----------------------------------
+
+func newAlertTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+func TestLoadWebhookTargetsEmptyWhenNeverSet(t *testing.T) {
+	st := newAlertTestStore(t)
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Empty(t, targets)
+}
+
+func TestSaveAndLoadWebhookTargetsRoundTrip(t *testing.T) {
+	st := newAlertTestStore(t)
+	want := []alert.WebhookTarget{
+		{ID: "home", Name: "Home Assistant", URL: "https://ha.local/hook", Enabled: true, TimeoutS: 10},
+		{ID: "ntfy", Name: "ntfy", URL: "https://ntfy.sh/gantry", Enabled: false, TimeoutS: 5},
+	}
+	require.NoError(t, saveWebhookTargets(st, want))
+
+	got, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+}
+
+func TestSeedWebhookTargetFromEnvNoopWhenEnvEmpty(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedWebhookTargetFromEnv(st, ""))
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Empty(t, targets)
+}
+
+// TestSeedWebhookTargetFromEnvRemovesEnvTargetWhenCleared pins the
+// unset direction: the env var is the source of truth for the "env"
+// target in BOTH directions, so clearing GANTRY_WEBHOOK_URL and
+// rebooting must remove the target a previous boot created -- not
+// leave it silently delivering to a URL the operator believes is gone.
+func TestSeedWebhookTargetFromEnvRemovesEnvTargetWhenCleared(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+
+	require.NoError(t, seedWebhookTargetFromEnv(st, ""))
+	targets, err = loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Empty(t, targets, "clearing the env var must remove the env target on the next boot")
+}
+
+func TestSeedWebhookTargetFromEnvClearingPreservesOtherTargets(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, saveWebhookTargets(st, []alert.WebhookTarget{
+		{ID: "home", Name: "Home Assistant", URL: "https://ha.local/hook", Enabled: true, TimeoutS: 10},
+	}))
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))
+	require.NoError(t, seedWebhookTargetFromEnv(st, ""))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1, "only the env target goes; hand-configured targets stay")
+	require.Equal(t, "home", targets[0].ID)
+}
+
+func TestSeedWebhookTargetFromEnvInsertsOnFirstBoot(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	require.Equal(t, "env", targets[0].ID)
+	require.Equal(t, "https://example.com/hook", targets[0].URL)
+	require.True(t, targets[0].Enabled)
+	require.Equal(t, 10, targets[0].TimeoutS)
+}
+
+func TestSeedWebhookTargetFromEnvSyncsURLOnLaterBoots(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://old.example.com/hook"))
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://new.example.com/hook"))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1, "re-seeding must update the existing env target, not add a second one")
+	require.Equal(t, "https://new.example.com/hook", targets[0].URL)
+}
+
+func TestSeedWebhookTargetFromEnvPreservesOtherTargets(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, saveWebhookTargets(st, []alert.WebhookTarget{
+		{ID: "home", Name: "Home Assistant", URL: "https://ha.local/hook", Enabled: true, TimeoutS: 10},
+	}))
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 2)
+	ids := map[string]bool{}
+	for _, tgt := range targets {
+		ids[tgt.ID] = true
+	}
+	require.True(t, ids["home"])
+	require.True(t, ids["env"])
+}
+
+func TestBuildWebhookChannelsSkipsDisabledAndInvalid(t *testing.T) {
+	targets := []alert.WebhookTarget{
+		{ID: "ok", URL: "https://example.com/hook", Enabled: true, TimeoutS: 10},
+		{ID: "disabled", URL: "https://example.com/hook", Enabled: false, TimeoutS: 10},
+		{ID: "bad-scheme", URL: "file:///etc/passwd", Enabled: true, TimeoutS: 10},
+	}
+	channels := buildWebhookChannels(targets, "v-test", time.Now)
+	require.Len(t, channels, 1)
+	require.Equal(t, "webhook:ok", channels[0].ID())
+}
+
+// --- dispatcher wiring --------------------------------------------------------
+
+func TestBuildDispatcherIncludesNotifyAndConfiguredWebhookChannels(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, saveWebhookTargets(st, []alert.WebhookTarget{
+		{ID: "home", URL: "https://example.com/hook", Enabled: true, TimeoutS: 10},
+	}))
+	cfg := config.New(st, func(string) string { return "" })
+
+	d, err := buildDispatcher(st, cfg, func(string) string { return "" }, "v-test")
+	require.NoError(t, err)
+	t.Cleanup(d.Stop)
+
+	ids := make([]string, len(d.Channels))
+	for i, ch := range d.Channels {
+		ids[i] = ch.ID()
+	}
+	require.Contains(t, ids, "notify")
+	require.Contains(t, ids, "webhook:home")
+}
+
+// TestAlertEngineFiresThroughDispatcherToNotifySpool wires the real
+// buildDispatcher output straight into a real alert.Engine -- the actual
+// production wiring code, not a re-implementation of it -- and drives
+// one Tick through an event rule (no ring/sustained-for window to seed,
+// unlike a threshold rule) to prove a fired alert actually reaches a
+// file in the notify spool end to end.
+func TestAlertEngineFiresThroughDispatcherToNotifySpool(t *testing.T) {
+	st := newAlertTestStore(t)
+	notifyDir := t.TempDir()
+	getenv := func(k string) string {
+		if k == "GANTRY_NOTIFY_DIR" {
+			return notifyDir
+		}
+		return ""
+	}
+	cfg := config.New(st, getenv)
+
+	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test")
+	require.NoError(t, err)
+	t.Cleanup(dispatcher.Stop)
+
+	now := time.Now()
+	require.NoError(t, st.UpsertAlertRule(store.AlertRule{
+		ID: "test-event-rule", Name: "Test event rule", Enabled: true, Type: "event",
+		EntityGlob: "*", EventKinds: "test.event", Severity: "warning", UpdatedAt: now.Unix(),
+	}))
+
+	noMatch := func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }
+	noClass := func(string, string) string { return "" }
+	eng := alert.New(st, noMatch, noClass, nil, dispatcher.Dispatch, func() time.Time { return now })
+
+	// The engine's cursor clamps to MaxEventID on its own first Tick (so
+	// a restart never replays the whole events table as fresh alerts) --
+	// an event appended before that first Tick is treated as pre-
+	// existing, not new. One "nothing to see yet" tick first establishes
+	// the cursor, exactly like a real boot would.
+	require.NoError(t, eng.Tick(context.Background()))
+
+	_, err = st.AppendEvent(store.Event{Kind: "test.event", Entity: "widget1", Severity: "warning", Detail: "boom"})
+	require.NoError(t, err)
+
+	require.NoError(t, eng.Tick(context.Background()))
+
+	require.Eventually(t, func() bool {
+		entries, derr := os.ReadDir(filepath.Join(notifyDir, "unread"))
+		return derr == nil && len(entries) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+
+	entries, err := os.ReadDir(filepath.Join(notifyDir, "unread"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	body, err := os.ReadFile(filepath.Join(notifyDir, "unread", entries[0].Name()))
+	require.NoError(t, err)
+	require.Contains(t, string(body), "widget1")
+}
+
+// TestRunSeedsWebhookTargetFromEnvAtBoot mirrors
+// TestRunSeedsDefaultAlertRulesAtBoot: after a full boot and graceful
+// shutdown with GANTRY_WEBHOOK_URL set, the on-disk settings table
+// carries the "env" target -- re-opened only after run() has fully
+// returned, for the same single-writer-handle reason that test documents.
+func TestRunSeedsWebhookTargetFromEnvAtBoot(t *testing.T) {
+	port := freePort(t)
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+	env := map[string]string{
+		"GANTRY_PORT":        fmt.Sprint(port),
+		"GANTRY_DB_PATH":     dbPath,
+		"GANTRY_WEBHOOK_URL": "https://example.com/gantry-hook",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+
+	st, err := store.Open(dbPath, nil)
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	require.Equal(t, "env", targets[0].ID)
+	require.Equal(t, "https://example.com/gantry-hook", targets[0].URL)
+}
+
+// TestRunWiresAlertsAndWebhooksAPIEndToEnd is Task 8's own end-to-end
+// pin: unlike api_alerts_test.go's handler tests (which exercise the
+// route logic against a fake AlertsIface/WebhooksIface), this drives the
+// REAL alertsAdapter/webhooksAdapter through a live run() -- the seeded
+// twelve builtins must be visible over HTTP, the frame must carry a
+// non-nil (if empty) alerts block, and the GANTRY_WEBHOOK_URL-seeded
+// "env" target must read back through GET /api/alerts/webhooks as
+// env_overridden with its header never present.
+func TestRunWiresAlertsAndWebhooksAPIEndToEnd(t *testing.T) {
+	port := freePort(t)
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+	env := map[string]string{
+		"GANTRY_PORT":        fmt.Sprint(port),
+		"GANTRY_DB_PATH":     dbPath,
+		"GANTRY_WEBHOOK_URL": "https://example.com/gantry-hook",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("run did not shut down")
+		}
+	}()
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(base + "/api/healthz")
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	rulesResp, err := http.Get(base + "/api/alerts/rules")
+	require.NoError(t, err)
+	defer drainAndClose(rulesResp)
+	require.Equal(t, http.StatusOK, rulesResp.StatusCode)
+	var rulesBody struct {
+		Rules []server.AlertRuleDTO `json:"rules"`
+	}
+	require.NoError(t, json.NewDecoder(rulesResp.Body).Decode(&rulesBody))
+	require.Len(t, rulesBody.Rules, 12, "the seeded builtins must be visible through the real adapter over HTTP")
+
+	alertsResp, err := http.Get(base + "/api/alerts")
+	require.NoError(t, err)
+	defer drainAndClose(alertsResp)
+	require.Equal(t, http.StatusOK, alertsResp.StatusCode)
+	var alertsBody struct {
+		Active   []server.AlertInstanceDTO `json:"active"`
+		Silences []server.SilenceDTO       `json:"silences"`
+		Channels map[string]string         `json:"channels"`
+	}
+	require.NoError(t, json.NewDecoder(alertsResp.Body).Decode(&alertsBody))
+	require.Empty(t, alertsBody.Active, "a fresh box has nothing firing yet")
+	require.Contains(t, alertsBody.Channels, "notify", "the notify-spool channel is always wired")
+
+	whResp, err := http.Get(base + "/api/alerts/webhooks")
+	require.NoError(t, err)
+	defer drainAndClose(whResp)
+	require.Equal(t, http.StatusOK, whResp.StatusCode)
+	raw, err := io.ReadAll(whResp.Body)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "header_value", "GET must never carry the secret field at all")
+	var whBody struct {
+		Targets []server.WebhookTargetDTO `json:"targets"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &whBody))
+	require.Len(t, whBody.Targets, 1)
+	require.Equal(t, "env", whBody.Targets[0].ID)
+	require.True(t, whBody.Targets[0].EnvOverridden)
+
+	snapResp, err := http.Get(base + "/api/live/snapshot")
+	require.NoError(t, err)
+	defer drainAndClose(snapResp)
+	var snap server.SnapshotDTO
+	require.NoError(t, json.NewDecoder(snapResp.Body).Decode(&snap))
+	require.NotNil(t, snap.Alerts.Firing, "the frame's alerts block must always be a real (if empty) array")
+	require.Contains(t, snap.Alerts.Channels, "notify")
 }

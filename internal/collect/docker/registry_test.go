@@ -93,6 +93,12 @@ func TestRegistryLookupAndRunningAfterInventory(t *testing.T) {
 
 	require.Empty(t, sink.snapshot(), "first-ever inventory snapshot is a baseline, not a diff")
 	require.Empty(t, ev.snapshot())
+
+	all := r.all()
+	require.Len(t, all, 3, "all() must include the exited container running() excludes")
+	require.Equal(t, "aaa", all[0].Name, "all() must be name-sorted")
+	require.Equal(t, "bbb", all[1].Name)
+	require.Equal(t, "ccc", all[2].Name)
 }
 
 func TestApplyInventoryFirstRefreshEmitsNoEvents(t *testing.T) {

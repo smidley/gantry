@@ -24,6 +24,47 @@ type SnapshotDTO struct {
 	Unraid        map[string]map[string]float64 `json:"unraid"`    // entity ("array"|"docker") -> metric -> value
 	GPU           map[string]map[string]float64 `json:"gpu"`
 	Sources       map[string]string             `json:"sources"` // collector name -> "ok" | unavailability detail
+	Alerts        AlertsBlockDTO                `json:"alerts"`  // Phase 4: firing alerts + channel health, so the UI is live without polling /api/alerts
+}
+
+// AlertsFrameCap bounds how many firing alerts SnapshotDTO.Alerts.Firing
+// ever carries -- a healthy box carries zero; the cap exists so a
+// pathological rule cannot bloat every 2s frame for every connected
+// client. Truncated reports how many were cut, FiringCount the true
+// total before the cut, so "N things need you" never disagrees with the
+// count even when the list itself is capped.
+const AlertsFrameCap = 20
+
+// AlertsBlockDTO is SnapshotDTO.Alerts: the live-frame view of alerting,
+// assembled in main wiring (buildAlertsBlock) from the same store data
+// GET /api/alerts serves on demand. Firing is always non-nil ("[]", not
+// "null", even when empty); PENDING instances never appear here -- a
+// pending alert is engine bookkeeping, not a user-facing state (the
+// same rule GET /api/alerts' own "active" field follows).
+type AlertsBlockDTO struct {
+	Firing      []FiringAlertDTO  `json:"firing"`
+	FiringCount int               `json:"firing_count"`
+	Truncated   int               `json:"truncated"`
+	Channels    map[string]string `json:"channels"`
+}
+
+// FiringAlertDTO is one firing instance's frame-sized summary -- a
+// narrower cousin of AlertInstanceDTO carrying just what the Overview
+// headline and the Alerts view's live section need, plus RuleName
+// (store.AlertInstance itself only carries RuleID; the frame assembly
+// joins it against the current rule list once per tick rather than
+// making every consumer do that lookup itself).
+type FiringAlertDTO struct {
+	RuleID    string  `json:"rule_id"`
+	RuleName  string  `json:"rule_name"`
+	Severity  string  `json:"severity"`
+	Kind      string  `json:"kind"`
+	Entity    string  `json:"entity"`
+	Metric    string  `json:"metric"`
+	Value     float64 `json:"value"`
+	Threshold float64 `json:"threshold"`
+	FiredAt   int64   `json:"fired_at"`
+	Silenced  bool    `json:"silenced"`
 }
 
 // DiskMetaDTO is one disk slot's device name and classified type

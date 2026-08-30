@@ -136,6 +136,66 @@ func (s *Store) ReplaceAlertRules(rules []AlertRule) error {
 	return tx.Commit()
 }
 
+// SaveAlertRules persists a whole PUT /api/alerts/rules submission in a
+// single transaction: every Builtin row in rules is upserted in place
+// (UpsertAlertRule's own semantics -- the only path a builtin ever
+// changes through) and the entire non-builtin set is replaced wholesale
+// (ReplaceAlertRules' own semantics), one commit for both halves.
+// UpsertAlertRule/ReplaceAlertRules above remain the standalone
+// primitives (still exercised directly by this file's own tests); this
+// is the one production callers (handleAlertsRulesPut) actually want --
+// calling them separately used to mean N+1 commits for N builtins, so a
+// failure partway through could leave builtins durably rewritten while
+// the non-builtin set stayed on its stale pre-request contents.
+func (s *Store) SaveAlertRules(rules []AlertRule) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, r := range rules {
+		if !r.Builtin {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO alert_rules (`+alertRuleColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			ON CONFLICT (id) DO UPDATE SET
+				name=excluded.name, enabled=excluded.enabled, builtin=excluded.builtin, type=excluded.type,
+				kind=excluded.kind, entity_glob=excluded.entity_glob, entity_class=excluded.entity_class,
+				metric=excluded.metric, op=excluded.op, threshold=excluded.threshold,
+				clear_threshold=excluded.clear_threshold, warn_threshold=excluded.warn_threshold,
+				critical_threshold=excluded.critical_threshold, band_family=excluded.band_family,
+				for_seconds=excluded.for_seconds, clear_seconds=excluded.clear_seconds,
+				event_kinds=excluded.event_kinds, min_severity=excluded.min_severity,
+				clear_event_kinds=excluded.clear_event_kinds, clear_max_severity=excluded.clear_max_severity,
+				severity=excluded.severity, channels=excluded.channels, renotify_hours=excluded.renotify_hours,
+				updated_at=excluded.updated_at`,
+			r.ID, r.Name, r.Enabled, r.Builtin, r.Type, r.Kind, r.EntityGlob, r.EntityClass, r.Metric, r.Op,
+			r.Threshold, r.ClearThreshold, r.WarnThreshold, r.CriticalThreshold, r.BandFamily,
+			r.ForSeconds, r.ClearSeconds, r.EventKinds, r.MinSeverity, r.ClearEventKinds,
+			r.ClearMaxSeverity, r.Severity, r.Channels, r.RenotifyHours, r.UpdatedAt); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM alert_rules WHERE builtin = 0`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	for _, r := range rules {
+		if r.Builtin {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO alert_rules (`+alertRuleColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Name, r.Enabled, r.Builtin, r.Type, r.Kind, r.EntityGlob, r.EntityClass, r.Metric, r.Op,
+			r.Threshold, r.ClearThreshold, r.WarnThreshold, r.CriticalThreshold, r.BandFamily,
+			r.ForSeconds, r.ClearSeconds, r.EventKinds, r.MinSeverity, r.ClearEventKinds,
+			r.ClearMaxSeverity, r.Severity, r.Channels, r.RenotifyHours, r.UpdatedAt); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // AlertInstance is one row of alert_instances -- one field per column, in
 // schema order.
 type AlertInstance struct {

@@ -20,6 +20,7 @@ import (
 	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/collect/host"
 	"github.com/smidley/gantry/internal/collect/unraid"
+	"github.com/smidley/gantry/internal/config"
 	"github.com/smidley/gantry/internal/server"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
@@ -1178,4 +1179,249 @@ func TestWireDockerCollectorPinsHostCoresToHostCollector(t *testing.T) {
 
 	require.Equal(t, reflect.ValueOf(h.NumCPU).Pointer(), reflect.ValueOf(dc.HostCores).Pointer(),
 		"dc.HostCores must be wired to the host collector's own NumCPU")
+}
+
+// --- webhook target settings-blob adapter -----------------------------------
+
+func newAlertTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+func TestLoadWebhookTargetsEmptyWhenNeverSet(t *testing.T) {
+	st := newAlertTestStore(t)
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Empty(t, targets)
+}
+
+func TestSaveAndLoadWebhookTargetsRoundTrip(t *testing.T) {
+	st := newAlertTestStore(t)
+	want := []alert.WebhookTarget{
+		{ID: "home", Name: "Home Assistant", URL: "https://ha.local/hook", Enabled: true, TimeoutS: 10},
+		{ID: "ntfy", Name: "ntfy", URL: "https://ntfy.sh/gantry", Enabled: false, TimeoutS: 5},
+	}
+	require.NoError(t, saveWebhookTargets(st, want))
+
+	got, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+}
+
+func TestSeedWebhookTargetFromEnvNoopWhenEnvEmpty(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedWebhookTargetFromEnv(st, ""))
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Empty(t, targets)
+}
+
+// TestSeedWebhookTargetFromEnvRemovesEnvTargetWhenCleared pins the
+// unset direction: the env var is the source of truth for the "env"
+// target in BOTH directions, so clearing GANTRY_WEBHOOK_URL and
+// rebooting must remove the target a previous boot created -- not
+// leave it silently delivering to a URL the operator believes is gone.
+func TestSeedWebhookTargetFromEnvRemovesEnvTargetWhenCleared(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+
+	require.NoError(t, seedWebhookTargetFromEnv(st, ""))
+	targets, err = loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Empty(t, targets, "clearing the env var must remove the env target on the next boot")
+}
+
+func TestSeedWebhookTargetFromEnvClearingPreservesOtherTargets(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, saveWebhookTargets(st, []alert.WebhookTarget{
+		{ID: "home", Name: "Home Assistant", URL: "https://ha.local/hook", Enabled: true, TimeoutS: 10},
+	}))
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))
+	require.NoError(t, seedWebhookTargetFromEnv(st, ""))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1, "only the env target goes; hand-configured targets stay")
+	require.Equal(t, "home", targets[0].ID)
+}
+
+func TestSeedWebhookTargetFromEnvInsertsOnFirstBoot(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	require.Equal(t, "env", targets[0].ID)
+	require.Equal(t, "https://example.com/hook", targets[0].URL)
+	require.True(t, targets[0].Enabled)
+	require.Equal(t, 10, targets[0].TimeoutS)
+}
+
+func TestSeedWebhookTargetFromEnvSyncsURLOnLaterBoots(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://old.example.com/hook"))
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://new.example.com/hook"))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1, "re-seeding must update the existing env target, not add a second one")
+	require.Equal(t, "https://new.example.com/hook", targets[0].URL)
+}
+
+func TestSeedWebhookTargetFromEnvPreservesOtherTargets(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, saveWebhookTargets(st, []alert.WebhookTarget{
+		{ID: "home", Name: "Home Assistant", URL: "https://ha.local/hook", Enabled: true, TimeoutS: 10},
+	}))
+	require.NoError(t, seedWebhookTargetFromEnv(st, "https://example.com/hook"))
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 2)
+	ids := map[string]bool{}
+	for _, tgt := range targets {
+		ids[tgt.ID] = true
+	}
+	require.True(t, ids["home"])
+	require.True(t, ids["env"])
+}
+
+func TestBuildWebhookChannelsSkipsDisabledAndInvalid(t *testing.T) {
+	targets := []alert.WebhookTarget{
+		{ID: "ok", URL: "https://example.com/hook", Enabled: true, TimeoutS: 10},
+		{ID: "disabled", URL: "https://example.com/hook", Enabled: false, TimeoutS: 10},
+		{ID: "bad-scheme", URL: "file:///etc/passwd", Enabled: true, TimeoutS: 10},
+	}
+	channels := buildWebhookChannels(targets, "v-test", time.Now)
+	require.Len(t, channels, 1)
+	require.Equal(t, "webhook:ok", channels[0].ID())
+}
+
+// --- dispatcher wiring --------------------------------------------------------
+
+func TestBuildDispatcherIncludesNotifyAndConfiguredWebhookChannels(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, saveWebhookTargets(st, []alert.WebhookTarget{
+		{ID: "home", URL: "https://example.com/hook", Enabled: true, TimeoutS: 10},
+	}))
+	cfg := config.New(st, func(string) string { return "" })
+
+	d, err := buildDispatcher(st, cfg, func(string) string { return "" }, "v-test")
+	require.NoError(t, err)
+	t.Cleanup(d.Stop)
+
+	ids := make([]string, len(d.Channels))
+	for i, ch := range d.Channels {
+		ids[i] = ch.ID()
+	}
+	require.Contains(t, ids, "notify")
+	require.Contains(t, ids, "webhook:home")
+}
+
+// TestAlertEngineFiresThroughDispatcherToNotifySpool wires the real
+// buildDispatcher output straight into a real alert.Engine -- the actual
+// production wiring code, not a re-implementation of it -- and drives
+// one Tick through an event rule (no ring/sustained-for window to seed,
+// unlike a threshold rule) to prove a fired alert actually reaches a
+// file in the notify spool end to end.
+func TestAlertEngineFiresThroughDispatcherToNotifySpool(t *testing.T) {
+	st := newAlertTestStore(t)
+	notifyDir := t.TempDir()
+	getenv := func(k string) string {
+		if k == "GANTRY_NOTIFY_DIR" {
+			return notifyDir
+		}
+		return ""
+	}
+	cfg := config.New(st, getenv)
+
+	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test")
+	require.NoError(t, err)
+	t.Cleanup(dispatcher.Stop)
+
+	now := time.Now()
+	require.NoError(t, st.UpsertAlertRule(store.AlertRule{
+		ID: "test-event-rule", Name: "Test event rule", Enabled: true, Type: "event",
+		EntityGlob: "*", EventKinds: "test.event", Severity: "warning", UpdatedAt: now.Unix(),
+	}))
+
+	noMatch := func(string, string, int64) (map[string][]store.Sample, map[string]int64) { return nil, nil }
+	noClass := func(string, string) string { return "" }
+	eng := alert.New(st, noMatch, noClass, nil, dispatcher.Dispatch, func() time.Time { return now })
+
+	// The engine's cursor clamps to MaxEventID on its own first Tick (so
+	// a restart never replays the whole events table as fresh alerts) --
+	// an event appended before that first Tick is treated as pre-
+	// existing, not new. One "nothing to see yet" tick first establishes
+	// the cursor, exactly like a real boot would.
+	require.NoError(t, eng.Tick(context.Background()))
+
+	_, err = st.AppendEvent(store.Event{Kind: "test.event", Entity: "widget1", Severity: "warning", Detail: "boom"})
+	require.NoError(t, err)
+
+	require.NoError(t, eng.Tick(context.Background()))
+
+	require.Eventually(t, func() bool {
+		entries, derr := os.ReadDir(filepath.Join(notifyDir, "unread"))
+		return derr == nil && len(entries) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+
+	entries, err := os.ReadDir(filepath.Join(notifyDir, "unread"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	body, err := os.ReadFile(filepath.Join(notifyDir, "unread", entries[0].Name()))
+	require.NoError(t, err)
+	require.Contains(t, string(body), "widget1")
+}
+
+// TestRunSeedsWebhookTargetFromEnvAtBoot mirrors
+// TestRunSeedsDefaultAlertRulesAtBoot: after a full boot and graceful
+// shutdown with GANTRY_WEBHOOK_URL set, the on-disk settings table
+// carries the "env" target -- re-opened only after run() has fully
+// returned, for the same single-writer-handle reason that test documents.
+func TestRunSeedsWebhookTargetFromEnvAtBoot(t *testing.T) {
+	port := freePort(t)
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+	env := map[string]string{
+		"GANTRY_PORT":        fmt.Sprint(port),
+		"GANTRY_DB_PATH":     dbPath,
+		"GANTRY_WEBHOOK_URL": "https://example.com/gantry-hook",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+
+	st, err := store.Open(dbPath, nil)
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+
+	targets, err := loadWebhookTargets(st)
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	require.Equal(t, "env", targets[0].ID)
+	require.Equal(t, "https://example.com/gantry-hook", targets[0].URL)
 }

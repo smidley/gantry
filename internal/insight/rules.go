@@ -7,6 +7,7 @@
 package insight
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 
@@ -232,21 +233,45 @@ func Rules(overrides map[string]map[string]float64) []Rule {
 // (tests, and the engine's own first tick before it has read any).
 func DefaultRules() []Rule { return Rules(nil) }
 
+// fastSustainSecsOverride is every sustain-bearing rule's own
+// "sustain_secs" threshold, compressed for fake-data mode -- the
+// DefaultAlertRules(fast) counterpart for this schema (Task 10): a real
+// box always seeds the true 90s/120s numbers (DefaultRuleConfigs(false)),
+// but a demo session needs a rule to count as sustained within seconds,
+// not minutes, to complete its whole scripted story in a few short
+// minutes of wall-clock time.
+const fastSustainSecsOverride = 10
+
 // DefaultRuleConfigs returns one store.InsightRuleConfig per compiled-in
 // rule -- enabled, notify off (Global Constraints: no seeded rule may
-// ever page by default), no overrides -- for main.go's boot-time
-// SeedInsightRuleConfigs call, the exact store.DefaultAlertRules
-// counterpart for this schema. UpdatedAt is left 0; SeedInsightRuleConfigs
-// stamps it at insert time, matching DefaultAlertRules' own convention.
-// Lives here, not in package store, because the rule ID list's one
-// authoritative source is this compiled-in library (librarySpecs) --
-// duplicating those seven strings into a second, store-side list would
-// be exactly the kind of hand-maintained copy this phase's own review
-// keeps flagging.
-func DefaultRuleConfigs() []store.InsightRuleConfig {
+// ever page by default) -- for main.go's boot-time SeedInsightRuleConfigs
+// call, the exact store.DefaultAlertRules counterpart for this schema.
+// UpdatedAt is left 0; SeedInsightRuleConfigs stamps it at insert time,
+// matching DefaultAlertRules' own convention. Lives here, not in package
+// store, because the rule ID list's one authoritative source is this
+// compiled-in library (librarySpecs) -- duplicating those seven strings
+// into a second, store-side list would be exactly the kind of
+// hand-maintained copy this phase's own review keeps flagging.
+//
+// fast, true only in fake-data mode, overrides every rule's own
+// "sustain_secs" threshold (the ones that have one -- disk-spinup-churn
+// doesn't) down to fastSustainSecsOverride, mirroring
+// DefaultAlertRules(fast)'s identical compression of for_seconds/
+// clear_seconds. This is SeedInsightRuleConfigs' own insert-or-ignore
+// contract: it only ever takes effect on the very first boot of a fresh
+// database, exactly like the alert rules' own fast seed.
+func DefaultRuleConfigs(fast bool) []store.InsightRuleConfig {
 	out := make([]store.InsightRuleConfig, len(librarySpecs))
 	for i, spec := range librarySpecs {
-		out[i] = store.InsightRuleConfig{RuleID: spec.id, Enabled: true, Notify: false}
+		c := store.InsightRuleConfig{RuleID: spec.id, Enabled: true, Notify: false}
+		if fast {
+			if _, hasSustain := spec.defaults["sustain_secs"]; hasSustain {
+				if b, err := json.Marshal(map[string]float64{"sustain_secs": fastSustainSecsOverride}); err == nil {
+					c.Overrides = string(b)
+				}
+			}
+		}
+		out[i] = c
 	}
 	return out
 }

@@ -563,13 +563,13 @@ func TestSustainSecsOverrideCompressesTheFiringWindow(t *testing.T) {
 }
 
 func TestDefaultRuleConfigsSeedsAllSevenEnabledWithNotifyOff(t *testing.T) {
-	configs := DefaultRuleConfigs()
+	configs := DefaultRuleConfigs(false)
 
 	require.Len(t, configs, 7)
 	for _, c := range configs {
 		require.True(t, c.Enabled, "rule %s must default enabled", c.RuleID)
 		require.False(t, c.Notify, "rule %s must default notify off -- Global Constraints: no seeded rule pages by default", c.RuleID)
-		require.Empty(t, c.Overrides)
+		require.Empty(t, c.Overrides, "a real (non-fake) boot seeds no overrides -- the true 90s/120s numbers")
 	}
 	ids := make([]string, len(configs))
 	for i, c := range configs {
@@ -579,6 +579,35 @@ func TestDefaultRuleConfigsSeedsAllSevenEnabledWithNotifyOff(t *testing.T) {
 		RuleDiskIOContention, RuleIODrivenCPULoad, RuleCPUStarvation, RuleParitySlowdown,
 		RuleDiskSpinupChurn, RuleGPUEngineContention, RuleMemorySqueeze,
 	}, ids)
+}
+
+// TestDefaultRuleConfigsFastCompressesSustainSecsOnEverySustainBearingRule
+// pins Task 10's own fake-mode requirement: every rule that HAS a
+// sustain_secs threshold gets it compressed; disk-spinup-churn (which has
+// none) is left with no override at all rather than one that would be
+// silently ignored.
+func TestDefaultRuleConfigsFastCompressesSustainSecsOnEverySustainBearingRule(t *testing.T) {
+	configs := DefaultRuleConfigs(true)
+
+	byID := make(map[string]store.InsightRuleConfig, len(configs))
+	for _, c := range configs {
+		byID[c.RuleID] = c
+	}
+
+	for _, id := range []string{RuleDiskIOContention, RuleIODrivenCPULoad, RuleCPUStarvation, RuleParitySlowdown, RuleGPUEngineContention, RuleMemorySqueeze} {
+		require.NotEmpty(t, byID[id].Overrides, "rule %s must carry a compressed sustain_secs override in fast mode", id)
+		require.JSONEq(t, `{"sustain_secs": 10}`, byID[id].Overrides)
+	}
+	require.Empty(t, byID[RuleDiskSpinupChurn].Overrides, "disk-spinup-churn has no sustain_secs threshold to compress")
+
+	// The override must actually take effect through the normal Rules()
+	// merge path -- proving this isn't just a config row nothing reads.
+	rules := Rules(map[string]map[string]float64{RuleDiskIOContention: {"sustain_secs": fastSustainSecsOverride}})
+	for _, r := range rules {
+		if r.ID == RuleDiskIOContention {
+			require.Equal(t, float64(fastSustainSecsOverride), r.Thresholds["sustain_secs"])
+		}
+	}
 }
 
 func TestMergeThresholdsIgnoresUnknownOverrideKeys(t *testing.T) {

@@ -97,6 +97,15 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	if err := st.SeedAlertRules(store.DefaultAlertRules(fakeMode)); err != nil {
 		return fmt.Errorf("seed alert rules: %w", err)
 	}
+	// resyncFastModeAlertRules runs right after the seed above for the
+	// exact reason its own doc names (I5, review): SeedAlertRules'
+	// INSERT OR IGNORE only ever writes fakeMode's compressed 60s/60s
+	// windows on a row's FIRST boot, so a database first seeded under
+	// one mode stays pinned to that mode's numbers on every later boot,
+	// fake or real, forever.
+	if err := resyncFastModeAlertRules(st, fakeMode); err != nil {
+		return fmt.Errorf("resync fast-mode alert rules: %w", err)
+	}
 	// Insight rule configs (Task 4's own INSERT-OR-IGNORE seed, same
 	// idempotent-on-every-boot posture as SeedAlertRules just above) --
 	// there is no "fast" variant here at all: unlike alert_rules'
@@ -812,6 +821,67 @@ func buildInsightSlots(diskMeta func() map[string]unraid.DiskMeta, fakeDiskMeta 
 		}
 		return out
 	}
+}
+
+// alertRulesByID indexes rules by ID -- the small lookup
+// resyncFastModeAlertRules needs against both store.DefaultAlertRules(true)
+// and store.DefaultAlertRules(false).
+func alertRulesByID(rules []store.AlertRule) map[string]store.AlertRule {
+	out := make(map[string]store.AlertRule, len(rules))
+	for _, r := range rules {
+		out[r.ID] = r
+	}
+	return out
+}
+
+// resyncFastModeAlertRules re-syncs every BUILTIN THRESHOLD rule's
+// for_seconds/clear_seconds to the CURRENT boot's mode, in both
+// directions -- the seedWebhookTargetFromEnv precedent, applied here
+// because SeedAlertRules' own INSERT OR IGNORE contract (deliberately
+// never touching an existing row -- see its own doc) means a rule first
+// seeded under one mode stays pinned to that mode's numbers forever,
+// even across a later boot in the other mode (I5, review): a single
+// fake-data demo permanently compresses a real box's alert windows to
+// 60s, or a real seed forces a later demo to run at production speed.
+//
+// Unlike the webhook "env" target, which the env var fully owns,
+// for_seconds/clear_seconds are meant to be user-tunable (SeedAlertRules'
+// whole "leave any existing row -- edited or otherwise -- completely
+// untouched" contract), so this can't just force every builtin threshold
+// rule to the current mode's numbers on every boot -- that would revert
+// a genuine edit on the very next restart. Instead, a rule is only
+// re-synced when its CURRENT for_seconds/clear_seconds still exactly
+// match what the OTHER mode's own compiled default would have seeded
+// for that same rule id: that exact combination could only be a
+// leftover artifact of a previous boot's seed under the other mode, not
+// a value a user chose on purpose (a real window is always well above
+// fake mode's 60s, so the two never collide by coincidence). Anything
+// else -- a custom value, or a rule that's already correct for the
+// current mode -- is left exactly as SeedAlertRules already leaves it.
+func resyncFastModeAlertRules(st *store.Store, fakeMode bool) error {
+	rules, err := st.AlertRules(context.Background())
+	if err != nil {
+		return err
+	}
+	real, fast := alertRulesByID(store.DefaultAlertRules(false)), alertRulesByID(store.DefaultAlertRules(true))
+	want, other := real, fast
+	if fakeMode {
+		want, other = fast, real
+	}
+	for _, r := range rules {
+		if !r.Builtin || r.Type != "threshold" {
+			continue
+		}
+		o, ok := other[r.ID]
+		if !ok || r.ForSeconds != o.ForSeconds || r.ClearSeconds != o.ClearSeconds {
+			continue // not a residual seed from the other mode -- a real user edit, or already correct
+		}
+		r.ForSeconds, r.ClearSeconds = want[r.ID].ForSeconds, want[r.ID].ClearSeconds
+		if err := st.UpsertAlertRule(r); err != nil {
+			return fmt.Errorf("resync alert rule %q for_seconds/clear_seconds: %w", r.ID, err)
+		}
+	}
+	return nil
 }
 
 // webhookTargetsSettingsKey is where the whole []alert.WebhookTarget

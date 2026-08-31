@@ -1625,6 +1625,78 @@ func newAlertTestStore(t *testing.T) *store.Store {
 	return st
 }
 
+// --- resyncFastModeAlertRules (I5, review) ----------------------------------
+
+func alertRuleByID(t *testing.T, st *store.Store, id string) store.AlertRule {
+	t.Helper()
+	rules, err := st.AlertRules(context.Background())
+	require.NoError(t, err)
+	for _, r := range rules {
+		if r.ID == id {
+			return r
+		}
+	}
+	t.Fatalf("no alert rule %q", id)
+	return store.AlertRule{}
+}
+
+// TestResyncFastModeAlertRulesRestoresRealValuesAfterFakeBoot pins I5's
+// own named case: a database first seeded under fake mode (every
+// threshold rule's for_seconds/clear_seconds compressed to 60/60 by
+// SeedAlertRules' INSERT OR IGNORE) must resync to the true numbers on
+// a later real boot, not stay pinned to the fake boot's seed forever.
+func TestResyncFastModeAlertRulesRestoresRealValuesAfterFakeBoot(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(true)))
+	require.EqualValues(t, 60, alertRuleByID(t, st, "host-cpu-high").ForSeconds, "sanity: fresh fake-mode seed is compressed")
+
+	require.NoError(t, resyncFastModeAlertRules(st, false))
+
+	got := alertRuleByID(t, st, "host-cpu-high")
+	require.EqualValues(t, 600, got.ForSeconds, "a residual fake-mode seed must resync to the real value on a real boot")
+	require.EqualValues(t, 300, got.ClearSeconds)
+}
+
+// TestResyncFastModeAlertRulesCompressesRealValuesForALaterDemoBoot pins
+// the OTHER direction: a real box later started for a demo
+// (GANTRY_FAKE_DATA=1) must actually get the compressed windows Task
+// 9's demo needs, not just skip resyncing because a real seed already
+// exists.
+func TestResyncFastModeAlertRulesCompressesRealValuesForALaterDemoBoot(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(false)))
+	require.EqualValues(t, 600, alertRuleByID(t, st, "host-cpu-high").ForSeconds, "sanity: fresh real seed is uncompressed")
+
+	require.NoError(t, resyncFastModeAlertRules(st, true))
+
+	got := alertRuleByID(t, st, "host-cpu-high")
+	require.EqualValues(t, 60, got.ForSeconds, "a residual real seed must compress for a later fake-data demo boot")
+	require.EqualValues(t, 60, got.ClearSeconds)
+}
+
+// TestResyncFastModeAlertRulesNeverOverwritesAGenuineUserEdit pins I5's
+// other named requirement: a value a user actually edited a builtin
+// rule to (one that matches neither mode's compiled constant) must
+// survive a resync in EITHER direction -- the whole reason this can't
+// just force every threshold rule to the current mode's numbers on
+// every boot.
+func TestResyncFastModeAlertRulesNeverOverwritesAGenuineUserEdit(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(false)))
+
+	edited := alertRuleByID(t, st, "host-cpu-high")
+	edited.ForSeconds, edited.ClearSeconds = 450, 450 // matches neither mode's compiled constant
+	require.NoError(t, st.UpsertAlertRule(edited))
+
+	require.NoError(t, resyncFastModeAlertRules(st, true))
+	require.EqualValues(t, 450, alertRuleByID(t, st, "host-cpu-high").ForSeconds, "a real edit must survive a fake-mode boot's resync")
+
+	require.NoError(t, resyncFastModeAlertRules(st, false))
+	got := alertRuleByID(t, st, "host-cpu-high")
+	require.EqualValues(t, 450, got.ForSeconds, "a real edit must survive a real boot's resync too")
+	require.EqualValues(t, 450, got.ClearSeconds)
+}
+
 func TestLoadWebhookTargetsEmptyWhenNeverSet(t *testing.T) {
 	st := newAlertTestStore(t)
 	targets, err := loadWebhookTargets(st)
@@ -2102,6 +2174,67 @@ func TestRunFakeModeSeedsFastRulesAndDemoWebhookTargets(t *testing.T) {
 		}
 		return body.Channels["notify"] == "ok"
 	}, 3*time.Second, 50*time.Millisecond, "the notify channel must read ok against fake mode's own temp-dir default, no configuration needed")
+}
+
+// TestRunRealBootAfterFakeBootRestoresRealAlertWindows drives the actual
+// production boot sequence (run()) twice against the SAME database --
+// pins I5 (review) end to end, not just at resyncFastModeAlertRules'
+// own unit level: a fake-data demo boot must never permanently
+// compress a later real boot's alert windows.
+func TestRunRealBootAfterFakeBootRestoresRealAlertWindows(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+
+	bootAndFetchRules := func(fakeData string) map[string]server.AlertRuleDTO {
+		port := freePort(t)
+		env := map[string]string{
+			"GANTRY_PORT":      fmt.Sprint(port),
+			"GANTRY_DB_PATH":   dbPath,
+			"GANTRY_FAKE_DATA": fakeData,
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+		defer func() {
+			cancel()
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("run did not shut down")
+			}
+		}()
+
+		base := fmt.Sprintf("http://127.0.0.1:%d", port)
+		require.Eventually(t, func() bool {
+			resp, err := http.Get(base + "/api/healthz")
+			if err != nil {
+				return false
+			}
+			drainAndClose(resp)
+			return resp.StatusCode == http.StatusOK
+		}, 5*time.Second, 50*time.Millisecond)
+
+		resp, err := http.Get(base + "/api/alerts/rules")
+		require.NoError(t, err)
+		defer drainAndClose(resp)
+		var body struct {
+			Rules []server.AlertRuleDTO `json:"rules"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		out := make(map[string]server.AlertRuleDTO, len(body.Rules))
+		for _, r := range body.Rules {
+			out[r.ID] = r
+		}
+		return out
+	}
+
+	fakeBootRules := bootAndFetchRules("1")
+	require.EqualValues(t, 60, fakeBootRules["host-cpu-high"].ForSeconds, "fake boot compresses the fresh seed")
+	require.EqualValues(t, 60, fakeBootRules["host-cpu-high"].ClearSeconds)
+
+	realBootRules := bootAndFetchRules("")
+	require.EqualValues(t, 600, realBootRules["host-cpu-high"].ForSeconds, "a later REAL boot must restore the true window, not inherit the fake boot's 60s")
+	require.EqualValues(t, 300, realBootRules["host-cpu-high"].ClearSeconds)
 }
 
 // TestFakeModeAlertDemoFiresThenResolves wires the real fake.Generator

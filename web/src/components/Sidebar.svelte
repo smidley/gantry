@@ -34,7 +34,7 @@
     </span>
     <span class="sidebar__brand-copy">
       <strong>Gantry</strong>
-      <small>Server observability</small>
+      <small>Container observability</small>
     </span>
   </a>
 

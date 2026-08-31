@@ -539,6 +539,29 @@ func TestDefaultRulesReturnsAllSevenWithCompiledInDefaults(t *testing.T) {
 	}, ids)
 }
 
+// TestSustainSecsOverrideCompressesTheFiringWindow is the mechanism Task
+// 10's fake-mode demo schedule needs: sustain_secs is a per-rule
+// Threshold like any other, so the SAME override plumbing that changes a
+// numeric floor also lets a much shorter breach count as "sustained" --
+// no separate engine-level compression path is needed.
+func TestSustainSecsOverrideCompressesTheFiringWindow(t *testing.T) {
+	in := diskIOContentionIn(testNow, true, true)
+	// Shrink the covered history to 15s -- far short of the DEFAULT 90s
+	// sustain_secs, but comfortably past a 5s override.
+	in.HostDiskIO.Samples[""]["diskio.sde.util_pct"] = seriesRange(testNow-15, testNow, 5, 97)
+	in.HostDiskIO.Oldest[""]["diskio.sde.util_pct"] = testNow - 15
+	older := seriesRange(testNow-700, testNow-130, 10, 5)
+	recent := seriesRange(testNow-15, testNow, 5, 45)
+	await := append(append([]store.Sample{}, older...), recent...)
+	in.HostDiskIO.Samples[""]["diskio.sde.await_ms"] = await
+	in.HostDiskIO.Oldest[""]["diskio.sde.await_ms"] = testNow - 700
+
+	require.Empty(t, DefaultRules()[0].Eval(in), "15s of history cannot satisfy the default 90s sustain_secs")
+
+	compressed := Rules(map[string]map[string]float64{RuleDiskIOContention: {"sustain_secs": 5}})
+	require.NotEmpty(t, compressed[0].Eval(in), "the same 15s of history satisfies a 5s sustain_secs override")
+}
+
 func TestDefaultRuleConfigsSeedsAllSevenEnabledWithNotifyOff(t *testing.T) {
 	configs := DefaultRuleConfigs()
 

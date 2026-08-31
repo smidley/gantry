@@ -26,13 +26,20 @@ const (
 	RuleMemorySqueeze       = "memory-squeeze"
 )
 
-// Engine-wide cadence constants (Global Constraints): one evidence
-// window and one sustain-for duration shared by every rule's OWN victim
-// check, so "sustained" means the same thing everywhere in this package.
-// A rule that genuinely needs a different sustain-for (parity-slowdown's
-// 120s) or a longer lookback (disk-spinup-churn's 60 minutes,
-// disk-io-contention's own await_ms baseline) says so via its own named
-// Thresholds entry instead of a second package-wide constant.
+// Engine-wide cadence constants (Global Constraints). EvidenceWindowSecs
+// bounds every gather-step fetch that doesn't need its own longer
+// lookback (BaselineLookbackSecs/SpinupLookbackSecs below). SustainForSecs
+// is the "sustain_secs" threshold DEFAULT every rule but disk-spinup-churn
+// carries in its own Thresholds map (librarySpecs) rather than reading
+// this constant directly at Eval time: fake mode needs to compress how
+// long a breach must sustain before firing (Task 10's own compressed
+// demo schedule), and the existing per-rule threshold-override mechanism
+// (Rules(overrides)) is what already lets a caller change a number
+// without a second, engine-level compression path -- see rules_test.go's
+// TestRulesThresholdOverrideChangesTheFiringPoint for the exact same
+// override plumbing this reuses. parity-slowdown's own default (120s)
+// is the one rule that genuinely needs a different sustain-for than the
+// shared 90s baseline.
 const (
 	EvidenceWindowSecs int64 = 120
 	SustainForSecs     int64 = 90
@@ -132,6 +139,7 @@ var librarySpecs = []ruleSpec{
 		id: RuleDiskIOContention, title: "Disk IO contention", tier: TierProxy, psiUpgrade: true,
 		defaults: map[string]float64{
 			"util_pct_floor": 90, "await_multiplier": 2, "culprit_share_floor_pct": 60, "psi_stall_floor": 20,
+			"sustain_secs": float64(SustainForSecs),
 		},
 		eval: evalDiskIOContention,
 	},
@@ -139,6 +147,7 @@ var librarySpecs = []ruleSpec{
 		id: RuleIODrivenCPULoad, title: "IO-driven CPU load", tier: TierProxy, psiUpgrade: true,
 		defaults: map[string]float64{
 			"iowait_pct_floor": 15, "psi_io_some_floor": 20, "psi_io_full_floor": 10, "culprit_share_floor_pct": 50,
+			"sustain_secs": float64(SustainForSecs),
 		},
 		eval: evalIODrivenCPULoad,
 	},
@@ -146,6 +155,7 @@ var librarySpecs = []ruleSpec{
 		id: RuleCPUStarvation, title: "CPU starvation", tier: TierProxy, psiUpgrade: true,
 		defaults: map[string]float64{
 			"throttled_pct_floor": 5, "psi_cpu_some_floor": 20, "culprit_cpu_pct_floor": 40, "host_cpu_total_floor": 85,
+			"sustain_secs": float64(SustainForSecs),
 		},
 		eval: evalCPUStarvation,
 	},
@@ -166,14 +176,14 @@ var librarySpecs = []ruleSpec{
 	{
 		id: RuleGPUEngineContention, title: "GPU engine contention", tier: TierProxy, psiUpgrade: false,
 		defaults: map[string]float64{
-			"engine_busy_floor": 90, "culprit_share_floor_pct": 10, "min_culprits": 2,
+			"engine_busy_floor": 90, "culprit_share_floor_pct": 10, "min_culprits": 2, "sustain_secs": float64(SustainForSecs),
 		},
 		eval: evalGPUEngineContention,
 	},
 	{
 		id: RuleMemorySqueeze, title: "Memory squeeze", tier: TierProxy, psiUpgrade: true,
 		defaults: map[string]float64{
-			"mem_used_pct_floor": 92, "psi_mem_some_floor": 10, "culprit_mem_pct_floor": 30,
+			"mem_used_pct_floor": 92, "psi_mem_some_floor": 10, "culprit_mem_pct_floor": 30, "sustain_secs": float64(SustainForSecs),
 		},
 		eval: evalMemorySqueeze,
 	},
@@ -309,13 +319,15 @@ func otherEntities(all map[string][]store.Sample, exclude []string) []string {
 
 // bestSustainedVictim finds the highest-latest-value entity among
 // candidates whose series in res has sustained past floor for
-// SustainForSecs -- the confirmed-tier "which specific entity is actually
+// sustainSecs (the caller's own "sustain_secs" threshold, so a
+// PSI-upgrade victim check compresses the same way its rule's tier-1
+// check does) -- the confirmed-tier "which specific entity is actually
 // measured stalled" step every PSI (or hard-metric) upgrade path uses.
 // ok is false when none of candidates clears the floor.
-func bestSustainedVictim(res MatchResult, candidates []string, now int64, floor float64) (victim string, value float64, ok bool) {
+func bestSustainedVictim(res MatchResult, candidates []string, now, sustainSecs int64, floor float64) (victim string, value float64, ok bool) {
 	best := -1.0
 	for _, c := range candidates {
-		v, latest := Sustained(Window{To: now, Samples: res.Samples[c]}, Above, floor, SustainForSecs, res.Oldest[c])
+		v, latest := Sustained(Window{To: now, Samples: res.Samples[c]}, Above, floor, sustainSecs, res.Oldest[c])
 		if v == VerdictBreaching && latest > best {
 			best, victim, ok = latest, c, true
 		}
@@ -444,7 +456,7 @@ func evalDiskIOContention(in In, th map[string]float64) []Finding {
 		}
 
 		utilMetric := "diskio." + hd.RawName + ".util_pct"
-		utilVerdict, utilLatest := Sustained(Window{To: in.Now, Samples: metrics[utilMetric]}, Above, th["util_pct_floor"], SustainForSecs, oldestFor(utilMetric))
+		utilVerdict, utilLatest := Sustained(Window{To: in.Now, Samples: metrics[utilMetric]}, Above, th["util_pct_floor"], int64(th["sustain_secs"]), oldestFor(utilMetric))
 		if utilVerdict != VerdictBreaching {
 			continue
 		}
@@ -456,7 +468,7 @@ func evalDiskIOContention(in In, th map[string]float64) []Finding {
 		if !haveBaseline {
 			continue
 		}
-		awaitVerdict, awaitLatest := Sustained(Window{To: in.Now, Samples: awaitSamples}, Above, baseline*th["await_multiplier"], SustainForSecs, oldestFor(awaitMetric))
+		awaitVerdict, awaitLatest := Sustained(Window{To: in.Now, Samples: awaitSamples}, Above, baseline*th["await_multiplier"], int64(th["sustain_secs"]), oldestFor(awaitMetric))
 		if awaitVerdict != VerdictBreaching {
 			continue
 		}
@@ -480,7 +492,7 @@ func evalDiskIOContention(in In, th map[string]float64) []Finding {
 			},
 		}
 		if in.Tier == "psi" {
-			if victim, stall, ok := bestSustainedVictim(in.ContainerPSI["psi.io.some_pct"], others, in.Now, th["psi_stall_floor"]); ok {
+			if victim, stall, ok := bestSustainedVictim(in.ContainerPSI["psi.io.some_pct"], others, in.Now, int64(th["sustain_secs"]), th["psi_stall_floor"]); ok {
 				f.VictimKind, f.Victim = "container", victim
 				f.Confidence, f.Tier = ConfidenceConfirmed, TierPSI
 				f.Evidence.VictimStallPct, f.Evidence.WindowMinutes = stall, windowMinutes
@@ -500,7 +512,7 @@ func evalDiskIOContention(in In, th map[string]float64) []Finding {
 // this rule is about the CPU-wide consequence of storage load, not any
 // one device.
 func evalIODrivenCPULoad(in In, th map[string]float64) []Finding {
-	iowaitVerdict, iowaitLatest := Sustained(Window{To: in.Now, Samples: in.HostCPUIowait.Samples[""]}, Above, th["iowait_pct_floor"], SustainForSecs, in.HostCPUIowait.Oldest[""])
+	iowaitVerdict, iowaitLatest := Sustained(Window{To: in.Now, Samples: in.HostCPUIowait.Samples[""]}, Above, th["iowait_pct_floor"], int64(th["sustain_secs"]), in.HostCPUIowait.Oldest[""])
 	if iowaitVerdict != VerdictBreaching {
 		return nil
 	}
@@ -521,11 +533,11 @@ func evalIODrivenCPULoad(in In, th map[string]float64) []Finding {
 		Evidence: Evidence{CulpritSharePct: culprits.Fraction * 100, IowaitPct: iowaitLatest},
 	}
 	if in.Tier == "psi" {
-		someV, someLatest := Sustained(Window{To: in.Now, Samples: in.HostPSI["psi.io.some_pct"].Samples[""]}, Above, th["psi_io_some_floor"], SustainForSecs, in.HostPSI["psi.io.some_pct"].Oldest[""])
+		someV, someLatest := Sustained(Window{To: in.Now, Samples: in.HostPSI["psi.io.some_pct"].Samples[""]}, Above, th["psi_io_some_floor"], int64(th["sustain_secs"]), in.HostPSI["psi.io.some_pct"].Oldest[""])
 		if someV == VerdictBreaching {
 			f.Confidence, f.Tier = ConfidenceConfirmed, TierPSI
 			f.Evidence.VictimStallPct, f.Evidence.WindowMinutes = someLatest, windowMinutes
-			fullV, _ := Sustained(Window{To: in.Now, Samples: in.HostPSI["psi.io.full_pct"].Samples[""]}, Above, th["psi_io_full_floor"], SustainForSecs, in.HostPSI["psi.io.full_pct"].Oldest[""])
+			fullV, _ := Sustained(Window{To: in.Now, Samples: in.HostPSI["psi.io.full_pct"].Samples[""]}, Above, th["psi_io_full_floor"], int64(th["sustain_secs"]), in.HostPSI["psi.io.full_pct"].Oldest[""])
 			if fullV == VerdictBreaching {
 				f.Severity = "alert"
 			}
@@ -579,7 +591,7 @@ func evalCPUStarvation(in In, th map[string]float64) []Finding {
 		if latestVal(in.ContainerCPUAllocCores.Samples[victim]) <= 0 {
 			continue // no CPU limit: throttled_pct is structurally zero, not evidence either way
 		}
-		verdict, latest := Sustained(Window{To: in.Now, Samples: throttled}, Above, th["throttled_pct_floor"], SustainForSecs, in.ContainerCPUThrottled.Oldest[victim])
+		verdict, latest := Sustained(Window{To: in.Now, Samples: throttled}, Above, th["throttled_pct_floor"], int64(th["sustain_secs"]), in.ContainerCPUThrottled.Oldest[victim])
 		if verdict != VerdictBreaching {
 			continue
 		}
@@ -590,7 +602,7 @@ func evalCPUStarvation(in In, th map[string]float64) []Finding {
 
 	if in.Tier == "psi" {
 		for victim, some := range in.ContainerPSI["psi.cpu.some_pct"].Samples {
-			verdict, latest := Sustained(Window{To: in.Now, Samples: some}, Above, th["psi_cpu_some_floor"], SustainForSecs, in.ContainerPSI["psi.cpu.some_pct"].Oldest[victim])
+			verdict, latest := Sustained(Window{To: in.Now, Samples: some}, Above, th["psi_cpu_some_floor"], int64(th["sustain_secs"]), in.ContainerPSI["psi.cpu.some_pct"].Oldest[victim])
 			if verdict != VerdictBreaching {
 				continue
 			}
@@ -816,7 +828,7 @@ func evalGPUEngineContention(in In, th map[string]float64) []Finding {
 			if !ok || suffix != "busy_pct" {
 				continue
 			}
-			verdict, latest := Sustained(Window{To: in.Now, Samples: samples}, Above, th["engine_busy_floor"], SustainForSecs, in.GPUEngine.Oldest[gpuEntity][metric])
+			verdict, latest := Sustained(Window{To: in.Now, Samples: samples}, Above, th["engine_busy_floor"], int64(th["sustain_secs"]), in.GPUEngine.Oldest[gpuEntity][metric])
 			if verdict != VerdictBreaching {
 				continue
 			}
@@ -882,7 +894,7 @@ func evalMemorySqueeze(in In, th map[string]float64) []Finding {
 		})
 	}
 
-	hostVerdict, hostLatest := Sustained(Window{To: in.Now, Samples: in.HostMemUsedPct.Samples[""]}, Above, th["mem_used_pct_floor"], SustainForSecs, in.HostMemUsedPct.Oldest[""])
+	hostVerdict, hostLatest := Sustained(Window{To: in.Now, Samples: in.HostMemUsedPct.Samples[""]}, Above, th["mem_used_pct_floor"], int64(th["sustain_secs"]), in.HostMemUsedPct.Oldest[""])
 	if hostVerdict == VerdictBreaching {
 		if culprits, ok := memorySqueezeCulprits(in, th, ""); ok {
 			f := Finding{
@@ -891,7 +903,7 @@ func evalMemorySqueeze(in In, th map[string]float64) []Finding {
 				Evidence: Evidence{CulpritSharePct: culprits.Fraction * 100, VictimStallPct: hostLatest},
 			}
 			if in.Tier == "psi" {
-				psiV, psiLatest := Sustained(Window{To: in.Now, Samples: in.HostPSI["psi.mem.some_pct"].Samples[""]}, Above, th["psi_mem_some_floor"], SustainForSecs, in.HostPSI["psi.mem.some_pct"].Oldest[""])
+				psiV, psiLatest := Sustained(Window{To: in.Now, Samples: in.HostPSI["psi.mem.some_pct"].Samples[""]}, Above, th["psi_mem_some_floor"], int64(th["sustain_secs"]), in.HostPSI["psi.mem.some_pct"].Oldest[""])
 				if psiV == VerdictBreaching {
 					f.Confidence, f.Tier = ConfidenceConfirmed, TierPSI
 					f.Evidence.VictimStallPct, f.Evidence.WindowMinutes = psiLatest, windowMinutes

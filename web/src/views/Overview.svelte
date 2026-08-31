@@ -315,13 +315,20 @@
     prevParitySample = { ts, pct: parityPct };
   });
 
+  // Both array fact lines render inside BaySchematic's own head now
+  // (Scott: "Move the warmest disk reading into the storage array
+  // section along with the array started mover idle status") -- card
+  // sublines, not prose, so no trailing periods. The derivations stay
+  // here because they read what the schematic deliberately doesn't:
+  // the parity tween below, and the FULL disks map (hottestDisk scans
+  // parity members too, which have no filesystem and so no bar).
   let arrayStateSentence = $derived.by(() => {
-    if (started === 0) return 'Array is stopped.';
-    if (started === undefined) return 'Array state unknown.';
+    if (started === 0) return 'Array is stopped';
+    if (started === undefined) return 'Array state unknown';
     if (parityRunning) {
-      return `Parity check running · ${fmtPct(parityPctTween.current)}${parityEta !== null ? `, ETA ${fmtDuration(parityEta)}` : ''}.`;
+      return `Parity check running · ${fmtPct(parityPctTween.current)}${parityEta !== null ? `, ETA ${fmtDuration(parityEta)}` : ''}`;
     }
-    return `Array started · mover ${moverRunning ? 'running' : 'idle'}.`;
+    return `Array started · mover ${moverRunning ? 'running' : 'idle'}`;
   });
 
   let disks = $derived(live.frame?.disks ?? {});
@@ -336,7 +343,7 @@
     return best;
   });
   let hottestSentence = $derived(
-    hottestDisk ? `${hottestDisk.slot} warmest · ${hottestDisk.temp.toFixed(1)}°C.` : null,
+    hottestDisk ? `${hottestDisk.slot} warmest at ${hottestDisk.temp.toFixed(1)}°C` : null,
   );
 
   // diskEntries: every disk/pool entity with a filesystem view, same
@@ -483,11 +490,6 @@
     </div>
     <div class="overview__status-band">
       <div class="overview__status-facts">
-        <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
-        {#if hottestSentence}
-          <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
-        {/if}
-
         {#if !overviewStatus.ok}
           <section class="overview__attention">
             <span class="microlabel">Needs a look</span>
@@ -499,7 +501,12 @@
       </div>
       <div class="overview__status-visuals">
         <FleetStrip containers={fleetContainers} />
-        <BaySchematic entries={baySchematicEntries} summary={closingLine} />
+        <BaySchematic
+          entries={baySchematicEntries}
+          summary={closingLine}
+          stateLine={arrayStateSentence}
+          warmestLine={hottestSentence}
+        />
       </div>
     </div>
   </div>
@@ -719,18 +726,14 @@
     }
   }
 
-  /* --- Status band: facts+attention (left) + fleet strip/schematic
-     (right) at >=768px (unified with every other view's own mobile
-     breakpoint, dropped from the header-compaction pass's one-off
-     64rem), one vertical stack below it. overview__status-facts' own
-     gap (0.6rem, the Balance pass) now separates BOTH the three fact
-     lines from each other AND the last of them from "Needs a look"
-     (moved in from a separate full-width block below the band -- see
-     that pass's own doc) -- looser than the header-compaction pass's
-     original 0.35rem (tuned for fact lines alone), tight enough that
-     the three lines still read as one group, loose enough that
-     attention reads as its own paragraph rather than a fourth fact
-     line. ---- */
+  /* --- Status band: attention (left) + fleet strip/schematic (right)
+     at >=768px (unified with every other view's own mobile breakpoint,
+     dropped from the header-compaction pass's one-off 64rem), one
+     vertical stack below it. The array/warmest fact lines that used to
+     lead the left column live inside BaySchematic's own head now (the
+     facts-relocation pass -- see arrayStateSentence's doc), so the
+     column is just the "Needs a look" section, top-aligned with the
+     visuals beside it. ---- */
   .overview__status-band {
     display: flex;
     flex-direction: column;
@@ -758,16 +761,6 @@
     flex-direction: column;
     gap: 0.75rem;
   }
-  .overview__sub-line {
-    margin: 0;
-    font-size: 0.94rem;
-    color: var(--ink);
-  }
-  .overview__sub-line--quiet {
-    color: var(--ink-2);
-    font-size: 0.88rem;
-  }
-
   .overview__metrics-rail {
     display: flex;
     flex-direction: column;
@@ -788,7 +781,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.55rem;
-    margin-top: 0.6rem;
     padding: 0.9rem 1rem;
     border-radius: 11px;
     background: color-mix(in oklab, var(--status-warning) 8%, var(--surface-muted));

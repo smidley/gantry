@@ -48,30 +48,26 @@ test('overview: status headline reflects fleet/array/disk state, the fleet strip
   await expect(page.locator('.overview__attention')).toHaveCount(isAllClear ? 0 : 1);
 
   // Fleet strip is D2's own "countable, literal" evidence -- one unit
-  // per container, so its count must equal the fleet sentence's own
-  // stated total. Deliberately NOT a hardcoded 20: this box's docker
-  // collector runs for real alongside fake.go's 20 synthetic
+  // per container, so its count must equal its own summary's stated
+  // counts. (The shell redesign folded the old standalone fleet
+  // SENTENCE into the strip's summary row of links -- "N running",
+  // "M stopped", the stopped link only rendering when anything is
+  // stopped at all.) Deliberately NOT a hardcoded 20: this box's
+  // docker collector runs for real alongside fake.go's 20 synthetic
   // archetypes (reproduced live while building this -- a handful of
   // the sandbox's own real containers showed up in the fleet total
   // too), so the true size varies by environment. This instead checks
-  // that the strip and the sentence -- two client-side views of the
-  // exact same live container set -- agree with each other. The
-  // sentence itself is one of two shapes (fleetSentence, overviewStatus.
-  // ts): "N containers, all running." when nothing's stopped, or "N
-  // running · M stopped." once anything is -- the fake fleet always has
-  // at least one stopped archetype, but a real box's own containers
-  // sharing this environment could tip either way, so both are parsed.
-  const fleetSentence = page.locator('.overview__sub-line').first();
-  await expect(fleetSentence).toBeVisible();
-  const sentenceText = (await fleetSentence.textContent()) ?? '';
-  const stoppedMatch = sentenceText.match(/^(\d+) running · (\d+) stopped\.$/);
-  const allRunningMatch = sentenceText.match(/^(\d+) containers?, all running\.$/);
-  const statedTotal = stoppedMatch
-    ? Number(stoppedMatch[1]) + Number(stoppedMatch[2])
-    : allRunningMatch
-      ? Number(allRunningMatch[1])
-      : NaN;
-  expect(statedTotal, `unrecognized fleet sentence shape: ${sentenceText}`).toBeGreaterThan(0);
+  // that the strip's units and its summary -- two client-side views of
+  // the exact same live container set -- agree with each other.
+  const summary = page.locator('.fleet-strip__summary');
+  await expect(summary).toBeVisible();
+  const runningText = (await summary.getByText(/^\d+ running$/).textContent()) ?? '';
+  const runningStated = Number(runningText.match(/^(\d+)/)?.[1] ?? NaN);
+  const stoppedLink = summary.getByText(/^\d+ stopped$/);
+  const stoppedStated =
+    (await stoppedLink.count()) > 0 ? Number(((await stoppedLink.textContent()) ?? '').match(/^(\d+)/)?.[1] ?? NaN) : 0;
+  const statedTotal = runningStated + stoppedStated;
+  expect(statedTotal, `unrecognized fleet summary counts: ${await summary.textContent()}`).toBeGreaterThan(0);
 
   const fleetUnits = page.locator('.fleet-strip .fleet-unit');
   await expect.poll(() => fleetUnits.count()).toBe(statedTotal);
@@ -207,10 +203,16 @@ test('overview: Top Consumers and Recent events share one wide column, wider tha
 });
 
 // Needs-a-look rows collapsed from a title line plus a separate detail
-// line into one inline sentence -- every row is a single flex line
-// (CalloutRow's .callout-row, since the Overview integration), never a
-// taller two-line block, regardless of which anomaly happens to be
-// active for a given fake-fleet run.
+// line into one inline sentence -- title and reason share a line
+// (CalloutRow's .callout-row, since the Overview integration), never
+// the old two-block stack. Geometry can only distinguish the two
+// layouts on a row whose sentence FITS one line -- the row's flex
+// wraps deliberately, so a long detail (an event alert's summary, an
+// insight "Cause:" suffix) legitimately continues below the title --
+// so this pins the one row fake mode keeps deterministically short:
+// grafana's own "unhealthy -- Failing its health check." A parallel
+// spec (acks.spec.ts's UI half) can briefly ack that row away, so its
+// absence skips rather than fails.
 test('overview: needs-a-look rows render as one line, not a title line over a detail line', async ({ page }) => {
   await page.goto('#/');
 
@@ -219,15 +221,20 @@ test('overview: needs-a-look rows render as one line, not a title line over a de
     test.skip(true, 'fake fleet booted all-clear for this run -- nothing to check');
   }
 
-  const lines = page.locator('.callout-row');
-  await expect(lines.first()).toBeVisible();
-  const count = await lines.count();
-  for (let i = 0; i < count; i++) {
-    const box = await lines.nth(i).boundingBox();
-    // One line of this app's body text is comfortably under 30px tall;
-    // the old title+detail stack ran closer to 45-50px.
-    expect(box.height, `row ${i} looks like a two-line stack`).toBeLessThan(30);
+  const row = page.locator('.callout-row', { hasText: 'grafana is unhealthy' });
+  if ((await row.count()) === 0) {
+    test.skip(true, 'the canonical short row is acked/absent this run -- nothing measurable to check');
   }
+
+  const titleBox = await row.locator('.callout-row__title').boundingBox();
+  const detailBox = await row.locator('.callout-row__detail').boundingBox();
+  expect(titleBox).not.toBeNull();
+  expect(detailBox).not.toBeNull();
+  const titleMid = titleBox.y + titleBox.height / 2;
+  const detailMid = detailBox.y + detailBox.height / 2;
+  // Sharing a baseline-aligned flex line puts the two midlines within
+  // a few px; the old stack separated them by a full line (~20px+).
+  expect(Math.abs(titleMid - detailMid), 'the row stacks its detail under its title').toBeLessThan(12);
 });
 
 // Bay schematic: now always part of the status band's right column
@@ -326,8 +333,9 @@ test('containers: never-started containers are excluded from the Overview fleet 
   await expect(watchtowerRow).toContainText('created');
 
   // Overview: excluded from the fleet strip's own units and (since the
-  // fake fleet always has a real stopped archetype too) the "N running ·
-  // M stopped" sentence's M, which counts exited only.
+  // fake fleet always has a real stopped archetype too) the strip
+  // summary's own "M stopped" count, which counts exited only -- the
+  // shell redesign folded the old fleet sentence into that summary row.
   await page.goto('#/');
   const stripHrefs = await page
     .locator('.fleet-strip .fleet-unit')
@@ -335,10 +343,13 @@ test('containers: never-started containers are excluded from the Overview fleet 
   expect(stripHrefs).not.toContain('#/containers/duplicati');
   expect(stripHrefs).not.toContain('#/containers/watchtower');
 
-  const sentenceText = (await page.locator('.overview__sub-line').first().textContent()) ?? '';
-  const stoppedMatch = sentenceText.match(/^(\d+) running · (\d+) stopped\.$/);
-  expect(stoppedMatch, `unexpected fleet sentence shape: ${sentenceText}`).not.toBeNull();
-  const statedTotal = Number(stoppedMatch[1]) + Number(stoppedMatch[2]);
+  const summary = page.locator('.fleet-strip__summary');
+  const runningText = (await summary.getByText(/^\d+ running$/).textContent()) ?? '';
+  const stoppedLink = summary.getByText(/^\d+ stopped$/);
+  await expect(stoppedLink, 'the fake fleet always has a stopped archetype').toBeVisible();
+  const statedTotal =
+    Number(runningText.match(/^(\d+)/)?.[1] ?? NaN) +
+    Number(((await stoppedLink.textContent()) ?? '').match(/^(\d+)/)?.[1] ?? NaN);
   await expect.poll(() => page.locator('.fleet-strip .fleet-unit').count()).toBe(statedTotal);
 });
 

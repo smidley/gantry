@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,28 +34,12 @@ const (
 // auth setting must fail closed (gate stays available), never open.
 func ParseMode(v string) (string, error) {
 	switch {
-	case v == "" || equalFold(v, ModeAuto):
+	case v == "" || strings.EqualFold(v, ModeAuto):
 		return ModeAuto, nil
-	case equalFold(v, ModeProxy):
+	case strings.EqualFold(v, ModeProxy):
 		return ModeProxy, nil
 	}
 	return ModeAuto, fmt.Errorf("auth: unknown GANTRY_AUTH value %q (want auto or proxy)", v)
-}
-
-func equalFold(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca, cb := a[i], b[i]
-		if 'A' <= ca && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
 }
 
 // Sentinel errors the HTTP layer maps to statuses. The messages are
@@ -305,7 +290,7 @@ func (m *Manager) Authenticate(token string) bool {
 		return false
 	}
 	if now-sess.LastSeen >= int64(sessionTouchInterval/time.Second) {
-		exp := min64(now+int64(SessionSlidingWindow/time.Second), absoluteDeadline)
+		exp := min(now+int64(SessionSlidingWindow/time.Second), absoluteDeadline)
 		if err := m.sessions.TouchSession(h, now, exp); err != nil {
 			log.Printf("auth: session touch: %v", err)
 		}
@@ -535,11 +520,4 @@ func (m *Manager) event(kind, entity, severity, detail string) {
 	if _, err := m.appendEvent(store.Event{Kind: kind, Entity: entity, Severity: severity, Detail: detail}); err != nil {
 		log.Printf("auth: append %s: %v", kind, err)
 	}
-}
-
-func min64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }

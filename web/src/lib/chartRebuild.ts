@@ -29,6 +29,12 @@ export interface SeriesShape {
   // trigger a rebuild the same as label/colorVar would.
   width?: number;
   dash?: number[];
+  // strokeAlphaPct (additive, optional -- D2 visual pass): mutes a
+  // reference line (the hero chart's "Host total") to a fraction of its
+  // resolved colorVar's own strength, replacing the old dotted-line
+  // treatment. Baked into build()'s literal stroke color the same way
+  // colorVar itself is, so a change here needs the same rebuild.
+  strokeAlphaPct?: number;
 }
 
 export interface ChartShape {
@@ -57,7 +63,14 @@ function sameArr(a: number[] | undefined, b: number[] | undefined): boolean {
 export function sameSeriesShape(a: SeriesShape[], b: SeriesShape[]): boolean {
   return (
     a.length === b.length &&
-    a.every((s, i) => s.label === b[i].label && s.colorVar === b[i].colorVar && s.width === b[i].width && sameArr(s.dash, b[i].dash))
+    a.every(
+      (s, i) =>
+        s.label === b[i].label &&
+        s.colorVar === b[i].colorVar &&
+        s.width === b[i].width &&
+        s.strokeAlphaPct === b[i].strokeAlphaPct &&
+        sameArr(s.dash, b[i].dash),
+    )
   );
 }
 

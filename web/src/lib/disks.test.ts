@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  defaultDiskChartVisible,
+  diskChartDash,
   diskKind,
   diskMediaType,
   diskRole,
@@ -179,17 +179,14 @@ describe('diskUsagePctSeries', () => {
   });
 });
 
-describe('defaultDiskChartVisible', () => {
-  it('defaults pools and parity visible regardless of activity', () => {
-    expect(defaultDiskChartVisible('cache', false)).toBe(true);
-    expect(defaultDiskChartVisible('rocket_pool', false)).toBe(true);
-    expect(defaultDiskChartVisible('parity', false)).toBe(true);
+describe('diskChartDash', () => {
+  it('draws the first 10 positions solid -- no dash array at all', () => {
+    for (let i = 0; i < 10; i++) expect(diskChartDash(i)).toBeUndefined();
   });
 
-  it('defaults an ordinary data disk or flash visible only with recent IO', () => {
-    expect(defaultDiskChartVisible('disk1', false)).toBe(false);
-    expect(defaultDiskChartVisible('disk1', true)).toBe(true);
-    expect(defaultDiskChartVisible('flash', false)).toBe(false);
-    expect(defaultDiskChartVisible('flash', true)).toBe(true);
+  it('dashes every position from the second lap on, once the 10-hue palette wraps', () => {
+    expect(diskChartDash(10)).toEqual([6, 3]);
+    expect(diskChartDash(11)).toEqual([6, 3]);
+    expect(diskChartDash(25)).toEqual([6, 3]);
   });
 });

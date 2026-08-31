@@ -151,13 +151,24 @@ export function diskUsagePctSeries(usedPoints: SeriesPoint[], freePoints: Series
   return out;
 }
 
-// defaultDiskChartVisible decides the storage chart's own starting
-// legend state ("keep 12+ lines calm"): pools and parity default
-// visible regardless of activity (the array's own backbone -- and
-// parity carries no usage/IO of its own to judge activity by anyway),
-// an ordinary data/flash disk only if it's actually doing something
-// right now; everything else starts toggled off.
-export function defaultDiskChartVisible(slot: string, hasRecentIO: boolean): boolean {
-  const role = diskRole(slot);
-  return role === 'pool' || role === 'parity' || hasRecentIO;
+// diskChartDash names the storage chart's own "distinguishable past 10"
+// fix: every line gets a categorical hue by POSITION (seriesColorVar,
+// compareColors.ts -- the same "color follows slot order" rule the
+// Metrics/Compare pages already use for their own per-line charts), but
+// that palette only has 10 distinct hues, wrapping every 10 drives --
+// left alone, an 11+-drive array (Scott's own box) would draw two
+// different drives 10 slots apart in the literal same stroke color with
+// no way to tell them apart. A dash pattern is the second, independent
+// channel that fixes it: solid for the first lap (i < 10, matching every
+// other line's default treatment everywhere else in this app), one
+// dashed variant for every lap after. Deliberately a dash, not a
+// color-mix toward ink/surface for a lighter/darker sibling: a mixed
+// color's own contrast against the chart's background shifts with the
+// theme (toward "ink" lightens in dark mode but darkens in light mode;
+// toward "surface" risks a stroke that nearly matches the plot's own
+// background in EITHER theme at higher mix ratios), while a dash
+// pattern reads identically regardless of which theme, or which hue
+// underneath it, happens to be active.
+export function diskChartDash(i: number): number[] | undefined {
+  return i < 10 ? undefined : [6, 3];
 }

@@ -1030,15 +1030,25 @@ test('storage: the header chart switches metrics/windows and its legend toggles 
   await expect(chart.locator('.storage-chart__error')).toHaveCount(0, { timeout: 10_000 });
   await chart.getByRole('button', { name: 'Now', exact: true }).click();
 
-  // Legend: at least one chip starts visible (a pool/parity always
-  // does) and at least one starts hidden (12+ lines calm) for the fake
-  // fleet's 8-disk array; clicking a chip flips its own state.
+  // Legend: EVERY chip starts visible now (Scott's own follow-up ask
+  // dropped the old pools/parity/active-only default-hidden set
+  // entirely -- "one /api/series per drive per metric on the ring tier
+  // is cheap") for the fake fleet's 8-disk array; clicking a chip flips
+  // its own state.
   const chips = chart.locator('.storage-chart__chip');
   await expect.poll(() => chips.count()).toBeGreaterThan(1);
   const offChips = chart.locator('.storage-chart__chip.storage-chart__chip--off');
   const onChips = chart.locator('.storage-chart__chip:not(.storage-chart__chip--off)');
-  await expect.poll(() => offChips.count()).toBeGreaterThan(0);
-  await expect.poll(() => onChips.count()).toBeGreaterThan(0);
+  expect(await offChips.count()).toBe(0);
+  expect(await onChips.count()).toBe(await chips.count());
+
+  // Each drive's own chip carries a distinct categorical stroke color by
+  // SLOT POSITION (seriesColorVar) -- fake mode's 8-disk fleet stays
+  // well under the 10-hue palette's own wrap point, so every one of
+  // these must come back pairwise distinct; a repeat here would mean two
+  // different drives got assigned the exact same line color.
+  const chipColors = await chips.evaluateAll((els) => els.map((el) => (el as HTMLElement).style.getPropertyValue('--chip-color')));
+  expect(chipColors.length).toBe(new Set(chipColors).size);
 
   const firstChip = chips.first();
   const wasOff = (await firstChip.getAttribute('aria-pressed')) === 'false';

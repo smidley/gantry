@@ -11,6 +11,7 @@ import {
   seqStep,
   sharesFromMetrics,
   sumMetricsByPattern,
+  sumSeriesByMetric,
   sumSeriesPoints,
 } from './metrics';
 
@@ -150,6 +151,56 @@ describe('sumSeriesPoints', () => {
   it('returns an empty ring for no inputs or all-empty inputs', () => {
     expect(sumSeriesPoints([])).toEqual([]);
     expect(sumSeriesPoints([[], []])).toEqual([]);
+  });
+});
+
+describe('sumSeriesByMetric', () => {
+  it('sums every requested metric key out of an already-built {metric -> points} lookup', () => {
+    // gpu's own four-engine shape (resourceMetricKeys('gpu')) -- the case
+    // this exists for: TopConsumers' fetched-window hero line used to
+    // read only the first key here instead of summing all four.
+    const byMetric = {
+      'gpu.render.busy_pct': [
+        [100, 1, 1],
+        [200, 2, 2],
+      ],
+      'gpu.video.busy_pct': [
+        [100, 10, 10],
+        [200, 20, 20],
+      ],
+      'gpu.video-enhance.busy_pct': [[100, 0.5, 0.5]],
+      'gpu.copy.busy_pct': [[200, 3, 3]],
+    };
+    expect(
+      sumSeriesByMetric(byMetric, [
+        'gpu.render.busy_pct',
+        'gpu.video.busy_pct',
+        'gpu.video-enhance.busy_pct',
+        'gpu.copy.busy_pct',
+      ]),
+    ).toEqual([
+      [100, 11.5],
+      [200, 25],
+    ]);
+  });
+
+  it('treats a metric key entirely absent from the lookup as contributing nothing, not throwing', () => {
+    expect(sumSeriesByMetric({ 'cpu.pct': [[100, 5, 5]] }, ['cpu.pct', 'nonexistent.metric'])).toEqual([[100, 5]]);
+  });
+
+  it('is the identity sum for a single-key resource (cpu/mem) -- unchanged from reading that key bare', () => {
+    const points: [number, number, number][] = [
+      [100, 42, 42],
+      [200, 43, 43],
+    ];
+    expect(sumSeriesByMetric({ 'cpu.pct': points }, ['cpu.pct'])).toEqual([
+      [100, 42],
+      [200, 43],
+    ]);
+  });
+
+  it('returns [] when metricKeys itself is empty', () => {
+    expect(sumSeriesByMetric({ 'cpu.pct': [[100, 5, 5]] }, [])).toEqual([]);
   });
 });
 

@@ -68,6 +68,13 @@ describe('needsRebuild', () => {
   it('rebuilds when showLegend flips', () => {
     expect(needsRebuild(base, { ...base, showLegend: false })).toBe(true);
   });
+
+  it('rebuilds when a series strokeAlphaPct changes -- the Metrics hero\'s muted host-total line', () => {
+    const withAlpha: ChartShape = { ...base, series: [{ ...base.series[0], strokeAlphaPct: 40 }] };
+    expect(needsRebuild(base, withAlpha)).toBe(true);
+    expect(needsRebuild(withAlpha, { ...withAlpha })).toBe(false);
+    expect(needsRebuild(withAlpha, { ...base, series: [{ ...base.series[0], strokeAlphaPct: 60 }] })).toBe(true);
+  });
 });
 
 describe('sameSeriesShape', () => {

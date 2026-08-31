@@ -4,6 +4,7 @@
 // long tail, an unattributed-host segment, and whatever's left over as
 // free headroom. Kept framework-free, matching every other lib/*.ts pure
 // helper in this app.
+import { containerColor } from './containerColor';
 
 export interface CoreSegment {
   // key identifies the segment for a keyed {#each} -- a container name,
@@ -12,9 +13,9 @@ export interface CoreSegment {
   label: string;
   cores: number;
   // colorVar is a ready-to-use CSS color value (a var(--series-N)
-  // reference for a named container, or a plain color-mix() expression
-  // for the two neutral buckets) -- the component applies it directly,
-  // no further lookup.
+  // reference, containerColor's own stable per-name hash for a named
+  // container, or a plain color-mix() expression for the two neutral
+  // buckets) -- the component applies it directly, no further lookup.
   colorVar: string;
 }
 
@@ -27,8 +28,7 @@ export interface CoreBudget {
 
 // MAX_NAMED_SEGMENTS caps how many containers get their own named,
 // individually-colored segment before the rest fold into one "Others"
-// bucket -- tokens.css's own categorical palette only has 10 series
-// slots, and a ribbon with 20+ slivers each fighting for a sliver of hue
+// bucket -- a ribbon with 20+ slivers each fighting for a sliver of hue
 // stops being readable well before then anyway.
 export const MAX_NAMED_SEGMENTS = 10;
 
@@ -49,6 +49,14 @@ export interface CoreBudgetContainer {
 // slightly-stale host total never goes negative), then whatever's left
 // of hostCores as free headroom. hostCores<=0 (no reading yet) returns
 // an empty budget rather than dividing by it anywhere.
+//
+// Each named segment's own color is containerColor(name) -- a stable
+// per-container hash (see its own doc), not the ribbon's sorted
+// position: the same container repaints a NEW color every tick its
+// cores rank shifts relative to its neighbors otherwise, and disagreed
+// with whatever color that same container gets on the Metrics hero
+// chart or Compare, each of which used to run its own independent
+// position assignment too.
 export function buildCoreBudget(
   hostCores: number,
   hostCpuTotalPct: number,
@@ -62,11 +70,11 @@ export function buildCoreBudget(
   const named = sorted.slice(0, MAX_NAMED_SEGMENTS);
   const rest = sorted.slice(MAX_NAMED_SEGMENTS);
 
-  const segments: CoreSegment[] = named.map((c, i) => ({
+  const segments: CoreSegment[] = named.map((c) => ({
     key: c.name,
     label: c.name,
     cores: c.cores,
-    colorVar: `var(--series-${i + 1})`,
+    colorVar: `var(${containerColor(c.name)})`,
   }));
 
   const restSum = rest.reduce((sum, c) => sum + c.cores, 0);

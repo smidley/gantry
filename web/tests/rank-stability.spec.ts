@@ -44,11 +44,11 @@ test('overview: the Top Consumers module never exceeds its own limit or shows a 
 // Same invariant, the Metrics page's own hero-chart selection (a
 // completely different rendering path -- TimeChart lines, no TopBarList
 // in sight -- see rankStability.ts's own doc for why it shares the exact
-// same stableTopN call): its own heroSlots reset a line's whole history
-// the instant its assigned entity changes, so churn here is an even
-// worse symptom (a chart line blanking back to empty) than the
-// leaderboard's own hard-swap -- capped at MAX_HERO_LINES (10) rather
-// than growing with the tie cluster's own dozen candidates.
+// same stableTopN call): the chip row is capped at MAX_HERO_LINES (10)
+// rather than growing with the tie cluster's own dozen candidates (a
+// fading, no-longer-ranked tail line can still be DRAWN past that count
+// -- see heroLines' own doc in TopConsumers.svelte -- but never gets its
+// own chip).
 test('metrics: the hero chart legend never exceeds 10 container chips plus the host-total chip, even with a dozen near-tied containers', async ({
   page,
 }) => {
@@ -67,6 +67,79 @@ test('metrics: the hero chart legend never exceeds 10 container chips plus the h
     await page.waitForTimeout(1000);
   }
   expect(maxCount).toBeGreaterThan(0);
+});
+
+// D2 chart-integrity pass: heroSlots used to be keyed by RANK POSITION,
+// so tick() reset a slot's WHOLE ring the instant its ASSIGNED ENTITY
+// changed -- which fired not only on a genuine membership change but
+// also on a mere reorder among members who never left the top-10 at
+// all. Confirmed live against the real box: several containers' history
+// blanked in sync every time their relative ranks merely swapped,
+// reading as "lines exist only in disconnected patches." heroLines now
+// keys by container IDENTITY instead, so a reorder among OTHER members
+// must never touch a tracked container's own ring. The target is
+// whichever container is CURRENTLY ranked #1 at test start (read
+// dynamically, not hardcoded -- fake mode's own randomness means no
+// single fixed name is guaranteed to be in the top-10 at every instant
+// this suite happens to run): rank #1 is the one member least likely to
+// fall out of the top-10 during the observation window, so its own
+// oldest-visible sample can be tracked reliably, and its rank still
+// fluctuates against the mid-pack/tie-cluster churn below it -- exactly
+// the condition the old bug needed. Once real, it must never regress
+// back to "no data" while it's still one of the rendered lines. Mirrors
+// live-seed.spec.ts's own left-edge-hover technique (TimeChart has no
+// DOM "empty" marker), just sampled repeatedly instead of once.
+test("metrics: a continuously-tracked container's hero-chart history survives OTHER members reordering around it", async ({
+  page,
+}) => {
+  test.setTimeout(40_000);
+  await page.goto('#/top/cpu');
+
+  const chart = page.locator('.top-consumers__header .u-over').first();
+  await expect(chart).toBeVisible();
+  const chips = page.locator('.top-consumers__chip');
+  await expect.poll(() => chips.count(), { timeout: 15_000 }).toBeGreaterThan(1); // >=1 container chip + host total
+
+  // The chip's own name lives in a plain trailing <span> sibling AFTER
+  // ContainerIcon (which renders its own fallback-letter text first) --
+  // .last() on every descendant span reliably lands on that trailing
+  // one, in DOM order, regardless of whatever ContainerIcon's own markup
+  // contains. A bare .textContent() on the whole chip would instead
+  // include that fallback letter too ("J jellyfin"), which the tooltip
+  // rows below (plain "jellyfin 1.7%" text, no icon) would never match.
+  const target = (await chips.first().locator('span').last().textContent())?.trim();
+  if (!target || target === 'Host total') throw new Error(`expected a real container as the top-ranked chip, got "${target}"`);
+
+  async function targetEdgeRow(): Promise<string | undefined> {
+    await chart.hover({ position: { x: 2, y: 10 } });
+    const rows = page.locator('.top-consumers__header .time-chart__tooltip-row');
+    const texts = await rows.allTextContents();
+    return texts.find((t) => t.includes(target));
+  }
+
+  // prevReal is undefined whenever the target isn't currently one of the
+  // rendered lines at all (a real, hysteresis-gated membership change --
+  // no claim either way while that's true); once it IS rendered, its
+  // real/not-real edge status may only ever go from not-real to real,
+  // never the other way, for as long as it stays rendered.
+  let prevReal: boolean | undefined;
+  let everReal = false;
+  const deadline = Date.now() + 25_000;
+  while (Date.now() < deadline) {
+    const row = await targetEdgeRow();
+    if (row === undefined) {
+      prevReal = undefined;
+    } else {
+      const isReal = !row.includes('—');
+      if (prevReal === true) {
+        expect(isReal, `${target}'s oldest-visible sample regressed from real to "no data" -- saw "${row}"`).toBe(true);
+      }
+      everReal = everReal || isReal;
+      prevReal = isReal;
+    }
+    await page.waitForTimeout(2_000);
+  }
+  expect(everReal, `${target} never showed a real value at the chart's oldest visible edge`).toBe(true);
 });
 
 // Fourth report on this same bug class: leaderboard rows left garbled/

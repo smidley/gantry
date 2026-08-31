@@ -21,18 +21,18 @@
   together" for its own uPlot canvases.
 -->
 <script>
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { Tween } from 'svelte/motion';
   import { linear } from 'svelte/easing';
   import { motion } from '../lib/motion.svelte';
   import { live } from '../lib/sse.svelte';
-  import { pushRing } from '../lib/livering';
+  import { appendAfterSeed, mergeSeed, pushRing } from '../lib/livering';
   import { sumSeriesPoints } from '../lib/metrics';
   import { resourceMetricKeys, resourceScaleMax } from '../lib/topFromFrame';
   import { fetchSeries } from '../lib/api';
   import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
   import { buildCompareHash, knownCompareNames, MAX_COMPARE_MEMBERS, parseCompareNames } from '../lib/compareRoute';
-  import { seriesColorVar } from '../lib/compareColors';
+  import { containerColor } from '../lib/containerColor';
   import { computeGroupTotals } from '../lib/compareTotals';
   import { groups } from '../lib/groups.svelte';
   import ContainerIcon from '../components/ContainerIcon.svelte';
@@ -80,12 +80,16 @@
   let chartMembers = $derived(knownForCharts.slice(0, MAX_COMPARE_MEMBERS));
   let chartsCapped = $derived(knownForCharts.length > MAX_COMPARE_MEMBERS);
 
-  // memberColor: chart-eligible members get their assigned series color
-  // (position in chartMembers, matching every chart's own series order);
-  // anything past the 10-member cap (or not currently known) gets no
-  // assigned color at all -- it isn't drawn on any chart, so a categorical
-  // hue there would falsely imply otherwise.
-  let memberColor = $derived(new Map(chartMembers.map((name, i) => [name, seriesColorVar(i)])));
+  // memberColor: chart-eligible members get containerColor's own stable
+  // per-name hash (D2 pass) -- not the old "series color follows this
+  // member's position in chartMembers" rule, which repainted every LATER
+  // member's line the instant an earlier one was removed, and assigned a
+  // color with no relationship to whatever hue the SAME container shows
+  // on the Metrics hero chart or the core-budget ribbon. Anything past
+  // the 10-member cap (or not currently known) gets no assigned color at
+  // all -- it isn't drawn on any chart, so a categorical hue there would
+  // falsely imply otherwise.
+  let memberColor = $derived(new Map(chartMembers.map((name) => [name, containerColor(name)])));
 
   function removeHref(name) {
     return buildCompareHash(requestedNames.filter((n) => n !== name));
@@ -134,6 +138,11 @@
     let ioWrite = $state([]);
     let gpu = $state([]);
     let assigned = null;
+    // seeded gates tick()'s own append rule exactly like heroSlots' own
+    // field of the same name (TopConsumers.svelte's makeHeroSlot) --
+    // false until seed() below actually applies real history for
+    // whichever member is assigned right now.
+    let seeded = false;
 
     return {
       get cpu() {
@@ -157,17 +166,52 @@
       get gpu() {
         return gpu;
       },
+      // seed folds a /api/series ring-tier fetch in as this slot's own
+      // initial contents, one mergeSeed per metric (see its own doc) --
+      // each is an independent no-op when that particular metric's own
+      // fetch came back empty (a member with no GPU activity, say), the
+      // same graceful-partial behavior sumSeriesPoints already has
+      // elsewhere. seeded flips true as soon as ANY one of the seven
+      // actually changed -- tick()'s own dedup mode below is one shared
+      // flag across all seven rings for a single member, not per-metric.
+      seed(byMetric) {
+        const held = { cpu, mem, netRx, netTx, ioRead, ioWrite, gpu };
+        const merged = {
+          cpu: mergeSeed(held.cpu, byMetric.cpu ?? [], LIVE_WINDOW_SEC),
+          mem: mergeSeed(held.mem, byMetric.mem ?? [], LIVE_WINDOW_SEC),
+          netRx: mergeSeed(held.netRx, byMetric.netRx ?? [], LIVE_WINDOW_SEC),
+          netTx: mergeSeed(held.netTx, byMetric.netTx ?? [], LIVE_WINDOW_SEC),
+          ioRead: mergeSeed(held.ioRead, byMetric.ioRead ?? [], LIVE_WINDOW_SEC),
+          ioWrite: mergeSeed(held.ioWrite, byMetric.ioWrite ?? [], LIVE_WINDOW_SEC),
+          gpu: mergeSeed(held.gpu, byMetric.gpu ?? [], LIVE_WINDOW_SEC),
+        };
+        if (Object.keys(merged).some((k) => merged[k] !== held[k])) seeded = true;
+        cpu = merged.cpu;
+        mem = merged.mem;
+        netRx = merged.netRx;
+        netTx = merged.netTx;
+        ioRead = merged.ioRead;
+        ioWrite = merged.ioWrite;
+        gpu = merged.gpu;
+      },
       // tick resets every one of this slot's rings the instant its
       // assigned member changes (add/remove/reorder) -- otherwise a
       // reassignment would paste one container's history directly onto
       // another's, reading as an impossible instant jump (same reasoning
-      // as heroSlots' own doc). untrack wraps the reads+writes below for
-      // the identical reason theirs does: this runs from inside the
-      // driving $effect further down, which must depend on live.frame/
-      // chartMembers ONLY, not on these rings' own current values.
+      // as heroSlots' own doc). Reports whether THIS call is the one that
+      // assigned a real member -- the driving $effect further down uses
+      // that to fire this slot's own seed fetch exactly once per
+      // assignment, the same signal heroSlots' own tick returns, covering
+      // a brand new mount and a member added/swapped mid-view alike.
+      // untrack wraps the reads+writes below for the identical reason
+      // theirs does: this runs from inside that same effect, which must
+      // depend on live.frame/chartMembers ONLY, not on these rings' own
+      // current values.
       tick(ts, name, c) {
+        let justAssigned = false;
         if (name !== assigned) {
           assigned = name;
+          seeded = false;
           untrack(() => {
             cpu = [];
             mem = [];
@@ -177,27 +221,79 @@
             ioWrite = [];
             gpu = [];
           });
+          justAssigned = !!name;
         }
-        if (!name || !c) return;
+        if (!name || !c) return justAssigned;
         const m = c.metrics ?? {};
+        const push = seeded ? appendAfterSeed : pushRing;
         untrack(() => {
-          if (m['cpu.pct'] !== undefined) cpu = pushRing(cpu, ts, m['cpu.pct'], LIVE_WINDOW_SEC);
-          if (m['mem.bytes'] !== undefined) mem = pushRing(mem, ts, m['mem.bytes'], LIVE_WINDOW_SEC);
-          if (m['net.rx_bps'] !== undefined) netRx = pushRing(netRx, ts, m['net.rx_bps'], LIVE_WINDOW_SEC);
-          if (m['net.tx_bps'] !== undefined) netTx = pushRing(netTx, ts, m['net.tx_bps'], LIVE_WINDOW_SEC);
-          if (m['io.read_bps'] !== undefined) ioRead = pushRing(ioRead, ts, m['io.read_bps'], LIVE_WINDOW_SEC);
-          if (m['io.write_bps'] !== undefined) ioWrite = pushRing(ioWrite, ts, m['io.write_bps'], LIVE_WINDOW_SEC);
+          if (m['cpu.pct'] !== undefined) cpu = push(cpu, ts, m['cpu.pct'], LIVE_WINDOW_SEC);
+          if (m['mem.bytes'] !== undefined) mem = push(mem, ts, m['mem.bytes'], LIVE_WINDOW_SEC);
+          if (m['net.rx_bps'] !== undefined) netRx = push(netRx, ts, m['net.rx_bps'], LIVE_WINDOW_SEC);
+          if (m['net.tx_bps'] !== undefined) netTx = push(netTx, ts, m['net.tx_bps'], LIVE_WINDOW_SEC);
+          if (m['io.read_bps'] !== undefined) ioRead = push(ioRead, ts, m['io.read_bps'], LIVE_WINDOW_SEC);
+          if (m['io.write_bps'] !== undefined) ioWrite = push(ioWrite, ts, m['io.write_bps'], LIVE_WINDOW_SEC);
           let gpuSum;
           for (const key of GPU_METRIC_KEYS) {
             if (m[key] === undefined) continue;
             gpuSum = (gpuSum ?? 0) + m[key];
           }
-          if (gpuSum !== undefined) gpu = pushRing(gpu, ts, gpuSum, LIVE_WINDOW_SEC);
+          if (gpuSum !== undefined) gpu = push(gpu, ts, gpuSum, LIVE_WINDOW_SEC);
         });
+        return justAssigned;
       },
     };
   }
   const compareSlots = Array.from({ length: MAX_COMPARE_MEMBERS }, () => makeCompareSlot());
+
+  // compareSeedControllers/abortCompareSeed/seedCompareSlot: the same
+  // per-slot ad hoc seed-fetch mechanics as TopConsumers.svelte's own
+  // heroSeedControllers/abortHeroSeed/seedHeroSlot -- see that file's own
+  // doc for why a fetch fires (and can be superseded) per slot instead of
+  // from one shared per-page effect.
+  const compareSeedControllers = new Map();
+  function abortCompareSeed(i) {
+    compareSeedControllers.get(i)?.abort();
+    compareSeedControllers.delete(i);
+  }
+  onMount(() => {
+    return () => {
+      for (let i = 0; i < MAX_COMPARE_MEMBERS; i++) abortCompareSeed(i);
+    };
+  });
+
+  // seedCompareSlot fetches slot i's newly-assigned member's own
+  // ring-tier history (last LIVE_WINDOW_SEC seconds) across every metric
+  // this page might chart -- the same ALL_METRICS shape the non-live
+  // fetch effect below already uses per member, just against the ring
+  // tier instead of a fetched range -- and folds it in as that slot's
+  // own seed.
+  function seedCompareSlot(i, name) {
+    abortCompareSeed(i);
+    const controller = new AbortController();
+    compareSeedControllers.set(i, controller);
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - LIVE_WINDOW_SEC;
+    fetchSeries({ kind: 'container', entity: name, metrics: ALL_METRICS, from, to, signal: controller.signal })
+      .then((results) => {
+        compareSeedControllers.delete(i);
+        const byMetric = {};
+        for (const r of results) byMetric[r.metric] = r.points;
+        compareSlots[i].seed({
+          cpu: byMetric['cpu.pct'],
+          mem: byMetric['mem.bytes'],
+          netRx: byMetric['net.rx_bps'],
+          netTx: byMetric['net.tx_bps'],
+          ioRead: byMetric['io.read_bps'],
+          ioWrite: byMetric['io.write_bps'],
+          gpu: sumSeriesPoints(GPU_METRIC_KEYS.map((k) => byMetric[k] ?? [])),
+        });
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // superseded -- a fresh reassignment beat this fetch back
+        compareSeedControllers.delete(i);
+      });
+  }
 
   $effect(() => {
     if (activeRange !== 'live') return;
@@ -206,7 +302,8 @@
     const members = chartMembers;
     for (let i = 0; i < MAX_COMPARE_MEMBERS; i++) {
       const name = members[i] ?? null;
-      compareSlots[i].tick(frame.ts, name, name ? frame.containers?.[name] : undefined);
+      const justAssigned = compareSlots[i].tick(frame.ts, name, name ? frame.containers?.[name] : undefined);
+      if (justAssigned) seedCompareSlot(i, name);
     }
   });
 
@@ -218,23 +315,31 @@
   let fetchedByMember = $state({});
   let fetchInFlight = $state(false);
   let fetchFailed = $state(false);
+  // fetchedRange: the [from, to] this effect actually asked /api/series
+  // for -- handed to every chart below as xDomain (D2 chart-integrity
+  // pass) so each axis shows the FULL requested window regardless of how
+  // little of it any given member has real data for. See
+  // lib/chartRange.ts's own doc for the sparse-data bug this fixes.
+  let fetchedRange = $state(undefined);
 
   $effect(() => {
     const range = activeRange;
     const members = chartMembers;
     if (range === 'live') {
       fetchedByMember = {};
+      fetchedRange = undefined;
       fetchFailed = false;
       fetchInFlight = false;
-      return;
-    }
-    if (members.length === 0) {
-      fetchedByMember = {};
       return;
     }
     const seconds = RANGE_SECONDS[range];
     const to = Math.floor(Date.now() / 1000);
     const from = to - seconds;
+    fetchedRange = [from, to];
+    if (members.length === 0) {
+      fetchedByMember = {};
+      return;
+    }
     const controller = new AbortController();
     fetchInFlight = true;
     fetchFailed = false;
@@ -274,14 +379,14 @@
     chartMembers.map((name, i) => ({
       label: name,
       points: activeRange === 'live' ? compareSlots[i].cpu : fetchedPoints(name, 'cpu.pct'),
-      colorVar: seriesColorVar(i),
+      colorVar: containerColor(name),
     })),
   );
   let memSeries = $derived(
     chartMembers.map((name, i) => ({
       label: name,
       points: activeRange === 'live' ? compareSlots[i].mem : fetchedPoints(name, 'mem.bytes'),
-      colorVar: seriesColorVar(i),
+      colorVar: containerColor(name),
     })),
   );
   let netSeries = $derived(
@@ -291,7 +396,7 @@
       return {
         label: name,
         points: sumSeriesPoints([rx, tx]),
-        colorVar: seriesColorVar(i),
+        colorVar: containerColor(name),
         directionPoints: [rx, tx],
         directionLabels: ['↓', '↑'],
       };
@@ -304,7 +409,7 @@
       return {
         label: name,
         points: sumSeriesPoints([read, write]),
-        colorVar: seriesColorVar(i),
+        colorVar: containerColor(name),
         directionPoints: [read, write],
         directionLabels: ['r', 'w'],
       };
@@ -315,7 +420,7 @@
       label: name,
       points:
         activeRange === 'live' ? compareSlots[i].gpu : sumSeriesPoints(GPU_METRIC_KEYS.map((k) => fetchedPoints(name, k))),
-      colorVar: seriesColorVar(i),
+      colorVar: containerColor(name),
     })),
   );
   // hasGpu gates the whole GPU chart card: "GPU only if any member has
@@ -507,24 +612,24 @@
       <div class="compare__charts">
         <div class="card compare__chart-card">
           <span class="microlabel">CPU</span>
-          <TimeChart bind:this={cpuChart} series={cpuSeries} formatValue={fmtPct} syncKey={SYNC_KEY} live={activeRange === 'live'} showLegend={false} />
+          <TimeChart bind:this={cpuChart} series={cpuSeries} formatValue={fmtPct} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} showLegend={false} />
         </div>
         <div class="card compare__chart-card">
           <span class="microlabel">Memory</span>
-          <TimeChart bind:this={memChart} series={memSeries} formatValue={fmtBytes} syncKey={SYNC_KEY} live={activeRange === 'live'} showLegend={false} />
+          <TimeChart bind:this={memChart} series={memSeries} formatValue={fmtBytes} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} showLegend={false} />
         </div>
         <div class="card compare__chart-card">
           <span class="microlabel">Network</span>
-          <TimeChart bind:this={netChart} series={netSeries} formatValue={fmtRate} syncKey={SYNC_KEY} live={activeRange === 'live'} showLegend={false} />
+          <TimeChart bind:this={netChart} series={netSeries} formatValue={fmtRate} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} showLegend={false} />
         </div>
         <div class="card compare__chart-card">
           <span class="microlabel">Disk IO</span>
-          <TimeChart bind:this={ioChart} series={ioSeries} formatValue={fmtRate} syncKey={SYNC_KEY} live={activeRange === 'live'} showLegend={false} />
+          <TimeChart bind:this={ioChart} series={ioSeries} formatValue={fmtRate} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} showLegend={false} />
         </div>
         {#if hasGpu}
           <div class="card compare__chart-card">
             <span class="microlabel">GPU</span>
-            <TimeChart bind:this={gpuChart} series={gpuSeries} formatValue={fmtPct} syncKey={SYNC_KEY} live={activeRange === 'live'} showLegend={false} />
+            <TimeChart bind:this={gpuChart} series={gpuSeries} formatValue={fmtPct} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} showLegend={false} />
           </div>
         {/if}
       </div>

@@ -17,13 +17,15 @@
 -->
 <script>
   import { onMount, untrack } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import { live } from '../lib/sse.svelte';
   import { liveRing } from '../lib/livering.svelte';
-  import { pushRing, seriesPointsToRing } from '../lib/livering';
+  import { appendAfterSeed, mergeSeed, pushRing, seriesPointsToRing } from '../lib/livering';
   import { fetchSeries, fetchSnapshot, fetchTop } from '../lib/api';
   import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
-  import { keysByPattern, niceCeiling, sumMetricsByPattern, sumSeriesPoints } from '../lib/metrics';
+  import { keysByPattern, niceCeiling, sumMetricsByPattern, sumSeriesByMetric, sumSeriesPoints } from '../lib/metrics';
   import { buildCoreBudget } from '../lib/coreBudget';
+  import { containerColor } from '../lib/containerColor';
   import {
     hostSeriesMetricKeys,
     hostTotalNow,
@@ -89,17 +91,35 @@
   const COMPLETE_LIST_LIMIT = 500;
   const LIVE_WINDOW_SEC = 900;
 
+  // HERO_FADE_GRACE_SEC bounds how long a fading tail (heroLines' own
+  // "keep the historical portion visible but stop extending" choice for
+  // an entity that has left the top-N) keeps rendering after its last
+  // real tick, well short of the full 15-minute LIVE_WINDOW_SEC: a short
+  // grace window still avoids the confusing pop-out/pop-back-in flicker
+  // for a container hovering right at the rank cutoff, without letting
+  // fading tails accumulate for the chart's ENTIRE visible span under
+  // sustained churn -- confirmed live against fake mode's own tie
+  // cluster (a dozen near-tied containers, deliberately pathological):
+  // the full-window grace let well over a dozen stale tails pile up
+  // simultaneously, turning the "one clean floating panel" tooltip into
+  // a 16-row list. A real box's own fleet churns far less than that
+  // stress fixture, but the bound should hold regardless of how many
+  // containers happen to be near-tied.
+  const HERO_FADE_GRACE_SEC = 60;
+
   // MAX_HERO_LINES: the hero chart's own top-N cut ("Instead of showing
   // the containers all together in a horizontal bar... show them as
   // lines on the main line graph with different colors"), independent of
   // COMPLETE_LIST_LIMIT above -- the ranked list below stays complete,
   // only the CHART bounds itself, both because a legend/line count much
   // past this stops being readable and because Now mode backs every
-  // line with its own live ring (heroSlots below) and a fetched window
+  // line with its own live ring (heroLines below) and a fetched window
   // backs every line with its own /api/series request -- 10 is exactly
-  // the categorical --series-1..10 palette's own size (tokens.css), so
-  // every line gets a real, distinct hue with nothing left to bucket
-  // into an "Other."
+  // the categorical --series-1..10 palette's own size (tokens.css),
+  // though containerColor's own hash no longer guarantees a distinct
+  // hue per line the way sequential position assignment used to (a
+  // deliberate trade -- see heroLines' own doc for why identity beats
+  // guaranteed-distinct here).
   const MAX_HERO_LINES = 10;
 
   let resource = $state(untrack(() => (isTopResource(initialResource) ? initialResource : 'cpu')));
@@ -323,61 +343,112 @@
   // as they were -- they're this chart's own legend data, not replaced
   // by it.
   //
-  // heroSlots: MAX_HERO_LINES fixed ring buffers for Now mode, one PER
-  // RANK SLOT rather than per container -- rings can't be created
-  // dynamically for an arbitrary, changing set of container names (see
-  // liveRing's own "call once per metric from a component's own
-  // top-level script" contract); a fixed pool sized to the chart's own
-  // cap, read by rank each tick, is the same shape the header rings
-  // above already use ("created unconditionally... which ones actually
-  // get READ is a display-time decision"). A slot's points reset the
-  // instant its assigned entity changes -- otherwise a reassignment
-  // (one container falling out of the top-N as another climbs in) would
-  // paste one container's history directly onto another's, reading as
-  // an impossible instant jump.
-  function makeHeroSlot() {
-    let sum = $state([]);
-    let dirA = $state([]);
-    let dirB = $state([]);
-    let assigned = null;
-    return {
-      get points() {
-        return sum;
-      },
-      get directionPoints() {
-        return [dirA, dirB];
-      },
-      tick(ts, entity, value, a, b) {
-        if (entity !== assigned) {
-          assigned = entity;
-          sum = [];
-          dirA = [];
-          dirB = [];
-        }
-        if (entity === null || value === undefined) return;
-        // untrack: tick() runs from inside the driving $effect below, which
-        // must depend on live.frame/heroTopNow ONLY -- reading sum/dirA/dirB
-        // here (as pushRing's own first argument) would otherwise ALSO
-        // register them as that effect's dependencies, and the write right
-        // back to them on the next line would then re-dirty it, forever
-        // (effect_update_depth_exceeded, reproduced live) -- the exact
-        // self-referential loop livering.svelte.ts's own liveRing() already
-        // documents and untracks for the identical reason.
-        sum = untrack(() => pushRing(sum, ts, value, LIVE_WINDOW_SEC));
-        if (a !== undefined) dirA = untrack(() => pushRing(dirA, ts, a, LIVE_WINDOW_SEC));
-        if (b !== undefined) dirB = untrack(() => pushRing(dirB, ts, b, LIVE_WINDOW_SEC));
-      },
-    };
+  // heroLines: identity-keyed ring storage for the Now-mode hero chart --
+  // a container's own entry, keyed by NAME, replacing the old
+  // MAX_HERO_LINES fixed-slot pool (heroSlots) keyed by RANK POSITION.
+  // The position-keyed version reset a slot's ENTIRE ring the instant
+  // its ASSIGNED ENTITY changed -- which fired not only on a genuine
+  // membership change (one container falling out of the top-N as another
+  // climbs in, where a reset is correct: pasting one container's history
+  // onto another's would read as an impossible instant jump) but also on
+  // a mere REORDER among members who never left the top-10 at all --
+  // rankStability.ts's own rolling-average re-sort is frequent,
+  // deliberately so (real per-tick sampling noise among near-tied
+  // containers reorders the ranking often); confirmed live against the
+  // real box, where this produced the exact "lines exist only in
+  // disconnected patches" symptom, several containers' worth of history
+  // wiped in sync every time their relative ranks merely swapped. Keying
+  // by identity instead means a container's ring is only ever touched by
+  // ITS OWN tick; a rank swap between two already-tracked members now
+  // touches neither of their rings at all.
+  //
+  // A plain Map (or $state(new Map())) can't be trusted to notify a
+  // reader on .set()/.delete() the way $state's own deep proxying does
+  // for plain objects/arrays -- svelte/reactivity's SvelteMap is the
+  // real, built-in answer (used nowhere else in this app because nothing
+  // else needs a genuinely dynamic, identity-keyed collection; every
+  // other ring pool in this app is a small FIXED set created once).
+  // Values are plain objects, always REPLACED wholesale on write, never
+  // mutated in place -- SvelteMap's own doc: "values in a reactive map
+  // are not made deeply reactive," so an in-place field mutation
+  // wouldn't be seen.
+  const heroLines = new SvelteMap();
+
+  // heroSeedControllers: one AbortController per hero line's own
+  // in-flight seed fetch (Map, entity -> controller) -- ad hoc rather
+  // than one controller per effect, because a line's own seed fires from
+  // inside the driving tick effect below whenever that entity is first
+  // tracked, not from a single per-resource effect the way the header
+  // rings' own seeding above is. abortHeroSeed cancels entity's own
+  // pending fetch, if any -- called before starting a fresh one (a
+  // second tracking landing before the first fetch resolved must not let
+  // the stale one win), when an entity is pruned, and by the reset
+  // effect below (a resource/window switch invalidates every in-flight
+  // fetch at once).
+  const heroSeedControllers = new Map();
+  function abortHeroSeed(entity) {
+    heroSeedControllers.get(entity)?.abort();
+    heroSeedControllers.delete(entity);
   }
-  const heroSlots = Array.from({ length: MAX_HERO_LINES }, () => makeHeroSlot());
+  onMount(() => {
+    return () => {
+      for (const controller of heroSeedControllers.values()) controller.abort();
+    };
+  });
+
+  // seedHeroLine fetches a hero line's newly-tracked entity's own
+  // ring-tier history (last LIVE_WINDOW_SEC seconds -- the same window
+  // every other live ring on this page bounds itself to) and folds it in
+  // as that entity's own seed. Same kind/metrics shape as
+  // fetchedHeroSeries below, just against the ring tier instead of a
+  // fetched range, and sums resourceMetricKeys(res) the SAME way tick's
+  // own live math already does (topFromFrame's sumPresentMetrics) -- for
+  // a directional resource, each component is seeded on its own
+  // alongside their sum, so the seed matches exactly what heroSeries
+  // plots for both the combined line and its direction breakdown.
+  function seedHeroLine(entity, res) {
+    abortHeroSeed(entity);
+    const controller = new AbortController();
+    heroSeedControllers.set(entity, controller);
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - LIVE_WINDOW_SEC;
+    const metrics = resourceMetricKeys(res);
+    fetchSeries({ kind: 'container', entity, metrics, from, to, signal: controller.signal })
+      .then((results) => {
+        heroSeedControllers.delete(entity);
+        const line = heroLines.get(entity);
+        if (!line) return; // pruned, or a resource/window reset cleared everything, before this resolved
+        const byMetric = {};
+        for (const r of results) byMetric[r.metric] = r.points;
+        const dirKeys = resourceDirectionKeys(res);
+        let sumPoints;
+        let dirAPoints = [];
+        let dirBPoints = [];
+        if (dirKeys) {
+          const ptsA = byMetric[dirKeys[0]] ?? [];
+          const ptsB = byMetric[dirKeys[1]] ?? [];
+          sumPoints = sumSeriesPoints([ptsA, ptsB]);
+          dirAPoints = seriesPointsToRing(ptsA);
+          dirBPoints = seriesPointsToRing(ptsB);
+        } else {
+          sumPoints = sumSeriesByMetric(byMetric, metrics);
+        }
+        const mergedSum = mergeSeed(line.sum, sumPoints, LIVE_WINDOW_SEC);
+        if (mergedSum === line.sum) return; // empty/no-op seed -- see mergeSeed's own doc
+        const mergedDirA = dirAPoints.length > 0 ? mergeSeed(line.dirA, dirAPoints, LIVE_WINDOW_SEC) : line.dirA;
+        const mergedDirB = dirBPoints.length > 0 ? mergeSeed(line.dirB, dirBPoints, LIVE_WINDOW_SEC) : line.dirB;
+        heroLines.set(entity, { ...line, sum: mergedSum, dirA: mergedDirA, dirB: mergedDirB, seeded: true });
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return; // superseded -- a reset or the entity being pruned beat this fetch back
+        heroSeedControllers.delete(entity);
+      });
+  }
 
   // heroTopNow: the stable top-MAX_HERO_LINES entries of nowRows -- its
   // own rankStability selection, not merely the ranked list's own naive
-  // slice: each hero SLOT (heroSlots above) resets its whole ring the
-  // instant its assigned entity changes, so a chart line churning at the
-  // same rate the leaderboard USED to would repeatedly blank a line back
-  // to empty instead of drawing a real trend, an even worse symptom than
-  // the leaderboard's own hard-swap.
+  // slice, so entering/leaving the top-N (as opposed to merely
+  // reordering within it) stays rare and deliberate.
   let heroTopNow = $derived(stableTopN(nowRows, heroRankState, resource, MAX_HERO_LINES, live.frame?.ts ?? 0));
 
   $effect(() => {
@@ -385,9 +456,56 @@
     const frame = live.frame;
     if (!frame) return;
     const top = heroTopNow;
-    for (let i = 0; i < MAX_HERO_LINES; i++) {
-      const row = top[i];
-      heroSlots[i].tick(frame.ts, row?.entity ?? null, row?.value, row?.direction?.[0], row?.direction?.[1]);
+    const r = resource;
+    const activeEntities = new Set(top.map((row) => row.entity));
+
+    for (const row of top) {
+      const entity = row.entity;
+      // untrack: this effect must depend on live.frame/heroTopNow/
+      // resource ONLY -- reading heroLines here (to fold this tick's
+      // value into whatever a container's ring already holds) would
+      // otherwise ALSO register it as a dependency, and the .set() write
+      // right back to it below would then re-dirty this SAME effect,
+      // forever (effect_update_depth_exceeded) -- the exact
+      // self-referential loop the old heroSlots' own tick() already
+      // documented and untracked for the identical reason. heroSeries'
+      // own $derived.by below reads heroLines WITHOUT untrack, exactly
+      // as intended, since that's the computation meant to react to it.
+      if (!untrack(() => heroLines.get(entity))) {
+        heroLines.set(entity, { sum: [], dirA: [], dirB: [], seeded: false, lastTs: frame.ts });
+        seedHeroLine(entity, r);
+      }
+      const line = untrack(() => heroLines.get(entity));
+      const [a, b] = row.direction ?? [];
+      const push = (points, v) =>
+        line.seeded ? appendAfterSeed(points, frame.ts, v, LIVE_WINDOW_SEC) : pushRing(points, frame.ts, v, LIVE_WINDOW_SEC);
+      heroLines.set(entity, {
+        ...line,
+        sum: row.value === undefined ? line.sum : push(line.sum, row.value),
+        dirA: a === undefined ? line.dirA : push(line.dirA, a),
+        dirB: b === undefined ? line.dirB : push(line.dirB, b),
+        lastTs: frame.ts,
+      });
+    }
+
+    // Drop any tracked entity that's BOTH no longer in the top-N AND has
+    // gone quiet for longer than HERO_FADE_GRACE_SEC -- the "keep the
+    // historical portion visible but stop extending" choice (see
+    // heroSeries' own doc below): a container that drops out of the
+    // top-10 keeps its existing line exactly where it is (nothing new
+    // gets pushed into it, since the loop above only ever touches
+    // entities in `top`) for a short grace window, then it's forgotten.
+    // Reads more honestly than an instant cut (no confusing pop-out/
+    // pop-back-in flicker for a container hovering right at the rank
+    // cutoff) without the unbounded pileup a full-LIVE_WINDOW_SEC grace
+    // allowed under sustained churn (see HERO_FADE_GRACE_SEC's own doc).
+    for (const entity of untrack(() => Array.from(heroLines.keys()))) {
+      if (activeEntities.has(entity)) continue;
+      const line = untrack(() => heroLines.get(entity));
+      if (frame.ts - line.lastTs > HERO_FADE_GRACE_SEC) {
+        heroLines.delete(entity);
+        abortHeroSeed(entity);
+      }
     }
   });
 
@@ -399,19 +517,33 @@
   // same stale-response guard as the rows/host-total effect above.
   let fetchedHeroSeries = $state([]);
 
+  // fetchedHeroRange: the [from, to] this effect actually asked
+  // /api/series for -- handed to the hero TimeChart as xDomain (D2
+  // chart-integrity pass) so the axis always shows the FULL requested
+  // window, not whatever narrower span the response's own data happens
+  // to cover. See lib/chartRange.ts's own doc: a container with only a
+  // couple minutes of real history inside a requested 7-day window used
+  // to auto-range down to that couple-minute sliver, occasionally
+  // degenerate enough to trip uPlot's own near-zero-domain bug (bogus
+  // multi-year gridlines).
+  let fetchedHeroRange = $state(undefined);
+
   $effect(() => {
     if (windowKey === 'now') {
       fetchedHeroSeries = [];
-      return;
-    }
-    const entities = fetchedRows.slice(0, MAX_HERO_LINES).map((r) => r.entity);
-    if (entities.length === 0) {
-      fetchedHeroSeries = [];
+      fetchedHeroRange = undefined;
       return;
     }
     const seconds = { '1h': 3600, '24h': 86400, '7d': 7 * 86400 }[windowKey];
     const to = Math.floor(Date.now() / 1000);
     const from = to - seconds;
+    fetchedHeroRange = [from, to];
+
+    const entities = fetchedRows.slice(0, MAX_HERO_LINES).map((r) => r.entity);
+    if (entities.length === 0) {
+      fetchedHeroSeries = [];
+      return;
+    }
     const metrics = resourceMetricKeys(resource);
     const controller = new AbortController();
     Promise.all(
@@ -430,28 +562,54 @@
   });
 
   // heroSeries unifies both windows into the one shape TimeChart/the
-  // legend chips read: {entity, label, points, colorVar, width?, dash?,
-  // directionPoints?, directionLabels?}. entity is null only for the
-  // trailing host-reference line (its own chip renders "Host total"
-  // with no ContainerIcon). Colors are assigned by CHART POSITION
-  // (index), not by entity identity -- same "color follows the
-  // leaderboard's own rank, not a stable per-entity hash" rule
-  // TopBarList's bars already use, since a categorical hue is only
-  // meaningful for as long as an entity holds a top-N slot at all.
+  // legend chips read: {entity, label, points, colorVar, active?,
+  // width?, strokeAlphaPct?, directionPoints?, directionLabels?}. entity
+  // is null only for the trailing host-reference line (its own chip
+  // renders "Host total" with no ContainerIcon). Colors are assigned by
+  // CONTAINER IDENTITY now (containerColor: a stable hash of the name),
+  // not chart position -- position-based assignment repainted an
+  // already-tracked line's color the instant the leaderboard's own
+  // ranking merely reordered (frequent -- see heroLines' own doc above)
+  // and disagreed with whatever color the SAME container got on Compare
+  // or the core-budget ribbon, each of which ran its own independent
+  // position assignment. active (Now mode only) marks a CURRENT
+  // heroTopNow member (gets its own legend chip) vs. a fading tail --
+  // an entity heroLines is still rendering (within HERO_FADE_GRACE_SEC
+  // of its last real tick) but that's no longer a ranked member: its
+  // line keeps rendering exactly where it already was, undisturbed, but
+  // it gets no chip of its own since it's not a current ranking result.
   let heroSeries = $derived.by(() => {
     const rowDirLabels = ROW_DIRECTION_LABELS[resource];
     let lines;
     if (windowKey === 'now') {
-      lines = heroTopNow.map((row, i) => ({
-        entity: row.entity,
-        label: row.entity,
-        points: heroSlots[i].points,
-        colorVar: `--series-${i + 1}`,
-        ...(isDirectional ? { directionPoints: heroSlots[i].directionPoints, directionLabels: rowDirLabels } : {}),
-      }));
+      const activeEntities = new Set(heroTopNow.map((row) => row.entity));
+      const active = heroTopNow.map((row) => {
+        const line = heroLines.get(row.entity);
+        return {
+          entity: row.entity,
+          label: row.entity,
+          points: line?.sum ?? [],
+          colorVar: containerColor(row.entity),
+          active: true,
+          ...(isDirectional ? { directionPoints: [line?.dirA ?? [], line?.dirB ?? []], directionLabels: rowDirLabels } : {}),
+        };
+      });
+      const fading = [];
+      for (const [entity, line] of heroLines) {
+        if (activeEntities.has(entity)) continue;
+        fading.push({
+          entity,
+          label: entity,
+          points: line.sum,
+          colorVar: containerColor(entity),
+          active: false,
+          ...(isDirectional ? { directionPoints: [line.dirA, line.dirB], directionLabels: rowDirLabels } : {}),
+        });
+      }
+      lines = [...active, ...fading];
     } else {
       const [keyA, keyB] = isDirectional ? resourceMetricKeys(resource) : [];
-      lines = fetchedHeroSeries.map((entry, i) => {
+      lines = fetchedHeroSeries.map((entry) => {
         const byMetric = {};
         for (const r of entry.results) byMetric[r.metric] = r.points;
         if (isDirectional) {
@@ -461,41 +619,84 @@
             entity: entry.entity,
             label: entry.entity,
             points: sumSeriesPoints([ptsA, ptsB]),
-            colorVar: `--series-${i + 1}`,
+            colorVar: containerColor(entry.entity),
             directionPoints: [ptsA, ptsB],
             directionLabels: rowDirLabels,
           };
         }
-        return { entity: entry.entity, label: entry.entity, points: byMetric[resourceMetricKeys(resource)[0]] ?? [], colorVar: `--series-${i + 1}` };
+        return {
+          entity: entry.entity,
+          label: entry.entity,
+          // sumSeriesByMetric, not a bare byMetric[key[0]] -- gpu's own
+          // four engines (resourceMetricKeys('gpu')) need summing here
+          // exactly like sumPresentMetrics already sums them for Now
+          // mode and seedHeroLine already sums them for Now's own seed,
+          // above: this fetched-window branch used to read only the
+          // FIRST key's points, silently dropping the other three
+          // engines' contribution the instant a container's hero line
+          // came from a 1h/24h/7d fetch instead of the live frame.
+          points: sumSeriesByMetric(byMetric, resourceMetricKeys(resource)),
+          colorVar: containerColor(entry.entity),
+        };
       });
     }
     if (hasHostTotal) {
       const hostPoints = hostReferencePoints();
       if (hostPoints.length > 0) {
-        lines = [...lines, { entity: null, label: 'Host total', points: hostPoints, colorVar: '--ink-2', width: 1, dash: [4, 4] }];
+        // strokeAlphaPct, not the old dash:[4,4] -- D2 pass: "drop the
+        // dotted-noise look" for the host-total reference line; muting
+        // the resolved --ink-2 stroke itself keeps it visually distinct
+        // from the solid container lines without the dated dashed look.
+        lines = [...lines, { entity: null, label: 'Host total', points: hostPoints, colorVar: '--ink-2', width: 1.5, strokeAlphaPct: 40 }];
       }
     }
     return lines;
   });
 
   let heroChart = $state(undefined);
-  let hiddenHeroIdx = $state(new Set());
+  // hiddenHeroEntities: entity name (or '__host') -> hidden, not a chart
+  // POSITION -- a position would silently start hiding whatever NEW
+  // container reorders into that same index next tick, exactly the kind
+  // of identity/position mixup this whole pass exists to remove.
+  let hiddenHeroEntities = $state(new Set());
 
   // A resource/window switch is a new chart context -- any per-line
   // hide from the OLD one shouldn't silently carry over onto whatever
-  // now occupies that same chip position.
+  // now occupies that same chip.
   $effect(() => {
     resource;
     windowKey;
-    hiddenHeroIdx = new Set();
+    hiddenHeroEntities = new Set();
   });
 
-  function toggleHeroLine(i) {
-    const next = new Set(hiddenHeroIdx);
-    if (next.has(i)) next.delete(i);
-    else next.add(i);
-    hiddenHeroIdx = next;
-    heroChart?.toggleSeries(i + 1);
+  // Same "new chart context" trigger, for the hero rings themselves:
+  // every tracked entity is dropped so the very next tick effect (above)
+  // starts completely fresh -- even for an entity that was ALSO in the
+  // top-N under the OLD resource, since one container topping both CPU
+  // and Memory would otherwise carry cpu.pct values straight over as if
+  // they were mem.bytes the instant the tab switched. Also cancels
+  // whatever seed fetch was still in-flight for the resource/window just
+  // left.
+  $effect(() => {
+    resource;
+    windowKey;
+    for (const controller of heroSeedControllers.values()) controller.abort();
+    heroSeedControllers.clear();
+    heroLines.clear();
+  });
+
+  // toggleHeroLine takes the entity (for the hidden-set key, stable
+  // across reorders) AND the line's current chart index (uPlot's own
+  // 1-based series position, resolved by the template from heroSeries'
+  // own array position at click-time -- never cached, so it can't go
+  // stale if a reorder happens between renders).
+  function toggleHeroLine(entity, chartIdx) {
+    const key = entity ?? '__host';
+    const next = new Set(hiddenHeroEntities);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    hiddenHeroEntities = next;
+    heroChart?.toggleSeries(chartIdx + 1);
   }
 
   // hostTotal: the header's own {value, direction?}, whichever window is
@@ -664,29 +865,33 @@
           series={heroSeries}
           formatValue={FORMATTERS[resource]}
           live={windowKey === 'now'}
+          xDomain={windowKey === 'now' ? undefined : fetchedHeroRange}
           height={260}
           showLegend={false}
         />
         <div class="top-consumers__legend" role="group" aria-label="Chart lines">
           {#each heroSeries as s, i (s.entity ?? '__host')}
-            <button
-              type="button"
-              class="top-consumers__chip"
-              class:top-consumers__chip--off={hiddenHeroIdx.has(i)}
-              style="--chip-color: var({s.colorVar})"
-              aria-pressed={!hiddenHeroIdx.has(i)}
-              aria-label={`${s.entity ?? 'Host total'} line, click to ${hiddenHeroIdx.has(i) ? 'show' : 'hide'}`}
-              onmouseenter={() => heroChart?.focusSeries(i + 1)}
-              onmouseleave={() => heroChart?.focusSeries(null)}
-              onclick={() => toggleHeroLine(i)}
-            >
-              {#if s.entity}
-                <ContainerIcon name={s.entity} icon={coreBudgetIcons[s.entity]} size={14} />
-              {:else}
-                <span class="top-consumers__chip-swatch"></span>
-              {/if}
-              <span>{s.entity ?? 'Host total'}</span>
-            </button>
+            {#if s.active !== false}
+              {@const chipKey = s.entity ?? '__host'}
+              <button
+                type="button"
+                class="top-consumers__chip"
+                class:top-consumers__chip--off={hiddenHeroEntities.has(chipKey)}
+                style="--chip-color: var({s.colorVar})"
+                aria-pressed={!hiddenHeroEntities.has(chipKey)}
+                aria-label={`${s.entity ?? 'Host total'} line, click to ${hiddenHeroEntities.has(chipKey) ? 'show' : 'hide'}`}
+                onmouseenter={() => heroChart?.focusSeries(i + 1)}
+                onmouseleave={() => heroChart?.focusSeries(null)}
+                onclick={() => toggleHeroLine(s.entity, i)}
+              >
+                {#if s.entity}
+                  <ContainerIcon name={s.entity} icon={coreBudgetIcons[s.entity]} size={14} />
+                {:else}
+                  <span class="top-consumers__chip-swatch"></span>
+                {/if}
+                <span>{s.entity ?? 'Host total'}</span>
+              </button>
+            {/if}
           {/each}
         </div>
         {#if heroCapped}
@@ -818,11 +1023,13 @@
   .top-consumers__chip--off {
     opacity: 0.45;
   }
+  /* A plain muted bar, not the old dashed one -- matches the host-total
+     line's own D2-pass restyle (strokeAlphaPct, not dash) in heroSeries. */
   .top-consumers__chip-swatch {
     display: inline-block;
     width: 10px;
     height: 2px;
-    border-top: 2px dashed var(--chip-color);
+    background: color-mix(in oklab, var(--chip-color) 40%, transparent);
     flex-shrink: 0;
   }
   .top-consumers__cap-note {

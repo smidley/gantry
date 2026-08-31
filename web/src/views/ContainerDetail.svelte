@@ -155,6 +155,12 @@
   let fetchedSeries = $state({});
   let fetchInFlight = $state(false);
   let fetchFailed = $state(false);
+  // fetchedRange: the [from, to] this effect actually asked /api/series
+  // for -- handed to every chart below as xDomain (D2 chart-integrity
+  // pass) so each axis shows the FULL requested window even when this
+  // container's own real history covers only a sliver of it. See
+  // lib/chartRange.ts's own doc for the sparse-data bug this fixes.
+  let fetchedRange = $state(undefined);
 
   // Stale-response race: switching range (or container name) fast enough
   // that an earlier /api/series call is still in flight when a newer one
@@ -176,6 +182,7 @@
     const containerName = name;
     if (range === 'live') {
       fetchedSeries = {};
+      fetchedRange = undefined;
       fetchFailed = false;
       fetchInFlight = false;
       return;
@@ -183,6 +190,7 @@
     const seconds = RANGE_SECONDS[range];
     const to = Math.floor(Date.now() / 1000);
     const from = to - seconds;
+    fetchedRange = [from, to];
     const controller = new AbortController();
     fetchInFlight = true;
     fetchFailed = false;
@@ -503,7 +511,7 @@
         </div>
       </div>
       {#if hasPoints('cpu.pct')}
-        <TimeChart series={cpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
+        <TimeChart series={cpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} />
       {:else if activeRange === 'live' && liveSeedPending}
         <!-- Live ring is still cold AND we don't yet know whether the seed
              found real history -- rendering nothing here (rather than the
@@ -527,7 +535,7 @@
         </div>
       </div>
       {#if hasPoints('mem.bytes')}
-        <TimeChart series={memSeries} formatValue={fmtBytes} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
+        <TimeChart series={memSeries} formatValue={fmtBytes} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} />
       {:else if activeRange === 'live' && liveSeedPending}
         <!-- see the CPU card's own doc above -->
       {:else}
@@ -537,7 +545,7 @@
     <div class="card container-detail__chart-card">
       <span class="microlabel">Network</span>
       {#if hasPoints('net.rx_bps') || hasPoints('net.tx_bps')}
-        <TimeChart series={netSeries} formatValue={fmtRate} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
+        <TimeChart series={netSeries} formatValue={fmtRate} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} />
       {:else if activeRange === 'live' && liveSeedPending}
         <!-- see the CPU card's own doc above -->
       {:else}
@@ -547,7 +555,7 @@
     <div class="card container-detail__chart-card">
       <span class="microlabel">Disk IO</span>
       {#if hasPoints('io.read_bps') || hasPoints('io.write_bps')}
-        <TimeChart series={ioSeries} formatValue={fmtRate} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
+        <TimeChart series={ioSeries} formatValue={fmtRate} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} />
       {:else if activeRange === 'live' && liveSeedPending}
         <!-- see the CPU card's own doc above -->
       {:else}
@@ -557,13 +565,13 @@
     {#if gpuSeries.length > 0}
       <div class="card container-detail__chart-card">
         <span class="microlabel">GPU</span>
-        <TimeChart series={gpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
+        <TimeChart series={gpuSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} />
       </div>
     {/if}
     {#if psiSeries.length > 0}
       <div class="card container-detail__chart-card">
         <span class="microlabel">Pressure (PSI)</span>
-        <TimeChart series={psiSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} />
+        <TimeChart series={psiSeries} formatValue={fmtPct} {markers} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} />
       </div>
     {/if}
   </div>

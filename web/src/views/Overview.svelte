@@ -70,6 +70,21 @@
   col-left/col-right are gone entirely; the status band and modules band
   are now two independent full-width rows, each free to pick its own
   column split.
+
+  Adaptive all-clear pass (Scott: "When there is nothing that needs
+  attention... the other sections should be expanded to use the
+  available space and then we won't need to scroll down so far to see
+  other things"): with zero callouts the status band's left column has
+  nothing left to say -- the array facts live in BaySchematic's own
+  head now (facts-relocation pass) and the attention section doesn't
+  exist -- so the whole two-column band is conditional on
+  !overviewStatus.ok. All-clear instead renders the headline card as a
+  compact strip (overview__headline-zone--clear) and promotes the fleet
+  strip + bay schematic into overview__clear-band, a full-width row of
+  their own (side by side at >=64rem, stacked below), pulling the
+  modules band and GPU strip up the page by roughly the dead column's
+  height. With callouts present the attention layout above stays
+  exactly as it was.
 -->
 <script>
   import { onMount, untrack } from 'svelte';
@@ -474,11 +489,34 @@
   });
 </script>
 
+<!-- statusVisuals: the fleet strip + bay schematic pair, rendered in
+  exactly one of two homes -- the attention band's right column, or the
+  all-clear's own full-width band (see the adaptive all-clear pass in
+  the top-of-file doc). Each sits in its own __visual-slot so the two
+  layouts only differ in how the slots flow, and the schematic's slot
+  disappears with it (BaySchematic renders nothing for zero entries)
+  rather than holding an empty half open. -->
+{#snippet statusVisuals()}
+  <div class="overview__visual-slot">
+    <FleetStrip containers={fleetContainers} />
+  </div>
+  {#if baySchematicEntries.length > 0}
+    <div class="overview__visual-slot">
+      <BaySchematic
+        entries={baySchematicEntries}
+        summary={closingLine}
+        stateLine={arrayStateSentence}
+        warmestLine={hottestSentence}
+      />
+    </div>
+  {/if}
+{/snippet}
+
 <div class="overview">
   <h1 class="page-title">Overview</h1>
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
-  <div class="card overview__headline-zone">
+  <div class="card overview__headline-zone" class:overview__headline-zone--clear={overviewStatus.ok}>
     <div class="overview__headline-row">
       <span
         class="overview__headline-dot"
@@ -488,28 +526,28 @@
       ></span>
       <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
     </div>
-    <div class="overview__status-band">
-      <div class="overview__status-facts">
-        {#if !overviewStatus.ok}
+    {#if !overviewStatus.ok}
+      <div class="overview__status-band">
+        <div class="overview__status-facts">
           <section class="overview__attention">
             <span class="microlabel">Needs a look</span>
             {#each overviewStatus.anomalies as anomaly, i (i)}
               <CalloutRow {anomaly} />
             {/each}
           </section>
-        {/if}
+        </div>
+        <div class="overview__status-visuals">
+          {@render statusVisuals()}
+        </div>
       </div>
-      <div class="overview__status-visuals">
-        <FleetStrip containers={fleetContainers} />
-        <BaySchematic
-          entries={baySchematicEntries}
-          summary={closingLine}
-          stateLine={arrayStateSentence}
-          warmestLine={hottestSentence}
-        />
-      </div>
-    </div>
+    {/if}
   </div>
+
+  {#if overviewStatus.ok}
+    <div class="overview__clear-band">
+      {@render statusVisuals()}
+    </div>
+  {/if}
 
   <div class="overview__modules-band">
     <div class="overview__modules-wide">
@@ -670,6 +708,41 @@
     background:
       radial-gradient(circle at 92% 5%, color-mix(in oklab, var(--accent) 11%, transparent), transparent 18rem),
       var(--surface-raised);
+  }
+  /* All-clear: the card holds only the headline row (the adaptive
+     all-clear pass, top-of-file doc), so it slims to a strip -- the
+     vertical padding drops while the horizontal stays aligned with the
+     attention state's own. */
+  .overview__headline-zone--clear {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+  }
+
+  /* --- All-clear band: the fleet strip + bay schematic at full page
+     width, side by side once there's room for two real modules
+     (>=64rem -- at the app's usual 48rem split the sidebar is already
+     eating ~15rem, which would squeeze each module under ~24rem),
+     stacked below that. The slots flex equally; each component already
+     fills its slot (width: 100%). ---- */
+  .overview__clear-band {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+  .overview__visual-slot {
+    min-width: 0;
+  }
+  .overview__clear-band .overview__visual-slot {
+    flex: 1 1 0;
+  }
+  @media (max-width: 63.9375rem) {
+    .overview__clear-band {
+      flex-direction: column;
+    }
+    .overview__clear-band .overview__visual-slot {
+      flex: none;
+      width: 100%;
+    }
   }
 
   .overview__headline-row {

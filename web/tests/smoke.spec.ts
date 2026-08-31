@@ -107,14 +107,71 @@ test('overview: the Top Consumers module metric switcher changes the module and 
   await expect(page.getByRole('tab', { name: 'Memory', exact: true })).toHaveAttribute('aria-selected', 'true');
 });
 
-// Header compaction (Scott: "lots of wasted space here"): the status
-// band -- headline facts on the left, fleet strip + array schematic on
-// the right -- is a side-by-side row at >=768px and a plain vertical
-// stack below that, same breakpoint convention as every other
-// desktop/mobile split in this app.
-test('overview: the status band is two columns at desktop width and stacked at mobile', async ({ page }) => {
+// One deterministic SSE frame for the layout specs below: they pin two
+// MUTUALLY EXCLUSIVE Overview layouts (the attention band vs the
+// all-clear band), and which one the real fake-mode server would show
+// depends on its own uptime (grafana's health check, the 5-minute
+// disk-errors trigger, the scripted insight demo) plus whatever acks a
+// parallel spec is briefly holding. Routing /api/live -- the same
+// route-mock pattern the events and container-storage specs use -- pins
+// the exact state each spec is about instead of skipping on the wrong
+// one. EventSource re-connects when the fulfilled body ends (retry:
+// 300) and re-receives the same frame every ~300ms -- as steady a live
+// feed as these geometry assertions could ask for.
+function liveFrame(extraContainers: Record<string, object> = {}) {
+  return {
+    ts: Math.floor(Date.now() / 1000),
+    unraid_version: '7.0.0',
+    host: { 'cpu.total': 12.5, 'mem.used_pct': 42 },
+    containers: {
+      jellyfin: { state: 'running', health: 'healthy', icon: '', metrics: { 'cpu.pct': 4.2, 'mem.bytes': 9e8 } },
+      qbittorrent: { state: 'running', health: '', icon: '', metrics: { 'cpu.pct': 0.4, 'mem.bytes': 5e8 } },
+      postgres: { state: 'running', health: 'healthy', icon: '', metrics: { 'cpu.pct': 1.6, 'mem.bytes': 1.2e9 } },
+      vaultwarden: { state: 'exited', health: '', icon: '', metrics: {} },
+      ...extraContainers,
+    },
+    disks: {
+      disk1: { 'fs.used_bytes': 4e12, 'fs.free_bytes': 4e12, 'temp.c': 38.2, errors: 0 },
+      cache: { 'fs.used_bytes': 2e11, 'fs.free_bytes': 3e11, 'temp.c': 41.5, errors: 0 },
+    },
+    disk_meta: { disk1: { device: 'sdb', kind: 'hdd' }, cache: { device: 'nvme0n1', kind: 'nvme' } },
+    unraid: { array: { 'array.started': 1, 'mover.running': 0 } },
+    gpu: {},
+    gpu_meta: {},
+    sources: { docker: 'ok' },
+    alerts: { firing: [], firing_count: 0, truncated: 0, channels: {} },
+    insights: { active: [], tier: 'proxy', suppressed: 0 },
+  };
+}
+
+async function routeLiveFrame(page: import('@playwright/test').Page, frame: object) {
+  await page.route('**/api/live', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: `retry: 300\nevent: frame\ndata: ${JSON.stringify(frame)}\n\n`,
+    }),
+  );
+}
+
+// Header compaction (Scott: "lots of wasted space here"): with callouts
+// present, the status band -- "Needs a look" on the left, fleet strip +
+// array schematic on the right -- is a side-by-side row at >=768px and
+// a plain vertical stack below that, same breakpoint convention as
+// every other desktop/mobile split in this app. The frame carries one
+// unhealthy container so the attention layout is guaranteed, not
+// dependent on the server's own mood.
+test('overview: with callouts, the status band is two columns at desktop width and stacked at mobile', async ({
+  page,
+}) => {
+  await routeLiveFrame(
+    page,
+    liveFrame({ 'mock-pager': { state: 'running', health: 'unhealthy', icon: '', metrics: { 'cpu.pct': 0.3, 'mem.bytes': 1e8 } } }),
+  );
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
+
+  await expect(page.locator('.overview__headline-text')).toHaveText('1 thing needs you');
 
   const facts = page.locator('.overview__status-facts');
   const visuals = page.locator('.overview__status-visuals');
@@ -134,6 +191,58 @@ test('overview: the status band is two columns at desktop width and stacked at m
   const visualsBoxMobile = await visuals.boundingBox();
   // Stacked: visuals starts at or below where facts ends, not beside it.
   expect(visualsBoxMobile.y).toBeGreaterThanOrEqual(factsBoxMobile.y + factsBoxMobile.height - 4);
+});
+
+// Adaptive all-clear (Scott: "When there is nothing that needs
+// attention... the other sections should be expanded to use the
+// available space and then we won't need to scroll down so far"): zero
+// callouts collapses the headline card to a compact strip (no status
+// band at all) and promotes the fleet strip + bay schematic to a
+// full-width band of their own -- side by side at >=64rem, stacked on
+// mobile -- pulling Top Consumers and everything below it up the page.
+test('overview: all-clear collapses the headline to a strip and the fleet/storage cards take the full width', async ({
+  page,
+}) => {
+  await routeLiveFrame(page, liveFrame());
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('#/');
+
+  await expect(page.locator('.overview__headline-text')).toHaveText('Nothing needs you');
+  await expect(page.locator('.overview__attention')).toHaveCount(0);
+  await expect(page.locator('.overview__status-band')).toHaveCount(0);
+  await expect(page.locator('.overview__headline-zone')).toHaveClass(/overview__headline-zone--clear/);
+
+  // The relocated array facts render inside the storage card, not as
+  // orphaned sub-lines (the facts-relocation pass).
+  const schematic = page.locator('.bay-schematic');
+  await expect(schematic).toContainText('Array started · mover idle');
+  await expect(schematic).toContainText('cache warmest at 41.5°C');
+
+  // Full width: the band spans the same content width as the headline
+  // card above it, with the two cards side by side inside it.
+  const band = page.locator('.overview__clear-band');
+  await expect(band).toBeVisible();
+  const zoneBox = await page.locator('.overview__headline-zone').boundingBox();
+  const bandBox = await band.boundingBox();
+  expect(Math.abs(bandBox.width - zoneBox.width)).toBeLessThan(2);
+
+  const fleet = band.locator('.fleet-strip-wrap');
+  await expect(fleet).toBeVisible();
+  const fleetBox = await fleet.boundingBox();
+  const schematicBox = await schematic.boundingBox();
+  expect(Math.abs(fleetBox.y - schematicBox.y)).toBeLessThan(8);
+  expect(schematicBox.x).toBeGreaterThan(fleetBox.x + fleetBox.width - 8);
+
+  // The point of the whole pass: the modules band starts high enough
+  // that Top Consumers is inside the first viewport, not below it.
+  const topBox = await page.locator('.overview__top').boundingBox();
+  expect(topBox.y).toBeLessThan(700);
+
+  // Mobile: the two cards stack.
+  await page.setViewportSize({ width: 375, height: 800 });
+  const fleetMobile = await fleet.boundingBox();
+  const schematicMobile = await schematic.boundingBox();
+  expect(schematicMobile.y).toBeGreaterThanOrEqual(fleetMobile.y + fleetMobile.height - 4);
 });
 
 // Balance pass (Scott: "sections are arranged oddly with lots of wasted

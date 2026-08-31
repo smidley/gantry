@@ -31,4 +31,10 @@ describe('anomalyHref', () => {
       anomalyHref({ kind: 'alert', ruleId: 'host-cpu-high', ruleName: 'Host CPU high', entity: '', severity: 'critical' }),
     ).toBe('#/alerts');
   });
+
+  it('links an insight-backed callout to the Insights view, where the finding and its evidence live', () => {
+    expect(
+      anomalyHref({ kind: 'insight', statement: 'qbittorrent is starving jellyfin on disk3', severity: 'warning', confidence: 'likely' }),
+    ).toBe('#/insights');
+  });
 });

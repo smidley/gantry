@@ -15,8 +15,8 @@
 // actually shows, and where the row points. Any OTHER source that ever
 // lands here routes nowhere (null -- a plain row), the same honest
 // "no page exists for this" fallback eventHref returns for unroutable
-// kinds. When insight callouts join the derivation they follow
-// eventHref's own 'insight' mapping: #/insights.
+// kinds. Insight callouts follow eventHref's own 'insight' mapping:
+// #/insights, where the finding's evidence drawer lives.
 import type { OverviewAnomaly } from './overviewStatus';
 
 export function anomalyHref(a: OverviewAnomaly): string | null {
@@ -31,5 +31,7 @@ export function anomalyHref(a: OverviewAnomaly): string | null {
       return a.source === 'docker' ? '#/containers' : null;
     case 'alert':
       return '#/alerts';
+    case 'insight':
+      return '#/insights';
   }
 }

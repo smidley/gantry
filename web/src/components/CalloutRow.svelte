@@ -32,6 +32,14 @@
 
   let text = $derived(describeAnomaly(anomaly));
 
+  // ackable: whether a quiet-this path exists for this row at all -- a
+  // silence for an alert-backed callout, a (kind, entity) ack for the
+  // frame-derived kinds. An insight-backed callout has neither
+  // (ackKeyFor returns null for it): quieting a finding is DISMISSING
+  // it on the Insights view this row already links to -- one mechanism
+  // per system -- so the ack control doesn't render at all.
+  let ackable = $derived(anomaly.kind === 'alert' || ackKeyFor(anomaly) !== null);
+
   // Ack menu state: closed -> the single "Ack" affordance; open -> the
   // three duration presets. pending disables the controls during the
   // POST; a failure surfaces the server's own message inline and leaves
@@ -79,6 +87,7 @@
     <span class="callout-row__title">{text.title}</span>
   {/if}
   {#if text.detail}<span class="callout-row__detail">&mdash; {text.detail}</span>{/if}
+  {#if ackable}
   <span class="callout-row__ack">
     {#if open}
       {#each DURATIONS as d (d.hours)}
@@ -112,6 +121,7 @@
       </button>
     {/if}
   </span>
+  {/if}
   {#if error}<span class="callout-row__error" role="alert">{error}</span>{/if}
 </p>
 

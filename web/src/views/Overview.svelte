@@ -374,6 +374,7 @@
       sources: live.frame?.sources ?? {},
       alerts: live.frame?.alerts?.firing ?? [],
       acks: acks.list,
+      insights: live.frame?.insights?.active ?? [],
     }),
   );
   let statusColor = $derived(`var(--status-${worstSeverity(overviewStatus.anomalies)})`);

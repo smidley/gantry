@@ -20,6 +20,7 @@
 import { anomalyHref } from './anomalyHref';
 import { diskUsagePct } from './disks';
 import { fmtPct } from './format';
+import { confidenceLabel, sortActiveInsights } from './insights';
 import type { HealthStatus } from './containerStatus';
 
 // AnomalyBase.severityOverride, when present, is the MAX of an anomaly's
@@ -44,6 +45,13 @@ interface AnomalyBase {
 // exit, parity errors -- each gets its own row linking to the Alerts
 // view. severity here is the alert's OWN mapped severity (there is no
 // "default" to override, unlike the five kinds above).
+//
+// Insights (Phase 5 Task 13) join the same way, one rung further out:
+// the 'insight' variant is an active finding's own statement, rendered
+// as a row linking to the Insights view -- but only when no alert row
+// already covers its victim (the insights merge below owns that rule;
+// see its doc). severity here is the finding's mapped severity, same
+// vocabulary and mapping as 'alert'.
 export type OverviewAnomaly =
   | ({ kind: 'unhealthy'; name: string } & AnomalyBase)
   | ({ kind: 'disk-usage'; slot: string; usagePct: number } & AnomalyBase)
@@ -63,7 +71,15 @@ export type OverviewAnomaly =
       // detail becomes the instance's own summary sentence instead).
       metric?: string;
       summary?: string;
-    } & AnomalyBase);
+      // why: the best active insight naming this alert's entity as its
+      // victim (the insights merge below) -- describeAnomaly folds it
+      // into the row's detail as a "Cause:"/"Likely cause:" suffix,
+      // annotateAlerts' exact wording. The alert stays the actionable
+      // row; the full annotation (with its link into #/insights) lives
+      // on the Alerts view this row already routes to.
+      why?: { statement: string; confidence: string };
+    } & AnomalyBase)
+  | ({ kind: 'insight'; statement: string; severity: HealthStatus; confidence: string } & AnomalyBase);
 
 // OverviewAckLike is the narrow slice of api.ts's OverviewAckDTO this
 // module actually needs (the FiringAlertLike convention right below):
@@ -84,7 +100,9 @@ export interface OverviewAckLike {
 // (there is only ever one), the source name. null for 'alert' --
 // acknowledging an alert-backed callout IS an alert silence (one
 // mechanism per system; see deriveOverviewStatus's ack doc), so no ack
-// identity exists for it, and no ack row can ever quiet one.
+// identity exists for it, and no ack row can ever quiet one. null for
+// 'insight' by the same rule: quieting a finding is DISMISSING it on
+// the Insights view, never a second parallel mechanism here.
 export function ackKeyFor(a: OverviewAnomaly): { kind: string; entity: string } | null {
   switch (a.kind) {
     case 'unhealthy':
@@ -97,6 +115,7 @@ export function ackKeyFor(a: OverviewAnomaly): { kind: string; entity: string } 
     case 'source-critical':
       return { kind: a.kind, entity: a.source };
     case 'alert':
+    case 'insight':
       return null;
   }
 }
@@ -113,11 +132,34 @@ export interface FiringAlertLike {
   severity: string;
   entity: string;
   silenced: boolean;
+  // kind: the alert's own subject vocabulary (container|host|array|
+  // disk|gpu), matched against an insight's victim_kind by the insights
+  // merge (annotateAlerts' exact rule). Optional the same way metric/
+  // summary are: a caller or fixture without it just never matches an
+  // insight, it doesn't fail to type-check.
+  kind?: string;
   // metric/summary: see OverviewAnomaly's 'alert' variant doc. Optional
   // so a caller that hasn't wired the fuller FiringAlertDTO through yet
   // (or a test fixture that doesn't care) still type-checks.
   metric?: string;
   summary?: string;
+}
+
+// OverviewInsightLike is the narrow slice of api.ts's InsightDTO the
+// insights merge needs (the FiringAlertLike convention above): the
+// victim identity an alert row is matched on, the statement/severity/
+// confidence a row or "why" suffix renders, and fired_at so
+// sortActiveInsights can rank competing findings the same way every
+// other consumer does.
+export interface OverviewInsightLike {
+  victim_kind: string;
+  victim: string;
+  statement: string;
+  // severity is the finding's own wire vocabulary (info|warning|alert)
+  // -- insight/rules.go shares store.Event's exact three slots.
+  severity: string;
+  confidence: string;
+  fired_at: number;
 }
 
 export interface OverviewStatusInput {
@@ -137,6 +179,10 @@ export interface OverviewStatusInput {
   // the frame itself). undefined on a page that hasn't wired acks
   // through yet -- treated as "nothing acked", not an error.
   acks?: OverviewAckLike[] | null;
+  // insights: the live frame's insights.active block (undefined on a
+  // page that hasn't wired insights through yet -- treated as "nothing
+  // active", not an error).
+  insights?: OverviewInsightLike[] | null;
   // now (unix seconds) is read only to decide ack expiry -- injectable
   // so tests can pin both sides of an ack's until deterministically.
   // Defaults to the real clock; every other part of this derivation
@@ -276,6 +322,10 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
   // alert contributes nothing here: silencing is a deliberate "don't
   // nag me about this" gesture, and it would be a strange product to
   // honor that everywhere except the one place a user can't dismiss it.
+  // alertRows remembers each pushed row alongside its source alert's
+  // own kind -- the insights merge below matches on kind+entity, and
+  // the anomaly itself deliberately doesn't carry the alert's kind.
+  const alertRows: { row: Extract<OverviewAnomaly, { kind: 'alert' }>; sourceKind?: string }[] = [];
   for (const alert of input.alerts ?? []) {
     if (alert.silenced) continue;
     const mappedSeverity = alertSeverityToHealth(alert.severity);
@@ -288,9 +338,52 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
       }
       continue;
     }
-    anomalies.push({
+    const row: Extract<OverviewAnomaly, { kind: 'alert' }> = {
       kind: 'alert', ruleId: alert.rule_id, ruleName: alert.rule_name, entity: alert.entity, severity: mappedSeverity,
       metric: alert.metric, summary: alert.summary,
+    };
+    anomalies.push(row);
+    alertRows.push({ row, sourceKind: alert.kind });
+  }
+
+  // Insights merge (Phase 5 Task 13, the Overview half) -- the same
+  // "coexist, not replace" shape as the alerts merge above, one rung
+  // further out: an insight is a diagnosis (culprit -> resource ->
+  // victim), so it earns an attention row only when it's load-bearing
+  // on its own. Three rules:
+  //
+  // - Only a finding at severity warning or worse becomes a row. An
+  //   info insight belongs on the Insights view, not in the headline
+  //   count -- and that holds regardless of confidence, so even a
+  //   confirmed info finding never lands here.
+  // - An insight never duplicates an alert row for the same entity,
+  //   matched on the alert's own kind+entity against the finding's
+  //   victim_kind+victim (annotateAlerts' exact rule; an empty victim
+  //   never matches): when both exist the alert row wins and gains the
+  //   "why" suffix instead (see the 'alert' variant's own doc) -- the
+  //   alert is the actionable one. Findings are walked best-first
+  //   (sortActiveInsights), so the suffix a row ends up with is the
+  //   same one annotateAlerts itself would pick: one annotation per
+  //   row, never a stack, and every lower-ranked finding naming the
+  //   same victim stays off the list entirely.
+  // - The headline count stays anomalies.length either way, the same
+  //   standing invariant the alerts merge already preserves.
+  const eligibleInsights = (input.insights ?? []).filter((i) => i.severity === 'warning' || i.severity === 'alert');
+  for (const insight of sortActiveInsights(eligibleInsights)) {
+    const host = insight.victim
+      ? alertRows.find((r) => r.sourceKind === insight.victim_kind && r.row.entity === insight.victim)
+      : undefined;
+    if (host) {
+      if (!host.row.why) {
+        host.row.why = { statement: insight.statement, confidence: insight.confidence };
+      }
+      continue;
+    }
+    anomalies.push({
+      kind: 'insight',
+      statement: insight.statement,
+      severity: alertSeverityToHealth(insight.severity),
+      confidence: insight.confidence,
     });
   }
 
@@ -371,13 +464,24 @@ function anomalyTextFor(a: OverviewAnomaly): AnomalyText {
       return { severity: 'serious', title: 'Array is stopped', detail: 'No parity protection while it is down.' };
     case 'source-critical':
       return { severity: 'critical', title: `${a.source} needs attention`, detail: a.detail };
-    case 'alert':
+    case 'alert': {
       // A threshold alert's metric is always non-empty -- detail stays
       // the bare entity, unchanged. An event alert has no metric (and
       // so no meaningful value/threshold at all -- see FiringAlertDTO's
       // own doc): its summary sentence is the only real description,
       // falling back to entity on the off chance summary is also empty.
-      return { severity: a.severity, title: a.ruleName, detail: a.metric ? a.entity : a.summary || a.entity };
+      // A matched insight's "why" rides the same detail slot, in
+      // annotateAlerts' exact wording -- see the variant's own doc.
+      const base = a.metric ? a.entity : a.summary || a.entity;
+      const why = a.why ? `${a.why.confidence === 'confirmed' ? 'Cause' : 'Likely cause'}: ${a.why.statement}` : null;
+      return { severity: a.severity, title: a.ruleName, detail: why ? `${base} · ${why}` : base };
+    }
+    case 'insight':
+      // The statement IS the finding ("qbittorrent is starving jellyfin
+      // on disk3") -- it carries subject and reason in one sentence, so
+      // the detail slot only adds the confidence reading, the same
+      // Likely/Confirmed vocabulary the Insights view's chip uses.
+      return { severity: a.severity, title: a.statement, detail: confidenceLabel(a.confidence) };
   }
 }
 

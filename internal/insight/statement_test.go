@@ -86,6 +86,28 @@ func TestStatementDiskIOContentionConfirmedMatchesPlanGolden(t *testing.T) {
 		Statement(f))
 }
 
+// TestStatementDiskIOContentionSharedPairWithNoBystanderRendersHonestly
+// pins I7 (review): when the shared culprit set IS every co-tenant the
+// device has (a two-container device where together they clear the
+// floor), Evidence.OtherUsers is correctly empty -- but the likely-tier
+// template's "other containers" filler would then claim an unnamed third
+// party is being slowed when there is none to name. The two culprits are
+// slowing each other, not some bystander that doesn't exist.
+func TestStatementDiskIOContentionSharedPairWithNoBystanderRendersHonestly(t *testing.T) {
+	f := Finding{
+		RuleID: RuleDiskIOContention, Resource: "disk3",
+		Culprit:    Culprits{Names: []string{"qbittorrent", "sabnzbd"}, Fraction: 1.0, Shared: true},
+		Confidence: ConfidenceLikely, Shape: ShapeSlowing,
+		Evidence: Evidence{CulpritSharePct: 100, DeviceUtilPct: 97, AwaitMs: 45},
+	}
+
+	s := Statement(f)
+
+	require.NotContains(t, s, "other containers", "no bystander exists to name -- these two ARE the whole co-tenancy")
+	require.Contains(t, s, "each other")
+	require.Contains(t, s, "qbittorrent and sabnzbd")
+}
+
 func TestStatementIODrivenCPULoadLikelyMatchesPlanGolden(t *testing.T) {
 	f := Finding{
 		RuleID: RuleIODrivenCPULoad, VictimKind: "host", Resource: "cpu",

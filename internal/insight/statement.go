@@ -228,7 +228,18 @@ func statementDiskIOContention(f Finding) string {
 			culprit, pct(f.Evidence.CulpritSharePct))
 	}
 	victim := f.Victim
-	if victim == "" {
+	switch {
+	case victim != "":
+		// named victim (the PSI-confirmed path) -- unchanged.
+	case f.Culprit.Shared && len(f.Evidence.OtherUsers) == 0:
+		// I7 (review): the shared culprit set IS every co-tenant the
+		// device has -- a two-container device where together they
+		// clear the floor, leaving otherEntities with nobody left over
+		// (rules.go's own doc on this). "other containers" would name a
+		// bystander that doesn't exist; the honest claim is that the
+		// culprits are slowing each other.
+		victim = "each other"
+	default:
 		victim = "other containers"
 	}
 	s := fmt.Sprintf("%s %s %s on %s — it's driving %s%% of the disk's IO while the device sits at %s%% utilisation and %sms average latency.",

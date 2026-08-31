@@ -147,6 +147,29 @@ func TestEvalDiskIOContentionDoesNotFireWithoutCulpritAttribution(t *testing.T) 
 	require.Empty(t, findings)
 }
 
+// TestEvalDiskIOContentionSharedPairConsumingEveryCoTenant pins I7's
+// other half: exactly two containers on the device, together clearing
+// the culprit floor -- Dominant's own shared-pair shape -- leaves
+// otherEntities with nobody left over. The finding still fires (two
+// heavy co-tenants saturating a shared disk is real, useful evidence);
+// Evidence.OtherUsers being empty here is correct, not a bug -- see
+// statement_test.go's own honesty test for the rendering half.
+func TestEvalDiskIOContentionSharedPairConsumingEveryCoTenant(t *testing.T) {
+	in := diskIOContentionIn(testNow, true, false)
+	in.ContainerLiveIO = mkPrefix(map[string]map[string][]store.Sample{
+		"qbittorrent": {"live:io.sde.read_bps": seriesRange(testNow-100, testNow, 10, 550)},
+		"sabnzbd":     {"live:io.sde.read_bps": seriesRange(testNow-100, testNow, 10, 450)},
+	})
+
+	findings := evalDiskIOContention(in, librarySpecs[0].defaults)
+
+	require.Len(t, findings, 1)
+	f := findings[0]
+	require.True(t, f.Culprit.Shared)
+	require.ElementsMatch(t, []string{"qbittorrent", "sabnzbd"}, f.Culprit.Names)
+	require.Empty(t, f.Evidence.OtherUsers, "the shared pair IS every co-tenant -- correctly nobody left over")
+}
+
 func TestEvalDiskIOContentionNeverFiresOnParityDeviceSeamTopologyContendedGate(t *testing.T) {
 	topo := diskTopology()
 	in := In{

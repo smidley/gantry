@@ -643,7 +643,16 @@ func evalCPUStarvation(in In, th map[string]float64) []Finding {
 			if verdict != VerdictBreaching {
 				continue
 			}
-			if alreadyFound(findings, victim) {
+			// I1 (review): a victim the tier-1 loop above already found
+			// is UPGRADED in place, never skipped -- the tier-1 loop's
+			// own Likely finding is exactly the population psi=1 exists
+			// to confirm (a genuinely CPU-limited, throttled container),
+			// so silently leaving it alone here would invert the whole
+			// point of the upgrade. Mirrors evalDiskIOContention's own
+			// inline-mutate shape (util_pct/await_ms's PSI branch above).
+			if idx := findingIndexForVictim(findings, victim); idx >= 0 {
+				findings[idx].Confidence, findings[idx].Tier = ConfidenceConfirmed, TierPSI
+				findings[idx].Evidence.VictimStallPct, findings[idx].Evidence.WindowMinutes = latest, windowMinutes
 				continue
 			}
 			if f, ok := cpuStarvationFinding(in, th, victim, ConfidenceConfirmed, latest); ok {
@@ -654,13 +663,16 @@ func evalCPUStarvation(in In, th map[string]float64) []Finding {
 	return findings
 }
 
-func alreadyFound(findings []Finding, victim string) bool {
-	for _, f := range findings {
+// findingIndexForVictim returns the index of findings' entry for victim,
+// or -1 -- the PSI loop's own "already found by tier 1" lookup, now
+// upgrade-in-place rather than the skip alreadyFound used to perform.
+func findingIndexForVictim(findings []Finding, victim string) int {
+	for i, f := range findings {
 		if f.Victim == victim {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 // cpuStarvationFinding shares the culprit-attribution step (a DIFFERENT

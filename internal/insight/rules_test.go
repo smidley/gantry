@@ -315,6 +315,31 @@ func TestEvalCPUStarvationPSIUpgradeNeedsNoAllocCores(t *testing.T) {
 	require.Equal(t, ConfidenceConfirmed, findings[0].Confidence)
 }
 
+// TestEvalCPUStarvationPSIUpgradesAVictimTheTier1LoopAlreadyFound pins I1
+// (review): a container with a real CPU limit that ALSO clears the
+// tier-1 throttled_pct floor must still reach Confirmed when
+// psi.cpu.some_pct breaches for that same victim -- alreadyFound exists
+// to stop a duplicate Finding for one victim, not to freeze the first
+// one at Likely forever. Before this fix the PSI loop simply skipped an
+// already-found victim, so exactly the population psi=1 exists to serve
+// (a genuinely CPU-limited, throttled container) could never reach
+// confirmed.
+func TestEvalCPUStarvationPSIUpgradesAVictimTheTier1LoopAlreadyFound(t *testing.T) {
+	in := cpuStarvationIn(testNow, true, true, 2) // tier-1 already fires for "minecraft"
+	in.Tier = "psi"
+	in.ContainerPSI["psi.cpu.some_pct"] = mkMatch(map[string][]store.Sample{"minecraft": seriesRange(testNow-100, testNow, 10, 27)})
+
+	findings := evalCPUStarvation(in, librarySpecs[2].defaults)
+
+	require.Len(t, findings, 1, "one finding per victim, upgraded in place -- never a duplicate")
+	f := findings[0]
+	require.Equal(t, "minecraft", f.Victim)
+	require.Equal(t, ConfidenceConfirmed, f.Confidence, "a both-signals victim must reach confirmed, not stay stuck at likely")
+	require.Equal(t, TierPSI, f.Tier)
+	require.Equal(t, 27.0, f.Evidence.VictimStallPct)
+	require.Equal(t, windowMinutes, f.Evidence.WindowMinutes)
+}
+
 // --- parity-slowdown ---------------------------------------------------
 
 func paritySlowdownIn(now int64, withVictim, withCulprit bool) In {

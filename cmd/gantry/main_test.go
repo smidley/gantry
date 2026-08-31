@@ -23,6 +23,7 @@ import (
 	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/config"
 	"github.com/smidley/gantry/internal/fake"
+	"github.com/smidley/gantry/internal/insight"
 	"github.com/smidley/gantry/internal/server"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
@@ -1103,6 +1104,52 @@ func TestBuildClassOfOnlyResolvesDiskKind(t *testing.T) {
 	require.Equal(t, "", classOf("disk", "disk1"), "unclassified disk (no ini ticked yet) reads as unknown, not a crash")
 }
 
+// TestBuildInsightSlotsJoinsDiskMetaWithLiveRotationalAndMergesFakeOverlay
+// pins buildInsightSlots' own join: Device comes from diskMeta (real
+// first, fakeDiskMeta's overlay on top -- the same real-then-fake
+// convention buildSnapshot's own DiskMeta merge uses), Rotational from
+// the live disk.<slot>.rotational sample, never the other way around.
+func TestBuildInsightSlotsJoinsDiskMetaWithLiveRotationalAndMergesFakeOverlay(t *testing.T) {
+	live := store.NewLive(100)
+	live.Record(store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "rotational"}, 1, 1)
+	live.Record(store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "rotational"}, 1, 0)
+
+	real := func() map[string]unraid.DiskMeta {
+		return map[string]unraid.DiskMeta{"disk1": {Device: "sdc", Kind: "hdd"}}
+	}
+	fakeOverlay := func() map[string]unraid.DiskMeta {
+		return map[string]unraid.DiskMeta{"cache": {Device: "nvme0n1", Kind: "nvme"}}
+	}
+
+	slots := buildInsightSlots(real, fakeOverlay, live)()
+
+	require.Equal(t, insight.SlotMeta{Device: "sdc", Rotational: true}, slots["disk1"])
+	require.Equal(t, insight.SlotMeta{Device: "nvme0n1", Rotational: false}, slots["cache"])
+}
+
+func TestBuildInsightSlotsNilFakeDiskMetaUnaffected(t *testing.T) {
+	live := store.NewLive(100)
+	real := func() map[string]unraid.DiskMeta { return map[string]unraid.DiskMeta{"disk1": {Device: "sdc"}} }
+
+	slots := buildInsightSlots(real, nil, live)()
+
+	require.Contains(t, slots, "disk1")
+	require.Equal(t, "sdc", slots["disk1"].Device)
+}
+
+// TestBuildInsightSlotsNoRotationalSampleDefaultsFalse covers a slot
+// present in DiskMeta but with no rotational reading recorded yet (the
+// very first tick, before the unraid collector's own rotational sample
+// lands) -- must default false, not panic or fabricate true.
+func TestBuildInsightSlotsNoRotationalSampleDefaultsFalse(t *testing.T) {
+	live := store.NewLive(100)
+	real := func() map[string]unraid.DiskMeta { return map[string]unraid.DiskMeta{"disk1": {Device: "sdc"}} }
+
+	slots := buildInsightSlots(real, nil, live)()
+
+	require.False(t, slots["disk1"].Rotational)
+}
+
 // fakeMeta builds a minimal known-container answer for a lookupByName
 // stand-in, without needing a real docker.Collector/daemon.
 func fakeMeta(name string) docker.Meta { return docker.Meta{Name: name} }
@@ -1473,6 +1520,75 @@ func TestRunSeedsDefaultAlertRulesAtBoot(t *testing.T) {
 		require.True(t, r.Builtin)
 		require.True(t, r.Enabled)
 	}
+}
+
+// TestRunSeedsInsightRuleConfigsAndResolvesStaleActiveInsightsAtBoot pins
+// main.go's own insight boot sequence: SeedInsightRuleConfigs (all seven,
+// enabled, notify off) and StaleActiveInsights (Open question 5 -- a row
+// left "active" by whatever process last held this db, e.g. a killed
+// prior instance, must not survive a restart as if the live ring still
+// backs it). A row is pre-seeded directly, before run() ever starts, the
+// same "prior process" it's meant to simulate.
+func TestRunSeedsInsightRuleConfigsAndResolvesStaleActiveInsightsAtBoot(t *testing.T) {
+	port := freePort(t)
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+
+	seedSt, err := store.Open(dbPath, nil)
+	require.NoError(t, err)
+	staleID, err := seedSt.UpsertInsight(store.InsightInstance{
+		RuleID: "disk-io-contention", VictimKind: "disk", Victim: "", Culprit: "qbittorrent",
+		Resource: "disk3", State: "active", Severity: "warning", Confidence: "likely", Tier: "proxy",
+		Statement: "stale from a prior process", Evidence: "{}", StartedAt: 1, FiredAt: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, seedSt.Close())
+
+	env := map[string]string{
+		"GANTRY_PORT":    fmt.Sprint(port),
+		"GANTRY_DB_PATH": dbPath,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+
+	st, err := store.Open(dbPath, nil)
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+
+	configs, err := st.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, configs, 7, "main.go must seed all seven insight rule configs at boot")
+	for _, c := range configs {
+		require.True(t, c.Enabled)
+		require.False(t, c.Notify, "no seeded rule may page by default")
+	}
+
+	active, err := st.ActiveInsights(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, active, "a stale active insight from a prior process must not survive a restart")
+
+	history, err := st.InsightHistory(context.Background(), 0, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, staleID, history[0].ID)
+	require.Equal(t, "restart", history[0].ResolveReason)
 }
 
 // TestWireDockerCollectorPinsHostCoresToHostCollector pins main.go's own

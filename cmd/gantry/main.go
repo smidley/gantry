@@ -28,6 +28,7 @@ import (
 	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/config"
 	"github.com/smidley/gantry/internal/fake"
+	"github.com/smidley/gantry/internal/insight"
 	"github.com/smidley/gantry/internal/server"
 	"github.com/smidley/gantry/internal/store"
 )
@@ -95,6 +96,23 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// seeds the true, uncompressed numbers.
 	if err := st.SeedAlertRules(store.DefaultAlertRules(fakeMode)); err != nil {
 		return fmt.Errorf("seed alert rules: %w", err)
+	}
+	// Insight rule configs (Task 4's own INSERT-OR-IGNORE seed, same
+	// idempotent-on-every-boot posture as SeedAlertRules just above) --
+	// there is no "fast" variant here: unlike alert_rules' for_seconds/
+	// clear_seconds, the insight engine's sustain/clear-for/cooldown are
+	// Engine struct fields, not seeded rows (see insight.Engine's own
+	// doc), so fake mode compresses them below at construction time
+	// instead. StaleActiveInsights runs right after: Open question 5's
+	// own recommendation -- the live ring is empty at boot, so a
+	// carried-over "active" row would assert something this process
+	// cannot currently see; if the contention is still real, the engine
+	// re-fires within two ticks anyway.
+	if err := st.SeedInsightRuleConfigs(insight.DefaultRuleConfigs(fakeMode)); err != nil {
+		return fmt.Errorf("seed insight rule configs: %w", err)
+	}
+	if err := st.StaleActiveInsights(time.Now().Unix()); err != nil {
+		return fmt.Errorf("stale active insights: %w", err)
 	}
 	// GANTRY_WEBHOOK_URL (spec Sec5's documented single-webhook path) is
 	// re-synced into the "env" target on every boot, same "before
@@ -293,6 +311,37 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	go func() {
 		defer wg.Done()
 		alertEngine.Run(runCtx, 10*time.Second)
+	}()
+
+	// Insight engine: cross-container impact correlation (spec §16), one
+	// 60s ticker beside the alert engine above, reading the exact same
+	// live ring (Live.MatchSince/MatchPrefixSince) and rebuilding its own
+	// Topology snapshot each tick from the host collector's DeviceName
+	// plus the unraid collector's disk slots (buildInsightSlots). Dispatch
+	// is left nil: Notifiable's own three gates already keep this inert
+	// with every seeded rule's notify off, and there is no
+	// store.AlertRule/AlertInstance to hand the shared alert Dispatcher's
+	// AlertNotification shape without fabricating fields it would then
+	// read for its own flap/silence bookkeeping -- a real delivery bridge
+	// is later work, not this phase's engine task. In fake-data mode,
+	// ClearForSecs/CooldownSecs are compressed the same way
+	// DefaultRuleConfigs(fakeMode) already compressed sustain_secs, so a
+	// scripted insight can fire, upgrade, and resolve inside one short
+	// demo session.
+	insightEngine := insight.New(st)
+	insightEngine.MatchSince = st.Live().MatchSince
+	insightEngine.MatchPrefixSince = st.Live().MatchPrefixSince
+	insightEngine.DeviceName = host.DeviceName
+	insightEngine.Slots = buildInsightSlots(ur.DiskMeta, fakeDiskMeta, st.Live())
+	insightEngine.PressureTier = pr.Tier
+	if fakeMode {
+		insightEngine.ClearForSecs = 20
+		insightEngine.CooldownSecs = 60
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		insightEngine.Run(runCtx, 60*time.Second)
 	}()
 
 	// snapshotFn is the one buildSnapshot instance shared by /api/live/
@@ -716,6 +765,46 @@ func buildClassOf(ur *unraid.Collector) func(kind, entity string) string {
 			return ""
 		}
 		return ur.DiskMeta()[entity].Kind
+	}
+}
+
+// buildInsightSlots returns the closure wired to insight.Engine.Slots:
+// joins diskMeta's own Device name with each slot's live
+// disk.<slot>.rotational reading, exactly matching the assembly
+// insight.SlotMeta's own doc describes the caller as responsible for.
+// diskMeta is real first, fakeDiskMeta's overlay layered on top when
+// wired -- the same real-then-fake merge convention buildSnapshot's own
+// DiskMeta merge and buildContainerStorage's diskMeta parameter already
+// use, needed here for the identical reason: fake-data mode's dev box
+// never has a real disks.ini for the real unraid.Collector to report
+// anything from, so its own DiskMeta() comes back empty and the fake
+// generator's synthetic array is the only source with anything to
+// report. Rotational, unlike Device/Kind, needs no such overlay: fake
+// mode's own disk.<slot>.rotational sample lands in the exact same
+// store.Live this reads from, real collector or not. Extracted out of
+// run() (the same reason wireDockerCollector/buildClassOf/buildFleet all
+// are) so this join -- easy to get backwards, e.g. reading Kind where
+// Device belongs -- is unit-testable without a live unraid.Collector.
+func buildInsightSlots(diskMeta func() map[string]unraid.DiskMeta, fakeDiskMeta func() map[string]unraid.DiskMeta, live *store.Live) func() map[string]insight.SlotMeta {
+	return func() map[string]insight.SlotMeta {
+		merged := make(map[string]unraid.DiskMeta)
+		for slot, m := range diskMeta() {
+			merged[slot] = m
+		}
+		if fakeDiskMeta != nil {
+			for slot, m := range fakeDiskMeta() {
+				merged[slot] = m
+			}
+		}
+		out := make(map[string]insight.SlotMeta, len(merged))
+		for slot, meta := range merged {
+			rotational := false
+			if s, ok := live.Latest(store.SeriesKey{Kind: "disk", Entity: slot, Metric: "rotational"}); ok {
+				rotational = s.Val != 0
+			}
+			out[slot] = insight.SlotMeta{Device: meta.Device, Rotational: rotational}
+		}
+		return out
 	}
 }
 

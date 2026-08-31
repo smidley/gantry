@@ -32,6 +32,20 @@ describe('eventHref', () => {
     expect(eventHref('alert.fired', '')).toBe('#/alerts');
   });
 
+  it('links insight.* to the Insights view, even when the entity is a container name that would otherwise misroute', () => {
+    expect(eventHref('insight.detected', 'jellyfin')).toBe('#/insights');
+    expect(eventHref('insight.resolved', 'sonarr')).toBe('#/insights');
+    expect(eventHref('insight.detected', '')).toBe('#/insights');
+  });
+
+  it('routes a BARE victim_kind word (no dot) correctly too -- the Insights view/ImpactPanel call this with insight_instances.victim_kind directly, not a dot-namespaced event kind', () => {
+    expect(eventHref('container', 'jellyfin')).toBe('#/containers/jellyfin');
+    expect(eventHref('disk', 'disk3')).toBe('#/storage');
+    expect(eventHref('array', '')).toBe('#/storage');
+    expect(eventHref('host', '')).toBeNull();
+    expect(eventHref('gpu', 'video')).toBeNull();
+  });
+
   it('is null for image.* -- plain row for now, the images view does not exist yet', () => {
     expect(eventHref('image.pull', 'demo/jellyfin:latest')).toBeNull();
   });

@@ -222,6 +222,25 @@ func Rules(overrides map[string]map[string]float64) []Rule {
 // (tests, and the engine's own first tick before it has read any).
 func DefaultRules() []Rule { return Rules(nil) }
 
+// DefaultRuleConfigs returns one store.InsightRuleConfig per compiled-in
+// rule -- enabled, notify off (Global Constraints: no seeded rule may
+// ever page by default), no overrides -- for main.go's boot-time
+// SeedInsightRuleConfigs call, the exact store.DefaultAlertRules
+// counterpart for this schema. UpdatedAt is left 0; SeedInsightRuleConfigs
+// stamps it at insert time, matching DefaultAlertRules' own convention.
+// Lives here, not in package store, because the rule ID list's one
+// authoritative source is this compiled-in library (librarySpecs) --
+// duplicating those seven strings into a second, store-side list would
+// be exactly the kind of hand-maintained copy this phase's own review
+// keeps flagging.
+func DefaultRuleConfigs() []store.InsightRuleConfig {
+	out := make([]store.InsightRuleConfig, len(librarySpecs))
+	for i, spec := range librarySpecs {
+		out[i] = store.InsightRuleConfig{RuleID: spec.id, Enabled: true, Notify: false}
+	}
+	return out
+}
+
 // --- shared helpers used by more than one rule's Eval -------------------
 
 // splitPrefixedMetric splits a metric of the shape "<prefix><middle>.<suffix>"

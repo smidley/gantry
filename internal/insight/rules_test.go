@@ -539,6 +539,25 @@ func TestDefaultRulesReturnsAllSevenWithCompiledInDefaults(t *testing.T) {
 	}, ids)
 }
 
+func TestDefaultRuleConfigsSeedsAllSevenEnabledWithNotifyOff(t *testing.T) {
+	configs := DefaultRuleConfigs()
+
+	require.Len(t, configs, 7)
+	for _, c := range configs {
+		require.True(t, c.Enabled, "rule %s must default enabled", c.RuleID)
+		require.False(t, c.Notify, "rule %s must default notify off -- Global Constraints: no seeded rule pages by default", c.RuleID)
+		require.Empty(t, c.Overrides)
+	}
+	ids := make([]string, len(configs))
+	for i, c := range configs {
+		ids[i] = c.RuleID
+	}
+	require.ElementsMatch(t, []string{
+		RuleDiskIOContention, RuleIODrivenCPULoad, RuleCPUStarvation, RuleParitySlowdown,
+		RuleDiskSpinupChurn, RuleGPUEngineContention, RuleMemorySqueeze,
+	}, ids)
+}
+
 func TestMergeThresholdsIgnoresUnknownOverrideKeys(t *testing.T) {
 	defaults := map[string]float64{"a": 1, "b": 2}
 	got := mergeThresholds(defaults, map[string]float64{"b": 20, "c": 30})

@@ -14,6 +14,7 @@ const ROUTES: { hash: string; h1: string }[] = [
   { hash: '#/maintenance', h1: 'Maintenance' },
   { hash: '#/gpu', h1: 'GPU' },
   { hash: '#/events', h1: 'Events' },
+  { hash: '#/insights', h1: 'Insights' },
   { hash: '#/alerts', h1: 'Alerts' },
   { hash: '#/settings', h1: 'Settings' },
 ];

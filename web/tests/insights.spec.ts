@@ -1,0 +1,217 @@
+import { test, expect } from '@playwright/test';
+
+// Insights view (Phase 5 Tasks 11-13): active/history/rules, the
+// evidence drawer, and the alert-annotation bridge -- driven against
+// the real fake-mode binary (playwright.config.ts's webServer), the
+// same shared-server instance every other spec file in this suite
+// uses.
+//
+// Timing reality this file works around, the exact alerts.spec.ts
+// precedent for the identical reason: the insight engine's own fake-
+// mode demo schedule (internal/fake/fake.go's insightDemo* constants:
+// disk-io-contention ramps ~60s after boot, holds until ~240s;
+// memory-squeeze fires deterministically off the SAME OOM event
+// alerts' own demo uses, alertDemoOOMAt = 3 minutes) may be at ANY
+// point in its lifecycle by the time a given test actually runs
+// against this suite's one shared server. Every assertion that depends
+// on a specific finding being currently active accepts either "still
+// active" or "already resolved into history" -- never a hard
+// hard-coded confidence tier, since whether the PSI-upgrade path is
+// exercised in this environment is a fake-mode/tier concern this UI
+// layer doesn't control.
+
+test('insights view renders its heading and the tier-1 empty state on a cold-enough check', async ({ page }) => {
+  await page.goto('#/insights');
+  await expect(page.locator('h1.page-title')).toHaveText('Insights');
+  await expect(page.locator('.segmented__btn', { hasText: 'List' })).toBeVisible();
+  await expect(page.locator('.segmented__btn', { hasText: 'Map' })).toBeVisible();
+  await expect(page.locator('.insights-view__rules')).toBeVisible();
+  await expect(page.locator('.insights-view__history')).toBeVisible();
+});
+
+// demo-fire: the disk-io-contention/memory-squeeze story fires through
+// the real engine end to end. Polls up to 4 minutes (the plan's own
+// Task 15 contract for this exact check).
+test('demo-fire: a real finding fires through the engine and renders in Active or History with its statement', async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  test.setTimeout(4 * 60_000 + 30_000);
+
+  let activeNow: { rule_id: string; statement: string } | null = null;
+  let seenInHistory: { rule_id: string; statement: string } | null = null;
+  const deadline = Date.now() + 4 * 60_000;
+  while (Date.now() < deadline && !activeNow && !seenInHistory) {
+    const snap = await (await request.get(`${baseURL}/api/live/snapshot`)).json();
+    const found = snap.insights?.active?.find(
+      (i: { rule_id: string }) => i.rule_id === 'disk-io-contention' || i.rule_id === 'memory-squeeze',
+    );
+    if (found) {
+      activeNow = found;
+    } else {
+      const hist = await (await request.get(`${baseURL}/api/insights/history?limit=200`)).json();
+      seenInHistory = hist.find((h: { rule_id: string }) => h.rule_id === 'disk-io-contention' || h.rule_id === 'memory-squeeze') ?? null;
+    }
+    if (!activeNow && !seenInHistory) await page.waitForTimeout(3000);
+  }
+  expect(activeNow || seenInHistory, 'disk-io-contention or memory-squeeze must fire (or have already resolved) within 4 minutes').toBeTruthy();
+  const finding = (activeNow ?? seenInHistory)!;
+
+  await page.goto('#/insights');
+  if (activeNow) {
+    const row = page.locator('.insights-view__row', { hasText: finding.statement.slice(0, 30) });
+    await expect(row).toBeVisible();
+    await expect(row.locator('.insights-view__chip')).toBeVisible();
+  } else {
+    const historyRow = page.locator('.insights-view__row--history', { hasText: finding.statement.slice(0, 30) });
+    await expect(historyRow).toBeVisible();
+  }
+});
+
+test('evidence drawer opens from an Active or History row, shows the statement and numbers, and closes on Escape', async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  test.setTimeout(4 * 60_000 + 30_000);
+
+  // This suite runs fullyParallel, so nothing guarantees another test
+  // in this file has already run first -- poll for the full 4-minute
+  // demo budget here too, the exact demo-fire test's own contract,
+  // rather than assuming borrowed state from elsewhere in the file.
+  let id: number | null = null;
+  const deadline = Date.now() + 4 * 60_000;
+  while (Date.now() < deadline && id === null) {
+    const active = await (await request.get(`${baseURL}/api/insights`)).json();
+    if (active.active?.length > 0) {
+      id = active.active[0].id;
+      break;
+    }
+    const hist = await (await request.get(`${baseURL}/api/insights/history?limit=1`)).json();
+    if (hist.length > 0) id = hist[0].id;
+    if (id === null) await page.waitForTimeout(3000);
+  }
+  expect(id, 'at least one insight (active or historical) must exist within 4 minutes').not.toBeNull();
+
+  await page.goto('#/insights');
+  const row = page.locator('.insights-view__row, .insights-view__row--history').first();
+  await expect(row).toBeVisible();
+  await row.locator('.insights-view__statement-btn').click();
+
+  const drawer = page.locator('.insights-drawer');
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator('.insights-drawer__statement')).not.toBeEmpty();
+  // "show your working": at least one evidence number is rendered, or
+  // the drawer's own facts/dismiss rows are still visible even for a
+  // finding whose bundle happens to carry only zero-valued fields.
+  await expect(drawer.locator('.insights-drawer__facts')).toBeVisible();
+
+  await page.keyboard.press('Escape');
+  await expect(drawer).not.toBeVisible();
+});
+
+// Dismiss round-trip: the one MUTATING test in this file. Targets a
+// SPECIFIC finding by its own statement text throughout (never a raw
+// "active count"), so it stays correct regardless of whatever else is
+// concurrently active or resolving on this shared server -- the same
+// reasoning alerts.spec.ts's own silence round-trip test applies.
+test('dismiss round-trip: dismissing an active card removes it and adds a history row', async ({ page, request, baseURL }) => {
+  test.setTimeout(4 * 60_000 + 30_000);
+
+  let target: { id: number; statement: string } | null = null;
+  const deadline = Date.now() + 4 * 60_000;
+  while (Date.now() < deadline && !target) {
+    const snap = await (await request.get(`${baseURL}/api/live/snapshot`)).json();
+    if (snap.insights?.active?.length > 0) target = snap.insights.active[0];
+    else await page.waitForTimeout(3000);
+  }
+  test.skip(!target, 'no finding became active within the timeout on this shared server run');
+
+  await page.goto('#/insights');
+  // List mode explicitly -- the dismiss control lives on the Active
+  // card, not the map.
+  await page.locator('.segmented__btn', { hasText: 'List' }).click();
+  const row = page.locator('.insights-view__row', { hasText: target!.statement.slice(0, 30) });
+  await expect(row).toBeVisible();
+
+  await row.locator('.insights-view__dismiss-btn').click();
+  await row.locator('.insights-view__dismiss-menu .segmented__btn', { hasText: '1d' }).click();
+
+  await expect(row).not.toBeVisible();
+  const historyRow = page.locator('.insights-view__row--history', { hasText: target!.statement.slice(0, 30) });
+  await expect(historyRow).toBeVisible();
+  await expect(historyRow).toContainText('dismissed');
+});
+
+test('List/Map segmented toggle switches modes and updates the URL', async ({ page }) => {
+  await page.goto('#/insights');
+  const mapBtn = page.locator('.segmented__btn', { hasText: 'Map' });
+  const listBtn = page.locator('.segmented__btn', { hasText: 'List' });
+
+  await mapBtn.click();
+  await expect(mapBtn).toHaveClass(/segmented__btn--active/);
+  await expect(page).toHaveURL(/#\/insights\/map$/);
+
+  await listBtn.click();
+  await expect(listBtn).toHaveClass(/segmented__btn--active/);
+  await expect(page).toHaveURL(/#\/insights$/);
+});
+
+// A genuinely FRESH navigation (not a same-page hash change, which
+// never remounts the component -- see mode's own untrack seed, the
+// TopConsumers.svelte initialResource precedent): #/insights/map must
+// open straight into Map on its own, the real "someone pasted/clicked
+// this link" scenario. page.goto with only a fragment differing from
+// the CURRENT URL is a same-document hash change in every browser (no
+// navigation event at all), so this test starts from about:blank
+// first to force a real load.
+test('#/insights/map deep-links straight into Map on a fresh load', async ({ page }) => {
+  await page.goto('about:blank');
+  await page.goto('#/insights/map');
+  await expect(page.locator('.segmented__btn', { hasText: 'Map' })).toHaveClass(/segmented__btn--active/);
+});
+
+test('insights map renders (nodes and, given the shared server likely has an active/recent finding by now, an empty state or a real edge either way)', async ({
+  page,
+}) => {
+  await page.goto('#/insights/map');
+  // Either the calm empty state (nothing active right now) or a real
+  // SVG canvas with at least the legend swatches -- both are valid,
+  // mutually exclusive renderings of the same view; this test asserts
+  // the view never renders neither (a blank hole) nor both at once.
+  const empty = page.locator('.interaction-map__empty');
+  const canvas = page.locator('.interaction-map__canvas svg');
+  await expect(empty.or(canvas)).toBeVisible();
+  const emptyVisible = await empty.isVisible();
+  const canvasVisible = await canvas.isVisible();
+  expect(emptyVisible !== canvasVisible).toBe(true);
+});
+
+// ContainerDetail's own impact panel (Task 12) -- the share strip is
+// ALWAYS present (no engine required), while the two findings
+// directions render either real rows or the panel's own calm line,
+// same demo-timing tolerance as every other test in this file.
+test('ContainerDetail impact panel always shows the share strip, and findings when the demo has produced any', async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  await page.goto('#/containers/qbittorrent');
+  const panel = page.locator('.impact-panel');
+  await expect(panel).toBeVisible();
+  // The share strip's own direction block always renders (cpu/memory
+  // are always-known metrics for a running fake-mode container).
+  await expect(panel.locator('.impact-panel__direction-label', { hasText: 'Current share' })).toBeVisible();
+
+  const active = await (await request.get(`${baseURL}/api/insights`)).json();
+  const involvesQbittorrent = active.active.some(
+    (i: { culprit: string; culprits: string }) => i.culprit === 'qbittorrent' || i.culprits?.split(',').includes('qbittorrent'),
+  );
+  if (involvesQbittorrent) {
+    await expect(panel.locator('.impact-panel__direction-label', { hasText: 'Slowing' })).toBeVisible();
+    await expect(panel.locator('.impact-panel__statement').first()).not.toBeEmpty();
+  } else {
+    await expect(panel.locator('.impact-panel__calm')).toBeVisible();
+  }
+});

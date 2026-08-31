@@ -19,6 +19,16 @@
   import HealthDot from '../components/HealthDot.svelte';
   import ContainerRow from '../components/ContainerRow.svelte';
 
+  let { initialState = 'all' } = $props();
+  const STATE_FILTERS = [
+    { key: 'all', label: 'All' },
+    { key: 'running', label: 'Running' },
+    { key: 'active', label: 'Active now' },
+    { key: 'stopped', label: 'Stopped' },
+    { key: 'attention', label: 'Needs attention' },
+  ];
+  let stateFilter = $derived(STATE_FILTERS.some((f) => f.key === initialState) ? initialState : 'all');
+
   const LIVE_WINDOW_SEC = 900;
   // MAX_CONCURRENT_SEED_FETCHES caps how many /api/series requests this
   // view fires at once while seeding every row's CPU sparkline --
@@ -276,7 +286,12 @@
   let filteredNames = $derived(
     sortedNames.filter((name) => {
       const c = live.frame?.containers?.[name];
-      return c ? matchesContainerFilter(name, c.image ?? '', filterText) : false;
+      if (!c || !matchesContainerFilter(name, c.image ?? '', filterText)) return false;
+      if (stateFilter === 'running') return c.state === 'running';
+      if (stateFilter === 'active') return c.state === 'running' && Number.isFinite(c.metrics['cpu.pct']) && c.metrics['cpu.pct'] > 1;
+      if (stateFilter === 'stopped') return c.state !== 'running';
+      if (stateFilter === 'attention') return c.state === 'running' && containerHealthStatus(c.state, c.health) !== 'good';
+      return true;
     }),
   );
   // Never-started ("created") containers -- ephemeral CI-runner spawns
@@ -290,6 +305,7 @@
   let stoppedNames = $derived(containerPartition.stopped);
   let createdNames = $derived(containerPartition.created);
   let notRunningNames = $derived([...stoppedNames, ...createdNames]);
+  let notRunningOpen = $derived(stateFilter === 'stopped' || stoppedExpanded);
 </script>
 
 <div class="containers-view">
@@ -372,17 +388,29 @@
     </div>
   {/if}
 
-  <input
-    type="text"
-    class="containers-view__filter"
-    placeholder="Filter by name or image…"
-    bind:value={filterText}
-    aria-label="Filter containers by name or image"
-  />
+  <div class="containers-view__filters">
+    <div class="containers-view__state-filters" aria-label="Container status filters">
+      {#each STATE_FILTERS as filter (filter.key)}
+        <a
+          class="containers-view__state-filter"
+          class:containers-view__state-filter--active={stateFilter === filter.key}
+          href={filter.key === 'all' ? '#/containers' : `#/containers?state=${filter.key}`}
+          aria-current={stateFilter === filter.key ? 'page' : undefined}
+        >{filter.label}</a>
+      {/each}
+    </div>
+    <input
+      type="text"
+      class="containers-view__filter"
+      placeholder="Filter by name or image…"
+      bind:value={filterText}
+      aria-label="Filter containers by name or image"
+    />
+  </div>
 
   {#if runningNames.length === 0 && notRunningNames.length === 0}
     <p class="microlabel containers-view__empty">
-      {filterText ? 'No containers match that filter.' : 'No containers yet.'}
+            {filterText || stateFilter !== 'all' ? 'No containers match these filters.' : 'No containers yet.'}
     </p>
   {:else}
     <!-- Desktop: dense sortable table, its own horizontal-scroll
@@ -472,13 +500,17 @@
 
     {#if notRunningNames.length > 0}
       <div class="containers-view__stopped-header">
-        <button type="button" class="containers-view__stopped-toggle" onclick={() => (stoppedExpanded = !stoppedExpanded)}>
+        {#if stateFilter === 'stopped'}
+          <span class="containers-view__stopped-label microlabel">Not running ({notRunningNames.length})</span>
+        {:else}
+          <button type="button" class="containers-view__stopped-toggle" onclick={() => (stoppedExpanded = !stoppedExpanded)}>
           <span class="microlabel">
-            {stoppedExpanded ? '▼' : '▶'} Not running ({notRunningNames.length})
+            {notRunningOpen ? '▼' : '▶'} Not running ({notRunningNames.length})
           </span>
-        </button>
+          </button>
+        {/if}
       </div>
-      {#if stoppedExpanded}
+      {#if notRunningOpen}
         <!-- Stopped (exited/dead/etc.) and created (never-started) share
              this one collapsed section -- both are "nothing live to show"
              -- but each row still names its own real state (showState
@@ -570,6 +602,41 @@
     font-size: 0.9rem;
     max-width: 24rem;
   }
+  .containers-view__filters {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .containers-view__state-filters {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    padding: 0.2rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-soft);
+  }
+  .containers-view__state-filter {
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 0.65rem;
+    border-radius: 7px;
+    color: var(--ink-2);
+    font-size: 0.75rem;
+    font-weight: 550;
+    text-decoration: none;
+  }
+  .containers-view__state-filter:hover {
+    color: var(--ink);
+  }
+  .containers-view__state-filter--active {
+    background: var(--surface);
+    color: var(--accent-strong);
+    box-shadow: 0 1px 3px color-mix(in oklab, var(--ink) 12%, transparent);
+  }
   .containers-view__empty {
     margin: 0;
   }
@@ -623,6 +690,10 @@
     cursor: pointer;
     padding: 0.4rem 0;
     min-height: 40px;
+  }
+  .containers-view__stopped-label {
+    display: inline-block;
+    padding: 0.7rem 0;
   }
   .containers-view__cards {
     flex-direction: column;

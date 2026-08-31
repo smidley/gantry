@@ -10,6 +10,7 @@ import {
   alertEntityHref,
   channelLabel,
   annotateAlerts,
+  alertGuidance,
 } from './alerts';
 import type { AnnotatableAlert, AnnotationInsight, DescribableRule } from './alerts';
 
@@ -30,6 +31,26 @@ describe('alertEntityHref', () => {
 
   it('a container with no entity name has nowhere to link', () => {
     expect(alertEntityHref('container', '')).toBeNull();
+  });
+});
+
+describe('alertGuidance', () => {
+  it('sends host CPU alerts to CPU consumers with a cautious cause', () => {
+    expect(alertGuidance({ rule_id: 'host-cpu-high', kind: 'host', entity: '' })).toEqual({
+      cause: 'A sustained workload or runaway process is consuming host CPU.',
+      nextStep: 'Inspect CPU consumers',
+      href: '#/top/cpu',
+    });
+  });
+
+  it('links container guidance to the affected container', () => {
+    expect(alertGuidance({ rule_id: 'container-unhealthy', kind: 'container', entity: 'sonarr' }).href).toBe(
+      '#/containers/sonarr',
+    );
+  });
+
+  it('falls back safely for future disk rules', () => {
+    expect(alertGuidance({ rule_id: 'future-rule', kind: 'disk', entity: 'disk1' }).href).toBe('#/storage');
   });
 });
 

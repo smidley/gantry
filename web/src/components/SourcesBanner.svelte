@@ -31,46 +31,127 @@
   }
 </script>
 
-{#if dockerDegraded}
-  <div class="card sources-banner sources-banner--prominent" role="alert">
-    <HealthDot status="critical" label="docker" />
-    <span class="sources-banner__detail">{dockerDegraded[1]}</span>
-  </div>
+{#if dockerDegraded || otherDegraded.length > 0}
+  <details class="card sources-panel" open={!!dockerDegraded}>
+    <summary class="sources-panel__summary">
+      <span class="sources-panel__summary-icon" class:sources-panel__summary-icon--critical={!!dockerDegraded} aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 9v4M12 17h.01"/><path d="M10.3 4.4 2.6 18a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.4a2 2 0 0 0-3.4 0Z"/></svg>
+      </span>
+      <span class="sources-panel__summary-copy">
+        <strong>{dockerDegraded ? 'A core data source needs attention' : `${otherDegraded.length} optional ${otherDegraded.length === 1 ? 'source' : 'sources'} unavailable`}</strong>
+        <small>{dockerDegraded ? 'Some monitoring data may be incomplete.' : 'Gantry is monitoring everything else normally.'}</small>
+      </span>
+      <span class="sources-panel__chevron" aria-hidden="true">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 8 4 4 4-4"/></svg>
+      </span>
+    </summary>
+
+    <div class="sources-panel__body">
+      {#if dockerDegraded}
+        <div class="sources-banner sources-banner--prominent" role="alert">
+          <HealthDot status="critical" label="docker" />
+          <span class="sources-banner__detail">{dockerDegraded[1]}</span>
+        </div>
+      {/if}
+
+      {#each otherDegraded as [name, detail] (name)}
+        <div class="sources-banner">
+          <HealthDot status="warning" label={name} />
+          <span class="sources-banner__detail">
+            {detail}
+            {#if name === 'pressure'}
+              <a
+                class="sources-banner__learn-more"
+                href="https://github.com/smidley/gantry/blob/main/docs/psi.md"
+                target="_blank"
+                rel="noopener"
+              >
+                Learn more &rarr;
+              </a>
+            {/if}
+          </span>
+          <button type="button" class="sources-banner__dismiss" onclick={() => dismiss(name)} aria-label="Dismiss {name} notice">
+            &times;
+          </button>
+        </div>
+      {/each}
+    </div>
+  </details>
 {/if}
 
-{#each otherDegraded as [name, detail] (name)}
-  <div class="card sources-banner">
-    <HealthDot status="warning" label={name} />
-    <span class="sources-banner__detail">
-      {detail}
-      {#if name === 'pressure'}
-        <a
-          class="sources-banner__learn-more"
-          href="https://github.com/smidley/gantry/blob/main/docs/psi.md"
-          target="_blank"
-          rel="noopener"
-        >
-          Learn more &rarr;
-        </a>
-      {/if}
-    </span>
-    <button type="button" class="sources-banner__dismiss" onclick={() => dismiss(name)} aria-label="Dismiss {name} notice">
-      &times;
-    </button>
-  </div>
-{/each}
-
 <style>
+  .sources-panel {
+    overflow: hidden;
+    background: color-mix(in oklab, var(--surface) 90%, var(--accent-soft));
+  }
+  .sources-panel__summary {
+    min-height: 58px;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.65rem 0.9rem;
+    cursor: pointer;
+    list-style: none;
+  }
+  .sources-panel__summary::-webkit-details-marker {
+    display: none;
+  }
+  .sources-panel__summary-icon {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    color: var(--status-warning);
+    background: color-mix(in oklab, var(--status-warning) 12%, transparent);
+  }
+  .sources-panel__summary-icon--critical {
+    color: var(--status-critical);
+    background: color-mix(in oklab, var(--status-critical) 12%, transparent);
+  }
+  .sources-panel__summary-icon svg {
+    width: 17px;
+    height: 17px;
+  }
+  .sources-panel__summary-copy {
+    min-width: 0;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+  }
+  .sources-panel__summary-copy strong {
+    color: var(--ink);
+    font-size: 0.82rem;
+    font-weight: 650;
+  }
+  .sources-panel__summary-copy small {
+    color: var(--ink-2);
+    font-size: 0.73rem;
+  }
+  .sources-panel__chevron {
+    display: inline-flex;
+    width: 20px;
+    height: 20px;
+    color: var(--ink-3);
+    transition: transform 160ms ease;
+  }
+  .sources-panel[open] .sources-panel__chevron {
+    transform: rotate(180deg);
+  }
+  .sources-panel__body {
+    padding: 0 0.9rem 0.75rem;
+  }
   .sources-banner {
-    padding: 0.6rem 0.85rem;
+    padding: 0.62rem 0;
     display: flex;
     align-items: center;
     gap: 0.6rem;
-    margin-bottom: 0.6rem;
+    border-top: 1px solid var(--border);
   }
   .sources-banner--prominent {
-    border-color: color-mix(in oklab, var(--status-critical) 45%, transparent);
-    background: color-mix(in oklab, var(--status-critical) 8%, var(--surface));
+    border-color: color-mix(in oklab, var(--status-critical) 26%, var(--border));
   }
   .sources-banner__detail {
     flex: 1;
@@ -80,7 +161,7 @@
   }
   .sources-banner__learn-more {
     margin-left: 0.4em;
-    color: var(--series-1);
+    color: var(--accent);
     text-decoration: none;
     white-space: nowrap;
   }
@@ -88,8 +169,8 @@
     text-decoration: underline;
   }
   .sources-banner__dismiss {
-    min-width: 40px;
-    min-height: 40px;
+    min-width: 32px;
+    min-height: 32px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -102,5 +183,13 @@
   }
   .sources-banner__dismiss:hover {
     color: var(--ink);
+  }
+  @media (max-width: 34rem) {
+    .sources-panel__summary-copy small {
+      display: none;
+    }
+    .sources-banner {
+      align-items: flex-start;
+    }
   }
 </style>

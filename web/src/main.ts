@@ -8,8 +8,8 @@
 // 600/700 are all drawn from this one file); the browser only fetches
 // the unicode-range subset (e.g. latin) actually used on the page, so
 // this isn't heavier than the old per-weight static imports. IBM Plex
-// Mono survives unchanged -- it's the true-mono face for microlabels
-// and the log viewer, never used for prose or big numbers.
+// Mono is loaded only for the raw log viewer; the rest of the interface,
+// including micro-labels and chart axes, uses Inter for a uniform rhythm.
 import '@fontsource-variable/inter/wght.css';
 import '@fontsource/ibm-plex-mono/latin-400.css';
 import '@fontsource/ibm-plex-mono/latin-500.css';

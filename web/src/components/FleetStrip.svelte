@@ -19,18 +19,13 @@
   container fleet still needs to stay individually tappable, and the
   strip wraps rather than ever forcing horizontal scroll.
 
-  Heat ("make it earn its space"): a clean-running unit additionally
-  tints by its own live CPU host-share (fleetHeatVar's single-hue seq
-  ramp) -- status colors above always override it, stopped units never
-  get it. Hover AND keyboard focus reveal a small label (icon+name+CPU+
-  mem, CoreBudgetRibbon's own hover-label convention) since the strip
-  otherwise carries this information in aria-label alone.
+  Healthy running, stopped, and attention colors deliberately mirror
+  the visible key exactly. Hover AND keyboard focus reveal a small label
+  (icon+name+CPU+mem, CoreBudgetRibbon's own hover-label convention)
+  since the strip otherwise carries this information in aria-label alone.
 -->
 <script>
-  import { motion } from '../lib/motion.svelte';
-  import { live as liveStore } from '../lib/sse.svelte';
   import { containerHealthStatus } from '../lib/containerStatus';
-  import { fleetHeatVar } from '../lib/fleetHeat';
   import { fmtBytes, fmtPct } from '../lib/format';
   import ContainerIcon from './ContainerIcon.svelte';
 
@@ -40,41 +35,111 @@
   // the caller.
   let { containers = [] } = $props();
 
-  let glideMs = $derived(motion.reduced ? 0 : liveStore.glideMs);
-
   let hoveredName = $state(null);
   let hoveredContainer = $derived(containers.find((c) => c.name === hoveredName) ?? null);
+  let runningContainers = $derived(containers.filter((c) => c.state === 'running'));
+  let stoppedContainers = $derived(containers.filter((c) => c.state !== 'running'));
+  let runningCount = $derived(runningContainers.length);
+  let stoppedCount = $derived(stoppedContainers.length);
+  let activeCount = $derived(
+    runningContainers.filter((c) => Number.isFinite(c.cpuPct) && c.cpuPct > 1).length,
+  );
+  let groups = $derived.by(() => {
+    const split = [
+      { key: 'running', label: 'Running', items: runningContainers },
+      { key: 'stopped', label: 'Stopped', items: stoppedContainers },
+    ];
+    return containers.length === 0 ? [split[0]] : split.filter((group) => group.items.length > 0);
+  });
+  let attentionCount = $derived(
+    containers.filter((c) => c.state === 'running' && containerHealthStatus(c.state, c.health) !== 'good').length,
+  );
+  let attentionStatuses = $derived.by(() => {
+    const present = new Set(
+      runningContainers
+        .map((c) => containerHealthStatus(c.state, c.health))
+        .filter((status) => status !== 'good'),
+    );
+    return ['warning', 'serious', 'critical'].filter((status) => present.has(status));
+  });
 
-  function ariaLabel(name, state, health) {
+  function ariaLabel(name, state, health, cpuPct) {
     const meaningfulHealth = health === 'unhealthy' || health === 'starting';
-    return meaningfulHealth ? `${name}: ${state}, ${health}` : `${name}: ${state}`;
+    const stateLabel = meaningfulHealth ? `${name}: ${state}, ${health}` : `${name}: ${state}`;
+    return state === 'running' && Number.isFinite(cpuPct) && cpuPct > 1
+      ? `${stateLabel}, ${fmtPct(cpuPct)} CPU`
+      : stateLabel;
   }
 </script>
 
-<div class="fleet-strip-wrap">
-  <ul class="fleet-strip" aria-label={`Container fleet, ${containers.length} total`}>
-    {#each containers as c (c.name)}
-      {@const stopped = c.state !== 'running'}
-      {@const status = containerHealthStatus(c.state, c.health)}
-      {@const heat = !stopped && status === 'good' ? fleetHeatVar(c.cpuPct) : null}
-      <li>
-        <a
-          class="fleet-unit"
-          class:fleet-unit--stopped={stopped}
-          class:fleet-unit--warning={!stopped && status === 'warning'}
-          class:fleet-unit--serious={!stopped && status === 'serious'}
-          class:fleet-unit--critical={!stopped && status === 'critical'}
-          href={`#/containers/${encodeURIComponent(c.name)}`}
-          aria-label={ariaLabel(c.name, c.state, c.health)}
-          style={heat ? `--heat-bg: ${heat}; transition-duration: ${glideMs}ms` : undefined}
-          onmouseenter={() => (hoveredName = c.name)}
-          onmouseleave={() => (hoveredName = null)}
-          onfocus={() => (hoveredName = c.name)}
-          onblur={() => (hoveredName = null)}
-        ></a>
-      </li>
+<section class="fleet-strip-wrap" aria-labelledby="fleet-strip-title">
+  <div class="fleet-strip__head">
+    <div>
+      <h3 id="fleet-strip-title" class="fleet-strip__title">Container fleet</h3>
+      <p class="fleet-strip__summary">
+        <a href="#/containers?state=running"
+          ><i class="fleet-strip__key fleet-strip__key--running" aria-hidden="true"></i>{runningCount} running</a
+        >
+        {#if activeCount > 0}
+          <a href="#/containers?state=active"
+            ><i class="fleet-strip__key fleet-strip__key--activity" aria-hidden="true"></i>{activeCount} active now</a
+          >
+        {/if}
+        {#if stoppedCount > 0}
+          <a href="#/containers?state=stopped"
+            ><i class="fleet-strip__key fleet-strip__key--stopped" aria-hidden="true"></i>{stoppedCount} stopped</a
+          >
+        {/if}
+        {#if attentionCount > 0}
+          <a href="#/containers?state=attention"
+            ><span class="fleet-strip__key-stack" aria-hidden="true"
+              >{#each attentionStatuses as status}<i
+                  class="fleet-strip__key"
+                  style={`background:var(--status-${status})`}
+                ></i>{/each}</span
+            >{attentionCount} {attentionCount === 1 ? 'needs' : 'need'} attention</a
+          >
+        {/if}
+      </p>
+    </div>
+    <a class="fleet-strip__link" href="#/containers">View all <span aria-hidden="true">&rarr;</span></a>
+  </div>
+  <div class="fleet-strip__groups" role="group" aria-label={`Container fleet, ${containers.length} total`}>
+    {#each groups as group (group.key)}
+      <div class="fleet-strip__group" class:fleet-strip__group--stopped={group.key === 'stopped'}>
+        <a class="fleet-strip__group-head" href={`#/containers?state=${group.key}`}>
+          <span class={`fleet-strip__group-dot fleet-strip__group-dot--${group.key}`} aria-hidden="true"></span>
+          <span class="fleet-strip__group-name">{group.label}</span>
+          <span class="fleet-strip__group-count tabular-nums">{group.items.length}</span>
+        </a>
+        <ul class="fleet-strip" aria-label={`${group.label} containers, ${group.items.length}`}>
+          {#each group.items as c, i (c.name)}
+            {@const stopped = group.key === 'stopped'}
+            {@const status = containerHealthStatus(c.state, c.health)}
+            {@const active = !stopped && Number.isFinite(c.cpuPct) && c.cpuPct > 1}
+            <li>
+              <a
+                class="fleet-unit"
+                class:fleet-unit--stopped={stopped}
+                class:fleet-unit--active={active}
+                class:fleet-unit--busy={active && c.cpuPct >= 10}
+                class:fleet-unit--warning={!stopped && status === 'warning'}
+                class:fleet-unit--serious={!stopped && status === 'serious'}
+                class:fleet-unit--critical={!stopped && status === 'critical'}
+                href={`#/containers/${encodeURIComponent(c.name)}`}
+                aria-label={ariaLabel(c.name, c.state, c.health, c.cpuPct)}
+                style={active ? `--activity-delay: -${i * 137}ms` : undefined}
+                onmouseenter={() => (hoveredName = c.name)}
+                onmouseleave={() => (hoveredName = null)}
+                onfocus={() => (hoveredName = c.name)}
+                onblur={() => (hoveredName = null)}
+              ></a>
+            </li>
+          {/each}
+        </ul>
+      </div>
     {/each}
-  </ul>
+  </div>
   <div class="fleet-strip__label" class:fleet-strip__label--visible={!!hoveredContainer}>
     {#if hoveredContainer}
       <ContainerIcon name={hoveredContainer.name} icon={hoveredContainer.icon} size={14} />
@@ -85,15 +150,134 @@
       {#if hoveredContainer.memBytes !== undefined}
         <span class="tabular-nums">{fmtBytes(hoveredContainer.memBytes)}</span>
       {/if}
+    {:else}
+      <span>Glowing blocks are active now. Select any block for details.</span>
     {/if}
   </div>
-</div>
+</section>
 
 <style>
   .fleet-strip-wrap {
     display: flex;
     flex-direction: column;
+    gap: 0.8rem;
+    width: 100%;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: color-mix(in oklab, var(--surface) 78%, transparent);
+  }
+  .fleet-strip__head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .fleet-strip__title {
+    margin: 0;
+    color: var(--ink);
+    font-size: 0.92rem;
+    font-weight: 650;
+    letter-spacing: -0.015em;
+  }
+  .fleet-strip__summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.8rem;
+    margin: 0.3rem 0 0;
+    color: var(--ink-2);
+    font-size: 0.76rem;
+  }
+  .fleet-strip__summary > a {
+    display: inline-flex;
+    align-items: center;
     gap: 0.3rem;
+    color: inherit;
+    text-decoration: none;
+  }
+  .fleet-strip__summary > a:hover {
+    color: var(--accent-strong);
+  }
+  .fleet-strip__key {
+    width: 7px;
+    height: 7px;
+    flex-shrink: 0;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  .fleet-strip__key--stopped {
+    background: color-mix(in oklab, var(--ink) 40%, transparent);
+  }
+  .fleet-strip__key--activity {
+    --unit-color: var(--accent);
+    animation: fleet-activity-glow 2.2s ease-in-out infinite;
+  }
+  .fleet-strip__key-stack {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .fleet-strip__link {
+    flex-shrink: 0;
+    color: var(--accent);
+    font-size: 0.76rem;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .fleet-strip__link:hover {
+    color: var(--accent-strong);
+  }
+  .fleet-strip__groups {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .fleet-strip__group {
+    display: grid;
+    grid-template-columns: 5.5rem minmax(0, 1fr);
+    align-items: center;
+    gap: 0.75rem;
+    min-height: 2.65rem;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid color-mix(in oklab, var(--border) 78%, transparent);
+    border-radius: 9px;
+    background: var(--surface-soft);
+  }
+  .fleet-strip__group--stopped {
+    background: color-mix(in oklab, var(--ink) 2.5%, var(--surface-soft));
+  }
+  .fleet-strip__group-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    color: inherit;
+    text-decoration: none;
+  }
+  .fleet-strip__group-head:hover .fleet-strip__group-name {
+    color: var(--accent-strong);
+  }
+  .fleet-strip__group-dot {
+    width: 7px;
+    height: 7px;
+    flex-shrink: 0;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  .fleet-strip__group-dot--stopped {
+    background: color-mix(in oklab, var(--ink) 40%, transparent);
+  }
+  .fleet-strip__group-name {
+    overflow: hidden;
+    color: var(--ink);
+    font-size: 0.74rem;
+    font-weight: 600;
+    text-overflow: ellipsis;
+  }
+  .fleet-strip__group-count {
+    margin-left: auto;
+    color: var(--ink-2);
+    font-size: 0.7rem;
   }
   /* A plain <ul>/<li> pair -- not a <div role="list">/<a role="listitem">
      one -- carries list/listitem semantics implicitly and correctly: an
@@ -125,16 +309,12 @@
     display: flex;
   }
   .fleet-unit {
+    --unit-color: var(--accent);
     display: block;
     width: 8px;
     height: 16px;
     border-radius: 1px;
-    /* --heat-bg (inline, above): a var() indirection rather than setting
-       `background` straight from the style attribute, so the plain
-       :hover rule below (a normal stylesheet declaration for the same
-       property) can still win by specificity -- an inline `background`
-       would otherwise always beat it regardless. */
-    background: var(--heat-bg, color-mix(in oklab, var(--ink) 16%, transparent));
+    background: var(--unit-color);
     flex-shrink: 0;
     transition:
       background-color 150ms ease,
@@ -151,7 +331,8 @@
      "running clean" without reading as an alarm. Full rework (its own
      shape/pattern, not just a color) is a later round. */
   .fleet-unit--stopped {
-    background: color-mix(in oklab, var(--ink) 40%, transparent);
+    --unit-color: color-mix(in oklab, var(--ink) 40%, transparent);
+    background: var(--unit-color);
   }
   .fleet-unit--stopped:hover {
     background: color-mix(in oklab, var(--ink) 55%, transparent);
@@ -159,8 +340,7 @@
   }
   /* Enlarged AND recolored -- two channels, not color alone, per the
      status-never-color-alone floor (the per-unit aria-label above is
-     the third, for anyone who can't see either). Status colors always
-     override heat -- these three never read --heat-bg at all. */
+     the third, for anyone who can't see either). */
   .fleet-unit--warning,
   .fleet-unit--serious,
   .fleet-unit--critical {
@@ -168,25 +348,54 @@
     transform-origin: bottom;
   }
   .fleet-unit--warning {
-    background: var(--status-warning);
+    --unit-color: var(--status-warning);
+    background: var(--unit-color);
   }
   .fleet-unit--warning:hover {
     background: var(--status-warning);
     filter: brightness(1.1);
   }
   .fleet-unit--serious {
-    background: var(--status-serious);
+    --unit-color: var(--status-serious);
+    background: var(--unit-color);
   }
   .fleet-unit--serious:hover {
     background: var(--status-serious);
     filter: brightness(1.1);
   }
   .fleet-unit--critical {
-    background: var(--status-critical);
+    --unit-color: var(--status-critical);
+    background: var(--unit-color);
   }
   .fleet-unit--critical:hover {
     background: var(--status-critical);
     filter: brightness(1.1);
+  }
+  .fleet-unit--active {
+    animation: fleet-activity-glow 2.2s ease-in-out infinite;
+    animation-delay: var(--activity-delay, 0ms);
+  }
+  .fleet-unit--busy {
+    animation-name: fleet-activity-glow-busy;
+    animation-duration: 1.45s;
+  }
+  @keyframes fleet-activity-glow {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in oklab, var(--unit-color) 0%, transparent);
+    }
+    50% {
+      box-shadow: 0 0 7px 1px color-mix(in oklab, var(--unit-color) 52%, transparent);
+    }
+  }
+  @keyframes fleet-activity-glow-busy {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in oklab, var(--unit-color) 0%, transparent);
+    }
+    50% {
+      box-shadow: 0 0 11px 3px color-mix(in oklab, var(--unit-color) 62%, transparent);
+    }
   }
 
   /* Fixed-height label row, always present in layout (opacity-toggled,
@@ -200,10 +409,32 @@
     min-height: 1.2rem;
     font-size: 0.8rem;
     color: var(--ink-2);
-    opacity: 0;
-    transition: opacity 150ms ease;
+    opacity: 0.72;
+    transition:
+      color 150ms ease,
+      opacity 150ms ease;
   }
   .fleet-strip__label--visible {
     opacity: 1;
+    color: var(--ink);
+  }
+
+  @media (max-width: 27rem) {
+    .fleet-strip__group {
+      grid-template-columns: 1fr;
+      gap: 0.5rem;
+    }
+    .fleet-strip__group-count {
+      margin-left: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .fleet-strip__key--activity,
+    .fleet-unit--active,
+    .fleet-unit--busy {
+      animation: none;
+      box-shadow: 0 0 0 2px color-mix(in oklab, var(--unit-color) 28%, transparent);
+    }
   }
 </style>

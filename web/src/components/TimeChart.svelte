@@ -25,6 +25,7 @@
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
   import { live as liveStore } from '../lib/sse.svelte';
   import { motion } from '../lib/motion.svelte';
+  import { scrubBus } from '../lib/scrubbus.svelte';
 
   // formatValue (additive, optional -- Task 14-17's own fold-in note:
   // "views pre-format tooltip values (or formatter callback) -- TimeChart
@@ -96,7 +97,7 @@
   // 1e6) so a series is always considered "close enough" to focus
   // regardless of the cursor's actual y-distance from it -- this always
   // resolves to nearest-by-y rather than only within some pixel radius.
-  const FOCUS_DIM_ALPHA = 0.35;
+  const FOCUS_DIM_ALPHA = 0.28;
   const FOCUS_PROX_PX = 1e6;
 
   const SEVERITY_VAR = {
@@ -108,9 +109,9 @@
 
   // --- D2 visual modernization: quieter grid/axes, matching the
   // microlabel type ramp instead of uPlot's own defaults --------------
-  const GRID_ALPHA_PCT = 10; // whisper-weight horizontal gridlines only -- see build()'s axes config
-  const AXIS_FONT = '11px "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace'; // canvas fonts can't read var(--font-mono); literal stack
-  const MIN_TICK_SPACE_PX = 64; // thins tick density on both axes vs. uPlot's own tighter default
+  const GRID_ALPHA_PCT = 12; // whisper-weight horizontal gridlines only -- see build()'s axes config
+  const AXIS_FONT = '11px "Inter Variable", ui-sans-serif, system-ui, sans-serif'; // canvas fonts can't read var(--font-sans); literal stack
+  const MIN_TICK_SPACE_PX = 72; // calmer tick density on both axes vs. uPlot's own tighter default
 
   // xScaleRange is uPlot's Range.Function for the x scale -- the actual
   // padding-vs-explicit-domain decision is lib/chartRange.ts's pure
@@ -125,6 +126,8 @@
   let plotEl;
   let chart = null;
   let ro = null;
+  const scrubSourceId = {};
+  let applyingBusCursor = false;
 
   // prevShape is the last-built chart's structural shape (see
   // lib/chartRebuild.ts) -- compared against the current one on every
@@ -277,8 +280,8 @@
   // seriesFill (used in build()) reads fillFocusIdx/fillFocusChangedAtMs
   // on every uPlot draw to decide whether a given series gets a gradient
   // at all, and how far into its own fade-in it currently is.
-  const FILL_FADE_MS = 160;
-  const FILL_TOP_ALPHA_PCT = 18; // series color -> transparent, per the brief's own ~18%->0
+  const FILL_FADE_MS = 240;
+  const FILL_TOP_ALPHA_PCT = 15; // enough depth to locate the line without turning the plot into a solid area chart
   let fillFocusIdx = null;
   let fillFocusChangedAtMs = 0;
   let fillFadeRaf = null;
@@ -343,7 +346,10 @@
   // CSS-pixel space, so marker hit-testing uses valToPos's CSS-pixel
   // variant (canvasPixels omitted) to match.
   function handleCursor(u) {
+    const eventTarget = u.cursor.event?.target;
+    const localPointer = !!eventTarget && !!container?.contains(eventTarget);
     if (u.cursor.left == null || u.cursor.left < 0) {
+      if (localPointer && !applyingBusCursor) scrubBus.clear(scrubSourceId);
       tooltip = null;
       hoverMarker = null;
       trackFillFocus(null);
@@ -384,6 +390,10 @@
               .sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity)),
           };
 
+    if (localPointer && !applyingBusCursor && tooltip?.ts != null) {
+      scrubBus.publish(tooltip.ts, scrubSourceId);
+    }
+
     const HOVER_PX = 6;
     hoverMarker = null;
     for (const m of markers) {
@@ -422,7 +432,7 @@
       {
         width,
         height,
-        padding: [8, 8, 8, 8],
+        padding: [12, 12, 10, 8],
         scales: { x: { time: true, range: xScaleRange } },
         axes: [
           {
@@ -474,7 +484,7 @@
               // way to stay visually distinct from the solid container
               // lines around it.
               stroke: s.strokeAlphaPct != null ? withAlpha(colorHex, s.strokeAlphaPct) : colorHex,
-              width: s.width ?? 2,
+              width: s.width ?? 2.25,
               dash: s.dash,
               cap: 'round', // D2 pass: "rounded joins/caps" (joins already default to round in this uPlot version)
               points: { show: false },
@@ -483,7 +493,7 @@
           }),
         ],
         cursor: {
-          points: { show: true },
+          points: { show: true, size: 8, width: 2 },
           focus: { prox: FOCUS_PROX_PX },
           ...(syncKey ? { sync: { key: syncKey } } : {}),
         },
@@ -582,6 +592,23 @@
     prevShape = shape;
   });
 
+  // Bridge TimeChart's uPlot cursor group to the same page-global scrub
+  // instant used by sparklines and stat tiles. Existing syncKey groups
+  // still handle TimeChart-to-TimeChart movement; this adds the missing
+  // TimeChart-to-Sparkline direction without creating a second clock.
+  $effect(() => {
+    const ts = scrubBus.ts;
+    if (!chart || scrubBus.isOwner(scrubSourceId)) return;
+    applyingBusCursor = true;
+    if (ts === null) {
+      chart.setCursor({ left: -10, top: -10 });
+    } else {
+      const left = chart.valToPos(ts, 'x');
+      if (Number.isFinite(left)) chart.setCursor({ left, top: chart.cursor.top ?? chart.bbox.height / 2 });
+    }
+    applyingBusCursor = false;
+  });
+
   // The live-mode animation subscription is its own effect (rather than
   // folded into the data effect above) so it can react to `live` itself
   // flipping -- a range-picker switch away from Live must unsubscribe
@@ -614,6 +641,7 @@
   });
 
   onDestroy(() => {
+    scrubBus.clear(scrubSourceId);
     ro?.disconnect();
     if (fillFadeRaf !== null) cancelAnimationFrame(fillFadeRaf);
     chart?.destroy();
@@ -650,11 +678,20 @@
   .time-chart {
     position: relative;
     width: 100%;
+    border-radius: 11px;
+    background: linear-gradient(180deg, color-mix(in oklab, var(--accent) 3%, var(--surface-muted)), transparent 72%);
+  }
+  .time-chart :global(.uplot) {
+    border-radius: inherit;
   }
   .time-chart :global(.u-legend) {
     color: var(--ink);
     font-family: var(--font-mono);
     font-size: 0.75rem;
+    padding-top: 0.35rem;
+  }
+  .time-chart :global(.u-legend .u-marker) {
+    border-radius: 999px !important;
   }
   /* Per-series focus dimming (see FOCUS_DIM_ALPHA above) sets opacity as
      a plain inline style/class straight from uPlot's own JS -- these
@@ -665,7 +702,16 @@
     transition: opacity 150ms ease;
   }
   .time-chart :global(.u-cursor-pt) {
-    transition: opacity 150ms ease;
+    border: 2px solid var(--surface) !important;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--ink) 14%, transparent), 0 2px 7px color-mix(in oklab, var(--ink) 18%, transparent);
+    transition: opacity 150ms ease, box-shadow 150ms ease;
+  }
+  .time-chart :global(.u-cursor-x) {
+    border-right: 1px solid color-mix(in oklab, var(--ink) 24%, transparent) !important;
+  }
+  .time-chart :global(.u-cursor-y) {
+    border-bottom-color: transparent !important;
   }
   /* Unified tooltip (D2 pass): one floating panel, elevated off the
      chart with the same card-shadow FORMULA app.css's own .card uses
@@ -674,23 +720,30 @@
      read as floating ABOVE plotted lines, not as a static surface. */
   .time-chart__tooltip {
     position: absolute;
-    transform: translate(10px, 10px);
-    background: var(--surface);
-    border: 1px solid color-mix(in oklab, var(--ink) 10%, transparent);
-    border-radius: 8px;
-    padding: 0.5rem 0.65rem;
+    transform: translate(12px, 12px);
+    min-width: 11.5rem;
+    background: color-mix(in oklab, var(--surface) 96%, transparent);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 0.62rem 0.72rem;
     color: var(--ink);
     font-size: 0.75rem;
     white-space: nowrap;
     pointer-events: none;
     z-index: 5;
-    box-shadow: 0 4px 16px color-mix(in oklab, var(--ink) 16%, transparent);
+    box-shadow: var(--shadow-md);
+    backdrop-filter: blur(12px) saturate(125%);
+  }
+  .time-chart__tooltip > .microlabel {
+    display: block;
+    margin-bottom: 0.35rem;
   }
   .time-chart__tooltip-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: 8px minmax(0, 1fr) auto;
     align-items: center;
-    gap: 0.4rem;
-    padding: 0.1rem 0;
+    gap: 0.5rem;
+    padding: 0.16rem 0;
   }
   .time-chart__tooltip-detail {
     margin: 0 0 0.1rem 1.2rem; /* aligns under the row's own label, past the swatch */
@@ -699,8 +752,8 @@
   }
   .time-chart__swatch {
     display: inline-block;
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
   }
@@ -710,8 +763,8 @@
     transform: translateX(-50%);
     background: var(--surface);
     border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    border-radius: 4px;
-    padding: 0.1rem 0.35rem;
+    border-radius: 7px;
+    padding: 0.18rem 0.42rem;
     pointer-events: none;
     z-index: 4;
     white-space: nowrap;

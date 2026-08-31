@@ -435,6 +435,143 @@ describe('deriveOverviewStatus acknowledgements', () => {
   });
 });
 
+describe('deriveOverviewStatus insights merge (Task 13)', () => {
+  const insight = (over: Record<string, unknown> = {}) => ({
+    victim_kind: 'container',
+    victim: 'jellyfin',
+    statement: 'qbittorrent is starving jellyfin on disk3',
+    severity: 'warning',
+    confidence: 'likely',
+    fired_at: 100,
+    ...over,
+  });
+  const firingOnJellyfin = {
+    rule_id: 'container-mem-limit',
+    rule_name: 'Container near memory limit',
+    severity: 'warning',
+    kind: 'container',
+    entity: 'jellyfin',
+    silenced: false,
+    metric: 'mem.limit_pct',
+  };
+
+  it('a warning-or-worse finding with no matching alert row gets its own row, counted in the headline', () => {
+    const status = deriveOverviewStatus({ ...BASE, insights: [insight()] });
+    expect(status.anomalies).toEqual([
+      {
+        kind: 'insight',
+        statement: 'qbittorrent is starving jellyfin on disk3',
+        severity: 'warning',
+        confidence: 'likely',
+      },
+    ]);
+    expect(status.headline).toBe('1 thing needs you');
+  });
+
+  it('an info finding never becomes a row, whatever its confidence -- it belongs on the Insights view', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      insights: [insight({ severity: 'info' }), insight({ severity: 'info', confidence: 'confirmed' })],
+    });
+    expect(status.ok).toBe(true);
+    expect(status.anomalies).toEqual([]);
+  });
+
+  it('an alert-severity finding maps to a critical row, same vocabulary bridge the alerts merge uses', () => {
+    const status = deriveOverviewStatus({ ...BASE, insights: [insight({ severity: 'alert', confidence: 'confirmed' })] });
+    expect(status.anomalies[0]).toMatchObject({ kind: 'insight', severity: 'critical', confidence: 'confirmed' });
+  });
+
+  it('a finding never duplicates an alert row for its victim -- the alert row wins and carries the why suffix', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [firingOnJellyfin],
+      insights: [insight()],
+    });
+    expect(status.anomalies).toHaveLength(1);
+    const [row] = status.anomalies;
+    expect(row.kind).toBe('alert');
+    expect(describeAnomaly(row).detail).toBe('jellyfin · Likely cause: qbittorrent is starving jellyfin on disk3');
+    expect(status.headline).toBe('1 thing needs you');
+  });
+
+  it('a confirmed finding annotates as "Cause", not "Likely cause"', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [firingOnJellyfin],
+      insights: [insight({ confidence: 'confirmed', statement: 'qbittorrent is driving 78% of disk3 IO' })],
+    });
+    expect(describeAnomaly(status.anomalies[0]).detail).toBe('jellyfin · Cause: qbittorrent is driving 78% of disk3 IO');
+  });
+
+  it('the match needs the alert kind AND entity to agree -- a same-name victim of another kind stays its own row', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [{ ...firingOnJellyfin, kind: 'disk', entity: 'jellyfin' }],
+      insights: [insight()],
+    });
+    expect(status.anomalies).toHaveLength(2);
+    expect(status.anomalies.map((a) => a.kind).sort()).toEqual(['alert', 'insight']);
+  });
+
+  it('several findings naming one victim: the best-ranked annotates, every other one stays off the list', () => {
+    const weak = insight({ statement: 'weak finding', severity: 'warning', confidence: 'likely' });
+    const strong = insight({ statement: 'strong finding', severity: 'alert', confidence: 'confirmed' });
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [firingOnJellyfin],
+      insights: [weak, strong],
+    });
+    expect(status.anomalies).toHaveLength(1);
+    expect(describeAnomaly(status.anomalies[0]).detail).toBe('jellyfin · Cause: strong finding');
+  });
+
+  it('an alert folded into a frame-derived row is not an alert row -- the finding still stands on its own', () => {
+    // container-unhealthy dedups into the 'unhealthy' frame anomaly, so
+    // no alert row exists for grafana; the finding is extra diagnosis
+    // (why grafana is struggling), not a duplicate of any visible row.
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['grafana'],
+      alerts: [
+        {
+          rule_id: 'container-unhealthy',
+          rule_name: 'Container unhealthy',
+          severity: 'warning',
+          kind: 'container',
+          entity: 'grafana',
+          silenced: false,
+        },
+      ],
+      insights: [insight({ victim: 'grafana', statement: 'qbittorrent is starving grafana on disk3' })],
+    });
+    expect(status.anomalies.map((a) => a.kind)).toEqual(['unhealthy', 'insight']);
+    expect(status.headline).toBe('2 things need you');
+  });
+
+  it('eligible findings land ranked -- severity first, then confidence -- after every other source', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['sonarr'],
+      insights: [
+        insight({ victim: 'a', statement: 'lesser', severity: 'warning', confidence: 'likely' }),
+        insight({ victim: 'b', statement: 'greater', severity: 'alert', confidence: 'confirmed' }),
+      ],
+    });
+    expect(status.anomalies.map((a) => (a.kind === 'insight' ? a.statement : a.kind))).toEqual([
+      'unhealthy',
+      'greater',
+      'lesser',
+    ]);
+  });
+
+  it('a missing insights field behaves exactly like an empty array', () => {
+    const withUndefined = deriveOverviewStatus({ ...BASE, unhealthyNames: ['sonarr'] });
+    const withEmpty = deriveOverviewStatus({ ...BASE, unhealthyNames: ['sonarr'], insights: [] });
+    expect(withUndefined).toEqual(withEmpty);
+  });
+});
+
 describe('ackKeyFor', () => {
   it('maps every frame-derived kind to its concrete (kind, entity) identity', () => {
     expect(ackKeyFor({ kind: 'unhealthy', name: 'sonarr' })).toEqual({ kind: 'unhealthy', entity: 'sonarr' });
@@ -450,6 +587,12 @@ describe('ackKeyFor', () => {
   it('is null for an alert-backed callout -- its ack IS an alert silence, one mechanism per system', () => {
     expect(
       ackKeyFor({ kind: 'alert', ruleId: 'host-cpu-high', ruleName: 'Host CPU high', entity: '', severity: 'warning' }),
+    ).toBeNull();
+  });
+
+  it('is null for an insight-backed callout -- quieting a finding is dismissing it on the Insights view', () => {
+    expect(
+      ackKeyFor({ kind: 'insight', statement: 'qbittorrent is starving jellyfin on disk3', severity: 'warning', confidence: 'likely' }),
     ).toBeNull();
   });
 });
@@ -478,6 +621,25 @@ describe('describeAnomaly', () => {
       describeAnomaly({ kind: 'alert', ruleId: 'host-cpu-high', ruleName: 'Host CPU high', entity: '', severity: 'warning' })
         .href,
     ).toBe('#/alerts');
+    expect(
+      describeAnomaly({ kind: 'insight', statement: 'qbittorrent is starving jellyfin on disk3', severity: 'warning', confidence: 'likely' })
+        .href,
+    ).toBe('#/insights');
+  });
+
+  it('insight renders its statement as the title and the confidence reading as the detail', () => {
+    const likely = describeAnomaly({
+      kind: 'insight',
+      statement: 'qbittorrent is starving jellyfin on disk3',
+      severity: 'warning',
+      confidence: 'likely',
+    });
+    expect(likely.title).toBe('qbittorrent is starving jellyfin on disk3');
+    expect(likely.detail).toBe('Likely');
+    expect(likely.severity).toBe('warning');
+    expect(
+      describeAnomaly({ kind: 'insight', statement: 's', severity: 'critical', confidence: 'confirmed' }).detail,
+    ).toBe('Confirmed');
   });
 
   it('disk-usage formats the percentage via fmtPct (one decimal, clamped)', () => {

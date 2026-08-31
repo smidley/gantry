@@ -375,7 +375,7 @@
     top: 0;
     bottom: 0;
     width: 1px;
-    background: color-mix(in oklab, var(--ink) 35%, transparent);
+    background: color-mix(in oklab, var(--ink) 24%, transparent);
     pointer-events: none;
     opacity: 0;
     transition: opacity 150ms ease;
@@ -385,10 +385,12 @@
   }
   .sparkline__dot {
     position: absolute;
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    transform: translate(-3px, -3px);
+    border: 2px solid var(--surface);
+    transform: translate(-4px, -4px);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--ink) 14%, transparent), 0 2px 6px color-mix(in oklab, var(--ink) 16%, transparent);
     pointer-events: none;
     opacity: 0;
     transition: opacity 150ms ease;

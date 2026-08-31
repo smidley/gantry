@@ -119,7 +119,7 @@ test('demo-fire: disk-temp-high on disk4 actually fires through the real engine,
 
   // Overview's own attention list must link the same concern to this view.
   await page.goto('#/');
-  const calloutLink = page.locator('.overview__attn-title', { hasText: 'Disk temperature high' });
+  const calloutLink = page.locator('.callout-row__title', { hasText: 'Disk temperature high' });
   if ((await calloutLink.count()) > 0) {
     await expect(calloutLink).toHaveAttribute('href', '#/alerts');
   }

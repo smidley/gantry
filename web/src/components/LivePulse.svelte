@@ -26,50 +26,83 @@
       {/if}
     </span>
   {/key}
-  <span class="microlabel live-pulse__text">{statusText}</span>
+  <span class="live-pulse__text">{statusText}</span>
 </span>
 
 <style>
   .live-pulse {
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: 0.52rem;
+    min-height: 34px;
+    padding: 0.35rem 0.72rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--surface) 84%, transparent);
+    box-shadow: 0 1px 2px color-mix(in oklab, var(--ink) 7%, transparent);
   }
   .live-pulse__dot {
     position: relative;
     display: inline-block;
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
+    flex-shrink: 0;
     border-radius: 50%;
     background: var(--status-good);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--status-good) 13%, transparent);
   }
   .live-pulse__ring {
     position: absolute;
-    inset: -6px;
+    inset: -4px;
     border-radius: 50%;
-    background: var(--status-good);
-    opacity: 0.5;
-    animation: live-pulse-ring 900ms ease-out;
+    border: 1px solid var(--status-good);
+    opacity: 0;
+    animation: live-pulse-ring 1400ms cubic-bezier(0.16, 1, 0.3, 1);
   }
   @keyframes live-pulse-ring {
     from {
-      opacity: 0.5;
-      transform: scale(0.4);
+      opacity: 0.42;
+      transform: scale(0.72);
     }
     to {
       opacity: 0;
-      transform: scale(1.8);
+      transform: scale(1.7);
     }
   }
-  .live-pulse--stale .live-pulse__dot,
-  .live-pulse--stale .live-pulse__ring {
+  .live-pulse--stale .live-pulse__dot {
     background: var(--status-warning);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--status-warning) 13%, transparent);
+  }
+  .live-pulse--stale .live-pulse__ring {
+    border-color: var(--status-warning);
   }
   .live-pulse--off .live-pulse__dot {
     background: transparent;
-    border: 1.5px solid var(--ink-2);
+    border: 1.5px solid var(--ink-3);
+    box-shadow: none;
+  }
+  .live-pulse--off .live-pulse__ring {
+    display: none;
   }
   .live-pulse__text {
-    min-width: 6.5em;
+    min-width: 5.65em;
+    color: var(--ink-2);
+    font-size: 0.72rem;
+    font-weight: 620;
+    line-height: 1;
+    letter-spacing: 0.035em;
+    text-transform: none;
+    white-space: nowrap;
+  }
+
+  @media (max-width: 34rem) {
+    .live-pulse {
+      min-height: 32px;
+      padding: 0.3rem 0.58rem;
+    }
+    .live-pulse__text {
+      min-width: auto;
+      font-size: 0.68rem;
+    }
   }
 </style>

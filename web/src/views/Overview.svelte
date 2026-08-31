@@ -95,9 +95,11 @@
   import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { createRankStabilityState, stableTopN } from '../lib/rankStability';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
-  import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, fleetSentence, worstSeverity } from '../lib/overviewStatus';
+  import { acks } from '../lib/acks.svelte';
+  import { calloutTextBySlot, deriveOverviewStatus, worstSeverity } from '../lib/overviewStatus';
   import { band } from '../lib/thresholds';
 
+  import CalloutRow from '../components/CalloutRow.svelte';
   import StatTile from '../components/StatTile.svelte';
   import FleetStrip from '../components/FleetStrip.svelte';
   import BaySchematic from '../components/BaySchematic.svelte';
@@ -210,14 +212,12 @@
 
   // created (never-started) containers -- ephemeral CI-runner spawns are
   // the live example that prompted this -- are excluded from the fleet
-  // headline/strip entirely: nothing to monitor, and a churny burst of
-  // them would otherwise flood both. runningCount/stoppedCount both read
-  // containerRunState rather than the raw state string, so "stopped"
-  // here means exited/dead/etc., never created; the Containers view
-  // lists created containers separately (see its own partition).
+  // strip entirely: nothing to monitor, and a churny burst of them
+  // would otherwise flood it. containerRunState (not the raw state
+  // string) decides what counts as running, so "created" is never
+  // conflated with a real stop; the Containers view lists created
+  // containers separately (see its own partition).
   let containerEntries = $derived(Object.entries(live.frame?.containers ?? {}));
-  let runningCount = $derived(containerEntries.filter(([, c]) => containerRunState(c.state) === 'running').length);
-  let stoppedCount = $derived(containerEntries.filter(([, c]) => containerRunState(c.state) === 'stopped').length);
   let unhealthyNames = $derived(unhealthyContainerNames(live.frame?.containers ?? {}));
   let fleetContainers = $derived(
     containerEntries
@@ -231,12 +231,6 @@
         memBytes: c.metrics['mem.bytes'],
       })),
   );
-
-  // total excludes created containers too (runningCount+stoppedCount,
-  // not containerEntries.length) -- fleetSentence's own "all running"
-  // phrasing must not count a never-started container as part of the
-  // fleet it's describing.
-  let fleetLine = $derived(fleetSentence(runningCount + stoppedCount, runningCount, stoppedCount));
 
   // TOP_MODULE_LIMIT: this module's own top-N cut, per the D2 compact-
   // module brief. ALL_PRESENT_LIMIT feeds topFromFrame instead -- rank
@@ -375,17 +369,26 @@
   let overviewStatus = $derived(
     deriveOverviewStatus({
       unhealthyNames,
-      stoppedCount,
       arrayStarted: started,
       disks,
       sources: live.frame?.sources ?? {},
       alerts: live.frame?.alerts?.firing ?? [],
+      acks: acks.list,
+      insights: live.frame?.insights?.active ?? [],
     }),
   );
   let statusColor = $derived(`var(--status-${worstSeverity(overviewStatus.anomalies)})`);
 
   let diskAnomalies = $derived(
     overviewStatus.anomalies.filter((a) => a.kind === 'disk-usage' || a.kind === 'disk-errors'),
+  );
+  let diskAlertBySlot = $derived.by(
+    () =>
+      new Map(
+        (live.frame?.alerts?.firing ?? [])
+          .filter((alert) => !alert.silenced && alert.kind === 'disk' && alert.entity)
+          .map((alert) => [alert.entity, alert.summary || alert.rule_name]),
+      ),
   );
 
   // baySchematicEntries: the schematic is now always in the status
@@ -395,17 +398,19 @@
   // as nothing.
   let baySchematicEntries = $derived.by(() => {
     const calloutBySlot = calloutTextBySlot(diskAnomalies);
-    return diskEntries.map((d) => ({
-      slot: d.slot,
-      pct: d.pct,
-      flagged: calloutBySlot.has(d.slot),
-      calloutText: calloutBySlot.get(d.slot),
-      kind: d.kind,
-      device: d.device,
-      tempState: d.tempState,
-      usedBytes: d.usedBytes,
-      freeBytes: d.freeBytes,
-    }));
+    return diskEntries
+      .map((d) => ({
+        slot: d.slot,
+        pct: d.pct,
+        flagged: calloutBySlot.has(d.slot) || diskAlertBySlot.has(d.slot),
+        calloutText: calloutBySlot.get(d.slot) ?? diskAlertBySlot.get(d.slot),
+        kind: d.kind,
+        device: d.device,
+        tempState: d.tempState,
+        usedBytes: d.usedBytes,
+        freeBytes: d.freeBytes,
+      }))
+      .sort((a, b) => Number(b.flagged) - Number(a.flagged) || b.pct - a.pct || a.slot.localeCompare(b.slot));
   });
 
   // closingLine only appears once something has actually been flagged --
@@ -448,6 +453,10 @@
   }
 
   onMount(() => {
+    // acks load once alongside the first events fetch -- the list rides
+    // outside the SSE frame (see acks.svelte.ts), so the derivation
+    // above sees every standing acknowledgement from first render.
+    acks.ensureLoaded();
     loadEvents();
     const interval = setInterval(loadEvents, EVENTS_POLL_MS);
     window.addEventListener('focus', loadEvents);
@@ -462,7 +471,7 @@
   <h1 class="page-title">Overview</h1>
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
-  <div class="overview__headline-zone">
+  <div class="card overview__headline-zone">
     <div class="overview__headline-row">
       <span
         class="overview__headline-dot"
@@ -474,7 +483,6 @@
     </div>
     <div class="overview__status-band">
       <div class="overview__status-facts">
-        <p class="overview__sub-line">{fleetLine}</p>
         <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
         {#if hottestSentence}
           <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
@@ -484,29 +492,14 @@
           <section class="overview__attention">
             <span class="microlabel">Needs a look</span>
             {#each overviewStatus.anomalies as anomaly, i (i)}
-              {@const text = describeAnomaly(anomaly)}
-              <p class="overview__attn-line">
-                <span class="overview__attn-dot" style={`background:var(--status-${text.severity})`} aria-hidden="true"
-                ></span>
-                {#if text.linkContainer}
-                  <a class="overview__attn-title" href={`#/containers/${encodeURIComponent(text.linkContainer)}`}>{text.title}</a>
-                {:else if text.href}
-                  <a class="overview__attn-title" href={text.href}>{text.title}</a>
-                {:else}
-                  <span class="overview__attn-title">{text.title}</span>
-                {/if}
-                {#if text.detail}<span class="overview__attn-detail">&mdash; {text.detail}</span>{/if}
-              </p>
+              <CalloutRow {anomaly} />
             {/each}
           </section>
         {/if}
       </div>
       <div class="overview__status-visuals">
         <FleetStrip containers={fleetContainers} />
-        <BaySchematic entries={baySchematicEntries} />
-        {#if closingLine}
-          <p class="overview__closing-line">{closingLine}</p>
-        {/if}
+        <BaySchematic entries={baySchematicEntries} summary={closingLine} />
       </div>
     </div>
   </div>
@@ -568,7 +561,7 @@
     </div>
 
     <div class="overview__modules-narrow">
-      <div class="overview__metrics-rail">
+      <div class="card overview__metrics-rail">
         <StatTile
           bare
           href="#/top/cpu"
@@ -622,7 +615,7 @@
   .overview {
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
+    gap: 1rem;
   }
 
   /* --- Modules band: Top Consumers + Recent events share one wide
@@ -638,12 +631,12 @@
   .overview__modules-band {
     display: flex;
     align-items: flex-start;
-    gap: 2rem;
+    gap: 1rem;
   }
   .overview__modules-wide {
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
+    gap: 1rem;
     flex: 1.6 1 0;
     min-width: 0;
   }
@@ -663,8 +656,13 @@
   .overview__headline-zone {
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: 1.15rem;
     min-width: 0;
+    padding: clamp(1.15rem, 2vw, 1.6rem);
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 92% 5%, color-mix(in oklab, var(--accent) 11%, transparent), transparent 18rem),
+      var(--surface-raised);
   }
 
   .overview__headline-row {
@@ -674,8 +672,8 @@
   }
   .overview__headline-dot {
     position: relative;
-    width: 14px;
-    height: 14px;
+    width: 11px;
+    height: 11px;
     border-radius: 50%;
     flex-shrink: 0;
   }
@@ -709,8 +707,9 @@
   .overview__headline-text {
     font-family: var(--font-display);
     font-weight: 700;
-    font-size: 2rem;
+    font-size: clamp(1.75rem, 3vw, 2.45rem);
     line-height: 1.1;
+    letter-spacing: -0.045em;
     margin: 0;
     color: var(--ink);
   }
@@ -735,7 +734,7 @@
   .overview__status-band {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 1.25rem;
   }
   @media (min-width: 48rem) {
     .overview__status-band {
@@ -752,12 +751,12 @@
   .overview__status-facts {
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: 0.45rem;
   }
   .overview__status-visuals {
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: 0.75rem;
   }
   .overview__sub-line {
     margin: 0;
@@ -773,6 +772,7 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+    padding: 1.2rem;
   }
 
   /* --- Attention: plain content, connected to the headline by
@@ -781,52 +781,25 @@
      other subline above it. No frame, no brackets, no leader line: the
      one rule surviving the corrective pass is that a line either
      separates two real regions or encodes real data. Each row is one
-     inline sentence (title + reason), not a title line over a separate
-     detail line -- the header-compaction pass. --------------------- */
+     CalloutRow (title + inline reason + ack control -- its own doc);
+     this section only owns the shared container they stack in. ------ */
 
   .overview__attention {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.55rem;
+    margin-top: 0.6rem;
+    padding: 0.9rem 1rem;
+    border-radius: 11px;
+    background: color-mix(in oklab, var(--status-warning) 8%, var(--surface-muted));
+    border: 1px solid color-mix(in oklab, var(--status-warning) 20%, var(--border));
   }
-  .overview__attn-line {
-    display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin: 0;
-  }
-  .overview__attn-dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    align-self: center;
-  }
-  .overview__attn-title {
-    font-weight: 600;
-    font-size: 1.02rem;
-    color: var(--ink);
-  }
-  a.overview__attn-title {
-    color: inherit;
-  }
-  .overview__attn-detail {
-    color: var(--ink-2);
-    font-size: 0.88rem;
-  }
-  .overview__closing-line {
-    color: var(--ink-2);
-    font-size: 0.88rem;
-    margin: 0;
-  }
-
   /* --- Top Consumers / Recent events (each now stacked in its own
      column above -- see overview__body's own doc) ------------------- */
 
   .overview__top,
   .overview__events {
-    padding: 1rem;
+    padding: 1.2rem;
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
@@ -838,7 +811,7 @@
   }
   .overview__top-link {
     font-size: 0.78rem;
-    color: var(--series-1);
+    color: var(--accent);
     text-decoration: none;
   }
   .overview__top-scale {
@@ -847,16 +820,19 @@
   }
   .overview__top-switcher {
     display: inline-flex;
+    gap: 3px;
+    padding: 3px;
     align-self: flex-start;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    border-radius: 6px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
     overflow: hidden;
+    background: var(--surface-soft);
   }
   .overview__top-switch {
-    min-height: 28px;
+    min-height: 30px;
     padding: 0 0.6rem;
     border: none;
-    border-right: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    border-radius: 6px;
     background: transparent;
     color: var(--ink-2);
     font-family: var(--font-mono);
@@ -865,13 +841,11 @@
     letter-spacing: 0.04em;
     cursor: pointer;
   }
-  .overview__top-switch:last-child {
-    border-right: none;
-  }
   .overview__top-switch--active {
-    background: color-mix(in oklab, var(--series-1) 15%, transparent);
-    color: var(--series-1);
+    background: var(--surface);
+    color: var(--accent-strong);
     font-weight: 600;
+    box-shadow: 0 1px 2px color-mix(in oklab, var(--ink) 12%, transparent);
   }
   .overview__events-empty {
     margin: 0;

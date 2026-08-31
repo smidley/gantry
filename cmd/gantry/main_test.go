@@ -531,7 +531,7 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
@@ -588,7 +588,7 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	require.Empty(t, dc.Running(), "dc's own registry never saw this container -- the fix must not depend on it")
 	c, ok := snap.Containers["jellyfin"]
@@ -631,7 +631,7 @@ func TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO(t *testing.T
 		}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["jellyfin"]
 	require.True(t, ok)
@@ -663,7 +663,7 @@ func TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running"}} // Created left at its zero value
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	require.Equal(t, int64(0), snap.Containers["jellyfin"].Created)
 }
@@ -697,7 +697,7 @@ func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
 		return []docker.Meta{{Name: "db", State: "running"}} // running unconditionally, per buildSnapshot's own entity-level contract
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -728,7 +728,7 @@ func TestBuildSnapshotIncludesStoppedContainerWithEmptyMetrics(t *testing.T) {
 		return []docker.Meta{{Name: "gitea", State: "exited", Health: "", Image: "demo/gitea:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["gitea"]
 	require.True(t, ok, "a stopped-but-known container must still appear in the frame")
@@ -761,7 +761,7 @@ func TestBuildSnapshotPassesThroughComposeProject(t *testing.T) {
 		}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	require.Equal(t, "gridmind-cloud", snap.Containers["gridmind-api"].ComposeProject)
 	require.Equal(t, "", snap.Containers["jellyfin"].ComposeProject)
@@ -791,7 +791,7 @@ func TestBuildSnapshotPassesThroughCpusetAndExitCode(t *testing.T) {
 		}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	require.Equal(t, "0-1", snap.Containers["minecraft"].Cpuset)
 	require.Equal(t, 0, snap.Containers["minecraft"].ExitCode)
@@ -822,7 +822,7 @@ func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testin
 		return []docker.Meta{{Name: "db", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -854,7 +854,7 @@ func TestBuildSnapshotDropsStaleContainerGPUBusyPct(t *testing.T) {
 		return []docker.Meta{{Name: "plex", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["plex"]
 	require.True(t, ok)
@@ -901,7 +901,7 @@ rotational="1"
 		return map[string]unraid.DiskMeta{"flash": {Device: "sdi", Kind: "usb"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, fakeDiskMeta, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, fakeDiskMeta, nil, nil, nil)()
 
 	require.Equal(t, server.DiskMetaDTO{Device: "sdc", Kind: "hdd"}, snap.DiskMeta["disk1"], "the real unraid collector's own DiskMeta must survive into the DTO")
 	require.Equal(t, server.DiskMetaDTO{Device: "sdi", Kind: "usb"}, snap.DiskMeta["flash"], "fake mode's own DiskMeta overlay must land alongside it, not replace it")
@@ -944,7 +944,7 @@ func TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced(t *t
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)()
 
 	require.Len(t, snap.Alerts.Firing, 1, "the pending instance must be excluded from the frame")
 	f := snap.Alerts.Firing[0]
@@ -985,7 +985,7 @@ func TestBuildSnapshotAlertsBlockCapsAtTwentyAndReportsTruncated(t *testing.T) {
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)()
 
 	require.Len(t, snap.Alerts.Firing, server.AlertsFrameCap)
 	require.Equal(t, 25, snap.Alerts.FiringCount)
@@ -1007,7 +1007,7 @@ func TestBuildSnapshotAlertsBlockEmptyChannelsWhenNoDispatcher(t *testing.T) {
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)()
 
 	require.Empty(t, snap.Alerts.Channels)
 	require.Empty(t, snap.Alerts.Firing)

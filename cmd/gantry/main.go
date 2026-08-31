@@ -363,7 +363,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// snapshot (Options.Snapshot), /api/live's connect frame (Options.
 	// Current), and the publish loop below -- all three read the exact
 	// same assembly, just on different triggers (poll, connect, tick).
-	snapshotFn := buildSnapshot(st, dc, ur, gp, nv, registry.Sources, fakeMetas, fakeDiskMeta, dispatcher)
+	snapshotFn := buildSnapshot(st, dc, ur, gp, nv, registry.Sources, fakeMetas, fakeDiskMeta, dispatcher, insightEngine, pr.Tier)
 	live := server.NewBroadcaster()
 
 	// SSE publish loop: every 2s, marshal the current snapshot and fan it
@@ -419,6 +419,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 
 		Alerts:   alertsAdapter{st: st, dispatcher: dispatcher},
 		Webhooks: webhooksAdapter{st: st, envLocked: webhookURLEnv != ""},
+		Insights: insightsAdapter{st: st, engine: insightEngine, pressureTier: pr.Tier},
 
 		ReadOnly:    readOnly,
 		AppendEvent: st.AppendEvent,
@@ -494,7 +495,7 @@ const containerFrameMaxAge = 60
 // and channel-health data GET /api/alerts serves on demand, assembled
 // fresh every tick so an SSE client sees an alert fire/resolve/channel
 // degrade live rather than on its next poll.
-func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, gp *gpu.Collector, nv *gpu.NvidiaCollector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta, dispatcher *alert.Dispatcher) func() server.SnapshotDTO {
+func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, gp *gpu.Collector, nv *gpu.NvidiaCollector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta, dispatcher *alert.Dispatcher, insightEngine *insight.Engine, pressureTier func() string) func() server.SnapshotDTO {
 	return func() server.SnapshotDTO {
 		dto := server.SnapshotDTO{
 			TS:            time.Now().Unix(),
@@ -601,17 +602,19 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 		}
 
 		dto.Alerts = buildAlertsBlock(st, dispatcher)
+		dto.Insights = buildInsightsBlock(st, insightEngine, pressureTier)
 		return dto
 	}
 }
 
-// alertsFrameContext is the fixed background context every buildSnapshot
-// tick's alert reads run under: the closure this feeds (server.Options.
-// Snapshot/Current, and the 2s publish loop) has no per-call caller
-// context of its own to thread through, the same reasoning the shutdown
-// flush at the bottom of run() already documents for its own
-// context.Background() use.
-var alertsFrameContext = context.Background()
+// snapshotFrameContext is the fixed background context every
+// buildSnapshot tick's store reads run under -- alerts' own and, since
+// Phase 5, insights' own (buildInsightsBlock): the closure this feeds
+// (server.Options.Snapshot/Current, and the 2s publish loop) has no
+// per-call caller context of its own to thread through, the same
+// reasoning the shutdown flush at the bottom of run() already documents
+// for its own context.Background() use.
+var snapshotFrameContext = context.Background()
 
 // buildAlertsBlock assembles SnapshotDTO.Alerts (Task 8): every FIRING
 // instance (pending excluded -- engine bookkeeping, not user-facing, the
@@ -621,7 +624,7 @@ var alertsFrameContext = context.Background()
 // one tick, never fatal to the frame -- the same "degrade, don't error"
 // posture Sources already models, and the next 2s tick tries again.
 func buildAlertsBlock(st *store.Store, dispatcher *alert.Dispatcher) server.AlertsBlockDTO {
-	rules, err := st.AlertRules(alertsFrameContext)
+	rules, err := st.AlertRules(snapshotFrameContext)
 	if err != nil {
 		log.Println("alerts frame: rules:", err)
 	}
@@ -630,11 +633,11 @@ func buildAlertsBlock(st *store.Store, dispatcher *alert.Dispatcher) server.Aler
 		ruleByID[r.ID] = r
 	}
 
-	active, err := st.ActiveAlertInstances(alertsFrameContext)
+	active, err := st.ActiveAlertInstances(snapshotFrameContext)
 	if err != nil {
 		log.Println("alerts frame: active instances:", err)
 	}
-	silences, err := st.Silences(alertsFrameContext, time.Now().Unix())
+	silences, err := st.Silences(snapshotFrameContext, time.Now().Unix())
 	if err != nil {
 		log.Println("alerts frame: silences:", err)
 	}
@@ -666,6 +669,34 @@ func buildAlertsBlock(st *store.Store, dispatcher *alert.Dispatcher) server.Aler
 		Firing: firing, FiringCount: total, Truncated: truncated,
 		Channels: channelHealthMap(dispatcher),
 	}
+}
+
+// buildInsightsBlock assembles SnapshotDTO.Insights (Phase 5 Task 9):
+// every active finding via server.ToInsightDTO with includeEvidence
+// false (Task 9's own frame contract: "statements included, evidence
+// excluded"; the evidence drawer fetches the full bundle on demand
+// through GET /api/insights/{id}), plus the live pressure tier and the
+// engine's own dropped-by-cap count. A read error is logged and treated
+// as empty for this one tick, never fatal to the frame -- the exact
+// buildAlertsBlock posture just above.
+func buildInsightsBlock(st *store.Store, engine *insight.Engine, pressureTier func() string) server.InsightsBlockDTO {
+	active, err := st.ActiveInsights(snapshotFrameContext)
+	if err != nil {
+		log.Println("insights frame: active instances:", err)
+	}
+	out := make([]server.InsightDTO, len(active))
+	for i, inst := range active {
+		out[i] = server.ToInsightDTO(inst, false)
+	}
+	tier := "proxy"
+	if pressureTier != nil {
+		tier = pressureTier()
+	}
+	suppressed := 0
+	if engine != nil {
+		suppressed = engine.Dropped()
+	}
+	return server.InsightsBlockDTO{Active: out, Tier: tier, Suppressed: suppressed}
 }
 
 // channelHealthMap reports every configured delivery channel's current
@@ -1565,6 +1596,62 @@ func (a alertsAdapter) AddSilence(sil store.Silence) (store.Silence, error) {
 func (a alertsAdapter) DeleteSilence(id int64) error { return a.st.DeleteSilence(id) }
 
 func (a alertsAdapter) Channels() map[string]string { return channelHealthMap(a.dispatcher) }
+
+// insightsAdapter implements server.InsightsIface (Phase 5 Task 9) over
+// *store.Store plus the running *insight.Engine's own Dropped() and the
+// pressure collector's Tier() -- kept in main, not the server package,
+// the same reason alertsAdapter is: server stays store/engine-shape-
+// agnostic. engine/pressureTier are both read live on every call rather
+// than snapshotted once at construction, since both can change across
+// this adapter's lifetime (Dropped() grows every tick; Tier() flips if
+// /proc/pressure ever appears or disappears).
+type insightsAdapter struct {
+	st           *store.Store
+	engine       *insight.Engine
+	pressureTier func() string
+}
+
+func (a insightsAdapter) Active(ctx context.Context) ([]store.InsightInstance, error) {
+	return a.st.ActiveInsights(ctx)
+}
+
+func (a insightsAdapter) ByID(ctx context.Context, id int64) (store.InsightInstance, bool, error) {
+	return a.st.InsightByID(ctx, id)
+}
+
+func (a insightsAdapter) History(ctx context.Context, from, to int64, limit int) ([]store.InsightInstance, error) {
+	return a.st.InsightHistory(ctx, from, to, limit)
+}
+
+func (a insightsAdapter) RuleConfigs(ctx context.Context) ([]store.InsightRuleConfig, error) {
+	return a.st.InsightRuleConfigs(ctx)
+}
+
+func (a insightsAdapter) SaveRuleConfig(c store.InsightRuleConfig) error {
+	return a.st.UpsertInsightRuleConfig(c)
+}
+
+func (a insightsAdapter) AddDismissal(d store.InsightDismissal) (int64, error) {
+	return a.st.AddInsightDismissal(d)
+}
+
+func (a insightsAdapter) Resolve(id, at int64, reason string) error {
+	return a.st.ResolveInsight(id, at, reason)
+}
+
+func (a insightsAdapter) Tier() string {
+	if a.pressureTier == nil {
+		return "proxy"
+	}
+	return a.pressureTier()
+}
+
+func (a insightsAdapter) Suppressed() int {
+	if a.engine == nil {
+		return 0
+	}
+	return a.engine.Dropped()
+}
 
 // webhooksAdapter implements server.WebhooksIface (Task 8) over the same
 // settings-blob-backed target list Task 7 built (loadWebhookTargets/

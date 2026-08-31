@@ -186,6 +186,15 @@ type Options struct {
 	// every write route 404s, matching Alerts' own convention.
 	Insights InsightsIface
 
+	// Auth backs the /api/auth routes, the session gate over the whole
+	// /api surface, and healthz's authenticated/unauthenticated split
+	// (main wiring: the *auth.Manager directly, which satisfies
+	// AuthIface -- see api_auth.go). Nil in tests that don't wire one:
+	// the gate is then simply off (gateActive is false), the /api/auth
+	// mutation routes 404 (the Settings-PUT convention), and status
+	// reports an open zero-config install.
+	Auth AuthIface
+
 	// Acks backs GET/POST /api/acks and DELETE /api/acks/{id} -- the
 	// Overview attention module's "stop showing me this for a while"
 	// control over frame-derived anomalies (main wiring: a small adapter
@@ -276,6 +285,15 @@ func New(o Options) *Server {
 	s.mux.Handle("GET /api/alerts/webhooks", withGzip(http.HandlerFunc(s.handleAlertsWebhooksGet)))
 	s.mux.Handle("PUT /api/alerts/webhooks", withGzip(http.HandlerFunc(s.handleAlertsWebhooksPut)))
 
+	// Auth routes. login/logout/status are in gate.go's authExemptPaths
+	// (each for its own documented reason); password/disable are gated
+	// like any other route whenever the gate is on.
+	s.mux.Handle("GET /api/auth/status", withGzip(http.HandlerFunc(s.handleAuthStatus)))
+	s.mux.Handle("POST /api/auth/login", withGzip(http.HandlerFunc(s.handleAuthLogin)))
+	s.mux.Handle("POST /api/auth/logout", withGzip(http.HandlerFunc(s.handleAuthLogout)))
+	s.mux.Handle("POST /api/auth/password", withGzip(http.HandlerFunc(s.handleAuthPassword)))
+	s.mux.Handle("POST /api/auth/disable", withGzip(http.HandlerFunc(s.handleAuthDisable)))
+
 	s.mux.Handle("GET /api/acks", withGzip(http.HandlerFunc(s.handleAcksGet)))
 	s.mux.Handle("POST /api/acks", withGzip(http.HandlerFunc(s.handleAcksPost)))
 	s.mux.Handle("DELETE /api/acks/{id}", withGzip(http.HandlerFunc(s.handleAcksDelete)))
@@ -302,7 +320,20 @@ func New(o Options) *Server {
 
 func (s *Server) Handler() http.Handler { return s.root }
 
-func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+// handleHealthz answers in two shapes: the full body for an open
+// install or an authenticated caller, and a bare {"status":"ok"} for an
+// unauthenticated caller while the password gate is on. The route must
+// stay reachable without a session (the Docker HEALTHCHECK and
+// reverse-proxy checks carry no cookies and only look at the status
+// code), but the full body is genuinely informative -- version, uptime,
+// and the sources map whose unavailability details include filesystem
+// hint text -- none of which an unauthenticated LAN scanner should get
+// for free once the owner has locked the box.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if s.gateActive() && !s.requestAuthenticated(r) {
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
 	sources := map[string]string{}
 	if s.opts.Sources != nil {
 		sources = s.opts.Sources()

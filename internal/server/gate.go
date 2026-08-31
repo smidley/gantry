@@ -1,7 +1,11 @@
 package server
 
 import (
+	"net"
 	"net/http"
+	"time"
+
+	"github.com/smidley/gantry/internal/auth"
 )
 
 // Cross-site request defense for the whole mutating /api surface.
@@ -65,17 +69,141 @@ func crossSiteHeaderPresent(r *http.Request) bool {
 		r.Header.Get(gantryConfirmHeader) != ""
 }
 
+// sessionCookieName carries the raw session token. HttpOnly (script
+// can never read it), SameSite=Lax (belt to the custom-header braces
+// above), Path=/ (the SSE stream and every API route need it), Secure
+// whenever the request arrived over TLS -- Gantry itself serves plain
+// HTTP, so TLS means a terminating proxy, detected via r.TLS or the
+// proxy's own X-Forwarded-Proto. A client spoofing that header only
+// makes its OWN cookie stricter, so trusting it here is safe. Max-Age
+// is the ABSOLUTE cap, not the sliding window: the server-side session
+// row is the source of truth for validity, the cookie just has to
+// outlive it -- a cookie that expired client-side before the row did
+// would log the user out early for no reason.
+const sessionCookieName = "gantry_session"
+
+// authExemptPaths are reachable without a session even while the gate
+// is on -- each one for a load-bearing reason:
+//   - /api/healthz: the Docker HEALTHCHECK and reverse-proxy checks
+//     probe it with no cookie jar; unauthenticated it answers a bare
+//     {"status":"ok"} (handleHealthz's split) so nothing sensitive --
+//     version, uptime, the sources map's filesystem hint text -- leaks
+//     to an unauthenticated LAN scanner.
+//   - /api/auth/login: the door itself.
+//   - /api/auth/status: the SPA must know whether to render the login
+//     screen before it can possibly log in. It reveals only that a
+//     password gate exists -- which the login screen reveals anyway.
+//   - /api/auth/logout: needs only the cookie it's deleting; letting an
+//     expired session "log out" is an idempotent no-op, and gating it
+//     would turn logout-after-expiry into a confusing 401.
+//
+// Everything else under /api -- including paths that don't exist --
+// requires a session while the gate is on: the mux's own 404 for an
+// unknown API path is only reachable authenticated. The SPA shell and
+// static assets are never gated: the app must load to show the login
+// screen.
+var authExemptPaths = map[string]bool{
+	"/api/healthz":     true,
+	"/api/auth/login":  true,
+	"/api/auth/status": true,
+	"/api/auth/logout": true,
+}
+
+// gateActive reports whether requests must carry a valid session:
+// there's an Auth manager, it isn't delegating to a reverse proxy, and
+// a password is actually set. Nil Auth (tests that don't wire one) and
+// fresh zero-config installs are open -- that IS the product default.
+func (s *Server) gateActive() bool {
+	return s.opts.Auth != nil && s.opts.Auth.Mode() != auth.ModeProxy && s.opts.Auth.PasswordSet()
+}
+
+func sessionTokenFrom(r *http.Request) string {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return ""
+	}
+	return c.Value
+}
+
+// requestAuthenticated reports whether r carries a live session. Long-
+// lived streams (/api/live, follow logs) are checked once at connect,
+// like the rest of the request; a session expiring mid-stream doesn't
+// sever it -- the stream carries only what the session was entitled to
+// when it opened, and the browser's next reconnect re-checks.
+func (s *Server) requestAuthenticated(r *http.Request) bool {
+	if s.opts.Auth == nil {
+		return false
+	}
+	token := sessionTokenFrom(r)
+	if token == "" {
+		return false
+	}
+	return s.opts.Auth.Authenticate(token)
+}
+
+func requestIsTLS(r *http.Request) bool {
+	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsTLS(r),
+		MaxAge:   int(auth.SessionAbsoluteCap / time.Second),
+	})
+}
+
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsTLS(r),
+		MaxAge:   -1,
+	})
+}
+
+// clientIP is the rate limiter's and audit events' notion of "who":
+// the TCP peer, never X-Forwarded-For -- XFF is client-supplied and any
+// LAN process could stamp a fresh fake value per request to sidestep
+// the per-IP login bucket entirely. In auto mode Gantry is normally hit
+// directly, so the peer IS the client; behind a trusted proxy the
+// built-in gate is off (GANTRY_AUTH=proxy) and this never matters.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 // secureAPI wraps the whole mux (New assigns it to s.root; both
-// Handler() and ListenAndServe serve through it) so the check is
+// Handler() and ListenAndServe serve through it) so both checks are
 // structurally impossible for a newly added route to forget --
 // default-closed for the entire current and future /api surface. The
-// SPA shell and its assets are never mutating and never checked.
+// SPA shell and its assets are never mutating and never gated: the app
+// must be able to load to show the login screen.
+//
+// Order: cross-site header first (cheapest, and a forged request should
+// die as forged regardless of session state), then the session gate.
+// The SPA always sends the header, so a legitimate call with an expired
+// session still gets the 401 its redirect-to-login flow keys on.
 func (s *Server) secureAPI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isAPIPath(r.URL.Path) {
 			if isMutatingMethod(r.Method) && !csrfExemptPaths[r.URL.Path] && !crossSiteHeaderPresent(r) {
 				writeError(w, http.StatusForbidden,
 					"cross-site request blocked: send the "+requestedWithHeader+": "+requestedWithValue+" header")
+				return
+			}
+			if s.gateActive() && !authExemptPaths[r.URL.Path] && !s.requestAuthenticated(r) {
+				writeError(w, http.StatusUnauthorized, "authentication required")
 				return
 			}
 		}

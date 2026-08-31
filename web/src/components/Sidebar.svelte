@@ -16,7 +16,21 @@
 <nav class="sidebar hidden md:flex" aria-label="Primary">
   <a class="sidebar__brand" href="#/" aria-label="Gantry overview">
     <span class="sidebar__brand-mark" aria-hidden="true">
-      <span></span><span></span><span></span>
+      <!-- The app icon (assets/icon/gantry.svg) inlined so the mark is
+           always the real crane; geometry stays in lockstep with the
+           master by hand -- edit both or neither. -->
+      <svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+        <rect x="0" y="0" width="256" height="256" rx="56" fill="#0b0b0b" />
+        <rect x="0" y="0" width="256" height="256" rx="56" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="3" />
+        <rect x="54" y="82" width="156" height="26" rx="4" fill="#2a78d6" />
+        <rect x="54" y="108" width="28" height="83" rx="4" fill="#2a78d6" />
+        <rect x="146" y="108" width="28" height="83" rx="4" fill="#2a78d6" />
+        <rect x="105" y="106" width="21" height="15" rx="2" fill="#ffffff" />
+        <rect x="111" y="119" width="9" height="25" fill="#ffffff" />
+        <rect x="85" y="144" width="61" height="40" rx="4" fill="#ffffff" />
+        <rect x="107" y="144" width="5" height="40" fill="#2a78d6" />
+        <rect x="119" y="144" width="5" height="40" fill="#2a78d6" />
+      </svg>
     </span>
     <span class="sidebar__brand-copy">
       <strong>Gantry</strong>
@@ -85,23 +99,13 @@
   .sidebar__brand-mark {
     width: 36px;
     height: 36px;
-    border-radius: 10px;
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    gap: 3px;
-    padding: 8px;
-    background: linear-gradient(145deg, #a6b2ff, #5269e8);
-    box-shadow: 0 8px 24px rgb(82 105 232 / 0.26);
+    flex-shrink: 0;
   }
-  .sidebar__brand-mark span {
-    width: 4px;
-    border-radius: 3px;
-    background: #141722;
+  .sidebar__brand-mark svg {
+    display: block;
+    width: 100%;
+    height: 100%;
   }
-  .sidebar__brand-mark span:nth-child(1) { height: 10px; opacity: 0.65; }
-  .sidebar__brand-mark span:nth-child(2) { height: 18px; }
-  .sidebar__brand-mark span:nth-child(3) { height: 14px; opacity: 0.82; }
   .sidebar__brand-copy {
     display: flex;
     flex-direction: column;

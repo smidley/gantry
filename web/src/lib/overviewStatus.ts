@@ -1,5 +1,5 @@
-// Pure derivation for Overview's D2 status headline: "Everything is
-// running" vs "N things need you", plus the ordered list of individual
+// Pure derivation for Overview's D2 status headline: "Nothing needs
+// you" vs "N things need you", plus the ordered list of individual
 // anomalies that back the attention module's rows. Kept plain (no
 // Svelte/DOM) so the counting rule itself -- the one piece of new product
 // logic this redesign adds -- is directly unit-testable, same split as
@@ -390,10 +390,14 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
   // The headline count stays anomalies.length either way (Task 12's own
   // invariant, unchanged from before alerts existed): "N things need
   // you" and the number of rows can never disagree, whether a row came
-  // from an instantaneous frame check or a sustained-for alert.
+  // from an instantaneous frame check or a sustained-for alert. The
+  // all-clear is that same sentence at zero, not a different claim
+  // (Scott: "something besides everything is running" -- the old
+  // "Everything is running" asserted MORE than the derivation checks,
+  // since stopped-on-purpose containers are fine and never counted).
   const ok = anomalies.length === 0;
   const headline = ok
-    ? 'Everything is running'
+    ? 'Nothing needs you'
     : anomalies.length === 1
       ? '1 thing needs you'
       : `${anomalies.length} things need you`;

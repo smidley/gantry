@@ -48,6 +48,26 @@ describe('FleetStrip', () => {
     expect(body).toContain('fleet-unit--stopped'); // prowlarr: exited
   });
 
+  // Active means cpu.pct > 1 -- one percent of the WHOLE HOST
+  // (host-share, not docker-stats per-core), the same bar the Containers
+  // view's "Active now" filter uses. Busy is the >= 10 tier on top.
+  it('marks a unit active only above 1% host-share CPU, and busy at 10%', () => {
+    const body = renderStrip([
+      { name: 'idle', state: 'running', health: 'healthy', cpuPct: 0.6 },
+      { name: 'working', state: 'running', health: 'healthy', cpuPct: 2.4 },
+      { name: 'churning', state: 'running', health: 'healthy', cpuPct: 12 },
+    ]);
+    const unitClasses = [...body.matchAll(/class="(fleet-unit[^"]*)" href="#\/containers\/([^"]+)"/g)].map(
+      (m) => [m[2], m[1]],
+    );
+    const byName = Object.fromEntries(unitClasses);
+    expect(byName['idle']).not.toContain('fleet-unit--active');
+    expect(byName['working']).toContain('fleet-unit--active');
+    expect(byName['working']).not.toContain('fleet-unit--busy');
+    expect(byName['churning']).toContain('fleet-unit--busy');
+    expect(body).toContain('2 active now');
+  });
+
   it('renders an empty fleet as an empty (but labeled) list, not an error', () => {
     const body = renderStrip([]);
     expect(body).toContain('aria-label="Container fleet, 0 total"');

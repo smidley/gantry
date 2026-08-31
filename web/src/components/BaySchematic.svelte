@@ -53,7 +53,15 @@
   // kind-colored top-cap stroke, independent of the flagged outline and
   // the usage-proportional fill -- a type signal, not a health one.
   // Absent/"hdd" (the ordinary/majority case) draws no cap at all.
-  let { entries = [], summary = null } = $props();
+  //
+  // stateLine/warmestLine (Scott: "Move the warmest disk reading into
+  // the storage array section along with the array started mover idle
+  // status"): the two array facts that used to be Overview's own
+  // headline sub-lines, now a second summary line under the device
+  // count -- passed as finished strings because both derive from data
+  // this component deliberately doesn't read (the parity tween, the
+  // full disks map including parity members), keeping it dumb.
+  let { entries = [], summary = null, stateLine = null, warmestLine = null } = $props();
 
   // glideMs: see the module doc above -- the CSS transition on each
   // bar's own fill reads this straight off the shared driver.
@@ -106,6 +114,13 @@
             <span>All within normal range</span>
           {/if}
         </p>
+        {#if stateLine || warmestLine}
+          <p class="bay-schematic__summary">
+            {#if stateLine}<span>{stateLine}</span>{/if}
+            {#if stateLine && warmestLine}<span aria-hidden="true">&middot;</span>{/if}
+            {#if warmestLine}<span>{warmestLine}</span>{/if}
+          </p>
+        {/if}
       </div>
       <a class="bay-schematic__link" href="#/storage">View details <span aria-hidden="true">&rarr;</span></a>
     </div>

@@ -1625,7 +1625,7 @@ func newAlertTestStore(t *testing.T) *store.Store {
 	return st
 }
 
-// --- resyncFastModeAlertRules (I5, review) ----------------------------------
+// --- resyncFastModeAlertRules (F1, review) ----------------------------------
 
 func alertRuleByID(t *testing.T, st *store.Store, id string) store.AlertRule {
 	t.Helper()
@@ -1640,61 +1640,128 @@ func alertRuleByID(t *testing.T, st *store.Store, id string) store.AlertRule {
 	return store.AlertRule{}
 }
 
-// TestResyncFastModeAlertRulesRestoresRealValuesAfterFakeBoot pins I5's
-// own named case: a database first seeded under fake mode (every
-// threshold rule's for_seconds/clear_seconds compressed to 60/60 by
-// SeedAlertRules' INSERT OR IGNORE) must resync to the true numbers on
-// a later real boot, not stay pinned to the fake boot's seed forever.
-func TestResyncFastModeAlertRulesRestoresRealValuesAfterFakeBoot(t *testing.T) {
+// TestResyncFastModeAlertRulesFirstBootStampsMarkerWithoutResyncing pins
+// the marker contract's first-boot branch precisely: absent any stored
+// marker, resyncFastModeAlertRules must never touch a single
+// alert_rules row, only stamp the marker for the NEXT boot to compare
+// against. A truly fresh database can't observe that on its own --
+// SeedAlertRules already wrote the current mode's own defaults, so a
+// resync-if-it-ran would be a no-op -- so this seeds FAKE mode's
+// defaults directly (bypassing resyncFastModeAlertRules entirely, so no
+// marker is ever written) and then calls resync for a REAL boot: if the
+// no-marker branch resynced, host-cpu-high would flip to 600/300 same
+// as any other mode flip; the contract says it must not.
+func TestResyncFastModeAlertRulesFirstBootStampsMarkerWithoutResyncing(t *testing.T) {
 	st := newAlertTestStore(t)
 	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(true)))
-	require.EqualValues(t, 60, alertRuleByID(t, st, "host-cpu-high").ForSeconds, "sanity: fresh fake-mode seed is compressed")
 
-	require.NoError(t, resyncFastModeAlertRules(st, false))
+	_, ok, err := st.SettingGet(alertSeededFastModeSettingsKey)
+	require.NoError(t, err)
+	require.False(t, ok, "sanity: no marker written yet")
 
-	got := alertRuleByID(t, st, "host-cpu-high")
-	require.EqualValues(t, 600, got.ForSeconds, "a residual fake-mode seed must resync to the real value on a real boot")
-	require.EqualValues(t, 300, got.ClearSeconds)
+	require.NoError(t, resyncFastModeAlertRules(st, false)) // this function's first-ever call, for a real boot
+
+	require.EqualValues(t, 60, alertRuleByID(t, st, "host-cpu-high").ForSeconds,
+		"first boot must not resync even though the existing rows don't match this mode")
+
+	marker, ok, err := st.SettingGet(alertSeededFastModeSettingsKey)
+	require.NoError(t, err)
+	require.True(t, ok, "marker must be stamped on first boot")
+	require.Equal(t, "false", marker)
 }
 
-// TestResyncFastModeAlertRulesCompressesRealValuesForALaterDemoBoot pins
-// the OTHER direction: a real box later started for a demo
-// (GANTRY_FAKE_DATA=1) must actually get the compressed windows Task
-// 9's demo needs, not just skip resyncing because a real seed already
-// exists.
-func TestResyncFastModeAlertRulesCompressesRealValuesForALaterDemoBoot(t *testing.T) {
+// TestResyncFastModeAlertRulesSameModeRebootNeverTouchesATunedRule pins
+// the exact ambiguity the old value-matching heuristic got wrong: a
+// real-box user who deliberately tunes host-cpu-high to
+// for_seconds=60/clear_seconds=60 -- a perfectly reasonable "alert
+// after a minute, clear after a minute" -- happens to collide with
+// fake mode's own compressed 60s/60s constant. The old heuristic
+// re-derived intent from that collision and silently reverted the edit
+// on the very next real boot; the marker makes that provably
+// impossible, because a same-mode reboot returns before ever reading a
+// rule's for_seconds/clear_seconds at all.
+func TestResyncFastModeAlertRulesSameModeRebootNeverTouchesATunedRule(t *testing.T) {
 	st := newAlertTestStore(t)
 	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(false)))
-	require.EqualValues(t, 600, alertRuleByID(t, st, "host-cpu-high").ForSeconds, "sanity: fresh real seed is uncompressed")
+	require.NoError(t, resyncFastModeAlertRules(st, false)) // first real boot: stamps the marker
 
-	require.NoError(t, resyncFastModeAlertRules(st, true))
+	edited := alertRuleByID(t, st, "host-cpu-high")
+	edited.ForSeconds, edited.ClearSeconds = 60, 60 // == fake mode's own compiled default, on purpose
+	require.NoError(t, st.UpsertAlertRule(edited))
+
+	require.NoError(t, resyncFastModeAlertRules(st, false)) // a later reboot, still real mode
 
 	got := alertRuleByID(t, st, "host-cpu-high")
-	require.EqualValues(t, 60, got.ForSeconds, "a residual real seed must compress for a later fake-data demo boot")
+	require.EqualValues(t, 60, got.ForSeconds, "a same-mode reboot must never revert a tuned rule, even one that matches the other mode's default")
 	require.EqualValues(t, 60, got.ClearSeconds)
 }
 
-// TestResyncFastModeAlertRulesNeverOverwritesAGenuineUserEdit pins I5's
-// other named requirement: a value a user actually edited a builtin
-// rule to (one that matches neither mode's compiled constant) must
-// survive a resync in EITHER direction -- the whole reason this can't
-// just force every threshold rule to the current mode's numbers on
-// every boot.
-func TestResyncFastModeAlertRulesNeverOverwritesAGenuineUserEdit(t *testing.T) {
+// TestResyncFastModeAlertRulesCustomEditSurvivesRepeatedSameModeReboots
+// pins the general case behind the same guarantee: a value that
+// matches NEITHER mode's compiled constant must survive any number of
+// reboots as long as the mode never actually changes.
+func TestResyncFastModeAlertRulesCustomEditSurvivesRepeatedSameModeReboots(t *testing.T) {
 	st := newAlertTestStore(t)
 	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(false)))
+	require.NoError(t, resyncFastModeAlertRules(st, false))
 
 	edited := alertRuleByID(t, st, "host-cpu-high")
 	edited.ForSeconds, edited.ClearSeconds = 450, 450 // matches neither mode's compiled constant
 	require.NoError(t, st.UpsertAlertRule(edited))
 
-	require.NoError(t, resyncFastModeAlertRules(st, true))
-	require.EqualValues(t, 450, alertRuleByID(t, st, "host-cpu-high").ForSeconds, "a real edit must survive a fake-mode boot's resync")
+	for i := 0; i < 3; i++ {
+		require.NoError(t, resyncFastModeAlertRules(st, false))
+	}
 
-	require.NoError(t, resyncFastModeAlertRules(st, false))
 	got := alertRuleByID(t, st, "host-cpu-high")
-	require.EqualValues(t, 450, got.ForSeconds, "a real edit must survive a real boot's resync too")
+	require.EqualValues(t, 450, got.ForSeconds, "a genuine edit must survive any number of same-mode reboots")
 	require.EqualValues(t, 450, got.ClearSeconds)
+}
+
+// TestResyncFastModeAlertRulesModeFlipRealToFakeCompressesEveryBuiltinThresholdRule
+// pins the other half of the marker contract: a genuine mode flip must
+// force EVERY builtin threshold rule to the new mode's numbers,
+// including one already tuned to something else entirely -- that's
+// what flipping demo mode means, not a per-rule judgment call.
+func TestResyncFastModeAlertRulesModeFlipRealToFakeCompressesEveryBuiltinThresholdRule(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(false)))
+	require.NoError(t, resyncFastModeAlertRules(st, false)) // first boot, real mode: stamps the marker "false"
+
+	edited := alertRuleByID(t, st, "host-cpu-high")
+	edited.ForSeconds, edited.ClearSeconds = 450, 450 // a genuine tune, matching neither mode
+	require.NoError(t, st.UpsertAlertRule(edited))
+
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(true))) // idempotent -- every id already exists
+	require.NoError(t, resyncFastModeAlertRules(st, true))               // mode flip: real -> fake
+
+	require.EqualValues(t, 60, alertRuleByID(t, st, "host-cpu-high").ForSeconds, "a mode flip compresses even an already-tuned rule")
+	require.EqualValues(t, 60, alertRuleByID(t, st, "host-cpu-high").ClearSeconds)
+	require.EqualValues(t, 60, alertRuleByID(t, st, "disk-usage-high").ForSeconds, "not just the one rule id the older per-rule tests happened to check")
+	require.EqualValues(t, 60, alertRuleByID(t, st, "disk-usage-high").ClearSeconds)
+
+	require.EqualValues(t, 3600, alertRuleByID(t, st, "container-oom").ClearSeconds, "a non-threshold builtin rule is never touched, in either mode")
+}
+
+// TestResyncFastModeAlertRulesModeFlipFakeToRealRestoresEveryBuiltinThresholdRule
+// is the mirror direction: fake -> real must restore the true windows
+// just as unconditionally.
+func TestResyncFastModeAlertRulesModeFlipFakeToRealRestoresEveryBuiltinThresholdRule(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(true)))
+	require.NoError(t, resyncFastModeAlertRules(st, true)) // first boot, fake mode: stamps the marker "true"
+
+	edited := alertRuleByID(t, st, "host-cpu-high")
+	edited.ForSeconds, edited.ClearSeconds = 45, 45 // a genuine fake-mode tune, matching neither mode's default
+	require.NoError(t, st.UpsertAlertRule(edited))
+
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(false))) // idempotent -- every id already exists
+	require.NoError(t, resyncFastModeAlertRules(st, false))               // mode flip: fake -> real
+
+	require.EqualValues(t, 600, alertRuleByID(t, st, "host-cpu-high").ForSeconds, "a mode flip restores even an already-tuned rule")
+	require.EqualValues(t, 300, alertRuleByID(t, st, "host-cpu-high").ClearSeconds)
+	require.EqualValues(t, 900, alertRuleByID(t, st, "disk-usage-high").ForSeconds)
+	require.EqualValues(t, 900, alertRuleByID(t, st, "disk-usage-high").ClearSeconds)
 }
 
 func TestLoadWebhookTargetsEmptyWhenNeverSet(t *testing.T) {

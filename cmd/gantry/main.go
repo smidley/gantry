@@ -824,8 +824,8 @@ func buildInsightSlots(diskMeta func() map[string]unraid.DiskMeta, fakeDiskMeta 
 }
 
 // alertRulesByID indexes rules by ID -- the small lookup
-// resyncFastModeAlertRules needs against both store.DefaultAlertRules(true)
-// and store.DefaultAlertRules(false).
+// resyncFastModeAlertRules needs against the current boot's own
+// store.DefaultAlertRules(fakeMode).
 func alertRulesByID(rules []store.AlertRule) map[string]store.AlertRule {
 	out := make(map[string]store.AlertRule, len(rules))
 	for _, r := range rules {
@@ -834,54 +834,82 @@ func alertRulesByID(rules []store.AlertRule) map[string]store.AlertRule {
 	return out
 }
 
-// resyncFastModeAlertRules re-syncs every BUILTIN THRESHOLD rule's
-// for_seconds/clear_seconds to the CURRENT boot's mode, in both
-// directions -- the seedWebhookTargetFromEnv precedent, applied here
-// because SeedAlertRules' own INSERT OR IGNORE contract (deliberately
-// never touching an existing row -- see its own doc) means a rule first
-// seeded under one mode stays pinned to that mode's numbers forever,
-// even across a later boot in the other mode (I5, review): a single
-// fake-data demo permanently compresses a real box's alert windows to
-// 60s, or a real seed forces a later demo to run at production speed.
+// alertSeededFastModeSettingsKey stores which mode --
+// strconv.FormatBool(fakeMode), "true" or "false" -- resyncFastModeAlertRules
+// last actually resynced every builtin threshold rule's for_seconds/
+// clear_seconds FOR. A bare bool needs no JSON envelope, so unlike
+// webhookTargetsSettingsKey's []alert.WebhookTarget blob below, this
+// setting's value is just that string itself.
+const alertSeededFastModeSettingsKey = "alert.seeded_fast_mode"
+
+// resyncFastModeAlertRules keeps every BUILTIN THRESHOLD rule's
+// for_seconds/clear_seconds in step with the CURRENT boot's mode by
+// recording the fact directly instead of inferring it from a rule's own
+// numbers (F1, review -- a correction to I5's own fix, in blame history
+// just above this doc): I5's version resynced a rule only when its
+// current for_seconds/clear_seconds exactly matched what the OTHER
+// mode's compiled default would have seeded for that id, reasoning that
+// such a match could only be a leftover seed from a boot under the
+// other mode. That guess is wrong in both directions: a real-box user
+// who deliberately tunes a rule to for_seconds=60 (a perfectly
+// reasonable "alert after a minute") collides with fake mode's own
+// compressed 60s constant and gets silently reverted on the very next
+// real-mode reboot; symmetrically, a fake-mode user who wants one rule
+// to run at real timing gets recompressed right back down.
 //
-// Unlike the webhook "env" target, which the env var fully owns,
-// for_seconds/clear_seconds are meant to be user-tunable (SeedAlertRules'
-// whole "leave any existing row -- edited or otherwise -- completely
-// untouched" contract), so this can't just force every builtin threshold
-// rule to the current mode's numbers on every boot -- that would revert
-// a genuine edit on the very next restart. Instead, a rule is only
-// re-synced when its CURRENT for_seconds/clear_seconds still exactly
-// match what the OTHER mode's own compiled default would have seeded
-// for that same rule id: that exact combination could only be a
-// leftover artifact of a previous boot's seed under the other mode, not
-// a value a user chose on purpose (a real window is always well above
-// fake mode's 60s, so the two never collide by coincidence). Anything
-// else -- a custom value, or a rule that's already correct for the
-// current mode -- is left exactly as SeedAlertRules already leaves it.
+// alertSeededFastModeSettingsKey fixes this by recording which mode
+// this function last actually synced FOR, so a rule's numbers are only
+// ever touched when that stored marker DISAGREES with the current
+// boot's mode -- i.e. exactly a real<->fake flip, the one event that
+// really is supposed to force every builtin threshold rule to the new
+// mode's numbers (that's what flipping demo mode means). A same-mode
+// reboot -- the overwhelmingly common case -- reads the marker, finds
+// it already matches, and returns immediately having read or written
+// not one alert_rules row: provably incapable of reverting a tuned
+// value, because that path never looks at a single rule's for_seconds/
+// clear_seconds at all.
+//
+// First boot (no marker stored yet) is deliberately NOT treated as a
+// disagreement, even if the existing rows happen to mismatch the
+// current mode (e.g. a database from before this marker existed): the
+// contract is simply "no marker means stamp one, full stop" --
+// SeedAlertRules, called immediately before this on every boot, already
+// writes the current mode's own compiled defaults for any rule id that
+// doesn't exist yet, which covers the actually-fresh-database case this
+// is designed for. The marker is stamped either way, so the NEXT boot
+// has something to compare against.
 func resyncFastModeAlertRules(st *store.Store, fakeMode bool) error {
-	rules, err := st.AlertRules(context.Background())
+	want := strconv.FormatBool(fakeMode)
+	prev, ok, err := st.SettingGet(alertSeededFastModeSettingsKey)
 	if err != nil {
 		return err
 	}
-	real, fast := alertRulesByID(store.DefaultAlertRules(false)), alertRulesByID(store.DefaultAlertRules(true))
-	want, other := real, fast
-	if fakeMode {
-		want, other = fast, real
+	if ok && prev == want {
+		return nil // same mode as last sync -- nothing to resync, no rule touched
 	}
-	for _, r := range rules {
-		if !r.Builtin || r.Type != "threshold" {
-			continue
+	if ok {
+		// A genuine mode flip: force every builtin threshold rule to the
+		// new mode's numbers, tuned or not -- see doc above.
+		rules, err := st.AlertRules(context.Background())
+		if err != nil {
+			return err
 		}
-		o, ok := other[r.ID]
-		if !ok || r.ForSeconds != o.ForSeconds || r.ClearSeconds != o.ClearSeconds {
-			continue // not a residual seed from the other mode -- a real user edit, or already correct
-		}
-		r.ForSeconds, r.ClearSeconds = want[r.ID].ForSeconds, want[r.ID].ClearSeconds
-		if err := st.UpsertAlertRule(r); err != nil {
-			return fmt.Errorf("resync alert rule %q for_seconds/clear_seconds: %w", r.ID, err)
+		defaults := alertRulesByID(store.DefaultAlertRules(fakeMode))
+		for _, r := range rules {
+			if !r.Builtin || r.Type != "threshold" {
+				continue
+			}
+			d, dok := defaults[r.ID]
+			if !dok {
+				continue
+			}
+			r.ForSeconds, r.ClearSeconds = d.ForSeconds, d.ClearSeconds
+			if err := st.UpsertAlertRule(r); err != nil {
+				return fmt.Errorf("resync alert rule %q for_seconds/clear_seconds: %w", r.ID, err)
+			}
 		}
 	}
-	return nil
+	return st.SettingSet(alertSeededFastModeSettingsKey, want)
 }
 
 // webhookTargetsSettingsKey is where the whole []alert.WebhookTarget

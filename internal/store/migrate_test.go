@@ -41,7 +41,7 @@ func TestOpenDBIsIdempotent(t *testing.T) {
 
 	var v int
 	require.NoError(t, db2.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&v))
-	require.Equal(t, 3, v)
+	require.Equal(t, 4, v)
 }
 
 func TestMigrationVersionsComeFromFilenamePrefix(t *testing.T) {
@@ -58,7 +58,7 @@ func TestMigrationVersionsComeFromFilenamePrefix(t *testing.T) {
 		require.NoError(t, rows.Scan(&v))
 		versions = append(versions, v)
 	}
-	require.Equal(t, []int{1, 2, 3}, versions) // 001_core.sql, 002_ts_indexes.sql, 003_alerts.sql
+	require.Equal(t, []int{1, 2, 3, 4}, versions) // 001_core.sql, 002_ts_indexes.sql, 003_alerts.sql, 004_insights.sql
 
 	var n int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_samples_1m_ts'`).Scan(&n))
@@ -112,14 +112,15 @@ func TestUpgradeFromOnlyCoreAndIndexesAppliesAlertsMigrationCleanly(t *testing.T
 		require.NoError(t, err)
 	}()
 
-	// Reopen exactly like a real restart: OpenDB finds 003 unapplied and runs it.
+	// Reopen exactly like a real restart: OpenDB finds 003 (and, now that
+	// it also exists, 004) unapplied and runs both.
 	db, err := OpenDB(path)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	var version int
 	require.NoError(t, db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version))
-	require.Equal(t, 3, version)
+	require.Equal(t, 4, version)
 
 	var kind string
 	require.NoError(t, db.QueryRow(`SELECT kind FROM events WHERE id = 50`).Scan(&kind))

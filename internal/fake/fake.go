@@ -379,6 +379,47 @@ const (
 	jellyfinBurstChance   = 0.02
 	jellyfinBurstMinTicks = 10
 	jellyfinBurstMaxTicks = 40
+
+	// insightDemo* (Phase 5 Task 10): a scripted disk-io-contention story
+	// on disk1 (device "sdc") -- Task 6's own flagship example, and the
+	// one insight demo this phase ships end to end. disk1, not disk3, is
+	// the target: disk3 is permanently spun down in this fixture (see
+	// the disks var's own doc), which would be a strange resource to
+	// stage an "actively contended" story on, while disk1 already carries
+	// the fixture's own "media library disk seeing real reads" framing.
+	//
+	// Schedule (elapsed since boot):
+	//   0s    -> insightDemoStartAt      baseline: modest, shared IO
+	//   60s   -> +insightDemoRampDuration    ramps up: qbittorrent dominates,
+	//                                    the device sits hot
+	//   ~75s  -> insightDemoResolveAt    holds hot -- disk-io-contention's
+	//                                    sustain_secs (compressed to 10s
+	//                                    in fake mode, DefaultRuleConfigs
+	//                                    (true)) is comfortably cleared
+	//                                    well before this
+	//   240s  -> onward                  qbittorrent backs off, the
+	//                                    device returns to baseline --
+	//                                    the finding resolves "cleared"
+	//                                    once ClearForSecs (compressed to
+	//                                    20s in fake mode, main.go) elapses
+	//
+	// jellyfin/sonarr keep a small, constant share of the SAME device
+	// throughout -- disk-io-contention's own co-tenancy requirement: a
+	// lone user of a saturated device is just busy, never a finding.
+	insightDemoDevice       = "sdc" // disk1's own device, see the disks var
+	insightDemoCulprit      = "qbittorrent"
+	insightDemoStartAt      = 60 * time.Second
+	insightDemoRampDuration = 15 * time.Second
+	insightDemoResolveAt    = 240 * time.Second
+
+	insightDemoUtilBaseline  = 28.0
+	insightDemoUtilPeak      = 97.0
+	insightDemoAwaitBaseline = 5.0
+	insightDemoAwaitPeak     = 45.0
+
+	insightDemoCulpritBpsBaseline = 3e5
+	insightDemoCulpritBpsPeak     = 8.5e6
+	insightDemoWitnessBps         = 4e5 // jellyfin's and sonarr's own constant share
 )
 
 type Generator struct {
@@ -579,6 +620,20 @@ func (g *Generator) Tick(now time.Time) {
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.nvme0n1.write_bps"}, ts, ioWrite*0.15)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.loop2.read_bps"}, ts, ioRead*0.05)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.loop2.write_bps"}, ts, ioWrite*0.08)
+
+		// The insightDemo* story's own culprit-attribution side (see
+		// insightDemoDevice's own doc): qbittorrent ramps to a dominant
+		// share of disk1's device while jellyfin/sonarr hold a small,
+		// constant share throughout -- disk-io-contention's co-tenancy
+		// requirement needs at least one OTHER user on the same device
+		// for the whole story, not just while qbittorrent is ramped up.
+		switch e {
+		case insightDemoCulprit:
+			v := insightDemoRamp(elapsed, insightDemoCulpritBpsBaseline, insightDemoCulpritBpsPeak)
+			g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io." + insightDemoDevice + ".read_bps"}, ts, v)
+		case "jellyfin", "sonarr":
+			g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io." + insightDemoDevice + ".read_bps"}, ts, insightDemoWitnessBps)
+		}
 	}
 
 	// hostCPUPct is already a sum of host-share percentages (see the loop
@@ -620,6 +675,16 @@ func (g *Generator) emitDisks(ts int64, elapsed time.Duration) {
 		g.sink.Record(store.SeriesKey{Kind: "disk", Entity: d.name, Metric: "rotational"}, ts, d.rotational)
 		g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + d.device + ".read_bps"}, ts, d.ioReadScale*g.rng.Float64())
 		g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + d.device + ".write_bps"}, ts, d.ioWriteScale*g.rng.Float64())
+
+		// util_pct/await_ms (Task 1's own real-collector series) are only
+		// worth emitting for the one device the insight demo actually
+		// drives -- see insightDemoDevice's own doc. No other disk needs
+		// them: nothing in the seven-rule library reads them for any
+		// device this fixture doesn't script.
+		if d.device == insightDemoDevice {
+			g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + d.device + ".util_pct"}, ts, insightDemoRamp(elapsed, insightDemoUtilBaseline, insightDemoUtilPeak))
+			g.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + d.device + ".await_ms"}, ts, insightDemoRamp(elapsed, insightDemoAwaitBaseline, insightDemoAwaitPeak))
+		}
 
 		if !d.spunDown && !d.noSensor {
 			var temp float64
@@ -687,6 +752,30 @@ func alertDemoDiskTempC(elapsed time.Duration, rng *rand.Rand) float64 {
 		return alertDemoTempPeak - (alertDemoTempPeak-alertDemoTempFloor)*frac
 	default:
 		return alertDemoTempFloor - 2 + rng.Float64()*4 // holds 38-42
+	}
+}
+
+// insightDemoRamp computes the scripted disk-io-contention story's
+// current value for one metric: baseline before insightDemoStartAt,
+// ramping linearly to peak over insightDemoRampDuration, holding at peak
+// until insightDemoResolveAt, then dropping straight back to baseline
+// (qbittorrent backing off) for good. Pure in elapsed, like every other
+// schedule in this file (alertDemoDiskTempC above, parityState below),
+// so it's unit-testable without a *Generator and reusable across every
+// metric this one story drives (device util_pct/await_ms, the culprit's
+// own live:io bytes/sec) without each needing its own copy of the same
+// four-phase shape.
+func insightDemoRamp(elapsed time.Duration, baseline, peak float64) float64 {
+	switch {
+	case elapsed < insightDemoStartAt:
+		return baseline
+	case elapsed < insightDemoStartAt+insightDemoRampDuration:
+		frac := float64(elapsed-insightDemoStartAt) / float64(insightDemoRampDuration)
+		return baseline + (peak-baseline)*frac
+	case elapsed < insightDemoResolveAt:
+		return peak
+	default:
+		return baseline
 	}
 }
 

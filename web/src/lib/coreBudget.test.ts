@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildCoreBudget, MAX_NAMED_SEGMENTS } from './coreBudget';
+import { containerColor } from './containerColor';
 
 describe('buildCoreBudget', () => {
   it('is empty for a host with no core count yet', () => {
@@ -15,8 +16,29 @@ describe('buildCoreBudget', () => {
     ]);
     expect(budget.segments.map((s) => s.key)).toEqual(['b', 'c', 'a']);
     expect(budget.segments.every((s) => s.colorVar.startsWith('var(--series-'))).toBe(true);
-    // Distinct series slots, in rank order.
-    expect(budget.segments.map((s) => s.colorVar)).toEqual(['var(--series-1)', 'var(--series-2)', 'var(--series-3)']);
+    // Colored by each container's own stable identity hash (containerColor),
+    // not by its rank position in the ribbon -- a container's segment must
+    // match the SAME color the Metrics hero chart/Compare would assign it,
+    // and must not repaint if its cores rank shifts relative to its
+    // neighbors on a later tick.
+    expect(budget.segments.map((s) => s.colorVar)).toEqual(['b', 'c', 'a'].map((name) => `var(${containerColor(name)})`));
+  });
+
+  it('a container keeps the same color regardless of which rank position it sorts into', () => {
+    const first = buildCoreBudget(8, 0, [
+      { name: 'a', cores: 1 },
+      { name: 'b', cores: 3 },
+    ]);
+    // 'a' now outranks 'b' -- under the old position-based rule this
+    // would have swapped their colors; identity-based coloring must not.
+    const second = buildCoreBudget(8, 0, [
+      { name: 'a', cores: 5 },
+      { name: 'b', cores: 3 },
+    ]);
+    const colorFor = (budget: ReturnType<typeof buildCoreBudget>, key: string) =>
+      budget.segments.find((s) => s.key === key)?.colorVar;
+    expect(colorFor(first, 'a')).toBe(colorFor(second, 'a'));
+    expect(colorFor(first, 'b')).toBe(colorFor(second, 'b'));
   });
 
   it('breaks a cores tie by name ascending, deterministically', () => {

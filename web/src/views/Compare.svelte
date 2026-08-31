@@ -32,7 +32,7 @@
   import { fetchSeries } from '../lib/api';
   import { fmtBytes, fmtCores, fmtPct, fmtRate } from '../lib/format';
   import { buildCompareHash, knownCompareNames, MAX_COMPARE_MEMBERS, parseCompareNames } from '../lib/compareRoute';
-  import { seriesColorVar } from '../lib/compareColors';
+  import { containerColor } from '../lib/containerColor';
   import { computeGroupTotals } from '../lib/compareTotals';
   import { groups } from '../lib/groups.svelte';
   import ContainerIcon from '../components/ContainerIcon.svelte';
@@ -80,12 +80,16 @@
   let chartMembers = $derived(knownForCharts.slice(0, MAX_COMPARE_MEMBERS));
   let chartsCapped = $derived(knownForCharts.length > MAX_COMPARE_MEMBERS);
 
-  // memberColor: chart-eligible members get their assigned series color
-  // (position in chartMembers, matching every chart's own series order);
-  // anything past the 10-member cap (or not currently known) gets no
-  // assigned color at all -- it isn't drawn on any chart, so a categorical
-  // hue there would falsely imply otherwise.
-  let memberColor = $derived(new Map(chartMembers.map((name, i) => [name, seriesColorVar(i)])));
+  // memberColor: chart-eligible members get containerColor's own stable
+  // per-name hash (D2 pass) -- not the old "series color follows this
+  // member's position in chartMembers" rule, which repainted every LATER
+  // member's line the instant an earlier one was removed, and assigned a
+  // color with no relationship to whatever hue the SAME container shows
+  // on the Metrics hero chart or the core-budget ribbon. Anything past
+  // the 10-member cap (or not currently known) gets no assigned color at
+  // all -- it isn't drawn on any chart, so a categorical hue there would
+  // falsely imply otherwise.
+  let memberColor = $derived(new Map(chartMembers.map((name) => [name, containerColor(name)])));
 
   function removeHref(name) {
     return buildCompareHash(requestedNames.filter((n) => n !== name));
@@ -311,23 +315,31 @@
   let fetchedByMember = $state({});
   let fetchInFlight = $state(false);
   let fetchFailed = $state(false);
+  // fetchedRange: the [from, to] this effect actually asked /api/series
+  // for -- handed to every chart below as xDomain (D2 chart-integrity
+  // pass) so each axis shows the FULL requested window regardless of how
+  // little of it any given member has real data for. See
+  // lib/chartRange.ts's own doc for the sparse-data bug this fixes.
+  let fetchedRange = $state(undefined);
 
   $effect(() => {
     const range = activeRange;
     const members = chartMembers;
     if (range === 'live') {
       fetchedByMember = {};
+      fetchedRange = undefined;
       fetchFailed = false;
       fetchInFlight = false;
-      return;
-    }
-    if (members.length === 0) {
-      fetchedByMember = {};
       return;
     }
     const seconds = RANGE_SECONDS[range];
     const to = Math.floor(Date.now() / 1000);
     const from = to - seconds;
+    fetchedRange = [from, to];
+    if (members.length === 0) {
+      fetchedByMember = {};
+      return;
+    }
     const controller = new AbortController();
     fetchInFlight = true;
     fetchFailed = false;
@@ -367,14 +379,14 @@
     chartMembers.map((name, i) => ({
       label: name,
       points: activeRange === 'live' ? compareSlots[i].cpu : fetchedPoints(name, 'cpu.pct'),
-      colorVar: seriesColorVar(i),
+      colorVar: containerColor(name),
     })),
   );
   let memSeries = $derived(
     chartMembers.map((name, i) => ({
       label: name,
       points: activeRange === 'live' ? compareSlots[i].mem : fetchedPoints(name, 'mem.bytes'),
-      colorVar: seriesColorVar(i),
+      colorVar: containerColor(name),
     })),
   );
   let netSeries = $derived(
@@ -384,7 +396,7 @@
       return {
         label: name,
         points: sumSeriesPoints([rx, tx]),
-        colorVar: seriesColorVar(i),
+        colorVar: containerColor(name),
         directionPoints: [rx, tx],
         directionLabels: ['↓', '↑'],
       };
@@ -397,7 +409,7 @@
       return {
         label: name,
         points: sumSeriesPoints([read, write]),
-        colorVar: seriesColorVar(i),
+        colorVar: containerColor(name),
         directionPoints: [read, write],
         directionLabels: ['r', 'w'],
       };
@@ -408,7 +420,7 @@
       label: name,
       points:
         activeRange === 'live' ? compareSlots[i].gpu : sumSeriesPoints(GPU_METRIC_KEYS.map((k) => fetchedPoints(name, k))),
-      colorVar: seriesColorVar(i),
+      colorVar: containerColor(name),
     })),
   );
   // hasGpu gates the whole GPU chart card: "GPU only if any member has
@@ -600,24 +612,24 @@
       <div class="compare__charts">
         <div class="card compare__chart-card">
           <span class="microlabel">CPU</span>
-          <TimeChart bind:this={cpuChart} series={cpuSeries} formatValue={fmtPct} syncKey={SYNC_KEY} live={activeRange === 'live'} showLegend={false} />
+          <TimeChart bind:this={cpuChart} series={cpuSeries} formatValue={fmtPct} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} showLegend={false} />
         </div>
         <div class="card compare__chart-card">
           <span class="microlabel">Memory</span>
-          <TimeChart bind:this={memChart} series={memSeries} formatValue={fmtBytes} syncKey={SYNC_KEY} live={activeRange === 'live'} showLegend={false} />
+          <TimeChart bind:this={memChart} series={memSeries} formatValue={fmtBytes} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} showLegend={false} />
         </div>
         <div class="card compare__chart-card">
           <span class="microlabel">Network</span>
-          <TimeChart bind:this={netChart} series={netSeries} formatValue={fmtRate} syncKey={SYNC_KEY} live={activeRange === 'live'} showLegend={false} />
+          <TimeChart bind:this={netChart} series={netSeries} formatValue={fmtRate} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} showLegend={false} />
         </div>
         <div class="card compare__chart-card">
           <span class="microlabel">Disk IO</span>
-          <TimeChart bind:this={ioChart} series={ioSeries} formatValue={fmtRate} syncKey={SYNC_KEY} live={activeRange === 'live'} showLegend={false} />
+          <TimeChart bind:this={ioChart} series={ioSeries} formatValue={fmtRate} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} showLegend={false} />
         </div>
         {#if hasGpu}
           <div class="card compare__chart-card">
             <span class="microlabel">GPU</span>
-            <TimeChart bind:this={gpuChart} series={gpuSeries} formatValue={fmtPct} syncKey={SYNC_KEY} live={activeRange === 'live'} showLegend={false} />
+            <TimeChart bind:this={gpuChart} series={gpuSeries} formatValue={fmtPct} syncKey={SYNC_KEY} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} showLegend={false} />
           </div>
         {/if}
       </div>

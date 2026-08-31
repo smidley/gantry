@@ -10,7 +10,9 @@ import (
 )
 
 // TestInsightsMigrationCreatesSchema pins migration 004_insights.sql: all
-// three insight tables exist, schema_migrations records version 4, and
+// three insight tables exist, schema_migrations records the latest
+// version (5, now 005_overview_acks.sql has landed on top -- the exact
+// TestAlertsMigrationCreatesSchema convention), and
 // the partial unique index that is the one-active-finding-per-identity-
 // tuple invariant (enforced by the DB, not engine bookkeeping -- see
 // TestUpsertInsightRejectsSecondActiveForSameIdentityTuple below) is
@@ -28,7 +30,7 @@ func TestInsightsMigrationCreatesSchema(t *testing.T) {
 
 	var version int
 	require.NoError(t, db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version))
-	require.Equal(t, 4, version)
+	require.Equal(t, 5, version)
 
 	var n int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_insight_active'`).Scan(&n))

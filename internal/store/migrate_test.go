@@ -41,7 +41,7 @@ func TestOpenDBIsIdempotent(t *testing.T) {
 
 	var v int
 	require.NoError(t, db2.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&v))
-	require.Equal(t, 4, v)
+	require.Equal(t, 5, v)
 }
 
 func TestMigrationVersionsComeFromFilenamePrefix(t *testing.T) {
@@ -58,7 +58,7 @@ func TestMigrationVersionsComeFromFilenamePrefix(t *testing.T) {
 		require.NoError(t, rows.Scan(&v))
 		versions = append(versions, v)
 	}
-	require.Equal(t, []int{1, 2, 3, 4}, versions) // 001_core.sql, 002_ts_indexes.sql, 003_alerts.sql, 004_insights.sql
+	require.Equal(t, []int{1, 2, 3, 4, 5}, versions) // 001_core.sql, 002_ts_indexes.sql, 003_alerts.sql, 004_insights.sql, 005_overview_acks.sql
 
 	var n int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_samples_1m_ts'`).Scan(&n))
@@ -113,20 +113,20 @@ func TestUpgradeFromOnlyCoreAndIndexesAppliesAlertsMigrationCleanly(t *testing.T
 	}()
 
 	// Reopen exactly like a real restart: OpenDB finds 003 (and, now that
-	// it also exists, 004) unapplied and runs both.
+	// they also exist, 004 and 005) unapplied and runs all of them.
 	db, err := OpenDB(path)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	var version int
 	require.NoError(t, db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version))
-	require.Equal(t, 4, version)
+	require.Equal(t, 5, version)
 
 	var kind string
 	require.NoError(t, db.QueryRow(`SELECT kind FROM events WHERE id = 50`).Scan(&kind))
 	require.Equal(t, "pre-existing", kind, "003's events-table rebuild must preserve pre-existing rows")
 
-	for _, table := range []string{"alert_rules", "alert_instances", "alert_silences", "alert_deliveries"} {
+	for _, table := range []string{"alert_rules", "alert_instances", "alert_silences", "alert_deliveries", "overview_acks"} {
 		var n int
 		require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n))
 		require.Equal(t, 1, n, "missing table %s", table)

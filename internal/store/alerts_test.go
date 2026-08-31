@@ -27,9 +27,9 @@ func fullRule(id string) AlertRule {
 }
 
 // TestAlertsMigrationCreatesSchema pins migration 003_alerts.sql: all four
-// alert tables exist, schema_migrations records the latest version (4, now
-// 004_insights.sql has landed on top of it -- OpenDB always applies every
-// embedded migration, not just 003's own), and the partial
+// alert tables exist, schema_migrations records the latest version (5, now
+// 004_insights.sql and 005_overview_acks.sql have landed on top of it --
+// OpenDB always applies every embedded migration, not just 003's own), and the partial
 // unique index that is the one-active-instance-per-(rule,entity) invariant
 // (enforced by the DB, not engine bookkeeping -- see
 // TestUpsertAlertInstanceRejectsSecondActiveForSameRuleAndEntity below) is
@@ -47,7 +47,7 @@ func TestAlertsMigrationCreatesSchema(t *testing.T) {
 
 	var version int
 	require.NoError(t, db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version))
-	require.Equal(t, 4, version)
+	require.Equal(t, 5, version)
 
 	var n int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_alert_active'`).Scan(&n))

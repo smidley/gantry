@@ -206,6 +206,46 @@ func allInsightInstanceIDs(s *Store) ([]int64, error) {
 	return ids, rows.Err()
 }
 
+// TestMaintainPrunesExpiredAcks mirrors the dismissal half of
+// TestMaintainPrunesInsightTablesButLeavesActiveInstancesAlone for
+// overview_acks: an ack past its own until is pruned outright (no
+// silenceRetention-style grace window -- see pruneAcks' own doc), an
+// unexpired one survives.
+func TestMaintainPrunesExpiredAcks(t *testing.T) {
+	s := newTestStore(t, nil)
+	now := at("12:00:00")
+	nowUnix := now.Unix()
+
+	expiredID, err := s.AddAck(OverviewAck{Kind: "disk-usage", Entity: "disk3", Until: nowUnix - 100, CreatedAt: 0})
+	require.NoError(t, err)
+	activeID, err := s.AddAck(OverviewAck{Kind: "unhealthy", Entity: "sonarr", Until: nowUnix + 100, CreatedAt: 0})
+	require.NoError(t, err)
+
+	require.NoError(t, s.Maintain(context.Background(), now, DefaultRetention()))
+
+	remaining, err := allAckIDs(s)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{activeID}, remaining, "expired ack pruned; unexpired one survives")
+	require.NotContains(t, remaining, expiredID)
+}
+
+func allAckIDs(s *Store) ([]int64, error) {
+	rows, err := s.DB().Query(`SELECT id FROM overview_acks`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func allInsightDismissalIDs(s *Store) ([]int64, error) {
 	rows, err := s.DB().Query(`SELECT id FROM insight_dismissals`)
 	if err != nil {

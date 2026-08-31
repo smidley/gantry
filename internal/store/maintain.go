@@ -34,7 +34,10 @@ func (s *Store) Maintain(ctx context.Context, now time.Time, ret Retention) erro
 	if err := s.pruneAlerts(ctx, now, ret); err != nil {
 		return err
 	}
-	return s.pruneInsights(ctx, now, ret)
+	if err := s.pruneInsights(ctx, now, ret); err != nil {
+		return err
+	}
+	return s.pruneAcks(ctx, now)
 }
 
 // pruneAlerts trims the three alert tables that accumulate history:
@@ -74,6 +77,18 @@ func (s *Store) pruneInsights(ctx context.Context, now time.Time, ret Retention)
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM insight_dismissals WHERE until < ?`, now.Unix())
+	return err
+}
+
+// pruneAcks trims overview_acks past their own until -- the exact
+// insight_dismissals treatment (no grace window the way silenceRetention
+// gives an expired silence: like a lapsed dismissal, a lapsed ack has no
+// "why didn't I get paged" debugging use -- it never suppressed
+// notification of anything, only an attention row on one view). Acks()
+// already excludes anything expired from what a live caller sees
+// regardless of this prune.
+func (s *Store) pruneAcks(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM overview_acks WHERE until < ?`, now.Unix())
 	return err
 }
 

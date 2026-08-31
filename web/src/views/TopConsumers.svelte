@@ -643,7 +643,11 @@
     if (hasHostTotal) {
       const hostPoints = hostReferencePoints();
       if (hostPoints.length > 0) {
-        lines = [...lines, { entity: null, label: 'Host total', points: hostPoints, colorVar: '--ink-2', width: 1, dash: [4, 4] }];
+        // strokeAlphaPct, not the old dash:[4,4] -- D2 pass: "drop the
+        // dotted-noise look" for the host-total reference line; muting
+        // the resolved --ink-2 stroke itself keeps it visually distinct
+        // from the solid container lines without the dated dashed look.
+        lines = [...lines, { entity: null, label: 'Host total', points: hostPoints, colorVar: '--ink-2', width: 1.5, strokeAlphaPct: 40 }];
       }
     }
     return lines;
@@ -1019,11 +1023,13 @@
   .top-consumers__chip--off {
     opacity: 0.45;
   }
+  /* A plain muted bar, not the old dashed one -- matches the host-total
+     line's own D2-pass restyle (strokeAlphaPct, not dash) in heroSeries. */
   .top-consumers__chip-swatch {
     display: inline-block;
     width: 10px;
     height: 2px;
-    border-top: 2px dashed var(--chip-color);
+    background: color-mix(in oklab, var(--chip-color) 40%, transparent);
     flex-shrink: 0;
   }
   .top-consumers__cap-note {

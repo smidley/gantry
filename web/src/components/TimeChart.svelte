@@ -16,7 +16,7 @@
 <script>
   import uPlot from 'uplot';
   import { onDestroy, onMount } from 'svelte';
-  import { theme, resolveToken } from '../lib/theme.svelte';
+  import { theme, resolveToken, withAlpha } from '../lib/theme.svelte';
   import { fmtRelTime } from '../lib/format';
   import { needsRebuild } from '../lib/chartRebuild';
   import { buildAlignedData } from '../lib/seriesAlign';
@@ -105,6 +105,12 @@
     serious: '--status-serious',
     critical: '--status-critical',
   };
+
+  // --- D2 visual modernization: quieter grid/axes, matching the
+  // microlabel type ramp instead of uPlot's own defaults --------------
+  const GRID_ALPHA_PCT = 10; // whisper-weight horizontal gridlines only -- see build()'s axes config
+  const AXIS_FONT = '11px "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace'; // canvas fonts can't read var(--font-mono); literal stack
+  const MIN_TICK_SPACE_PX = 64; // thins tick density on both axes vs. uPlot's own tighter default
 
   // xScaleRange is uPlot's Range.Function for the x scale -- the actual
   // padding-vs-explicit-domain decision is lib/chartRange.ts's pure
@@ -259,17 +265,91 @@
     return `${labelA} ${fmt(a)} · ${labelB} ${fmt(b)}`;
   }
 
+  // --- Hover fade-fill (D2 visual pass: "multi-line charts fill ONLY
+  // the focused/hovered line... hover focuses a line (existing legend
+  // hover) and its fill fades in") -------------------------------------
+  //
+  // fillFocusIdx mirrors whichever series uPlot's own built-in
+  // cursor.focus mechanism has ALREADY decided is nearest the cursor
+  // (series[i]._focus, set before every setCursor hook fires) -- not a
+  // second focus computation of our own, so the fill always agrees with
+  // whichever line's stroke/legend row is simultaneously undimmed.
+  // seriesFill (used in build()) reads fillFocusIdx/fillFocusChangedAtMs
+  // on every uPlot draw to decide whether a given series gets a gradient
+  // at all, and how far into its own fade-in it currently is.
+  const FILL_FADE_MS = 160;
+  const FILL_TOP_ALPHA_PCT = 18; // series color -> transparent, per the brief's own ~18%->0
+  let fillFocusIdx = null;
+  let fillFocusChangedAtMs = 0;
+  let fillFadeRaf = null;
+
+  function fillFadeProgress(nowMs) {
+    if (motion.reduced) return 1; // no glide under reduced motion -- snaps straight to full strength
+    return Math.min(1, Math.max(0, (nowMs - fillFocusChangedAtMs) / FILL_FADE_MS));
+  }
+
+  function runFillFade() {
+    fillFadeRaf = null;
+    chart?.redraw(false, false); // cheap repaint -- no path rebuild, no axis recalc
+    if (fillFadeProgress(Date.now()) < 1) fillFadeRaf = requestAnimationFrame(runFillFade);
+  }
+
+  // trackFillFocus reads the CURRENT focus off uPlot's own per-series
+  // state (u===null on cursor-leave, matching handleCursor's own early
+  // return below) and, only on an actual change, (re)starts the short
+  // rAF loop above -- never a second overlapping one: a focus change
+  // mid-fade just retargets the already-running loop, since seriesFill
+  // reads fillFocusChangedAtMs fresh on every draw regardless of which
+  // invocation of this function last moved it.
+  function trackFillFocus(u) {
+    const foundIdx = u ? u.series.findIndex((s, i) => i > 0 && s._focus) : -1;
+    const nextIdx = foundIdx > 0 ? foundIdx : null;
+    if (nextIdx === fillFocusIdx) return;
+    fillFocusIdx = nextIdx;
+    fillFocusChangedAtMs = Date.now();
+    if (!motion.reduced && fillFadeRaf === null) fillFadeRaf = requestAnimationFrame(runFillFade);
+  }
+
+  // seriesFill builds series `seriesIdx`'s own uPlot `fill` option, as a
+  // FUNCTION (not a static color) so it can read u.bbox fresh on every
+  // draw -- a resize must not leave a stale gradient rect behind. A
+  // single-series chart (a tile-scale metric, ContainerDetail's own
+  // per-metric cards, any chart that happens to have exactly one line)
+  // always fades from FILL_TOP_ALPHA_PCT at the plot's top to fully
+  // transparent at its bottom baseline -- there's no ambiguity about
+  // which line "has focus" when there's only one. A multi-series chart
+  // (the Metrics hero, Storage's per-drive lines -- 10 simultaneous
+  // fills would read as mud, per the design brief) only ever fills the
+  // ONE series uPlot itself currently has focused, ramping in via
+  // fillFadeProgress rather than snapping; every other series renders no
+  // fill at all until IT becomes the focused one.
+  function seriesFill(colorHex, seriesIdx, isMulti) {
+    return (u) => {
+      const alphaMul = isMulti ? (seriesIdx === fillFocusIdx ? fillFadeProgress(Date.now()) : 0) : 1;
+      if (alphaMul <= 0) return 'transparent';
+      const top = u.bbox.top;
+      const bottom = Math.max(top + 1, u.bbox.top + u.bbox.height);
+      const grad = u.ctx.createLinearGradient(0, top, 0, bottom);
+      grad.addColorStop(0, withAlpha(colorHex, FILL_TOP_ALPHA_PCT * alphaMul));
+      grad.addColorStop(1, withAlpha(colorHex, 0));
+      return grad;
+    };
+  }
+
   // handleCursor is a uPlot "setCursor" hook: recomputes the tooltip
-  // (crosshair values for every series at the hovered index) and
-  // which marker, if any, the cursor is close enough to for a hover
-  // label. u.cursor.left is CSS-pixel space, so marker hit-testing
-  // uses valToPos's CSS-pixel variant (canvasPixels omitted) to match.
+  // (crosshair values for every series at the hovered index), the
+  // hover-fill focus tracking above, and which marker, if any, the
+  // cursor is close enough to for a hover label. u.cursor.left is
+  // CSS-pixel space, so marker hit-testing uses valToPos's CSS-pixel
+  // variant (canvasPixels omitted) to match.
   function handleCursor(u) {
     if (u.cursor.left == null || u.cursor.left < 0) {
       tooltip = null;
       hoverMarker = null;
+      trackFillFocus(null);
       return;
     }
+    trackFillFocus(u);
 
     const idx = u.cursor.idx;
     tooltip =
@@ -279,19 +359,29 @@
             x: u.cursor.left,
             y: u.cursor.top ?? 0,
             ts: u.data[0][idx],
-            rows: series.map((s, i) => {
-              const raw = u.data[i + 1][idx];
-              // A real gap (null -- see buildAlignedData) stays unformatted
-              // ('—' is rendered by the template below) rather than being
-              // handed to formatValue, which would otherwise turn a
-              // missing sample into a misleadingly concrete "0.0 B".
-              return {
-                label: s.label,
-                color: resolveToken(s.colorVar),
-                value: raw == null ? null : formatValue ? formatValue(raw) : raw,
-                detail: directionDetail(s, u.data[0][idx]),
-              };
-            }),
+            // Sorted desc by raw value (nulls last): "one clean floating
+            // panel" reads top-to-bottom as a mini leaderboard of
+            // whatever's hovered, rather than whichever order the
+            // caller's own series array happens to be in (rank order for
+            // the hero chart, but URL/request order for Compare,
+            // declaration order for ContainerDetail's per-engine/
+            // direction charts).
+            rows: series
+              .map((s, i) => {
+                const raw = u.data[i + 1][idx];
+                // A real gap (null -- see buildAlignedData) stays unformatted
+                // ('—' is rendered by the template below) rather than being
+                // handed to formatValue, which would otherwise turn a
+                // missing sample into a misleadingly concrete "0.0 B".
+                return {
+                  label: s.label,
+                  color: resolveToken(s.colorVar),
+                  raw,
+                  value: raw == null ? null : formatValue ? formatValue(raw) : raw,
+                  detail: directionDetail(s, u.data[0][idx]),
+                };
+              })
+              .sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity)),
           };
 
     const HOVER_PX = 6;
@@ -313,10 +403,20 @@
     // headState so index i can't end up easing a NEW series toward a
     // STALE target left over from whatever used to be at that index.
     headState = [];
+    // A fresh uPlot instance has no series identity for fillFocusIdx to
+    // keep meaning the same line -- start every rebuild with no fill
+    // focus and no fade in flight, same as a genuine cursor-leave.
+    fillFocusIdx = null;
+    fillFocusChangedAtMs = 0;
 
     const width = container.clientWidth || 320;
-    const ink = resolveToken('var(--ink)');
-    const gridColor = resolveToken('var(--ink-2)');
+    const inkMuted = resolveToken('var(--ink-2)');
+    // gridColor: the y-axis's own whisper-weight horizontal lines (D2
+    // pass: "kill the full gridline cage... horizontal gridlines only,
+    // whisper-weight"). The x-axis gets none at all (grid.show:false
+    // below) -- its own tick LABELS are the only thing marking time now.
+    const gridColor = withAlpha(inkMuted, GRID_ALPHA_PCT);
+    const isMulti = series.length > 1;
 
     chart = new uPlot(
       {
@@ -325,10 +425,19 @@
         padding: [8, 8, 8, 8],
         scales: { x: { time: true, range: xScaleRange } },
         axes: [
-          { stroke: ink, grid: { stroke: gridColor, width: 1 } },
           {
-            stroke: ink,
+            stroke: inkMuted,
+            font: AXIS_FONT,
+            grid: { show: false },
+            ticks: { show: false },
+            space: MIN_TICK_SPACE_PX,
+          },
+          {
+            stroke: inkMuted,
+            font: AXIS_FONT,
             grid: { stroke: gridColor, width: 1 },
+            ticks: { show: false },
+            space: MIN_TICK_SPACE_PX,
             values: (_u, vals) => vals.map((v) => (formatValue ? formatValue(v) : unit ? `${v} ${unit}` : `${v}`)),
             // uPlot's own default y-axis gutter width is sized for short
             // bare numbers; a formatValue label ("858.3 MiB", "12.4 MB/s")
@@ -336,29 +445,42 @@
             // right against too narrow a box runs the label's leading
             // characters off the canvas's left edge) -- size the gutter
             // off the actual longest rendered label instead of trusting
-            // uPlot's un-aware default. The 7px/char + 14px estimate is
-            // deliberately generous (default font is small/proportional,
-            // not truly 7px-per-char monospace) since a slightly wide
-            // gutter costs a little plot area, while a narrow one clips.
+            // uPlot's un-aware default. The 6.5px/char + 12px estimate
+            // (tightened for AXIS_FONT's smaller size, down from the
+            // pre-modernization 7px/14px) is deliberately generous
+            // (default font is small/proportional, not truly monospace
+            // at this rendering size) since a slightly wide gutter costs
+            // a little plot area, while a narrow one clips.
             size: (_u, values) => {
               // uPlot calls this during layout passes where `values` can
               // be null (e.g. before any ticks are computed yet) --
               // guard defensively rather than let a null.reduce blank
               // the whole chart (reproduced live while building this).
               const longest = (values ?? []).reduce((max, v) => Math.max(max, String(v ?? '').length), 0);
-              return Math.max(40, longest * 7 + 14);
+              return Math.max(36, longest * 6.5 + 12);
             },
           },
         ],
         series: [
           {},
-          ...series.map((s) => ({
-            label: s.label,
-            stroke: resolveToken(s.colorVar),
-            width: s.width ?? 2,
-            dash: s.dash,
-            points: { show: false },
-          })),
+          ...series.map((s, i) => {
+            const colorHex = resolveToken(s.colorVar);
+            return {
+              label: s.label,
+              // strokeAlphaPct (optional -- the hero chart's own muted
+              // "Host total" reference line): mutes the resolved color
+              // itself rather than drawing a dotted line, per the D2
+              // pass's "drop the dotted-noise look" -- a cleaner, calmer
+              // way to stay visually distinct from the solid container
+              // lines around it.
+              stroke: s.strokeAlphaPct != null ? withAlpha(colorHex, s.strokeAlphaPct) : colorHex,
+              width: s.width ?? 2,
+              dash: s.dash,
+              cap: 'round', // D2 pass: "rounded joins/caps" (joins already default to round in this uPlot version)
+              points: { show: false },
+              fill: seriesFill(colorHex, i + 1, isMulti),
+            };
+          }),
         ],
         cursor: {
           points: { show: true },
@@ -383,7 +505,7 @@
   // change never needs more than the setData path below).
   function currentShape() {
     return {
-      series: series.map((s) => ({ label: s.label, colorVar: s.colorVar, width: s.width, dash: s.dash })),
+      series: series.map((s) => ({ label: s.label, colorVar: s.colorVar, width: s.width, dash: s.dash, strokeAlphaPct: s.strokeAlphaPct })),
       theme: theme.resolved,
       unit,
       hasFormatValue: !!formatValue,
@@ -493,6 +615,7 @@
 
   onDestroy(() => {
     ro?.disconnect();
+    if (fillFadeRaf !== null) cancelAnimationFrame(fillFadeRaf);
     chart?.destroy();
   });
 </script>
@@ -544,34 +667,41 @@
   .time-chart :global(.u-cursor-pt) {
     transition: opacity 150ms ease;
   }
+  /* Unified tooltip (D2 pass): one floating panel, elevated off the
+     chart with the same card-shadow FORMULA app.css's own .card uses
+     (color-mix against --ink, not a new token), just carried further
+     (wider blur, no border-driven light-mode look) since this needs to
+     read as floating ABOVE plotted lines, not as a static surface. */
   .time-chart__tooltip {
     position: absolute;
-    transform: translate(8px, 8px);
+    transform: translate(10px, 10px);
     background: var(--surface);
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    border-radius: 6px;
-    padding: 0.4rem 0.6rem;
+    border: 1px solid color-mix(in oklab, var(--ink) 10%, transparent);
+    border-radius: 8px;
+    padding: 0.5rem 0.65rem;
     color: var(--ink);
     font-size: 0.75rem;
     white-space: nowrap;
     pointer-events: none;
     z-index: 5;
+    box-shadow: 0 4px 16px color-mix(in oklab, var(--ink) 16%, transparent);
   }
   .time-chart__tooltip-row {
     display: flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: 0.4rem;
+    padding: 0.1rem 0;
   }
   .time-chart__tooltip-detail {
-    margin: 0 0 0 1.15rem; /* aligns under the row's own label, past the swatch */
+    margin: 0 0 0.1rem 1.2rem; /* aligns under the row's own label, past the swatch */
     color: var(--ink-2);
     font-size: 0.68rem;
   }
   .time-chart__swatch {
     display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 2px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
     flex-shrink: 0;
   }
   .time-chart__marker-label {

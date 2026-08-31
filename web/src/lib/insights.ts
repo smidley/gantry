@@ -102,6 +102,26 @@ export function insightsCausedBy<T extends InsightCulpritLike>(insights: T[], co
   return insights.filter((i) => culpritNames(i).includes(containerName));
 }
 
+// --- share strip (Task 12's "always-present, no engine required" view) -----
+
+// deviceSharePct computes one container's share of one device's total
+// IO: its own read+write bytes/s (from GET /api/containers/{name}/
+// storage, the impact panel's own reused StorageRefDTO plumbing) over
+// the HOST's own total for that same device (live.frame.host's own
+// diskio.<dev>.read_bps/.write_bps) -- the same ratio insight/
+// evidence.go's Share() computes when ranking every container, just for
+// one already-known container rather than a full ranking. This is
+// honest at every moment and needs no engine: it's a plain live-frame
+// division, which is exactly why the plan calls this strip
+// "always-present" rather than something that waits for a finding to
+// fire.
+export function deviceSharePct(containerReadBps: number, containerWriteBps: number, hostReadBps: number, hostWriteBps: number): number {
+  const hostTotal = hostReadBps + hostWriteBps;
+  if (!Number.isFinite(hostTotal) || hostTotal <= 0) return 0;
+  const containerTotal = containerReadBps + containerWriteBps;
+  return Math.max(0, Math.min(100, (containerTotal / hostTotal) * 100));
+}
+
 // --- evidence formatting -----------------------------------------------------
 
 // EVIDENCE_UNIT names each EvidenceDTO field's own unit family --

@@ -4,6 +4,7 @@ import {
   confidenceLabel,
   culpritNames,
   describeRule,
+  deviceSharePct,
   formatEvidenceNumber,
   insightsAffecting,
   insightsCausedBy,
@@ -88,6 +89,24 @@ describe('insightsAffecting / insightsCausedBy', () => {
   it('a container that is neither culprit nor victim anywhere gets empty results from both, never an error', () => {
     expect(insightsAffecting(insights, 'grafana')).toEqual([]);
     expect(insightsCausedBy(insights, 'grafana')).toEqual([]);
+  });
+});
+
+describe('deviceSharePct', () => {
+  it('computes a container share of a device total', () => {
+    expect(deviceSharePct(78e6, 0, 100e6, 0)).toBe(78);
+  });
+
+  it('sums read and write on both sides', () => {
+    expect(deviceSharePct(30, 20, 100, 100)).toBe(25);
+  });
+
+  it('returns 0 rather than NaN/Infinity when the host total is 0', () => {
+    expect(deviceSharePct(10, 0, 0, 0)).toBe(0);
+  });
+
+  it('clamps to 100 for a transient over-100% reading', () => {
+    expect(deviceSharePct(150, 0, 100, 0)).toBe(100);
   });
 });
 

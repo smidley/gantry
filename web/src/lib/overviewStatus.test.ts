@@ -312,7 +312,22 @@ describe('describeAnomaly', () => {
       title: 'sonarr is unhealthy',
       detail: 'Failing its health check.',
       linkContainer: 'sonarr',
+      href: '#/containers/sonarr',
     });
+  });
+
+  it('every kind carries the route that explains it (Scott: every attention row is clickable)', () => {
+    expect(describeAnomaly({ kind: 'unhealthy', name: 'sonarr' }).href).toBe('#/containers/sonarr');
+    expect(describeAnomaly({ kind: 'disk-usage', slot: 'disk6', usagePct: 95 }).href).toBe('#/storage');
+    expect(describeAnomaly({ kind: 'disk-errors', slot: 'disk2', errors: 1 }).href).toBe('#/storage');
+    expect(describeAnomaly({ kind: 'array-stopped' }).href).toBe('#/storage');
+    expect(describeAnomaly({ kind: 'source-critical', source: 'docker', detail: 'daemon unreachable' }).href).toBe(
+      '#/containers',
+    );
+    expect(
+      describeAnomaly({ kind: 'alert', ruleId: 'host-cpu-high', ruleName: 'Host CPU high', entity: '', severity: 'warning' })
+        .href,
+    ).toBe('#/alerts');
   });
 
   it('disk-usage formats the percentage via fmtPct (one decimal, clamped)', () => {

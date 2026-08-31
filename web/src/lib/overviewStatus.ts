@@ -17,6 +17,7 @@
 // ("X running · Y stopped", fleetSentence below) still states it as a
 // plain fact. The headline's own count is always anomalies.length, so
 // "N things" and "N rows in the attention module" can never disagree.
+import { anomalyHref } from './anomalyHref';
 import { diskUsagePct } from './disks';
 import { fmtPct } from './format';
 import type { HealthStatus } from './containerStatus';
@@ -245,9 +246,16 @@ export interface AnomalyText {
   // (the row's own link target) need the bare name separately from the
   // human sentence it's embedded in.
   linkContainer?: string;
-  // Present only for an 'alert' anomaly -- links the row to the Alerts
-  // view (Task 12: "the callouts link to the Alerts view"). The other
-  // five kinds either link via linkContainer or don't link at all.
+  // The route that explains this anomaly (anomalyHref -- Scott:
+  // "anything in the NEEDS YOU section needs to be clickable to get to
+  // information about that item"), carried on EVERY kind that has a
+  // page to land on: container concerns to that container's detail,
+  // disk/array concerns to Storage, alert-backed callouts to the Alerts
+  // view, a critical docker source to the fleet view it degrades.
+  // Absent only when no page exists for the concern (anomalyHref's own
+  // null convention). For 'unhealthy' it duplicates linkContainer's
+  // destination on purpose -- consumers that render generically read
+  // href alone.
   href?: string;
 }
 
@@ -258,8 +266,16 @@ export interface AnomalyText {
 // formatters are. describeAnomaly (below) is the public entry point;
 // this one exists separately so the severity-override check has a
 // "what would this kind's severity be on its own" to compare against
-// without recursing into itself.
+// without recursing into itself. href is attached once, after the
+// switch, from anomalyHref -- the one shared routing table -- rather
+// than each case naming its own destination.
 function describeAnomalyCore(a: OverviewAnomaly): AnomalyText {
+  const href = anomalyHref(a);
+  const text = anomalyTextFor(a);
+  return href ? { ...text, href } : text;
+}
+
+function anomalyTextFor(a: OverviewAnomaly): AnomalyText {
   switch (a.kind) {
     case 'unhealthy':
       return {
@@ -290,7 +306,7 @@ function describeAnomalyCore(a: OverviewAnomaly): AnomalyText {
       // so no meaningful value/threshold at all -- see FiringAlertDTO's
       // own doc): its summary sentence is the only real description,
       // falling back to entity on the off chance summary is also empty.
-      return { severity: a.severity, title: a.ruleName, detail: a.metric ? a.entity : a.summary || a.entity, href: '#/alerts' };
+      return { severity: a.severity, title: a.ruleName, detail: a.metric ? a.entity : a.summary || a.entity };
   }
 }
 

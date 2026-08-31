@@ -129,22 +129,33 @@
 {/if}
 
 <style>
+  /* Region-sizing pass (Scott: the schematic's fixed footprint stranded
+     dead space beside it): the component now sizes to its own content
+     with a max instead of claiming its container's full width -- a
+     small array renders a small schematic, and whatever module shares
+     the region can actually use the rest. max-width keeps a huge array
+     from forcing horizontal scroll: the bars still wrap, and because
+     the fixed height moved off the row and onto each BAR, a wrapped
+     second row stacks below at full bar height instead of overflowing
+     a fixed-height row box (the old height:130px on __bars clipped
+     exactly that case). */
   .bay-schematic {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    width: fit-content;
+    max-width: 100%;
   }
   .bay-schematic__bars {
     display: flex;
     align-items: flex-end;
     gap: 6px;
-    height: 130px;
     flex-wrap: wrap;
   }
   .bay-schematic__bar {
     position: relative;
     width: 22px;
-    height: 100%;
+    height: 130px;
     background: color-mix(in oklab, var(--ink) 7%, transparent);
     border-radius: 2px;
     flex-shrink: 0;
@@ -188,12 +199,20 @@
   /* Fixed-height label row, always present in layout (opacity-toggled,
      not conditionally rendered) so the bars' own position never shifts
      when a hover/focus starts or ends -- CoreBudgetRibbon's own
-     hover-label convention, same as FleetStrip's. */
+     hover-label convention, same as FleetStrip's. width:0 +
+     min-width:100% keeps the label's own text OUT of the component's
+     intrinsic width (percentages are ignored during fit-content
+     sizing, then resolve against the bars' final width): without it,
+     hovering a long slot/device/temp line would widen the whole
+     fit-content schematic mid-hover. The text wraps within the bars'
+     width instead. */
   .bay-schematic__label {
     display: flex;
     align-items: baseline;
     flex-wrap: wrap;
     gap: 0.5rem;
+    width: 0;
+    min-width: 100%;
     min-height: 1.2rem;
     font-size: 0.8rem;
     font-weight: 600;

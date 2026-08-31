@@ -100,10 +100,22 @@
      explicit role="listitem" on the <a> itself is invalid (an
      interactive element can't take a non-interactive ARIA role) and
      Svelte's own a11y check rejects it. */
+  /* Region-sizing pass (Scott: the strip wrapped as ragged rows of
+     blocks): a fixed-pitch GRID, not flex-wrap. auto-fill lays every
+     row on the same explicit column tracks, so a wrapped strip reads
+     as one deliberate contribution-graph grid -- columns align
+     vertically, each row holds only whole units (never a clipped
+     partial at the edge), and the sub-pitch remainder stays as quiet
+     trailing space. The wider row-gap (vs the 2px column-gap) is what
+     makes a second row read as a ROW rather than more noise, and
+     absorbs the flagged units' scaleY(1.25) overshoot (transforms
+     don't take layout space -- under flex they overlapped the line
+     above). */
   .fleet-strip {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 2px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 8px);
+    justify-content: start;
+    gap: 4px 2px;
     max-width: 100%;
     list-style: none;
     margin: 0;

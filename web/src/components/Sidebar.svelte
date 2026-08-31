@@ -4,13 +4,28 @@
   presentations can never drift).
 -->
 <script>
+  import { onMount } from 'svelte';
   import { route, routes } from '../lib/router';
+  import { fetchVersion } from '../lib/api';
 
   const monitorRoutes = routes.filter((item) =>
     ['overview', 'containers', 'top', 'storage', 'gpu', 'insights'].includes(item.name),
   );
   const operateRoutes = routes.filter((item) => ['maintenance', 'events', 'alerts'].includes(item.name));
   const systemRoutes = routes.filter((item) => item.name === 'settings');
+
+  // Same one-shot fetch the Settings About card uses; the sidebar mounts
+  // once for the app's whole life, so this runs once per load.
+  let version = $state(null);
+  onMount(() => {
+    fetchVersion()
+      .then((v) => {
+        version = v.version;
+      })
+      .catch(() => {
+        version = null;
+      });
+  });
 </script>
 
 <nav class="sidebar hidden md:flex" aria-label="Primary">
@@ -70,7 +85,10 @@
         {#if $route.name === item.name}<span class="sidebar__active-dot" aria-hidden="true"></span>{/if}
       </a>
     {/each}
-    <span class="sidebar__alpha"><span></span> Alpha preview</span>
+    <span class="sidebar__version">
+      {#if version}<span class="sidebar__version-tag">{version}</span><span aria-hidden="true">&middot;</span>{/if}
+      <a href="https://github.com/smidley/gantry/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+    </span>
   </div>
 </nav>
 
@@ -188,7 +206,7 @@
     margin-top: auto;
     padding-top: 1rem;
   }
-  .sidebar__alpha {
+  .sidebar__version {
     display: inline-flex;
     align-items: center;
     gap: 0.45rem;
@@ -196,13 +214,14 @@
     color: var(--sidebar-muted);
     font-family: var(--font-mono);
     font-size: 0.62rem;
-    text-transform: uppercase;
     letter-spacing: 0.08em;
   }
-  .sidebar__alpha span {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: #e7a416;
+  .sidebar__version a {
+    color: var(--sidebar-muted);
+    text-decoration: none;
+  }
+  .sidebar__version a:hover {
+    color: var(--sidebar-ink);
+    text-decoration: underline;
   }
 </style>

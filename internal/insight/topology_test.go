@@ -53,7 +53,7 @@ func TestTopologyResolveMapsKnownMajMinToSlot(t *testing.T) {
 	dev, ok := topo.Resolve("8:32")
 
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "sdc", Slot: "disk1", Role: RoleData, Rotational: true}, dev)
+	require.Equal(t, Device{Name: "sdc", Slot: "disk1", Role: RoleData, Rotational: true, RotationalKnown: true}, dev)
 }
 
 // TestTopologyContended pins the parity exclusion at the type level:
@@ -87,7 +87,9 @@ func TestTopologyCanonicalLeavesPoolDeviceAlone(t *testing.T) {
 // TestTopologyResolveUnknownDeviceDegradesToRoleUnknown pins the
 // degrade-don't-drop contract: a kernel name that resolves fine but
 // matches no known array/pool slot is still a real, contended device --
-// just one Topology can't name by Unraid slot.
+// just one Topology can't name by Unraid slot. Its Rotational reading is
+// a map-lookup zero value rather than a real one, so RotationalKnown
+// must say so -- otherwise an unplaced disk silently reads as an SSD.
 func TestTopologyResolveUnknownDeviceDegradesToRoleUnknown(t *testing.T) {
 	slots := loadSlotMeta(t, "../collect/unraid/testdata/disks.ini")
 	deviceName := func(majMin string) (string, bool) {
@@ -101,8 +103,22 @@ func TestTopologyResolveUnknownDeviceDegradesToRoleUnknown(t *testing.T) {
 	dev, ok := topo.Resolve("259:3")
 
 	require.True(t, ok, "a device we don't understand is still a real device")
-	require.Equal(t, Device{Name: "nvme2n1", Slot: "", Role: RoleUnknown, Rotational: false}, dev)
+	require.Equal(t, Device{Name: "nvme2n1", Slot: "", Role: RoleUnknown, Rotational: false, RotationalKnown: false}, dev)
 	require.True(t, topo.Contended(dev))
+}
+
+// TestTopologyResolveNamePlacedDiskReportsRotationalKnown is the
+// positive counterpart, exercised through ResolveName: any name that
+// does match a known slot always carries a real rotational reading, so
+// RotationalKnown must be true.
+func TestTopologyResolveNamePlacedDiskReportsRotationalKnown(t *testing.T) {
+	slots := loadSlotMeta(t, "../collect/unraid/testdata/disks.ini")
+	topo := NewTopology(nil, slots)
+
+	dev, ok := topo.ResolveName("nvme0n1")
+
+	require.True(t, ok)
+	require.True(t, dev.RotationalKnown)
 }
 
 // TestTopologyResolveTotallyUnresolvableMajMin covers the one case that
@@ -136,7 +152,7 @@ func TestTopologyParityExcludedFromContentionAgainstDisksIniCapture(t *testing.T
 	parity, ok := topo.Resolve("8:16")
 
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "sdb", Slot: "parity", Role: RoleParity, Rotational: true}, parity)
+	require.Equal(t, Device{Name: "sdb", Slot: "parity", Role: RoleParity, Rotational: true, RotationalKnown: true}, parity)
 	require.False(t, topo.Contended(parity),
 		"every array write drives parity as a CONSEQUENCE of the data write -- naming it separately double-counts the same write")
 	require.Equal(t, parity, topo.Canonical(parity), "parity has no md wrapper of its own to collapse onto")
@@ -167,31 +183,31 @@ func TestTopologyAgainstRealDisksIniCapture(t *testing.T) {
 
 	disk1, ok := topo.Resolve("8:96")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "sdg", Slot: "disk1", Role: RoleData, Rotational: true}, disk1)
+	require.Equal(t, Device{Name: "sdg", Slot: "disk1", Role: RoleData, Rotational: true, RotationalKnown: true}, disk1)
 	require.True(t, topo.Contended(disk1))
-	require.Equal(t, Device{Name: "md1", Slot: "disk1", Role: RoleData, Rotational: true}, topo.Canonical(disk1))
+	require.Equal(t, Device{Name: "md1", Slot: "disk1", Role: RoleData, Rotational: true, RotationalKnown: true}, topo.Canonical(disk1))
 
 	// md1 resolved directly (a host-level diskstats row for the array
 	// device itself) must land on the same slot as sdg: one logical
 	// write, attributed once, whichever raw name a given sample carries.
 	disk1ViaMD, ok := topo.Resolve("9:1")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "md1", Slot: "disk1", Role: RoleData, Rotational: true}, disk1ViaMD)
+	require.Equal(t, Device{Name: "md1", Slot: "disk1", Role: RoleData, Rotational: true, RotationalKnown: true}, disk1ViaMD)
 	require.Equal(t, disk1ViaMD, topo.Canonical(disk1ViaMD), "md1 is already canonical")
 
 	cache, ok := topo.Resolve("259:1")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "nvme1n1", Slot: "cache", Role: RolePool, Rotational: false}, cache)
+	require.Equal(t, Device{Name: "nvme1n1", Slot: "cache", Role: RolePool, Rotational: false, RotationalKnown: true}, cache)
 	require.Equal(t, cache, topo.Canonical(cache))
 
 	rocketPool, ok := topo.Resolve("259:2")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "nvme0n1", Slot: "rocket_pool", Role: RolePool, Rotational: false}, rocketPool,
+	require.Equal(t, Device{Name: "nvme0n1", Slot: "rocket_pool", Role: RolePool, Rotational: false, RotationalKnown: true}, rocketPool,
 		`a custom-named pool is still RolePool -- Unraid doesn't limit pool naming to "cache"`)
 
 	flash, ok := topo.Resolve("8:128")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "sdi", Slot: "flash", Role: RoleFlash, Rotational: true}, flash,
+	require.Equal(t, Device{Name: "sdi", Slot: "flash", Role: RoleFlash, Rotational: true, RotationalKnown: true}, flash,
 		"the boot device reports rotational=1 like a spinning disk -- Kind classification is a separate concern from Role")
 	require.True(t, topo.Contended(flash))
 
@@ -210,15 +226,15 @@ func TestTopologyResolveNameMapsKnownNamesToSlot(t *testing.T) {
 
 	parity, ok := topo.ResolveName("sdb")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "sdb", Slot: "parity", Role: RoleParity, Rotational: true}, parity)
+	require.Equal(t, Device{Name: "sdb", Slot: "parity", Role: RoleParity, Rotational: true, RotationalKnown: true}, parity)
 
 	disk1, ok := topo.ResolveName("sdc")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "sdc", Slot: "disk1", Role: RoleData, Rotational: true}, disk1)
+	require.Equal(t, Device{Name: "sdc", Slot: "disk1", Role: RoleData, Rotational: true, RotationalKnown: true}, disk1)
 
 	cache, ok := topo.ResolveName("nvme0n1")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "nvme0n1", Slot: "cache", Role: RolePool, Rotational: false}, cache)
+	require.Equal(t, Device{Name: "nvme0n1", Slot: "cache", Role: RolePool, Rotational: false, RotationalKnown: true}, cache)
 }
 
 // TestTopologyResolveNameAgainstRealDisksIniCapture covers the roles
@@ -235,20 +251,20 @@ func TestTopologyResolveNameAgainstRealDisksIniCapture(t *testing.T) {
 
 	disk1, ok := topo.ResolveName("sdg")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "sdg", Slot: "disk1", Role: RoleData, Rotational: true}, disk1)
+	require.Equal(t, Device{Name: "sdg", Slot: "disk1", Role: RoleData, Rotational: true, RotationalKnown: true}, disk1)
 
 	disk1ViaMD, ok := topo.ResolveName("md1")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "md1", Slot: "disk1", Role: RoleData, Rotational: true}, disk1ViaMD,
+	require.Equal(t, Device{Name: "md1", Slot: "disk1", Role: RoleData, Rotational: true, RotationalKnown: true}, disk1ViaMD,
 		"md1 is disk1's canonical array device -- ResolveName resolves it directly, matching Canonical's model")
 
 	rocketPool, ok := topo.ResolveName("nvme0n1")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "nvme0n1", Slot: "rocket_pool", Role: RolePool, Rotational: false}, rocketPool)
+	require.Equal(t, Device{Name: "nvme0n1", Slot: "rocket_pool", Role: RolePool, Rotational: false, RotationalKnown: true}, rocketPool)
 
 	flash, ok := topo.ResolveName("sdi")
 	require.True(t, ok)
-	require.Equal(t, Device{Name: "sdi", Slot: "flash", Role: RoleFlash, Rotational: true}, flash)
+	require.Equal(t, Device{Name: "sdi", Slot: "flash", Role: RoleFlash, Rotational: true, RotationalKnown: true}, flash)
 }
 
 // TestTopologyResolveNameUnknownNameReturnsFalse pins ResolveName's

@@ -62,6 +62,12 @@ type Device struct {
 	Slot       string // "disk3", "cache", "parity" -- "" for a device with no known array/pool slot
 	Role       Role
 	Rotational bool
+	// RotationalKnown is false when Slot is unknown (RoleUnknown): with
+	// no slot to look up, Rotational is a map-lookup zero value, not a
+	// real reading, and would otherwise silently present an unplaced
+	// disk as an SSD. True whenever Slot is non-empty -- every present
+	// slot Topology tracks carries a real rotational reading.
+	RotationalKnown bool
 }
 
 // SlotMeta is Topology's per-slot input: one present array/pool slot's
@@ -126,12 +132,13 @@ func (t *Topology) Resolve(majMin string) (Device, bool) {
 	if !ok {
 		return Device{}, false
 	}
-	slot := t.nameToSlot[name]
+	slot, known := t.nameToSlot[name]
 	return Device{
-		Name:       name,
-		Slot:       slot,
-		Role:       classifyRole(slot),
-		Rotational: t.slotRot[slot],
+		Name:            name,
+		Slot:            slot,
+		Role:            classifyRole(slot),
+		Rotational:      t.slotRot[slot],
+		RotationalKnown: known,
 	}, true
 }
 
@@ -159,10 +166,11 @@ func (t *Topology) ResolveName(name string) (Device, bool) {
 		return Device{}, false
 	}
 	return Device{
-		Name:       name,
-		Slot:       slot,
-		Role:       classifyRole(slot),
-		Rotational: t.slotRot[slot],
+		Name:            name,
+		Slot:            slot,
+		Role:            classifyRole(slot),
+		Rotational:      t.slotRot[slot],
+		RotationalKnown: known,
 	}, true
 }
 

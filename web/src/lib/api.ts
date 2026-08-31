@@ -315,6 +315,55 @@ export async function deleteSilence(id: number): Promise<void> {
   }
 }
 
+// --- overview acknowledgements ---------------------------------------------
+
+// OverviewAckDTO mirrors server.OverviewAckDTO -- one overview_acks row:
+// a concrete (kind, entity) attention concern suppressed until `until`.
+export interface OverviewAckDTO {
+  id: number;
+  kind: string;
+  entity: string;
+  until: number;
+  created_at: number;
+}
+
+export interface AcksGetResponse {
+  acks: OverviewAckDTO[];
+}
+
+export function fetchAcks(signal?: AbortSignal): Promise<AcksGetResponse> {
+  return getJSON<AcksGetResponse>('/api/acks', signal);
+}
+
+// createAck backs the Overview attention row's ack control (1h/24h/7d)
+// for FRAME-DERIVED callouts only -- an alert-backed callout's ack goes
+// through createSilence instead (one mechanism per system; the control
+// routes by callout kind). kind and entity are both always concrete:
+// the server 400s anything outside its closed kind vocabulary or with
+// an empty entity -- there is deliberately no global ack shape at all
+// (unlike silences' explicit scope:"all" gesture).
+export async function createAck(body: { kind: string; entity: string; hours: number }): Promise<OverviewAckDTO> {
+  const res = await fetch('/api/acks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const parsed = (await res.json()) as OverviewAckDTO & { error?: string };
+  if (!res.ok) {
+    throw new Error(parsed.error ?? `POST /api/acks: ${res.status} ${res.statusText}`);
+  }
+  return parsed;
+}
+
+// deleteAck lifts an ack early -- 204 whether or not the id still
+// existed, the deleteSilence convention exactly.
+export async function deleteAck(id: number): Promise<void> {
+  const res = await fetch(`/api/acks/${id}`, { method: 'DELETE' });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`DELETE /api/acks/${id}: ${res.status} ${res.statusText}`);
+  }
+}
+
 export function fetchWebhookTargets(): Promise<WebhooksGetResponse> {
   return getJSON<WebhooksGetResponse>('/api/alerts/webhooks');
 }

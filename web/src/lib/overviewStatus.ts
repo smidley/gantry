@@ -65,6 +65,42 @@ export type OverviewAnomaly =
       summary?: string;
     } & AnomalyBase);
 
+// OverviewAckLike is the narrow slice of api.ts's OverviewAckDTO this
+// module actually needs (the FiringAlertLike convention right below):
+// the concrete (kind, entity) identity an acknowledgement suppresses,
+// plus its own expiry. until is checked HERE, per derivation run,
+// rather than trusting the list to be pre-pruned -- the frame
+// re-derives every ~2s tick, so an ack lapsing between store refetches
+// makes its anomaly reappear on the very next tick with no fetch.
+export interface OverviewAckLike {
+  kind: string;
+  entity: string;
+  until: number; // unix seconds
+}
+
+// ackKeyFor maps one anomaly onto the concrete (kind, entity) identity
+// an acknowledgement row carries (POST /api/acks' own closed
+// vocabulary): the container name, the disk slot, the literal "array"
+// (there is only ever one), the source name. null for 'alert' --
+// acknowledging an alert-backed callout IS an alert silence (one
+// mechanism per system; see deriveOverviewStatus's ack doc), so no ack
+// identity exists for it, and no ack row can ever quiet one.
+export function ackKeyFor(a: OverviewAnomaly): { kind: string; entity: string } | null {
+  switch (a.kind) {
+    case 'unhealthy':
+      return { kind: a.kind, entity: a.name };
+    case 'disk-usage':
+    case 'disk-errors':
+      return { kind: a.kind, entity: a.slot };
+    case 'array-stopped':
+      return { kind: a.kind, entity: 'array' };
+    case 'source-critical':
+      return { kind: a.kind, entity: a.source };
+    case 'alert':
+      return null;
+  }
+}
+
 // FiringAlertLike is the narrow slice of api.ts's FiringAlertDTO this
 // module actually needs -- kept local rather than importing the wider
 // API surface, the same "no dependency beyond what's used" convention
@@ -96,6 +132,16 @@ export interface OverviewStatusInput {
   // that hasn't wired alerts through yet -- treated as "nothing
   // firing", not an error).
   alerts?: FiringAlertLike[] | null;
+  // acks: every live acknowledgement (GET /api/acks, fetched by the
+  // acks store ALONGSIDE the frame -- acks deliberately don't ride in
+  // the frame itself). undefined on a page that hasn't wired acks
+  // through yet -- treated as "nothing acked", not an error.
+  acks?: OverviewAckLike[] | null;
+  // now (unix seconds) is read only to decide ack expiry -- injectable
+  // so tests can pin both sides of an ack's until deterministically.
+  // Defaults to the real clock; every other part of this derivation
+  // stays clock-free exactly as before.
+  now?: number;
 }
 
 // alertSeverityToHealth maps store.Event's three-slot vocabulary onto
@@ -150,15 +196,14 @@ const DISK_USAGE_WARN_PCT = 90;
 const CRITICAL_SOURCES = ['docker'];
 
 export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus {
-  const anomalies: OverviewAnomaly[] = [];
+  const frameAnomalies: OverviewAnomaly[] = [];
 
   for (const name of input.unhealthyNames) {
-    anomalies.push({ kind: 'unhealthy', name });
+    frameAnomalies.push({ kind: 'unhealthy', name });
   }
 
   const disks = input.disks ?? {};
   const diskSlots = Object.keys(disks).sort();
-  const flaggedDiskSlots: string[] = [];
 
   // disk-usage: at most ONE anomaly, the single worst (highest-%) disk
   // over the threshold -- the mockup's own "one callout on the fullest,"
@@ -173,8 +218,7 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
     }
   }
   if (worst) {
-    anomalies.push({ kind: 'disk-usage', slot: worst.slot, usagePct: worst.usagePct });
-    flaggedDiskSlots.push(worst.slot);
+    frameAnomalies.push({ kind: 'disk-usage', slot: worst.slot, usagePct: worst.usagePct });
   }
 
   // disk-errors: unlike usage, one row PER erroring disk -- a real error
@@ -183,20 +227,47 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
   for (const slot of diskSlots) {
     const errors = disks[slot]?.['errors'] ?? 0;
     if (errors > 0) {
-      anomalies.push({ kind: 'disk-errors', slot, errors });
-      flaggedDiskSlots.push(slot);
+      frameAnomalies.push({ kind: 'disk-errors', slot, errors });
     }
   }
 
   if (input.arrayStarted === 0) {
-    anomalies.push({ kind: 'array-stopped' });
+    frameAnomalies.push({ kind: 'array-stopped' });
   }
 
   const sources = input.sources ?? {};
   for (const source of CRITICAL_SOURCES) {
     const detail = sources[source];
     if (detail !== undefined && detail !== 'ok') {
-      anomalies.push({ kind: 'source-critical', source, detail });
+      frameAnomalies.push({ kind: 'source-critical', source, detail });
+    }
+  }
+
+  // Acknowledgements (Scott: "We need to be able to acknowledge things
+  // that need you so they stop showing up for a period of time"): an
+  // acked (kind, entity) pair contributes nothing until its ack's own
+  // until passes -- the silenced-alert treatment one block down, applied
+  // to the frame-derived kinds. Filtered BEFORE the alerts merge, on
+  // purpose: an ack quiets the frame-derived row only, never a firing
+  // alert. If the same concern's alert rule fires unsilenced while the
+  // frame row is acked, the dedup below finds no surviving row to fold
+  // into and the alert surfaces on its own line -- an ack is not a
+  // silence, and only a silence may quiet an alert.
+  const now = input.now ?? Date.now() / 1000;
+  const liveAcks = (input.acks ?? []).filter((ack) => ack.until > now);
+  const anomalies = frameAnomalies.filter((a) => {
+    const key = ackKeyFor(a);
+    return !key || !liveAcks.some((ack) => ack.kind === key.kind && ack.entity === key.entity);
+  });
+
+  // flaggedDiskSlots derives from the SURVIVING disk anomalies (in list
+  // order, one entry per anomaly -- a slot flagged for usage AND errors
+  // appears twice, as before): an acked disk callout un-flags its bay-
+  // schematic bar too, the same "acked means quiet" the row itself gets.
+  const flaggedDiskSlots: string[] = [];
+  for (const a of anomalies) {
+    if (a.kind === 'disk-usage' || a.kind === 'disk-errors') {
+      flaggedDiskSlots.push(a.slot);
     }
   }
 

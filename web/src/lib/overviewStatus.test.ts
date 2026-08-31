@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ackKeyFor,
   calloutTextBySlot,
   deriveOverviewStatus,
   describeAnomaly,
@@ -301,6 +302,155 @@ describe('deriveOverviewStatus alerts merge (Task 12)', () => {
     const withUndefined = deriveOverviewStatus(BASE);
     const withEmpty = deriveOverviewStatus({ ...BASE, alerts: [] });
     expect(withUndefined).toEqual(withEmpty);
+  });
+});
+
+describe('deriveOverviewStatus acknowledgements', () => {
+  // A fixed "now" makes every expiry boundary in this block
+  // deterministic -- deriveOverviewStatus only reads the real clock
+  // when now is omitted.
+  const NOW = 1_000_000;
+
+  it('an acked (kind, entity) pair contributes nothing -- row gone, headline count down', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['sonarr', 'radarr'],
+      acks: [{ kind: 'unhealthy', entity: 'sonarr', until: NOW + 3600 }],
+      now: NOW,
+    });
+    expect(status.anomalies).toEqual([{ kind: 'unhealthy', name: 'radarr' }]);
+    expect(status.headline).toBe('1 thing needs you');
+  });
+
+  it('acking every anomaly restores the all-clear headline', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['sonarr'],
+      acks: [{ kind: 'unhealthy', entity: 'sonarr', until: NOW + 3600 }],
+      now: NOW,
+    });
+    expect(status.ok).toBe(true);
+    expect(status.headline).toBe('Everything is running');
+  });
+
+  it('an ack filters only its exact (kind, entity) pair -- neither field matches loosely', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['sonarr'],
+      acks: [
+        { kind: 'unhealthy', entity: 'radarr', until: NOW + 3600 }, // wrong entity
+        { kind: 'disk-errors', entity: 'sonarr', until: NOW + 3600 }, // wrong kind
+      ],
+      now: NOW,
+    });
+    expect(status.anomalies).toEqual([{ kind: 'unhealthy', name: 'sonarr' }]);
+  });
+
+  it('an acked anomaly disappears and RETURNS after the ack expires -- same list, only now moves (compressed expiry)', () => {
+    const input = {
+      ...BASE,
+      unhealthyNames: ['sonarr'],
+      acks: [{ kind: 'unhealthy', entity: 'sonarr', until: NOW + 60 }],
+    };
+    const during = deriveOverviewStatus({ ...input, now: NOW });
+    expect(during.ok).toBe(true);
+
+    // One second past until: the ack is spent, the anomaly is back --
+    // no refetch or list change needed, expiry is checked per run.
+    const after = deriveOverviewStatus({ ...input, now: NOW + 61 });
+    expect(after.anomalies).toEqual([{ kind: 'unhealthy', name: 'sonarr' }]);
+    expect(after.headline).toBe('1 thing needs you');
+  });
+
+  it('an ack expiring exactly AT until no longer filters (until > now is the live condition)', () => {
+    const input = {
+      ...BASE,
+      unhealthyNames: ['sonarr'],
+      acks: [{ kind: 'unhealthy', entity: 'sonarr', until: NOW }],
+    };
+    expect(deriveOverviewStatus({ ...input, now: NOW }).ok).toBe(false);
+  });
+
+  it('acking a disk callout un-flags its bay-schematic slot too', () => {
+    const disks = { disk1: { 'fs.used_bytes': 95, 'fs.free_bytes': 5, errors: 3 } };
+    const unacked = deriveOverviewStatus({ ...BASE, disks, now: NOW });
+    expect(unacked.flaggedDiskSlots).toEqual(['disk1', 'disk1']);
+
+    const acked = deriveOverviewStatus({
+      ...BASE,
+      disks,
+      acks: [{ kind: 'disk-usage', entity: 'disk1', until: NOW + 3600 }],
+      now: NOW,
+    });
+    // The usage callout is quiet; the errors callout (its own concern,
+    // not covered by the disk-usage ack) still flags the slot.
+    expect(acked.anomalies).toEqual([{ kind: 'disk-errors', slot: 'disk1', errors: 3 }]);
+    expect(acked.flaggedDiskSlots).toEqual(['disk1']);
+  });
+
+  it('array-stopped acks under the literal "array" entity (there is only ever one)', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      arrayStarted: 0,
+      acks: [{ kind: 'array-stopped', entity: 'array', until: NOW + 3600 }],
+      now: NOW,
+    });
+    expect(status.ok).toBe(true);
+  });
+
+  it('an ack can never quiet an alert-backed callout -- that gesture is a SILENCE, not an ack', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [{ rule_id: 'host-cpu-high', rule_name: 'Host CPU high', severity: 'warning', entity: 'host', silenced: false }],
+      // Even an ack row shaped exactly like the alert's identity does
+      // nothing: 'alert' has no ack identity at all (ackKeyFor is null),
+      // and the server refuses to create kind:'alert' rows to begin with.
+      acks: [{ kind: 'alert', entity: 'host', until: NOW + 3600 }],
+      now: NOW,
+    });
+    expect(status.anomalies).toHaveLength(1);
+    expect(status.anomalies[0].kind).toBe('alert');
+  });
+
+  it('an acked frame row does not swallow the same concern\'s unsilenced firing alert -- the alert surfaces on its own line', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      disks: { disk1: { 'fs.used_bytes': 91, 'fs.free_bytes': 9 } },
+      alerts: [{ rule_id: 'disk-usage-high', rule_name: 'Disk usage high', severity: 'alert', entity: 'disk1', silenced: false }],
+      acks: [{ kind: 'disk-usage', entity: 'disk1', until: NOW + 3600 }],
+      now: NOW,
+    });
+    // Without the ack this would be ONE row (the frame row, upgraded by
+    // dedup). With the frame row acked, the still-firing alert gets its
+    // own row instead of vanishing under a mere ack.
+    expect(status.anomalies).toEqual([
+      { kind: 'alert', ruleId: 'disk-usage-high', ruleName: 'Disk usage high', entity: 'disk1', severity: 'critical' },
+    ]);
+  });
+
+  it('a missing acks field behaves exactly like an empty array', () => {
+    const withUndefined = deriveOverviewStatus({ ...BASE, unhealthyNames: ['sonarr'], now: NOW });
+    const withEmpty = deriveOverviewStatus({ ...BASE, unhealthyNames: ['sonarr'], acks: [], now: NOW });
+    expect(withUndefined).toEqual(withEmpty);
+  });
+});
+
+describe('ackKeyFor', () => {
+  it('maps every frame-derived kind to its concrete (kind, entity) identity', () => {
+    expect(ackKeyFor({ kind: 'unhealthy', name: 'sonarr' })).toEqual({ kind: 'unhealthy', entity: 'sonarr' });
+    expect(ackKeyFor({ kind: 'disk-usage', slot: 'disk3', usagePct: 95 })).toEqual({ kind: 'disk-usage', entity: 'disk3' });
+    expect(ackKeyFor({ kind: 'disk-errors', slot: 'disk2', errors: 1 })).toEqual({ kind: 'disk-errors', entity: 'disk2' });
+    expect(ackKeyFor({ kind: 'array-stopped' })).toEqual({ kind: 'array-stopped', entity: 'array' });
+    expect(ackKeyFor({ kind: 'source-critical', source: 'docker', detail: 'down' })).toEqual({
+      kind: 'source-critical',
+      entity: 'docker',
+    });
+  });
+
+  it('is null for an alert-backed callout -- its ack IS an alert silence, one mechanism per system', () => {
+    expect(
+      ackKeyFor({ kind: 'alert', ruleId: 'host-cpu-high', ruleName: 'Host CPU high', entity: '', severity: 'warning' }),
+    ).toBeNull();
   });
 });
 

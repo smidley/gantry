@@ -23,6 +23,7 @@ import (
 	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/config"
 	"github.com/smidley/gantry/internal/fake"
+	"github.com/smidley/gantry/internal/insight"
 	"github.com/smidley/gantry/internal/server"
 	"github.com/smidley/gantry/internal/store"
 	"github.com/stretchr/testify/require"
@@ -530,7 +531,7 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
@@ -587,7 +588,7 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	require.Empty(t, dc.Running(), "dc's own registry never saw this container -- the fix must not depend on it")
 	c, ok := snap.Containers["jellyfin"]
@@ -630,7 +631,7 @@ func TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO(t *testing.T
 		}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["jellyfin"]
 	require.True(t, ok)
@@ -662,7 +663,7 @@ func TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running"}} // Created left at its zero value
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	require.Equal(t, int64(0), snap.Containers["jellyfin"].Created)
 }
@@ -696,7 +697,7 @@ func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
 		return []docker.Meta{{Name: "db", State: "running"}} // running unconditionally, per buildSnapshot's own entity-level contract
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -727,7 +728,7 @@ func TestBuildSnapshotIncludesStoppedContainerWithEmptyMetrics(t *testing.T) {
 		return []docker.Meta{{Name: "gitea", State: "exited", Health: "", Image: "demo/gitea:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["gitea"]
 	require.True(t, ok, "a stopped-but-known container must still appear in the frame")
@@ -760,7 +761,7 @@ func TestBuildSnapshotPassesThroughComposeProject(t *testing.T) {
 		}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	require.Equal(t, "gridmind-cloud", snap.Containers["gridmind-api"].ComposeProject)
 	require.Equal(t, "", snap.Containers["jellyfin"].ComposeProject)
@@ -790,7 +791,7 @@ func TestBuildSnapshotPassesThroughCpusetAndExitCode(t *testing.T) {
 		}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	require.Equal(t, "0-1", snap.Containers["minecraft"].Cpuset)
 	require.Equal(t, 0, snap.Containers["minecraft"].ExitCode)
@@ -821,7 +822,7 @@ func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testin
 		return []docker.Meta{{Name: "db", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -853,7 +854,7 @@ func TestBuildSnapshotDropsStaleContainerGPUBusyPct(t *testing.T) {
 		return []docker.Meta{{Name: "plex", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["plex"]
 	require.True(t, ok)
@@ -900,7 +901,7 @@ rotational="1"
 		return map[string]unraid.DiskMeta{"flash": {Device: "sdi", Kind: "usb"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, fakeDiskMeta, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, fakeDiskMeta, nil, nil, nil)()
 
 	require.Equal(t, server.DiskMetaDTO{Device: "sdc", Kind: "hdd"}, snap.DiskMeta["disk1"], "the real unraid collector's own DiskMeta must survive into the DTO")
 	require.Equal(t, server.DiskMetaDTO{Device: "sdi", Kind: "usb"}, snap.DiskMeta["flash"], "fake mode's own DiskMeta overlay must land alongside it, not replace it")
@@ -943,7 +944,7 @@ func TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced(t *t
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)()
 
 	require.Len(t, snap.Alerts.Firing, 1, "the pending instance must be excluded from the frame")
 	f := snap.Alerts.Firing[0]
@@ -984,7 +985,7 @@ func TestBuildSnapshotAlertsBlockCapsAtTwentyAndReportsTruncated(t *testing.T) {
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)()
 
 	require.Len(t, snap.Alerts.Firing, server.AlertsFrameCap)
 	require.Equal(t, 25, snap.Alerts.FiringCount)
@@ -1006,7 +1007,7 @@ func TestBuildSnapshotAlertsBlockEmptyChannelsWhenNoDispatcher(t *testing.T) {
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)()
 
 	require.Empty(t, snap.Alerts.Channels)
 	require.Empty(t, snap.Alerts.Firing)
@@ -1101,6 +1102,52 @@ func TestBuildClassOfOnlyResolvesDiskKind(t *testing.T) {
 
 	require.Equal(t, "", classOf("host", "disk1"), "non-disk kind never consults DiskMeta")
 	require.Equal(t, "", classOf("disk", "disk1"), "unclassified disk (no ini ticked yet) reads as unknown, not a crash")
+}
+
+// TestBuildInsightSlotsJoinsDiskMetaWithLiveRotationalAndMergesFakeOverlay
+// pins buildInsightSlots' own join: Device comes from diskMeta (real
+// first, fakeDiskMeta's overlay on top -- the same real-then-fake
+// convention buildSnapshot's own DiskMeta merge uses), Rotational from
+// the live disk.<slot>.rotational sample, never the other way around.
+func TestBuildInsightSlotsJoinsDiskMetaWithLiveRotationalAndMergesFakeOverlay(t *testing.T) {
+	live := store.NewLive(100)
+	live.Record(store.SeriesKey{Kind: "disk", Entity: "disk1", Metric: "rotational"}, 1, 1)
+	live.Record(store.SeriesKey{Kind: "disk", Entity: "cache", Metric: "rotational"}, 1, 0)
+
+	real := func() map[string]unraid.DiskMeta {
+		return map[string]unraid.DiskMeta{"disk1": {Device: "sdc", Kind: "hdd"}}
+	}
+	fakeOverlay := func() map[string]unraid.DiskMeta {
+		return map[string]unraid.DiskMeta{"cache": {Device: "nvme0n1", Kind: "nvme"}}
+	}
+
+	slots := buildInsightSlots(real, fakeOverlay, live)()
+
+	require.Equal(t, insight.SlotMeta{Device: "sdc", Rotational: true}, slots["disk1"])
+	require.Equal(t, insight.SlotMeta{Device: "nvme0n1", Rotational: false}, slots["cache"])
+}
+
+func TestBuildInsightSlotsNilFakeDiskMetaUnaffected(t *testing.T) {
+	live := store.NewLive(100)
+	real := func() map[string]unraid.DiskMeta { return map[string]unraid.DiskMeta{"disk1": {Device: "sdc"}} }
+
+	slots := buildInsightSlots(real, nil, live)()
+
+	require.Contains(t, slots, "disk1")
+	require.Equal(t, "sdc", slots["disk1"].Device)
+}
+
+// TestBuildInsightSlotsNoRotationalSampleDefaultsFalse covers a slot
+// present in DiskMeta but with no rotational reading recorded yet (the
+// very first tick, before the unraid collector's own rotational sample
+// lands) -- must default false, not panic or fabricate true.
+func TestBuildInsightSlotsNoRotationalSampleDefaultsFalse(t *testing.T) {
+	live := store.NewLive(100)
+	real := func() map[string]unraid.DiskMeta { return map[string]unraid.DiskMeta{"disk1": {Device: "sdc"}} }
+
+	slots := buildInsightSlots(real, nil, live)()
+
+	require.False(t, slots["disk1"].Rotational)
 }
 
 // fakeMeta builds a minimal known-container answer for a lookupByName
@@ -1475,6 +1522,75 @@ func TestRunSeedsDefaultAlertRulesAtBoot(t *testing.T) {
 	}
 }
 
+// TestRunSeedsInsightRuleConfigsAndResolvesStaleActiveInsightsAtBoot pins
+// main.go's own insight boot sequence: SeedInsightRuleConfigs (all seven,
+// enabled, notify off) and StaleActiveInsights (Open question 5 -- a row
+// left "active" by whatever process last held this db, e.g. a killed
+// prior instance, must not survive a restart as if the live ring still
+// backs it). A row is pre-seeded directly, before run() ever starts, the
+// same "prior process" it's meant to simulate.
+func TestRunSeedsInsightRuleConfigsAndResolvesStaleActiveInsightsAtBoot(t *testing.T) {
+	port := freePort(t)
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+
+	seedSt, err := store.Open(dbPath, nil)
+	require.NoError(t, err)
+	staleID, err := seedSt.UpsertInsight(store.InsightInstance{
+		RuleID: "disk-io-contention", VictimKind: "disk", Victim: "", Culprit: "qbittorrent",
+		Resource: "disk3", State: "active", Severity: "warning", Confidence: "likely", Tier: "proxy",
+		Statement: "stale from a prior process", Evidence: "{}", StartedAt: 1, FiredAt: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, seedSt.Close())
+
+	env := map[string]string{
+		"GANTRY_PORT":    fmt.Sprint(port),
+		"GANTRY_DB_PATH": dbPath,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+
+	st, err := store.Open(dbPath, nil)
+	require.NoError(t, err)
+	defer func() { _ = st.Close() }()
+
+	configs, err := st.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, configs, 7, "main.go must seed all seven insight rule configs at boot")
+	for _, c := range configs {
+		require.True(t, c.Enabled)
+		require.False(t, c.Notify, "no seeded rule may page by default")
+	}
+
+	active, err := st.ActiveInsights(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, active, "a stale active insight from a prior process must not survive a restart")
+
+	history, err := st.InsightHistory(context.Background(), 0, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, staleID, history[0].ID)
+	require.Equal(t, "restart", history[0].ResolveReason)
+}
+
 // TestWireDockerCollectorPinsHostCoresToHostCollector pins main.go's own
 // dc.HostCores wiring: it must be the host collector's own NumCPU method
 // (the /proc/stat-derived, cpuset-immune count), not some other int-
@@ -1507,6 +1623,145 @@ func newAlertTestStore(t *testing.T) *store.Store {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = st.Close() })
 	return st
+}
+
+// --- resyncFastModeAlertRules (F1, review) ----------------------------------
+
+func alertRuleByID(t *testing.T, st *store.Store, id string) store.AlertRule {
+	t.Helper()
+	rules, err := st.AlertRules(context.Background())
+	require.NoError(t, err)
+	for _, r := range rules {
+		if r.ID == id {
+			return r
+		}
+	}
+	t.Fatalf("no alert rule %q", id)
+	return store.AlertRule{}
+}
+
+// TestResyncFastModeAlertRulesFirstBootStampsMarkerWithoutResyncing pins
+// the marker contract's first-boot branch precisely: absent any stored
+// marker, resyncFastModeAlertRules must never touch a single
+// alert_rules row, only stamp the marker for the NEXT boot to compare
+// against. A truly fresh database can't observe that on its own --
+// SeedAlertRules already wrote the current mode's own defaults, so a
+// resync-if-it-ran would be a no-op -- so this seeds FAKE mode's
+// defaults directly (bypassing resyncFastModeAlertRules entirely, so no
+// marker is ever written) and then calls resync for a REAL boot: if the
+// no-marker branch resynced, host-cpu-high would flip to 600/300 same
+// as any other mode flip; the contract says it must not.
+func TestResyncFastModeAlertRulesFirstBootStampsMarkerWithoutResyncing(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(true)))
+
+	_, ok, err := st.SettingGet(alertSeededFastModeSettingsKey)
+	require.NoError(t, err)
+	require.False(t, ok, "sanity: no marker written yet")
+
+	require.NoError(t, resyncFastModeAlertRules(st, false)) // this function's first-ever call, for a real boot
+
+	require.EqualValues(t, 60, alertRuleByID(t, st, "host-cpu-high").ForSeconds,
+		"first boot must not resync even though the existing rows don't match this mode")
+
+	marker, ok, err := st.SettingGet(alertSeededFastModeSettingsKey)
+	require.NoError(t, err)
+	require.True(t, ok, "marker must be stamped on first boot")
+	require.Equal(t, "false", marker)
+}
+
+// TestResyncFastModeAlertRulesSameModeRebootNeverTouchesATunedRule pins
+// the exact ambiguity the old value-matching heuristic got wrong: a
+// real-box user who deliberately tunes host-cpu-high to
+// for_seconds=60/clear_seconds=60 -- a perfectly reasonable "alert
+// after a minute, clear after a minute" -- happens to collide with
+// fake mode's own compressed 60s/60s constant. The old heuristic
+// re-derived intent from that collision and silently reverted the edit
+// on the very next real boot; the marker makes that provably
+// impossible, because a same-mode reboot returns before ever reading a
+// rule's for_seconds/clear_seconds at all.
+func TestResyncFastModeAlertRulesSameModeRebootNeverTouchesATunedRule(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(false)))
+	require.NoError(t, resyncFastModeAlertRules(st, false)) // first real boot: stamps the marker
+
+	edited := alertRuleByID(t, st, "host-cpu-high")
+	edited.ForSeconds, edited.ClearSeconds = 60, 60 // == fake mode's own compiled default, on purpose
+	require.NoError(t, st.UpsertAlertRule(edited))
+
+	require.NoError(t, resyncFastModeAlertRules(st, false)) // a later reboot, still real mode
+
+	got := alertRuleByID(t, st, "host-cpu-high")
+	require.EqualValues(t, 60, got.ForSeconds, "a same-mode reboot must never revert a tuned rule, even one that matches the other mode's default")
+	require.EqualValues(t, 60, got.ClearSeconds)
+}
+
+// TestResyncFastModeAlertRulesCustomEditSurvivesRepeatedSameModeReboots
+// pins the general case behind the same guarantee: a value that
+// matches NEITHER mode's compiled constant must survive any number of
+// reboots as long as the mode never actually changes.
+func TestResyncFastModeAlertRulesCustomEditSurvivesRepeatedSameModeReboots(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(false)))
+	require.NoError(t, resyncFastModeAlertRules(st, false))
+
+	edited := alertRuleByID(t, st, "host-cpu-high")
+	edited.ForSeconds, edited.ClearSeconds = 450, 450 // matches neither mode's compiled constant
+	require.NoError(t, st.UpsertAlertRule(edited))
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, resyncFastModeAlertRules(st, false))
+	}
+
+	got := alertRuleByID(t, st, "host-cpu-high")
+	require.EqualValues(t, 450, got.ForSeconds, "a genuine edit must survive any number of same-mode reboots")
+	require.EqualValues(t, 450, got.ClearSeconds)
+}
+
+// TestResyncFastModeAlertRulesModeFlipRealToFakeCompressesEveryBuiltinThresholdRule
+// pins the other half of the marker contract: a genuine mode flip must
+// force EVERY builtin threshold rule to the new mode's numbers,
+// including one already tuned to something else entirely -- that's
+// what flipping demo mode means, not a per-rule judgment call.
+func TestResyncFastModeAlertRulesModeFlipRealToFakeCompressesEveryBuiltinThresholdRule(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(false)))
+	require.NoError(t, resyncFastModeAlertRules(st, false)) // first boot, real mode: stamps the marker "false"
+
+	edited := alertRuleByID(t, st, "host-cpu-high")
+	edited.ForSeconds, edited.ClearSeconds = 450, 450 // a genuine tune, matching neither mode
+	require.NoError(t, st.UpsertAlertRule(edited))
+
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(true))) // idempotent -- every id already exists
+	require.NoError(t, resyncFastModeAlertRules(st, true))               // mode flip: real -> fake
+
+	require.EqualValues(t, 60, alertRuleByID(t, st, "host-cpu-high").ForSeconds, "a mode flip compresses even an already-tuned rule")
+	require.EqualValues(t, 60, alertRuleByID(t, st, "host-cpu-high").ClearSeconds)
+	require.EqualValues(t, 60, alertRuleByID(t, st, "disk-usage-high").ForSeconds, "not just the one rule id the older per-rule tests happened to check")
+	require.EqualValues(t, 60, alertRuleByID(t, st, "disk-usage-high").ClearSeconds)
+
+	require.EqualValues(t, 3600, alertRuleByID(t, st, "container-oom").ClearSeconds, "a non-threshold builtin rule is never touched, in either mode")
+}
+
+// TestResyncFastModeAlertRulesModeFlipFakeToRealRestoresEveryBuiltinThresholdRule
+// is the mirror direction: fake -> real must restore the true windows
+// just as unconditionally.
+func TestResyncFastModeAlertRulesModeFlipFakeToRealRestoresEveryBuiltinThresholdRule(t *testing.T) {
+	st := newAlertTestStore(t)
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(true)))
+	require.NoError(t, resyncFastModeAlertRules(st, true)) // first boot, fake mode: stamps the marker "true"
+
+	edited := alertRuleByID(t, st, "host-cpu-high")
+	edited.ForSeconds, edited.ClearSeconds = 45, 45 // a genuine fake-mode tune, matching neither mode's default
+	require.NoError(t, st.UpsertAlertRule(edited))
+
+	require.NoError(t, st.SeedAlertRules(store.DefaultAlertRules(false))) // idempotent -- every id already exists
+	require.NoError(t, resyncFastModeAlertRules(st, false))               // mode flip: fake -> real
+
+	require.EqualValues(t, 600, alertRuleByID(t, st, "host-cpu-high").ForSeconds, "a mode flip restores even an already-tuned rule")
+	require.EqualValues(t, 300, alertRuleByID(t, st, "host-cpu-high").ClearSeconds)
+	require.EqualValues(t, 900, alertRuleByID(t, st, "disk-usage-high").ForSeconds)
+	require.EqualValues(t, 900, alertRuleByID(t, st, "disk-usage-high").ClearSeconds)
 }
 
 func TestLoadWebhookTargetsEmptyWhenNeverSet(t *testing.T) {
@@ -1986,6 +2241,67 @@ func TestRunFakeModeSeedsFastRulesAndDemoWebhookTargets(t *testing.T) {
 		}
 		return body.Channels["notify"] == "ok"
 	}, 3*time.Second, 50*time.Millisecond, "the notify channel must read ok against fake mode's own temp-dir default, no configuration needed")
+}
+
+// TestRunRealBootAfterFakeBootRestoresRealAlertWindows drives the actual
+// production boot sequence (run()) twice against the SAME database --
+// pins I5 (review) end to end, not just at resyncFastModeAlertRules'
+// own unit level: a fake-data demo boot must never permanently
+// compress a later real boot's alert windows.
+func TestRunRealBootAfterFakeBootRestoresRealAlertWindows(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+
+	bootAndFetchRules := func(fakeData string) map[string]server.AlertRuleDTO {
+		port := freePort(t)
+		env := map[string]string{
+			"GANTRY_PORT":      fmt.Sprint(port),
+			"GANTRY_DB_PATH":   dbPath,
+			"GANTRY_FAKE_DATA": fakeData,
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+		defer func() {
+			cancel()
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("run did not shut down")
+			}
+		}()
+
+		base := fmt.Sprintf("http://127.0.0.1:%d", port)
+		require.Eventually(t, func() bool {
+			resp, err := http.Get(base + "/api/healthz")
+			if err != nil {
+				return false
+			}
+			drainAndClose(resp)
+			return resp.StatusCode == http.StatusOK
+		}, 5*time.Second, 50*time.Millisecond)
+
+		resp, err := http.Get(base + "/api/alerts/rules")
+		require.NoError(t, err)
+		defer drainAndClose(resp)
+		var body struct {
+			Rules []server.AlertRuleDTO `json:"rules"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		out := make(map[string]server.AlertRuleDTO, len(body.Rules))
+		for _, r := range body.Rules {
+			out[r.ID] = r
+		}
+		return out
+	}
+
+	fakeBootRules := bootAndFetchRules("1")
+	require.EqualValues(t, 60, fakeBootRules["host-cpu-high"].ForSeconds, "fake boot compresses the fresh seed")
+	require.EqualValues(t, 60, fakeBootRules["host-cpu-high"].ClearSeconds)
+
+	realBootRules := bootAndFetchRules("")
+	require.EqualValues(t, 600, realBootRules["host-cpu-high"].ForSeconds, "a later REAL boot must restore the true window, not inherit the fake boot's 60s")
+	require.EqualValues(t, 300, realBootRules["host-cpu-high"].ClearSeconds)
 }
 
 // TestFakeModeAlertDemoFiresThenResolves wires the real fake.Generator

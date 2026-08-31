@@ -935,3 +935,113 @@ func TestFakeUnlimitedArchetypesEmitNoMemOrCPUAllocMetrics(t *testing.T) {
 	_, ok := sink.recs[store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "pids.limit"}]
 	require.True(t, ok, "pids.limit is universal, unrelated to the mem/cpu archetype choice")
 }
+
+// --- insightDemo* (Phase 5 Task 10) --------------------------------------
+
+// TestInsightDemoRampFourPhases pins insightDemoRamp's own shape: flat
+// baseline, a linear climb, a flat hold at peak, then straight back to
+// baseline -- mirroring TestAlertDemoDiskTempCRampsCrossesFireThenCoolsCrossesClear's
+// own crossing-never-flickers property, adapted to this simpler
+// two-value (not cool-then-hold-again) shape.
+func TestInsightDemoRampFourPhases(t *testing.T) {
+	require.Equal(t, insightDemoUtilBaseline, insightDemoRamp(0, insightDemoUtilBaseline, insightDemoUtilPeak), "before start: baseline")
+	require.Equal(t, insightDemoUtilBaseline, insightDemoRamp(insightDemoStartAt-time.Second, insightDemoUtilBaseline, insightDemoUtilPeak))
+
+	mid := insightDemoRamp(insightDemoStartAt+insightDemoRampDuration/2, insightDemoUtilBaseline, insightDemoUtilPeak)
+	require.Greater(t, mid, insightDemoUtilBaseline, "mid-ramp: strictly above baseline")
+	require.Less(t, mid, insightDemoUtilPeak, "mid-ramp: strictly below peak")
+
+	require.Equal(t, insightDemoUtilPeak, insightDemoRamp(insightDemoStartAt+insightDemoRampDuration, insightDemoUtilBaseline, insightDemoUtilPeak), "ramp end: exactly at peak")
+	require.Equal(t, insightDemoUtilPeak, insightDemoRamp(insightDemoResolveAt-time.Second, insightDemoUtilBaseline, insightDemoUtilPeak), "still holding just before resolve")
+	require.Equal(t, insightDemoUtilBaseline, insightDemoRamp(insightDemoResolveAt, insightDemoUtilBaseline, insightDemoUtilPeak), "at resolve: straight back to baseline")
+	require.Equal(t, insightDemoUtilBaseline, insightDemoRamp(insightDemoResolveAt+time.Hour, insightDemoUtilBaseline, insightDemoUtilPeak), "long after: still baseline")
+}
+
+// TestInsightDemoRampNeverOvershootsOrDipsMidRamp pins monotonicity
+// through the ramp phase specifically: a demo whose util_pct/await_ms
+// wobbled back down mid-climb would risk resetting Sustained's own
+// all-samples-cross window right as the story is trying to fire.
+func TestInsightDemoRampNeverOvershootsOrDipsMidRamp(t *testing.T) {
+	prev := insightDemoRamp(insightDemoStartAt, insightDemoUtilBaseline, insightDemoUtilPeak)
+	for d := insightDemoStartAt; d <= insightDemoStartAt+insightDemoRampDuration; d += time.Second {
+		v := insightDemoRamp(d, insightDemoUtilBaseline, insightDemoUtilPeak)
+		require.GreaterOrEqual(t, v, prev, "must never dip during the climb (t=%s)", d)
+		require.LessOrEqual(t, v, insightDemoUtilPeak, "must never overshoot peak (t=%s)", d)
+		prev = v
+	}
+}
+
+// TestEmitDisksWiresUtilAndAwaitOnlyForTheInsightDemoDevice proves the
+// emitDisks wiring reaches insightDemoRamp for disk1's own device
+// (sdc) specifically, and that no OTHER disk gets util_pct/await_ms at
+// all -- nothing in the seven-rule library needs them for a device this
+// fixture doesn't script, and emitting them everywhere would just be
+// unused noise.
+func TestEmitDisksWiresUtilAndAwaitOnlyForTheInsightDemoDevice(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	g.Tick(time.Unix(1_000_000, 0)) // elapsed 0 -> baseline
+
+	util := sink.recs[store.SeriesKey{Kind: "host", Metric: "diskio." + insightDemoDevice + ".util_pct"}]
+	require.Len(t, util, 1)
+	require.Equal(t, insightDemoUtilBaseline, util[0].Val)
+	await := sink.recs[store.SeriesKey{Kind: "host", Metric: "diskio." + insightDemoDevice + ".await_ms"}]
+	require.Len(t, await, 1)
+	require.Equal(t, insightDemoAwaitBaseline, await[0].Val)
+
+	for _, d := range disks {
+		if d.device == insightDemoDevice {
+			continue
+		}
+		_, ok := sink.recs[store.SeriesKey{Kind: "host", Metric: "diskio." + d.device + ".util_pct"}]
+		require.False(t, ok, "device %s must not emit util_pct -- only the insight demo's own device does", d.device)
+	}
+}
+
+// TestEmitDisksUtilAndAwaitRampAtInsightDemoStartAt proves the wiring
+// tracks elapsed time, not just tick count: driving Tick well past
+// insightDemoStartAt+insightDemoRampDuration must show the peak value.
+func TestEmitDisksUtilAndAwaitRampAtInsightDemoStartAt(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	boot := time.Unix(1_000_000, 0)
+	g.Tick(boot)
+	g.Tick(boot.Add(insightDemoStartAt + insightDemoRampDuration + 5*time.Second))
+
+	util := sink.recs[store.SeriesKey{Kind: "host", Metric: "diskio." + insightDemoDevice + ".util_pct"}]
+	require.Equal(t, insightDemoUtilPeak, util[len(util)-1].Val)
+}
+
+// TestContainerLiveIOWiresInsightDemoCulpritAndWitnessesOnDemoDeviceOnly
+// pins the culprit-attribution side: qbittorrent ramps on the demo
+// device while jellyfin/sonarr hold a small constant share throughout
+// (the co-tenancy requirement's own witnesses), and no OTHER container
+// ever touches the demo device at all.
+func TestContainerLiveIOWiresInsightDemoCulpritAndWitnessesOnDemoDeviceOnly(t *testing.T) {
+	sink := &capture{}
+	g := New(sink, nil, 1)
+	boot := time.Unix(1_000_000, 0)
+	g.Tick(boot)                                                                   // elapsed 0 -> baseline
+	g.Tick(boot.Add(insightDemoStartAt + insightDemoRampDuration + 5*time.Second)) // elapsed -> peak
+
+	metric := "live:io." + insightDemoDevice + ".read_bps"
+	qbit := sink.recs[store.SeriesKey{Kind: "container", Entity: insightDemoCulprit, Metric: metric}]
+	require.Len(t, qbit, 2)
+	require.Equal(t, insightDemoCulpritBpsBaseline, qbit[0].Val)
+	require.Equal(t, insightDemoCulpritBpsPeak, qbit[1].Val)
+
+	for _, witness := range []string{"jellyfin", "sonarr"} {
+		got := sink.recs[store.SeriesKey{Kind: "container", Entity: witness, Metric: metric}]
+		require.Len(t, got, 2)
+		require.Equal(t, insightDemoWitnessBps, got[0].Val, "%s's own share never ramps -- it's the co-tenancy witness", witness)
+		require.Equal(t, insightDemoWitnessBps, got[1].Val)
+	}
+
+	for _, a := range fleet {
+		if a.name == insightDemoCulprit || a.name == "jellyfin" || a.name == "sonarr" || a.stopped || a.created {
+			continue
+		}
+		_, ok := sink.recs[store.SeriesKey{Kind: "container", Entity: a.name, Metric: metric}]
+		require.False(t, ok, "%s must not touch the insight demo's own device", a.name)
+	}
+}

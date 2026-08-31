@@ -9,18 +9,15 @@
    lib/tokens.css, switched by [data-theme] rather than Tailwind's
    dark: variant, since the design needs an explicit system|light|dark
    toggle, not just a prefers-color-scheme mirror. */
-/* Legibility corrective pass: Inter is the single UI+display+data face
-   (--font-sans and --font-display are now the same stack) -- Space
-   Grotesk (quirky letterforms, a flagged '1' that misread in the
-   Overview headline) and IBM Plex Sans are both retired. The two
-   tokens stay separate names, not collapsed into one, since call
-   sites throughout the app already say "this is a display context" or
-   "this is body text" via which token they reference; only the value
-   changed. --font-mono (IBM Plex Mono) is untouched -- true-mono
-   contexts (microlabels, the log viewer) keep their own face. */
+/* Inter is the single interface face: prose, headings, numbers, labels,
+   controls, chart axes, and navigation all share its proportions. The
+   legacy --font-mono token now resolves to Inter as well so existing
+   component call sites stay uniform; --font-code is reserved for the
+   one place monospacing carries meaning: raw container logs. */
 @theme {
   --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-mono: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-code: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
   --font-display: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
   --breakpoint-md: 48rem;
 }
@@ -49,6 +46,18 @@ body {
   min-height: 100vh;
   background: var(--page);
   color: var(--ink);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  background-image:
+    radial-gradient(circle at 78% -10%, color-mix(in oklab, var(--accent) 9%, transparent), transparent 32rem),
+    linear-gradient(180deg, color-mix(in oklab, var(--surface) 26%, transparent), transparent 22rem);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--accent) 28%, transparent);
 }
 
 /* Quality floor: a visible focus ring everywhere, never suppressed --
@@ -83,42 +92,44 @@ body {
    renders its own. */
 .page-title {
   font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 1.4rem;
+  font-weight: 680;
+  font-size: clamp(1.65rem, 2vw, 2.15rem);
+  line-height: 1.12;
+  letter-spacing: -0.035em;
   color: var(--ink);
-  margin: 0 0 1rem 0;
+  margin: 0 0 0.35rem 0;
 }
 
-/* Equipment-tag micro-label convention: metric names, table headers,
-   chart eyebrows. Bumped 11px->12px and 0.08em->0.06em letter-spacing
-   in the same legibility pass as the font swap above -- the tighter
-   original tracking, combined with IBM Plex Mono's own narrow
-   letterforms at 11px, read as borderline illegible at arm's length. */
+/* Metric names, table headers and chart eyebrows share the same Inter
+   face as the rest of the UI, distinguished only by size, case and a
+   restrained amount of tracking. */
 .microlabel {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.07em;
   color: var(--ink-2);
 }
 
 /* Card surface -- shadow in light mode only; dark mode relies on the
    border alone (a shadow reads as noise on a near-black surface). */
 .card {
-  background: var(--surface);
-  border: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
-  border-radius: 8px;
-  box-shadow: 0 1px 2px color-mix(in oklab, var(--ink) 12%, transparent);
+  background: color-mix(in oklab, var(--surface-raised) 96%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) .card {
-    box-shadow: none;
+    box-shadow: var(--shadow-sm);
   }
 }
 
 :root[data-theme='dark'] .card {
-  box-shadow: none;
+  box-shadow: var(--shadow-sm);
 }
 
 /* Tabular numerals everywhere data ticks -- a value must not jitter
@@ -143,23 +154,29 @@ body {
    of this. */
 .segmented {
   display: inline-flex;
-  border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-  border-radius: 6px;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
   overflow: hidden;
+  background: var(--surface-soft);
 }
 .segmented__btn {
-  min-height: 40px;
+  min-height: 34px;
   padding: 0 0.85rem;
   border: none;
-  border-right: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+  border-radius: 7px;
   background: transparent;
   color: var(--ink-2);
-  font-size: 0.82rem;
+  font-size: 0.8rem;
+  font-weight: 520;
   white-space: nowrap;
   cursor: pointer;
+  transition: background 150ms ease, color 150ms ease, box-shadow 150ms ease;
 }
-.segmented__btn:last-child {
-  border-right: none;
+.segmented__btn:hover:not(.segmented__btn--active) {
+  color: var(--ink);
+  background: color-mix(in oklab, var(--surface) 60%, transparent);
 }
 @media (max-width: 47.9375rem) {
   .segmented__btn {
@@ -167,7 +184,121 @@ body {
   }
 }
 .segmented__btn--active {
-  background: color-mix(in oklab, var(--series-1) 15%, transparent);
-  color: var(--series-1);
-  font-weight: 500;
+  background: var(--surface);
+  color: var(--accent-strong);
+  font-weight: 650;
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--ink) 12%, transparent);
+}
+
+/* Shared control treatment. Individual views still own sizing and
+   layout, while the material, focus and hover language stays consistent. */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+input[type='text'],
+input[type='number'],
+input[type='password'],
+input[type='search'],
+select,
+textarea {
+  color: var(--ink);
+  background: var(--surface);
+  border-color: var(--border-strong) !important;
+  border-radius: 9px !important;
+  box-shadow: inset 0 1px 0 color-mix(in oklab, white 28%, transparent);
+  transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--ink-3);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 14%, transparent);
+}
+
+button:not(.segmented__btn):not(.core-ribbon__segment):not([class*='sort']):not([class*='dismiss']):not([class*='toggle']) {
+  border-radius: 9px;
+}
+
+/* Product actions use one recognizable accent treatment across views.
+   Their behavior and component-level dimensions remain untouched. */
+body :is(
+  .settings-retention__save,
+  .settings-webhooks__save,
+  .settings-webhooks__add,
+  .alerts-view__add-rule,
+  .compare__save-group-open,
+  .compare__save-group-btn,
+  .containers-view__compare-btn,
+  .maintenance-card__action
+) {
+  color: white !important;
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 6px 16px color-mix(in oklab, var(--accent) 18%, transparent);
+}
+
+body :is(
+  .settings-retention__save,
+  .settings-webhooks__save,
+  .settings-webhooks__add,
+  .alerts-view__add-rule,
+  .compare__save-group-open,
+  .compare__save-group-btn,
+  .containers-view__compare-btn,
+  .maintenance-card__action
+):hover:not(:disabled) {
+  background: var(--accent-strong) !important;
+  border-color: var(--accent-strong) !important;
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+a {
+  text-underline-offset: 0.2em;
+}
+
+table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+thead th {
+  background: color-mix(in oklab, var(--surface-soft) 55%, transparent);
+}
+
+tbody tr {
+  transition: background 140ms ease;
+}
+
+tbody tr:hover {
+  background: color-mix(in oklab, var(--accent) 5%, transparent);
+}
+
+@media (max-width: 47.9375rem) {
+  body {
+    font-size: 14px;
+    background-image: none;
+  }
+
+  .page-title {
+    font-size: 1.65rem;
+  }
+
+  .card {
+    border-radius: 12px;
+  }
 }

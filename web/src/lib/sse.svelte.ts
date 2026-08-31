@@ -23,6 +23,7 @@ class LiveStore {
   // "the dot emits one soft pulse PER RECEIVED FRAME... it's honest"
   // per the design direction.
   frameCount = $state(0);
+  lastFrameAt = $state(0);
 
   // glideMs is the duration (ms) every live head-ease/tween should span
   // for the leg starting with the frame that just arrived -- the
@@ -90,6 +91,7 @@ class LiveStore {
       this.connected = true;
       this.stale = false;
       this.#lastFrameAt = now;
+      this.lastFrameAt = now;
       this.frameCount++;
     });
 
@@ -105,6 +107,13 @@ class LiveStore {
     this.#es = null;
     if (this.#staleTimer !== null) clearInterval(this.#staleTimer);
     this.#staleTimer = null;
+  }
+
+  reconnect() {
+    this.disconnect();
+    this.connected = false;
+    this.stale = false;
+    this.connect();
   }
 }
 

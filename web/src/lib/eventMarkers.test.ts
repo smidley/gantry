@@ -42,6 +42,13 @@ describe('eventsToMarkers', () => {
     expect(eventsToMarkers([ev({ Kind: 'alert.resolved', TS: 60 })])).toEqual([]);
   });
 
+  it('maps insight.detected to an info marker, and insight.resolved to no marker at all', () => {
+    expect(eventsToMarkers([ev({ Kind: 'insight.detected', TS: 55, Detail: 'qbittorrent is likely slowing disk3' })])).toEqual([
+      { ts: 55, severity: 'info', label: 'Insight · qbittorrent is likely slowing disk3' },
+    ]);
+    expect(eventsToMarkers([ev({ Kind: 'insight.resolved', TS: 65 })])).toEqual([]);
+  });
+
   it('skips event kinds with no marker mapping (e.g. array/disk events)', () => {
     expect(eventsToMarkers([ev({ Kind: 'array.state', TS: 10 }), ev({ Kind: 'disk.errors', TS: 20 })])).toEqual([]);
   });

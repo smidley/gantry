@@ -36,6 +36,7 @@
     sortMounts,
   } from '../lib/containerStorage';
   import { diskKind, diskUsagePct } from '../lib/disks';
+  import { deviceSharePct } from '../lib/insights';
 
   import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
@@ -44,6 +45,7 @@
   import StorageDeviceRow from '../components/StorageDeviceRow.svelte';
   import StorageTotalRow from '../components/StorageTotalRow.svelte';
   import AnomalyBanner from '../components/AnomalyBanner.svelte';
+  import ImpactPanel from '../components/ImpactPanel.svelte';
 
   let { name } = $props();
 
@@ -403,6 +405,45 @@
   // "warn" floor, same as every other banded number in this app.
   let memLimitColor = $derived(memLimitPctNow !== undefined ? bandToken(band('container.mem_limit_pct', memLimitPctNow)) : undefined);
 
+  // --- Impact panel (Phase 5 Task 12) ---------------------------------
+
+  // activeInsights: the live frame's own insights.active block -- no
+  // separate fetch, the same "reads straight off the live frame"
+  // contract the rest of this page follows.
+  let activeInsights = $derived(live.frame?.insights?.active ?? []);
+  // hostMetrics backs the share strip's own per-device denominator
+  // (deviceSharePct's own doc) -- host/diskio.<dev>.read_bps/.write_bps,
+  // already flowing on every SSE tick.
+  let hostMetrics = $derived(live.frame?.host ?? {});
+  // deviceShares reuses visibleDevices (the Live IO section's own noise-
+  // filtered list, above) rather than storageData.devices directly: a
+  // device idle long enough to be hidden from Live IO has ~0% share
+  // anyway, and showing it here too would just be the same clutter
+  // twice.
+  let deviceShares = $derived(
+    visibleDevices.map((d) => ({
+      device: d.device,
+      label: d.label,
+      sharePct: deviceSharePct(
+        d.read_bps,
+        d.write_bps,
+        hostMetrics[`diskio.${d.device}.read_bps`] ?? 0,
+        hostMetrics[`diskio.${d.device}.write_bps`] ?? 0,
+      ),
+    })),
+  );
+  // gpuEngineShares: container/<name>/gpu.<eng>.busy_pct is ALREADY a
+  // share of that engine (Task 0's own signal inventory), not a raw
+  // number needing further division -- only engines this container has
+  // actually reported a value for are shown, same conditional-presence
+  // rule gpuSeries above already follows.
+  let gpuEngineShares = $derived(
+    GPU_ENGINE_ORDER.filter((engine) => c?.metrics?.[`gpu.${engine}.busy_pct`] !== undefined).map((engine) => ({
+      engine,
+      busyPct: c.metrics[`gpu.${engine}.busy_pct`],
+    })),
+  );
+
   // pidsNow/pidsLimitNow back the Metadata card's own quiet "142 / 2048"
   // row -- shown only when pidsLimitNow is defined (limited), per the
   // "nothing shown when fully unlimited" rule the whole limits feature
@@ -670,6 +711,17 @@
         </div>
       {/if}
     </div>
+  {/if}
+
+  {#if c}
+    <ImpactPanel
+      containerName={name}
+      insights={activeInsights}
+      cpuPct={cpuPctNow}
+      memPct={memPctNow}
+      devices={deviceShares}
+      gpuEngines={gpuEngineShares}
+    />
   {/if}
 
   <div class="card container-detail__metadata">

@@ -58,6 +58,8 @@
     'disk.errors',
     'alert.fired',
     'alert.resolved',
+    'insight.detected',
+    'insight.resolved',
   ];
   const TIME_PRESETS = [
     { key: '1h', label: '1h', seconds: 3600 },

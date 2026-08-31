@@ -1,0 +1,11 @@
+<!-- Rejected: fused the crane profile with a "G" monogram (nod to the old placeholder letter) but the extra bottom foot needed to sell the letterform competed with the boom and hoist, reading as neither G nor crane by 32px. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="#0b0b0b"/>
+  <rect x="70" y="82" width="22" height="104" fill="#2a78d6"/>
+  <rect x="70" y="82" width="128" height="22" fill="#2a78d6"/>
+  <rect x="132" y="104" width="22" height="60" fill="#2a78d6"/>
+  <rect x="70" y="164" width="62" height="22" fill="#2a78d6"/>
+  <rect x="169" y="104" width="18" height="14" fill="#ffffff"/>
+  <rect x="175" y="118" width="6" height="20" fill="#ffffff"/>
+  <rect x="158" y="138" width="40" height="26" fill="#ffffff"/>
+</svg>

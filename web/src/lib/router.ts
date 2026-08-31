@@ -17,6 +17,7 @@ export type RouteName =
   | 'maintenance'
   | 'gpu'
   | 'events'
+  | 'insights'
   | 'alerts'
   | 'settings'
   | 'not-found';
@@ -63,6 +64,18 @@ const routeDefs: RouteDef[] = [
   { name: 'maintenance', pattern: ['maintenance'] },
   { name: 'gpu', pattern: ['gpu'] },
   { name: 'events', pattern: ['events'] },
+  { name: 'insights', pattern: ['insights'] },
+  // Phase 5 Task 14: the interaction map is a `.segmented` MODE inside
+  // the Insights view, not a separate page (see routes[] below's own
+  // doc on why it gets no second nav item) -- so "#/insights/map" is a
+  // second pattern for the SAME route name, capturing into
+  // params.mode, exactly the "top"/"top/:resource" precedent just
+  // above (Overview's compact switcher deep-linking into a specific
+  // resource tab within TopConsumers). Insights.svelte reads
+  // params.mode itself; any value other than "map" (including absent)
+  // means "let the view's own default -- map when something's active,
+  // list otherwise -- decide."
+  { name: 'insights', pattern: ['insights', ':mode'] },
   { name: 'alerts', pattern: ['alerts'] },
   { name: 'settings', pattern: ['settings'] },
 ];
@@ -72,7 +85,8 @@ const routeDefs: RouteDef[] = [
 // same as the overview route -- every one of them has zero path
 // segments once the leading "#" and empty splits are stripped.
 export function parseHash(hash: string): Route {
-  const path = hash.replace(/^#/, '');
+  const raw = hash.replace(/^#/, '');
+  const [path, queryString = ''] = raw.split('?', 2);
   const segments = path.split('/').filter((s) => s.length > 0);
 
   for (const def of routeDefs) {
@@ -88,7 +102,11 @@ export function parseHash(hash: string): Route {
         break;
       }
     }
-    if (matched) return { name: def.name, params };
+    if (matched) {
+      const query = new URLSearchParams(queryString);
+      for (const [key, value] of query) params[key] = value;
+      return { name: def.name, params };
+    }
   }
   return { name: 'not-found', params: {} };
 }
@@ -153,6 +171,12 @@ const ICON_GPU = strokeIcon(
 const ICON_EVENTS = strokeIcon(
   '<path d="M18 8a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M9.5 20a2.5 2.5 0 0 0 5 0"/>',
 );
+// ICON_INSIGHTS: two linked nodes -- a plain link/graph glyph, distinct
+// from Alerts' own triangle and Events' own bell (Phase 5's own icon
+// contract, mirroring Alerts' Task 10 precedent above): an insight is a
+// RELATIONSHIP between two things, and this is the simplest shape that
+// reads as one without borrowing either sibling's silhouette.
+const ICON_INSIGHTS = strokeIcon('<circle cx="6" cy="7" r="3"/><circle cx="18" cy="17" r="3"/><path d="M8.4 9.1l7.2 5.8"/>');
 // ICON_ALERTS: a warning triangle with an exclamation mark -- distinct
 // from Events' own bell glyph just above (Events keeps the bell; Phase
 // 4's Alerts view gets the triangle, per the plan's own icon contract).
@@ -161,11 +185,24 @@ const ICON_SETTINGS = strokeIcon(
   '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>',
 );
 
-// routes is the single nav table -- 9 entries, the original spec's full
-// count plus Maintenance (new, outside that original count). Alerts
-// sits between Events and Settings (Task 10's own contract);
-// container-detail is reached by clicking a container row rather than
-// through nav, so it's never in this table at all.
+// routes is the single nav table -- 10 entries now (Phase 5 adds
+// Insights, the plan's own "exactly ONE nav item, not two" -- the
+// interaction map lives INSIDE it as a `.segmented` mode, see
+// routeDefs' own doc above, rather than claiming a second slot).
+// Insights sits directly above Alerts ("an explanation precedes an
+// escalation" -- Task 11's own ordering rationale); container-detail is
+// reached by clicking a container row rather than through nav, so it's
+// never in this table at all.
+//
+// TabBar.svelte/Sidebar.svelte both render off this exported array.
+// TabBar needs no per-entry edit ever: its moreRoutes filter is a
+// subtractive `!primaryNames.has(...)`, so a name absent from every
+// explicit list lands in its own "More" overflow rather than
+// vanishing. Sidebar's three groups (monitorRoutes/operateRoutes/
+// systemRoutes) are each an EXPLICIT allow-list; its Monitor group
+// names 'insights' -- a finding is something you watch and read, not a
+// lever you pull, so it sits with Overview/Metrics/Storage rather than
+// with Maintenance/Alerts in Operate.
 export const routes: NavItem[] = [
   { name: 'overview', hash: '#/', label: 'Overview', icon: ICON_OVERVIEW },
   {
@@ -191,6 +228,7 @@ export const routes: NavItem[] = [
   },
   { name: 'gpu', hash: '#/gpu', label: 'GPU', icon: ICON_GPU },
   { name: 'events', hash: '#/events', label: 'Events', icon: ICON_EVENTS },
+  { name: 'insights', hash: '#/insights', label: 'Insights', icon: ICON_INSIGHTS },
   { name: 'alerts', hash: '#/alerts', label: 'Alerts', icon: ICON_ALERTS },
   { name: 'settings', hash: '#/settings', label: 'Settings', icon: ICON_SETTINGS },
 ];

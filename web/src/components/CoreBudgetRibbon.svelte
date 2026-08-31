@@ -110,18 +110,29 @@
   .core-ribbon__segment {
     position: relative;
     height: 100%;
-    min-width: 2px;
+    /* Width must remain a faithful fraction of host capacity. A former
+       2px minimum made tiny consumers look larger than they really were
+       and could push the free section out of scale. */
+    min-width: 0;
     flex-shrink: 0;
     border: none;
+    border-radius: 0;
     padding: 0;
     font: inherit;
     transition-property: width;
     transition-timing-function: linear;
     cursor: pointer;
   }
+  /* Only the bar itself owns rounded corners. Internal edges stay square
+     and receive a hairline separator, making narrow allocations read as
+     exact slices instead of a row of pills. */
+  .core-ribbon__segment + .core-ribbon__segment {
+    box-shadow: inset 1px 0 0 color-mix(in oklab, var(--surface) 42%, transparent);
+  }
   .core-ribbon__segment:hover,
   .core-ribbon__segment:focus-visible {
     filter: brightness(1.15);
+    z-index: 1;
   }
   .core-ribbon__free {
     height: 100%;

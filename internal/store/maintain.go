@@ -31,7 +31,13 @@ func (s *Store) Maintain(ctx context.Context, now time.Time, ret Retention) erro
 	if err := s.PruneOnce(ctx, now, ret); err != nil {
 		return err
 	}
-	return s.pruneAlerts(ctx, now, ret)
+	if err := s.pruneAlerts(ctx, now, ret); err != nil {
+		return err
+	}
+	if err := s.pruneInsights(ctx, now, ret); err != nil {
+		return err
+	}
+	return s.pruneAcks(ctx, now)
 }
 
 // pruneAlerts trims the three alert tables that accumulate history:
@@ -53,6 +59,36 @@ func (s *Store) pruneAlerts(ctx context.Context, now time.Time, ret Retention) e
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM alert_silences WHERE until < ?`, now.Add(-silenceRetention).Unix())
+	return err
+}
+
+// pruneInsights trims the two insight tables that accumulate history:
+// resolved instances past ret.R2 (the same knob pruneAlerts already uses
+// for alert_instances -- insight history is the same medium-retention
+// artifact class, not the raw 1m tier's R1 nor the coarse 1h tier's R3),
+// and dismissals past their own until (no grace window the way
+// silenceRetention gives an expired silence -- a dismissal has no
+// "why didn't I get paged" debugging use once it lapses). An active
+// instance (resolved_at = 0) is never touched -- the age filter looks
+// only at resolved_at, never started_at, the exact pruneAlerts guarantee.
+func (s *Store) pruneInsights(ctx context.Context, now time.Time, ret Retention) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM insight_instances WHERE resolved_at > 0 AND resolved_at < ?`,
+		now.Add(-ret.R2).Unix()); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM insight_dismissals WHERE until < ?`, now.Unix())
+	return err
+}
+
+// pruneAcks trims overview_acks past their own until -- the exact
+// insight_dismissals treatment (no grace window the way silenceRetention
+// gives an expired silence: like a lapsed dismissal, a lapsed ack has no
+// "why didn't I get paged" debugging use -- it never suppressed
+// notification of anything, only an attention row on one view). Acks()
+// already excludes anything expired from what a live caller sees
+// regardless of this prune.
+func (s *Store) pruneAcks(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM overview_acks WHERE until < ?`, now.Unix())
 	return err
 }
 

@@ -19,8 +19,12 @@
   import Maintenance from './views/Maintenance.svelte';
   import GPU from './views/GPU.svelte';
   import Events from './views/Events.svelte';
+  import Insights from './views/Insights.svelte';
   import Alerts from './views/Alerts.svelte';
   import Settings from './views/Settings.svelte';
+  import LoadingState from './components/LoadingState.svelte';
+
+  const LIVE_ROUTES = new Set(['overview', 'containers', 'container-detail', 'compare', 'top', 'storage', 'gpu']);
 
   onMount(() => {
     live.connect();
@@ -43,10 +47,12 @@
 </script>
 
 <Layout>
-  {#if $route.name === 'overview'}
+  {#if LIVE_ROUTES.has($route.name) && !live.frame}
+    <LoadingState title="Connecting to your server" detail="The first live system snapshot will appear here automatically." />
+  {:else if $route.name === 'overview'}
     <Overview />
   {:else if $route.name === 'containers'}
-    <Containers />
+    <Containers initialState={$route.params.state} />
   {:else if $route.name === 'container-detail'}
     <!-- Keyed on the name param: navigating straight from one
          container's detail page to another's must fully reset every
@@ -70,6 +76,8 @@
     <GPU />
   {:else if $route.name === 'events'}
     <Events />
+  {:else if $route.name === 'insights'}
+    <Insights mode={$route.params.mode} />
   {:else if $route.name === 'alerts'}
     <Alerts />
   {:else if $route.name === 'settings'}

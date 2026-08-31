@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ackKeyFor,
   calloutTextBySlot,
   deriveOverviewStatus,
   describeAnomaly,
@@ -10,7 +11,6 @@ import {
 
 const BASE = {
   unhealthyNames: [] as string[],
-  stoppedCount: 0,
   arrayStarted: 1,
   disks: {},
   sources: {},
@@ -46,10 +46,16 @@ describe('deriveOverviewStatus', () => {
     ]);
   });
 
-  it('stopped containers stay ONE aggregated anomaly regardless of count', () => {
-    const status = deriveOverviewStatus({ ...BASE, stoppedCount: 5 });
-    expect(status.headline).toBe('1 thing needs you');
-    expect(status.anomalies).toEqual([{ kind: 'stopped', count: 5 }]);
+  it('stopped containers are NOT an anomaly: the input carries no stopped count at all, and a quiet frame stays ok', () => {
+    // Scott: "stopped containers are not something that needs you."
+    // The derivation has no stopped input anymore -- the fleet sentence
+    // (fleetSentence below) is the one place stopped is still stated,
+    // as a fact rather than a callout. This test pins the input SHAPE:
+    // nothing here can re-grow a stopped-derived anomaly without a test
+    // noticing the union/interface change.
+    const status = deriveOverviewStatus(BASE);
+    expect(status.ok).toBe(true);
+    expect(status.headline).toBe('Everything is running');
   });
 
   it('a disk at exactly the 90% threshold is not flagged', () => {
@@ -147,14 +153,13 @@ describe('deriveOverviewStatus', () => {
   it('combines every kind at once, with the headline counting every row', () => {
     const status = deriveOverviewStatus({
       unhealthyNames: ['sonarr'],
-      stoppedCount: 2,
       arrayStarted: 0,
       disks: { disk1: { 'fs.used_bytes': 95, 'fs.free_bytes': 5 } },
       sources: { docker: 'daemon unreachable' },
     });
-    // unhealthy(1) + stopped(1) + disk-usage(1) + array-stopped(1) + source-critical(1) = 5
-    expect(status.anomalies).toHaveLength(5);
-    expect(status.headline).toBe('5 things need you');
+    // unhealthy(1) + disk-usage(1) + array-stopped(1) + source-critical(1) = 4
+    expect(status.anomalies).toHaveLength(4);
+    expect(status.headline).toBe('4 things need you');
   });
 });
 
@@ -300,6 +305,298 @@ describe('deriveOverviewStatus alerts merge (Task 12)', () => {
   });
 });
 
+describe('deriveOverviewStatus acknowledgements', () => {
+  // A fixed "now" makes every expiry boundary in this block
+  // deterministic -- deriveOverviewStatus only reads the real clock
+  // when now is omitted.
+  const NOW = 1_000_000;
+
+  it('an acked (kind, entity) pair contributes nothing -- row gone, headline count down', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['sonarr', 'radarr'],
+      acks: [{ kind: 'unhealthy', entity: 'sonarr', until: NOW + 3600 }],
+      now: NOW,
+    });
+    expect(status.anomalies).toEqual([{ kind: 'unhealthy', name: 'radarr' }]);
+    expect(status.headline).toBe('1 thing needs you');
+  });
+
+  it('acking every anomaly restores the all-clear headline', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['sonarr'],
+      acks: [{ kind: 'unhealthy', entity: 'sonarr', until: NOW + 3600 }],
+      now: NOW,
+    });
+    expect(status.ok).toBe(true);
+    expect(status.headline).toBe('Everything is running');
+  });
+
+  it('an ack filters only its exact (kind, entity) pair -- neither field matches loosely', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['sonarr'],
+      acks: [
+        { kind: 'unhealthy', entity: 'radarr', until: NOW + 3600 }, // wrong entity
+        { kind: 'disk-errors', entity: 'sonarr', until: NOW + 3600 }, // wrong kind
+      ],
+      now: NOW,
+    });
+    expect(status.anomalies).toEqual([{ kind: 'unhealthy', name: 'sonarr' }]);
+  });
+
+  it('an acked anomaly disappears and RETURNS after the ack expires -- same list, only now moves (compressed expiry)', () => {
+    const input = {
+      ...BASE,
+      unhealthyNames: ['sonarr'],
+      acks: [{ kind: 'unhealthy', entity: 'sonarr', until: NOW + 60 }],
+    };
+    const during = deriveOverviewStatus({ ...input, now: NOW });
+    expect(during.ok).toBe(true);
+
+    // One second past until: the ack is spent, the anomaly is back --
+    // no refetch or list change needed, expiry is checked per run.
+    const after = deriveOverviewStatus({ ...input, now: NOW + 61 });
+    expect(after.anomalies).toEqual([{ kind: 'unhealthy', name: 'sonarr' }]);
+    expect(after.headline).toBe('1 thing needs you');
+  });
+
+  it('an ack expiring exactly AT until no longer filters (until > now is the live condition)', () => {
+    const input = {
+      ...BASE,
+      unhealthyNames: ['sonarr'],
+      acks: [{ kind: 'unhealthy', entity: 'sonarr', until: NOW }],
+    };
+    expect(deriveOverviewStatus({ ...input, now: NOW }).ok).toBe(false);
+  });
+
+  it('acking a disk callout un-flags its bay-schematic slot too', () => {
+    const disks = { disk1: { 'fs.used_bytes': 95, 'fs.free_bytes': 5, errors: 3 } };
+    const unacked = deriveOverviewStatus({ ...BASE, disks, now: NOW });
+    expect(unacked.flaggedDiskSlots).toEqual(['disk1', 'disk1']);
+
+    const acked = deriveOverviewStatus({
+      ...BASE,
+      disks,
+      acks: [{ kind: 'disk-usage', entity: 'disk1', until: NOW + 3600 }],
+      now: NOW,
+    });
+    // The usage callout is quiet; the errors callout (its own concern,
+    // not covered by the disk-usage ack) still flags the slot.
+    expect(acked.anomalies).toEqual([{ kind: 'disk-errors', slot: 'disk1', errors: 3 }]);
+    expect(acked.flaggedDiskSlots).toEqual(['disk1']);
+  });
+
+  it('array-stopped acks under the literal "array" entity (there is only ever one)', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      arrayStarted: 0,
+      acks: [{ kind: 'array-stopped', entity: 'array', until: NOW + 3600 }],
+      now: NOW,
+    });
+    expect(status.ok).toBe(true);
+  });
+
+  it('an ack can never quiet an alert-backed callout -- that gesture is a SILENCE, not an ack', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [{ rule_id: 'host-cpu-high', rule_name: 'Host CPU high', severity: 'warning', entity: 'host', silenced: false }],
+      // Even an ack row shaped exactly like the alert's identity does
+      // nothing: 'alert' has no ack identity at all (ackKeyFor is null),
+      // and the server refuses to create kind:'alert' rows to begin with.
+      acks: [{ kind: 'alert', entity: 'host', until: NOW + 3600 }],
+      now: NOW,
+    });
+    expect(status.anomalies).toHaveLength(1);
+    expect(status.anomalies[0].kind).toBe('alert');
+  });
+
+  it('an acked frame row does not swallow the same concern\'s unsilenced firing alert -- the alert surfaces on its own line', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      disks: { disk1: { 'fs.used_bytes': 91, 'fs.free_bytes': 9 } },
+      alerts: [{ rule_id: 'disk-usage-high', rule_name: 'Disk usage high', severity: 'alert', entity: 'disk1', silenced: false }],
+      acks: [{ kind: 'disk-usage', entity: 'disk1', until: NOW + 3600 }],
+      now: NOW,
+    });
+    // Without the ack this would be ONE row (the frame row, upgraded by
+    // dedup). With the frame row acked, the still-firing alert gets its
+    // own row instead of vanishing under a mere ack.
+    expect(status.anomalies).toEqual([
+      { kind: 'alert', ruleId: 'disk-usage-high', ruleName: 'Disk usage high', entity: 'disk1', severity: 'critical' },
+    ]);
+  });
+
+  it('a missing acks field behaves exactly like an empty array', () => {
+    const withUndefined = deriveOverviewStatus({ ...BASE, unhealthyNames: ['sonarr'], now: NOW });
+    const withEmpty = deriveOverviewStatus({ ...BASE, unhealthyNames: ['sonarr'], acks: [], now: NOW });
+    expect(withUndefined).toEqual(withEmpty);
+  });
+});
+
+describe('deriveOverviewStatus insights merge (Task 13)', () => {
+  const insight = (over: Record<string, unknown> = {}) => ({
+    victim_kind: 'container',
+    victim: 'jellyfin',
+    statement: 'qbittorrent is starving jellyfin on disk3',
+    severity: 'warning',
+    confidence: 'likely',
+    fired_at: 100,
+    ...over,
+  });
+  const firingOnJellyfin = {
+    rule_id: 'container-mem-limit',
+    rule_name: 'Container near memory limit',
+    severity: 'warning',
+    kind: 'container',
+    entity: 'jellyfin',
+    silenced: false,
+    metric: 'mem.limit_pct',
+  };
+
+  it('a warning-or-worse finding with no matching alert row gets its own row, counted in the headline', () => {
+    const status = deriveOverviewStatus({ ...BASE, insights: [insight()] });
+    expect(status.anomalies).toEqual([
+      {
+        kind: 'insight',
+        statement: 'qbittorrent is starving jellyfin on disk3',
+        severity: 'warning',
+        confidence: 'likely',
+      },
+    ]);
+    expect(status.headline).toBe('1 thing needs you');
+  });
+
+  it('an info finding never becomes a row, whatever its confidence -- it belongs on the Insights view', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      insights: [insight({ severity: 'info' }), insight({ severity: 'info', confidence: 'confirmed' })],
+    });
+    expect(status.ok).toBe(true);
+    expect(status.anomalies).toEqual([]);
+  });
+
+  it('an alert-severity finding maps to a critical row, same vocabulary bridge the alerts merge uses', () => {
+    const status = deriveOverviewStatus({ ...BASE, insights: [insight({ severity: 'alert', confidence: 'confirmed' })] });
+    expect(status.anomalies[0]).toMatchObject({ kind: 'insight', severity: 'critical', confidence: 'confirmed' });
+  });
+
+  it('a finding never duplicates an alert row for its victim -- the alert row wins and carries the why suffix', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [firingOnJellyfin],
+      insights: [insight()],
+    });
+    expect(status.anomalies).toHaveLength(1);
+    const [row] = status.anomalies;
+    expect(row.kind).toBe('alert');
+    expect(describeAnomaly(row).detail).toBe('jellyfin · Likely cause: qbittorrent is starving jellyfin on disk3');
+    expect(status.headline).toBe('1 thing needs you');
+  });
+
+  it('a confirmed finding annotates as "Cause", not "Likely cause"', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [firingOnJellyfin],
+      insights: [insight({ confidence: 'confirmed', statement: 'qbittorrent is driving 78% of disk3 IO' })],
+    });
+    expect(describeAnomaly(status.anomalies[0]).detail).toBe('jellyfin · Cause: qbittorrent is driving 78% of disk3 IO');
+  });
+
+  it('the match needs the alert kind AND entity to agree -- a same-name victim of another kind stays its own row', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [{ ...firingOnJellyfin, kind: 'disk', entity: 'jellyfin' }],
+      insights: [insight()],
+    });
+    expect(status.anomalies).toHaveLength(2);
+    expect(status.anomalies.map((a) => a.kind).sort()).toEqual(['alert', 'insight']);
+  });
+
+  it('several findings naming one victim: the best-ranked annotates, every other one stays off the list', () => {
+    const weak = insight({ statement: 'weak finding', severity: 'warning', confidence: 'likely' });
+    const strong = insight({ statement: 'strong finding', severity: 'alert', confidence: 'confirmed' });
+    const status = deriveOverviewStatus({
+      ...BASE,
+      alerts: [firingOnJellyfin],
+      insights: [weak, strong],
+    });
+    expect(status.anomalies).toHaveLength(1);
+    expect(describeAnomaly(status.anomalies[0]).detail).toBe('jellyfin · Cause: strong finding');
+  });
+
+  it('an alert folded into a frame-derived row is not an alert row -- the finding still stands on its own', () => {
+    // container-unhealthy dedups into the 'unhealthy' frame anomaly, so
+    // no alert row exists for grafana; the finding is extra diagnosis
+    // (why grafana is struggling), not a duplicate of any visible row.
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['grafana'],
+      alerts: [
+        {
+          rule_id: 'container-unhealthy',
+          rule_name: 'Container unhealthy',
+          severity: 'warning',
+          kind: 'container',
+          entity: 'grafana',
+          silenced: false,
+        },
+      ],
+      insights: [insight({ victim: 'grafana', statement: 'qbittorrent is starving grafana on disk3' })],
+    });
+    expect(status.anomalies.map((a) => a.kind)).toEqual(['unhealthy', 'insight']);
+    expect(status.headline).toBe('2 things need you');
+  });
+
+  it('eligible findings land ranked -- severity first, then confidence -- after every other source', () => {
+    const status = deriveOverviewStatus({
+      ...BASE,
+      unhealthyNames: ['sonarr'],
+      insights: [
+        insight({ victim: 'a', statement: 'lesser', severity: 'warning', confidence: 'likely' }),
+        insight({ victim: 'b', statement: 'greater', severity: 'alert', confidence: 'confirmed' }),
+      ],
+    });
+    expect(status.anomalies.map((a) => (a.kind === 'insight' ? a.statement : a.kind))).toEqual([
+      'unhealthy',
+      'greater',
+      'lesser',
+    ]);
+  });
+
+  it('a missing insights field behaves exactly like an empty array', () => {
+    const withUndefined = deriveOverviewStatus({ ...BASE, unhealthyNames: ['sonarr'] });
+    const withEmpty = deriveOverviewStatus({ ...BASE, unhealthyNames: ['sonarr'], insights: [] });
+    expect(withUndefined).toEqual(withEmpty);
+  });
+});
+
+describe('ackKeyFor', () => {
+  it('maps every frame-derived kind to its concrete (kind, entity) identity', () => {
+    expect(ackKeyFor({ kind: 'unhealthy', name: 'sonarr' })).toEqual({ kind: 'unhealthy', entity: 'sonarr' });
+    expect(ackKeyFor({ kind: 'disk-usage', slot: 'disk3', usagePct: 95 })).toEqual({ kind: 'disk-usage', entity: 'disk3' });
+    expect(ackKeyFor({ kind: 'disk-errors', slot: 'disk2', errors: 1 })).toEqual({ kind: 'disk-errors', entity: 'disk2' });
+    expect(ackKeyFor({ kind: 'array-stopped' })).toEqual({ kind: 'array-stopped', entity: 'array' });
+    expect(ackKeyFor({ kind: 'source-critical', source: 'docker', detail: 'down' })).toEqual({
+      kind: 'source-critical',
+      entity: 'docker',
+    });
+  });
+
+  it('is null for an alert-backed callout -- its ack IS an alert silence, one mechanism per system', () => {
+    expect(
+      ackKeyFor({ kind: 'alert', ruleId: 'host-cpu-high', ruleName: 'Host CPU high', entity: '', severity: 'warning' }),
+    ).toBeNull();
+  });
+
+  it('is null for an insight-backed callout -- quieting a finding is dismissing it on the Insights view', () => {
+    expect(
+      ackKeyFor({ kind: 'insight', statement: 'qbittorrent is starving jellyfin on disk3', severity: 'warning', confidence: 'likely' }),
+    ).toBeNull();
+  });
+});
+
 describe('describeAnomaly', () => {
   it('unhealthy names the container and links to it', () => {
     const text = describeAnomaly({ kind: 'unhealthy', name: 'sonarr' });
@@ -308,12 +605,41 @@ describe('describeAnomaly', () => {
       title: 'sonarr is unhealthy',
       detail: 'Failing its health check.',
       linkContainer: 'sonarr',
+      href: '#/containers/sonarr',
     });
   });
 
-  it('stopped pluralizes on the boundary between 1 and many', () => {
-    expect(describeAnomaly({ kind: 'stopped', count: 1 }).title).toBe('1 container is stopped');
-    expect(describeAnomaly({ kind: 'stopped', count: 2 }).title).toBe('2 containers are stopped');
+  it('every kind carries the route that explains it (Scott: every attention row is clickable)', () => {
+    expect(describeAnomaly({ kind: 'unhealthy', name: 'sonarr' }).href).toBe('#/containers/sonarr');
+    expect(describeAnomaly({ kind: 'disk-usage', slot: 'disk6', usagePct: 95 }).href).toBe('#/storage');
+    expect(describeAnomaly({ kind: 'disk-errors', slot: 'disk2', errors: 1 }).href).toBe('#/storage');
+    expect(describeAnomaly({ kind: 'array-stopped' }).href).toBe('#/storage');
+    expect(describeAnomaly({ kind: 'source-critical', source: 'docker', detail: 'daemon unreachable' }).href).toBe(
+      '#/containers',
+    );
+    expect(
+      describeAnomaly({ kind: 'alert', ruleId: 'host-cpu-high', ruleName: 'Host CPU high', entity: '', severity: 'warning' })
+        .href,
+    ).toBe('#/alerts');
+    expect(
+      describeAnomaly({ kind: 'insight', statement: 'qbittorrent is starving jellyfin on disk3', severity: 'warning', confidence: 'likely' })
+        .href,
+    ).toBe('#/insights');
+  });
+
+  it('insight renders its statement as the title and the confidence reading as the detail', () => {
+    const likely = describeAnomaly({
+      kind: 'insight',
+      statement: 'qbittorrent is starving jellyfin on disk3',
+      severity: 'warning',
+      confidence: 'likely',
+    });
+    expect(likely.title).toBe('qbittorrent is starving jellyfin on disk3');
+    expect(likely.detail).toBe('Likely');
+    expect(likely.severity).toBe('warning');
+    expect(
+      describeAnomaly({ kind: 'insight', statement: 's', severity: 'critical', confidence: 'confirmed' }).detail,
+    ).toBe('Confirmed');
   });
 
   it('disk-usage formats the percentage via fmtPct (one decimal, clamped)', () => {
@@ -369,7 +695,6 @@ describe('calloutTextBySlot', () => {
   it('ignores non-disk anomaly kinds', () => {
     const bySlot = calloutTextBySlot([
       { kind: 'unhealthy', name: 'sonarr' },
-      { kind: 'stopped', count: 2 },
       { kind: 'array-stopped' },
       { kind: 'source-critical', source: 'docker', detail: 'daemon unreachable' },
     ]);
@@ -384,7 +709,7 @@ describe('worstSeverity', () => {
 
   it('picks the single most severe anomaly present', () => {
     const anomalies: OverviewAnomaly[] = [
-      { kind: 'stopped', count: 1 }, // warning
+      { kind: 'disk-usage', slot: 'disk1', usagePct: 95 }, // warning
       { kind: 'disk-errors', slot: 'disk1', errors: 1 }, // serious
       { kind: 'unhealthy', name: 'sonarr' }, // critical
     ];
@@ -392,7 +717,10 @@ describe('worstSeverity', () => {
   });
 
   it('does not let a later, less severe anomaly downgrade the result', () => {
-    const anomalies: OverviewAnomaly[] = [{ kind: 'unhealthy', name: 'sonarr' }, { kind: 'stopped', count: 1 }];
+    const anomalies: OverviewAnomaly[] = [
+      { kind: 'unhealthy', name: 'sonarr' },
+      { kind: 'disk-usage', slot: 'disk1', usagePct: 95 },
+    ];
     expect(worstSeverity(anomalies)).toBe('critical');
   });
 });

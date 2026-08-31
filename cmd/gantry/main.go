@@ -28,6 +28,7 @@ import (
 	"github.com/smidley/gantry/internal/collect/unraid"
 	"github.com/smidley/gantry/internal/config"
 	"github.com/smidley/gantry/internal/fake"
+	"github.com/smidley/gantry/internal/insight"
 	"github.com/smidley/gantry/internal/server"
 	"github.com/smidley/gantry/internal/store"
 )
@@ -95,6 +96,36 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// seeds the true, uncompressed numbers.
 	if err := st.SeedAlertRules(store.DefaultAlertRules(fakeMode)); err != nil {
 		return fmt.Errorf("seed alert rules: %w", err)
+	}
+	// resyncFastModeAlertRules runs right after the seed above for the
+	// exact reason its own doc names (I5, review): SeedAlertRules'
+	// INSERT OR IGNORE only ever writes fakeMode's compressed 60s/60s
+	// windows on a row's FIRST boot, so a database first seeded under
+	// one mode stays pinned to that mode's numbers on every later boot,
+	// fake or real, forever.
+	if err := resyncFastModeAlertRules(st, fakeMode); err != nil {
+		return fmt.Errorf("resync fast-mode alert rules: %w", err)
+	}
+	// Insight rule configs (Task 4's own INSERT-OR-IGNORE seed, same
+	// idempotent-on-every-boot posture as SeedAlertRules just above) --
+	// there is no "fast" variant here at all: unlike alert_rules'
+	// for_seconds/clear_seconds, the insight engine's sustain/clear-for/
+	// cooldown are all Engine struct fields, not seeded rows (see
+	// insight.Engine's own doc), so fake mode compresses them below at
+	// construction time instead -- I5 (review): sustain_secs used to be
+	// the one exception, compressed via a seeded override that outlived
+	// the fake-data session that needed it, so DefaultRuleConfigs no
+	// longer takes a fake/fast parameter at all. StaleActiveInsights
+	// runs right after: Open question 5's own recommendation -- the
+	// live ring is empty at boot, so a carried-over "active" row would
+	// assert something this process cannot currently see; if the
+	// contention is still real, the engine re-fires within two ticks
+	// anyway.
+	if err := st.SeedInsightRuleConfigs(insight.DefaultRuleConfigs()); err != nil {
+		return fmt.Errorf("seed insight rule configs: %w", err)
+	}
+	if err := st.StaleActiveInsights(time.Now().Unix()); err != nil {
+		return fmt.Errorf("stale active insights: %w", err)
 	}
 	// GANTRY_WEBHOOK_URL (spec Sec5's documented single-webhook path) is
 	// re-synced into the "env" target on every boot, same "before
@@ -295,11 +326,44 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		alertEngine.Run(runCtx, 10*time.Second)
 	}()
 
+	// Insight engine: cross-container impact correlation (spec §16), one
+	// 60s ticker beside the alert engine above, reading the exact same
+	// live ring (Live.MatchSince/MatchPrefixSince) and rebuilding its own
+	// Topology snapshot each tick from the host collector's DeviceName
+	// plus the unraid collector's disk slots (buildInsightSlots). Dispatch
+	// is left nil: Notifiable's own three gates already keep this inert
+	// with every seeded rule's notify off, and there is no
+	// store.AlertRule/AlertInstance to hand the shared alert Dispatcher's
+	// AlertNotification shape without fabricating fields it would then
+	// read for its own flap/silence bookkeeping -- a real delivery bridge
+	// is later work, not this phase's engine task. In fake-data mode,
+	// ClearForSecs/CooldownSecs/FakeSustainSecs are all compressed here
+	// (FakeSustainSecs is I5's own read-time replacement for what used
+	// to be a DefaultRuleConfigs(fakeMode) seeded override -- see its
+	// own doc), so a scripted insight can fire, upgrade, and resolve
+	// inside one short demo session.
+	insightEngine := insight.New(st)
+	insightEngine.MatchSince = st.Live().MatchSince
+	insightEngine.MatchPrefixSince = st.Live().MatchPrefixSince
+	insightEngine.DeviceName = host.DeviceName
+	insightEngine.Slots = buildInsightSlots(ur.DiskMeta, fakeDiskMeta, st.Live())
+	insightEngine.PressureTier = pr.Tier
+	if fakeMode {
+		insightEngine.FakeSustainSecs = 10
+		insightEngine.ClearForSecs = 20
+		insightEngine.CooldownSecs = 60
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		insightEngine.Run(runCtx, 60*time.Second)
+	}()
+
 	// snapshotFn is the one buildSnapshot instance shared by /api/live/
 	// snapshot (Options.Snapshot), /api/live's connect frame (Options.
 	// Current), and the publish loop below -- all three read the exact
 	// same assembly, just on different triggers (poll, connect, tick).
-	snapshotFn := buildSnapshot(st, dc, ur, gp, nv, registry.Sources, fakeMetas, fakeDiskMeta, dispatcher)
+	snapshotFn := buildSnapshot(st, dc, ur, gp, nv, registry.Sources, fakeMetas, fakeDiskMeta, dispatcher, insightEngine, pr.Tier)
 	live := server.NewBroadcaster()
 
 	// SSE publish loop: every 2s, marshal the current snapshot and fan it
@@ -355,6 +419,8 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 
 		Alerts:   alertsAdapter{st: st, dispatcher: dispatcher},
 		Webhooks: webhooksAdapter{st: st, envLocked: webhookURLEnv != ""},
+		Insights: insightsAdapter{st: st, engine: insightEngine, pressureTier: pr.Tier},
+		Acks:     acksAdapter{st: st},
 
 		ReadOnly:    readOnly,
 		AppendEvent: st.AppendEvent,
@@ -430,7 +496,7 @@ const containerFrameMaxAge = 60
 // and channel-health data GET /api/alerts serves on demand, assembled
 // fresh every tick so an SSE client sees an alert fire/resolve/channel
 // degrade live rather than on its next poll.
-func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, gp *gpu.Collector, nv *gpu.NvidiaCollector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta, dispatcher *alert.Dispatcher) func() server.SnapshotDTO {
+func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, gp *gpu.Collector, nv *gpu.NvidiaCollector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta, dispatcher *alert.Dispatcher, insightEngine *insight.Engine, pressureTier func() string) func() server.SnapshotDTO {
 	return func() server.SnapshotDTO {
 		dto := server.SnapshotDTO{
 			TS:            time.Now().Unix(),
@@ -537,17 +603,19 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 		}
 
 		dto.Alerts = buildAlertsBlock(st, dispatcher)
+		dto.Insights = buildInsightsBlock(st, insightEngine, pressureTier)
 		return dto
 	}
 }
 
-// alertsFrameContext is the fixed background context every buildSnapshot
-// tick's alert reads run under: the closure this feeds (server.Options.
-// Snapshot/Current, and the 2s publish loop) has no per-call caller
-// context of its own to thread through, the same reasoning the shutdown
-// flush at the bottom of run() already documents for its own
-// context.Background() use.
-var alertsFrameContext = context.Background()
+// snapshotFrameContext is the fixed background context every
+// buildSnapshot tick's store reads run under -- alerts' own and, since
+// Phase 5, insights' own (buildInsightsBlock): the closure this feeds
+// (server.Options.Snapshot/Current, and the 2s publish loop) has no
+// per-call caller context of its own to thread through, the same
+// reasoning the shutdown flush at the bottom of run() already documents
+// for its own context.Background() use.
+var snapshotFrameContext = context.Background()
 
 // buildAlertsBlock assembles SnapshotDTO.Alerts (Task 8): every FIRING
 // instance (pending excluded -- engine bookkeeping, not user-facing, the
@@ -557,7 +625,7 @@ var alertsFrameContext = context.Background()
 // one tick, never fatal to the frame -- the same "degrade, don't error"
 // posture Sources already models, and the next 2s tick tries again.
 func buildAlertsBlock(st *store.Store, dispatcher *alert.Dispatcher) server.AlertsBlockDTO {
-	rules, err := st.AlertRules(alertsFrameContext)
+	rules, err := st.AlertRules(snapshotFrameContext)
 	if err != nil {
 		log.Println("alerts frame: rules:", err)
 	}
@@ -566,11 +634,11 @@ func buildAlertsBlock(st *store.Store, dispatcher *alert.Dispatcher) server.Aler
 		ruleByID[r.ID] = r
 	}
 
-	active, err := st.ActiveAlertInstances(alertsFrameContext)
+	active, err := st.ActiveAlertInstances(snapshotFrameContext)
 	if err != nil {
 		log.Println("alerts frame: active instances:", err)
 	}
-	silences, err := st.Silences(alertsFrameContext, time.Now().Unix())
+	silences, err := st.Silences(snapshotFrameContext, time.Now().Unix())
 	if err != nil {
 		log.Println("alerts frame: silences:", err)
 	}
@@ -602,6 +670,34 @@ func buildAlertsBlock(st *store.Store, dispatcher *alert.Dispatcher) server.Aler
 		Firing: firing, FiringCount: total, Truncated: truncated,
 		Channels: channelHealthMap(dispatcher),
 	}
+}
+
+// buildInsightsBlock assembles SnapshotDTO.Insights (Phase 5 Task 9):
+// every active finding via server.ToInsightDTO with includeEvidence
+// false (Task 9's own frame contract: "statements included, evidence
+// excluded"; the evidence drawer fetches the full bundle on demand
+// through GET /api/insights/{id}), plus the live pressure tier and the
+// engine's own dropped-by-cap count. A read error is logged and treated
+// as empty for this one tick, never fatal to the frame -- the exact
+// buildAlertsBlock posture just above.
+func buildInsightsBlock(st *store.Store, engine *insight.Engine, pressureTier func() string) server.InsightsBlockDTO {
+	active, err := st.ActiveInsights(snapshotFrameContext)
+	if err != nil {
+		log.Println("insights frame: active instances:", err)
+	}
+	out := make([]server.InsightDTO, len(active))
+	for i, inst := range active {
+		out[i] = server.ToInsightDTO(inst, false)
+	}
+	tier := "proxy"
+	if pressureTier != nil {
+		tier = pressureTier()
+	}
+	suppressed := 0
+	if engine != nil {
+		suppressed = engine.Dropped()
+	}
+	return server.InsightsBlockDTO{Active: out, Tier: tier, Suppressed: suppressed}
 }
 
 // channelHealthMap reports every configured delivery channel's current
@@ -717,6 +813,135 @@ func buildClassOf(ur *unraid.Collector) func(kind, entity string) string {
 		}
 		return ur.DiskMeta()[entity].Kind
 	}
+}
+
+// buildInsightSlots returns the closure wired to insight.Engine.Slots:
+// joins diskMeta's own Device name with each slot's live
+// disk.<slot>.rotational reading, exactly matching the assembly
+// insight.SlotMeta's own doc describes the caller as responsible for.
+// diskMeta is real first, fakeDiskMeta's overlay layered on top when
+// wired -- the same real-then-fake merge convention buildSnapshot's own
+// DiskMeta merge and buildContainerStorage's diskMeta parameter already
+// use, needed here for the identical reason: fake-data mode's dev box
+// never has a real disks.ini for the real unraid.Collector to report
+// anything from, so its own DiskMeta() comes back empty and the fake
+// generator's synthetic array is the only source with anything to
+// report. Rotational, unlike Device/Kind, needs no such overlay: fake
+// mode's own disk.<slot>.rotational sample lands in the exact same
+// store.Live this reads from, real collector or not. Extracted out of
+// run() (the same reason wireDockerCollector/buildClassOf/buildFleet all
+// are) so this join -- easy to get backwards, e.g. reading Kind where
+// Device belongs -- is unit-testable without a live unraid.Collector.
+func buildInsightSlots(diskMeta func() map[string]unraid.DiskMeta, fakeDiskMeta func() map[string]unraid.DiskMeta, live *store.Live) func() map[string]insight.SlotMeta {
+	return func() map[string]insight.SlotMeta {
+		merged := make(map[string]unraid.DiskMeta)
+		for slot, m := range diskMeta() {
+			merged[slot] = m
+		}
+		if fakeDiskMeta != nil {
+			for slot, m := range fakeDiskMeta() {
+				merged[slot] = m
+			}
+		}
+		out := make(map[string]insight.SlotMeta, len(merged))
+		for slot, meta := range merged {
+			rotational := false
+			if s, ok := live.Latest(store.SeriesKey{Kind: "disk", Entity: slot, Metric: "rotational"}); ok {
+				rotational = s.Val != 0
+			}
+			out[slot] = insight.SlotMeta{Device: meta.Device, Rotational: rotational}
+		}
+		return out
+	}
+}
+
+// alertRulesByID indexes rules by ID -- the small lookup
+// resyncFastModeAlertRules needs against the current boot's own
+// store.DefaultAlertRules(fakeMode).
+func alertRulesByID(rules []store.AlertRule) map[string]store.AlertRule {
+	out := make(map[string]store.AlertRule, len(rules))
+	for _, r := range rules {
+		out[r.ID] = r
+	}
+	return out
+}
+
+// alertSeededFastModeSettingsKey stores which mode --
+// strconv.FormatBool(fakeMode), "true" or "false" -- resyncFastModeAlertRules
+// last actually resynced every builtin threshold rule's for_seconds/
+// clear_seconds FOR. A bare bool needs no JSON envelope, so unlike
+// webhookTargetsSettingsKey's []alert.WebhookTarget blob below, this
+// setting's value is just that string itself.
+const alertSeededFastModeSettingsKey = "alert.seeded_fast_mode"
+
+// resyncFastModeAlertRules keeps every BUILTIN THRESHOLD rule's
+// for_seconds/clear_seconds in step with the CURRENT boot's mode by
+// recording the fact directly instead of inferring it from a rule's own
+// numbers (F1, review -- a correction to I5's own fix, in blame history
+// just above this doc): I5's version resynced a rule only when its
+// current for_seconds/clear_seconds exactly matched what the OTHER
+// mode's compiled default would have seeded for that id, reasoning that
+// such a match could only be a leftover seed from a boot under the
+// other mode. That guess is wrong in both directions: a real-box user
+// who deliberately tunes a rule to for_seconds=60 (a perfectly
+// reasonable "alert after a minute") collides with fake mode's own
+// compressed 60s constant and gets silently reverted on the very next
+// real-mode reboot; symmetrically, a fake-mode user who wants one rule
+// to run at real timing gets recompressed right back down.
+//
+// alertSeededFastModeSettingsKey fixes this by recording which mode
+// this function last actually synced FOR, so a rule's numbers are only
+// ever touched when that stored marker DISAGREES with the current
+// boot's mode -- i.e. exactly a real<->fake flip, the one event that
+// really is supposed to force every builtin threshold rule to the new
+// mode's numbers (that's what flipping demo mode means). A same-mode
+// reboot -- the overwhelmingly common case -- reads the marker, finds
+// it already matches, and returns immediately having read or written
+// not one alert_rules row: provably incapable of reverting a tuned
+// value, because that path never looks at a single rule's for_seconds/
+// clear_seconds at all.
+//
+// First boot (no marker stored yet) is deliberately NOT treated as a
+// disagreement, even if the existing rows happen to mismatch the
+// current mode (e.g. a database from before this marker existed): the
+// contract is simply "no marker means stamp one, full stop" --
+// SeedAlertRules, called immediately before this on every boot, already
+// writes the current mode's own compiled defaults for any rule id that
+// doesn't exist yet, which covers the actually-fresh-database case this
+// is designed for. The marker is stamped either way, so the NEXT boot
+// has something to compare against.
+func resyncFastModeAlertRules(st *store.Store, fakeMode bool) error {
+	want := strconv.FormatBool(fakeMode)
+	prev, ok, err := st.SettingGet(alertSeededFastModeSettingsKey)
+	if err != nil {
+		return err
+	}
+	if ok && prev == want {
+		return nil // same mode as last sync -- nothing to resync, no rule touched
+	}
+	if ok {
+		// A genuine mode flip: force every builtin threshold rule to the
+		// new mode's numbers, tuned or not -- see doc above.
+		rules, err := st.AlertRules(context.Background())
+		if err != nil {
+			return err
+		}
+		defaults := alertRulesByID(store.DefaultAlertRules(fakeMode))
+		for _, r := range rules {
+			if !r.Builtin || r.Type != "threshold" {
+				continue
+			}
+			d, dok := defaults[r.ID]
+			if !dok {
+				continue
+			}
+			r.ForSeconds, r.ClearSeconds = d.ForSeconds, d.ClearSeconds
+			if err := st.UpsertAlertRule(r); err != nil {
+				return fmt.Errorf("resync alert rule %q for_seconds/clear_seconds: %w", r.ID, err)
+			}
+		}
+	}
+	return st.SettingSet(alertSeededFastModeSettingsKey, want)
 }
 
 // webhookTargetsSettingsKey is where the whole []alert.WebhookTarget
@@ -1372,6 +1597,86 @@ func (a alertsAdapter) AddSilence(sil store.Silence) (store.Silence, error) {
 func (a alertsAdapter) DeleteSilence(id int64) error { return a.st.DeleteSilence(id) }
 
 func (a alertsAdapter) Channels() map[string]string { return channelHealthMap(a.dispatcher) }
+
+// acksAdapter implements server.AcksIface over *store.Store -- kept in
+// main, not the server package, the same reason alertsAdapter is:
+// server stays store-shape-agnostic. Acks resolves "now" here (the
+// alertsAdapter.Silences convention) so the server package never
+// decides what expired means.
+type acksAdapter struct {
+	st *store.Store
+}
+
+func (a acksAdapter) Acks(ctx context.Context) ([]store.OverviewAck, error) {
+	return a.st.Acks(ctx, time.Now().Unix())
+}
+
+func (a acksAdapter) AddAck(ack store.OverviewAck) (store.OverviewAck, error) {
+	id, err := a.st.AddAck(ack)
+	if err != nil {
+		return store.OverviewAck{}, err
+	}
+	ack.ID = id
+	return ack, nil
+}
+
+func (a acksAdapter) DeleteAck(id int64) error { return a.st.DeleteAck(id) }
+
+// insightsAdapter implements server.InsightsIface (Phase 5 Task 9) over
+// *store.Store plus the running *insight.Engine's own Dropped() and the
+// pressure collector's Tier() -- kept in main, not the server package,
+// the same reason alertsAdapter is: server stays store/engine-shape-
+// agnostic. engine/pressureTier are both read live on every call rather
+// than snapshotted once at construction, since both can change across
+// this adapter's lifetime (Dropped() grows every tick; Tier() flips if
+// /proc/pressure ever appears or disappears).
+type insightsAdapter struct {
+	st           *store.Store
+	engine       *insight.Engine
+	pressureTier func() string
+}
+
+func (a insightsAdapter) Active(ctx context.Context) ([]store.InsightInstance, error) {
+	return a.st.ActiveInsights(ctx)
+}
+
+func (a insightsAdapter) ByID(ctx context.Context, id int64) (store.InsightInstance, bool, error) {
+	return a.st.InsightByID(ctx, id)
+}
+
+func (a insightsAdapter) History(ctx context.Context, from, to int64, limit int) ([]store.InsightInstance, error) {
+	return a.st.InsightHistory(ctx, from, to, limit)
+}
+
+func (a insightsAdapter) RuleConfigs(ctx context.Context) ([]store.InsightRuleConfig, error) {
+	return a.st.InsightRuleConfigs(ctx)
+}
+
+func (a insightsAdapter) SaveRuleConfig(c store.InsightRuleConfig) error {
+	return a.st.UpsertInsightRuleConfig(c)
+}
+
+func (a insightsAdapter) AddDismissal(d store.InsightDismissal) (int64, error) {
+	return a.st.AddInsightDismissal(d)
+}
+
+func (a insightsAdapter) Resolve(id, at int64, reason string) error {
+	return a.st.ResolveInsight(id, at, reason)
+}
+
+func (a insightsAdapter) Tier() string {
+	if a.pressureTier == nil {
+		return "proxy"
+	}
+	return a.pressureTier()
+}
+
+func (a insightsAdapter) Suppressed() int {
+	if a.engine == nil {
+		return 0
+	}
+	return a.engine.Dropped()
+}
 
 // webhooksAdapter implements server.WebhooksIface (Task 8) over the same
 // settings-blob-backed target list Task 7 built (loadWebhookTargets/

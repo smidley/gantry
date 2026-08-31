@@ -174,6 +174,27 @@ type Options struct {
 	// alerts write path READ_ONLY covers (see handleAlertsWebhooksPut's
 	// own doc for the asymmetry with Alerts' own writes).
 	Webhooks WebhooksIface
+
+	// Insights backs GET /api/insights, GET /api/insights/{id}, GET/PUT
+	// /api/insights/rules, GET /api/insights/history, POST
+	// /api/insights/{id}/dismiss, and GET /api/insights/graph (main
+	// wiring: a small adapter over *store.Store plus the running
+	// *insight.Engine's Dropped() and the pressure collector's Tier() --
+	// see api_insights.go's InsightsIface for why the interface stays
+	// this minimal, the same AlertsIface precedent). Nil in tests that
+	// don't wire one: every GET route reports its own meaningful empty;
+	// every write route 404s, matching Alerts' own convention.
+	Insights InsightsIface
+
+	// Acks backs GET/POST /api/acks and DELETE /api/acks/{id} -- the
+	// Overview attention module's "stop showing me this for a while"
+	// control over frame-derived anomalies (main wiring: a small adapter
+	// over *store.Store -- see api_acks.go's AcksIface). Nil in tests
+	// that don't wire one: GET reports an empty list; POST/DELETE 404,
+	// matching Alerts' own convention. Deliberately NOT ReadOnly-gated:
+	// an ack, like a silence, only reduces what's shown (see
+	// handleAcksPost's own doc for the silences precedent).
+	Acks AcksIface
 }
 
 type Server struct {
@@ -246,6 +267,25 @@ func New(o Options) *Server {
 	s.mux.Handle("DELETE /api/alerts/silences/{id}", withGzip(http.HandlerFunc(s.handleAlertsSilencesDelete)))
 	s.mux.Handle("GET /api/alerts/webhooks", withGzip(http.HandlerFunc(s.handleAlertsWebhooksGet)))
 	s.mux.Handle("PUT /api/alerts/webhooks", withGzip(http.HandlerFunc(s.handleAlertsWebhooksPut)))
+
+	s.mux.Handle("GET /api/acks", withGzip(http.HandlerFunc(s.handleAcksGet)))
+	s.mux.Handle("POST /api/acks", withGzip(http.HandlerFunc(s.handleAcksPost)))
+	s.mux.Handle("DELETE /api/acks/{id}", withGzip(http.HandlerFunc(s.handleAcksDelete)))
+
+	// Insights (Phase 5, Task 9): registered in id-then-verb order the
+	// way alerts' own block above reads -- /api/insights/{id} sits
+	// before /rules and /history below it only because ServeMux's own
+	// pattern-specificity rules don't care about registration order at
+	// all (an exact "/api/insights/rules" pattern always beats the
+	// wildcard "/api/insights/{id}" for that one path regardless of
+	// which was registered first); this order is purely readability.
+	s.mux.Handle("GET /api/insights", withGzip(http.HandlerFunc(s.handleInsightsGet)))
+	s.mux.Handle("GET /api/insights/rules", withGzip(http.HandlerFunc(s.handleInsightsRulesGet)))
+	s.mux.Handle("PUT /api/insights/rules", withGzip(http.HandlerFunc(s.handleInsightsRulesPut)))
+	s.mux.Handle("GET /api/insights/history", withGzip(http.HandlerFunc(s.handleInsightsHistory)))
+	s.mux.Handle("GET /api/insights/graph", withGzip(http.HandlerFunc(s.handleInsightsGraph)))
+	s.mux.Handle("GET /api/insights/{id}", withGzip(http.HandlerFunc(s.handleInsightGet)))
+	s.mux.Handle("POST /api/insights/{id}/dismiss", withGzip(http.HandlerFunc(s.handleInsightDismiss)))
 
 	s.mux.Handle("GET /", withGzip(webHandler()))
 	return s

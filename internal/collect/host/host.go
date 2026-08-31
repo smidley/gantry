@@ -235,6 +235,54 @@ func (c *Collector) tickDiskIO(now time.Time) {
 		if bps, ok := c.rates.Rate("diskio."+dev+".write", now, float64(cnt.writeSectors)*512); ok {
 			c.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + dev + ".write_bps"}, ts, bps)
 		}
+		if cnt.extended {
+			c.tickDiskIOSaturation(dev, cnt, now, ts)
+		}
+	}
+}
+
+// tickDiskIOSaturation records the saturation/latency series that need
+// the extended (14-field) diskstats row: util_pct and queue_avg are
+// plain RateTracker deltas of io_ticks and time_in_queue: util_pct is
+// that rate's ms/s expressed as a fraction of the 1000ms/s the wall
+// clock itself advances at (rate/10 == rate/1000*100), clamped to 100
+// because io_ticks is millisecond-granular and a short tick can round
+// past the interval; queue_avg is the same rate re-based to a per-second
+// mean depth (rate/1000). await_ms combines four independent
+// RateTracker deltas (reads, writes, ms reading, ms writing) rather than
+// tracking raw counters of its own: all four share this call's `now`, so
+// they share the same elapsed seconds, and that term cancels exactly out
+// of (dms/elapsed)/(dcount/elapsed) -- the sum of the rates divides out
+// to the same answer as the sum of the raw deltas would. It is omitted,
+// not zeroed, when no read or write completed in the window: a missing
+// sample is honest, a zero reads as "instant". inflight is the one plain
+// gauge here (the kernel's "IOs in progress" is a live count, not a
+// monotonic counter) and is recorded every tick including the first,
+// like cpu.count.
+func (c *Collector) tickDiskIOSaturation(dev string, cnt diskCounters, now time.Time, ts int64) {
+	c.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + dev + ".inflight"}, ts, float64(cnt.inFlight))
+
+	if rate, ok := c.rates.Rate("diskio."+dev+".ioticks", now, float64(cnt.ioTicks)); ok {
+		util := rate / 10
+		if util > 100 {
+			util = 100
+		}
+		c.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + dev + ".util_pct"}, ts, util)
+	}
+
+	if rate, ok := c.rates.Rate("diskio."+dev+".queue", now, float64(cnt.timeInQueue)); ok {
+		c.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + dev + ".queue_avg"}, ts, rate/1000)
+	}
+
+	readsRate, readsOK := c.rates.Rate("diskio."+dev+".reads", now, float64(cnt.reads))
+	writesRate, writesOK := c.rates.Rate("diskio."+dev+".writes", now, float64(cnt.writes))
+	msReadRate, msReadOK := c.rates.Rate("diskio."+dev+".msread", now, float64(cnt.msReading))
+	msWriteRate, msWriteOK := c.rates.Rate("diskio."+dev+".mswrite", now, float64(cnt.msWriting))
+	if readsOK && writesOK && msReadOK && msWriteOK {
+		if completed := readsRate + writesRate; completed > 0 {
+			await := (msReadRate + msWriteRate) / completed
+			c.sink.Record(store.SeriesKey{Kind: "host", Metric: "diskio." + dev + ".await_ms"}, ts, await)
+		}
 	}
 }
 

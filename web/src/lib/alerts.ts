@@ -5,6 +5,7 @@
 // ordering is deliberately the same "worst severity first, then oldest
 // within it" rule that file's own worstSeverity/anomaly ordering uses).
 import { fmtDuration } from './format';
+import { sortActiveInsights } from './insights';
 
 // --- resolve reasons ---------------------------------------------------
 
@@ -127,6 +128,54 @@ export function alertEntityHref(kind: string, entity: string): string | null {
   return null;
 }
 
+export interface AlertGuidanceLike {
+  rule_id: string;
+  kind: string;
+  entity: string;
+}
+
+export interface AlertGuidance {
+  cause: string;
+  nextStep: string;
+  href: string;
+}
+
+// A conservative cause hypothesis plus one concrete next destination.
+// A correlated insight, when present, replaces this generic cause in
+// the view; this function never claims a root cause as confirmed.
+export function alertGuidance(alert: AlertGuidanceLike): AlertGuidance {
+  const containerHref = alert.entity ? `#/containers/${encodeURIComponent(alert.entity)}` : '#/containers';
+  switch (alert.rule_id) {
+    case 'host-cpu-high':
+      return { cause: 'A sustained workload or runaway process is consuming host CPU.', nextStep: 'Inspect CPU consumers', href: '#/top/cpu' };
+    case 'host-mem-high':
+      return { cause: 'A workload, cache, or container is holding more memory than usual.', nextStep: 'Inspect memory consumers', href: '#/top/mem' };
+    case 'disk-usage-high':
+      return { cause: 'Data growth is outpacing the device’s remaining capacity.', nextStep: 'Review storage usage', href: '#/storage' };
+    case 'disk-temp-high':
+    case 'disk-temp-nvme-high':
+      return { cause: 'Sustained I/O, cooling, or airflow may be keeping this device hot.', nextStep: 'Review device activity and temperature', href: '#/storage' };
+    case 'container-mem-limit-high':
+      return { cause: 'The workload is approaching its configured memory limit.', nextStep: 'Inspect the container', href: containerHref };
+    case 'array-stopped':
+      return { cause: 'The array was stopped or did not complete startup.', nextStep: 'Check array status', href: '#/storage' };
+    case 'container-unhealthy':
+      return { cause: 'The container’s configured health check is failing.', nextStep: 'Inspect health and recent logs', href: containerHref };
+    case 'container-oom':
+      return { cause: 'The container exceeded available or configured memory.', nextStep: 'Inspect memory and limits', href: containerHref };
+    case 'container-exit-nonzero':
+      return { cause: 'The main process returned an error during shutdown or restart.', nextStep: 'Inspect recent container logs', href: containerHref };
+    case 'disk-errors':
+      return { cause: 'The device reported new I/O or health errors.', nextStep: 'Inspect the affected device', href: '#/storage' };
+    case 'parity-errors':
+      return { cause: 'The latest parity operation completed with one or more errors.', nextStep: 'Review parity history', href: '#/storage' };
+    default:
+      if (alert.kind === 'container') return { cause: 'The container crossed one of its configured alert conditions.', nextStep: 'Inspect the container', href: containerHref };
+      if (alert.kind === 'disk' || alert.kind === 'unraid') return { cause: 'Storage crossed one of its configured alert conditions.', nextStep: 'Inspect storage', href: '#/storage' };
+      return { cause: 'A configured alert condition has remained active.', nextStep: 'Review related metrics', href: '#/top' };
+  }
+}
+
 // --- value/threshold formatting --------------------------------------------
 
 // formatMetricValue renders a live threshold-rule reading with its own
@@ -161,6 +210,63 @@ export function channelLabel(id: string): string {
   if (id === 'notify') return 'Unraid notifications';
   if (id.startsWith('webhook:')) return `Webhook: ${id.slice('webhook:'.length)}`;
   return id;
+}
+
+// --- insight annotation (Phase 5 Task 13) -----------------------------------
+
+// AnnotatableAlert/AnnotationInsight are the minimal shapes
+// annotateAlerts needs -- a firing alert's own kind+entity, and an
+// active insight's victim identity + rendered statement + ordering
+// fields (the exact SortableInsight shape sortActiveInsights already
+// takes). Deliberately narrow so this works against either the frame's
+// compact insights.active items or a fuller REST one interchangeably.
+export interface AnnotatableAlert {
+  kind: string;
+  entity: string;
+}
+
+export interface AnnotationInsight {
+  victim_kind: string;
+  victim: string;
+  statement: string;
+  severity: string;
+  confidence: string;
+  fired_at: number;
+}
+
+export interface InsightAnnotation {
+  text: string;
+  href: string;
+}
+
+// annotateAlerts is the sanctioned insight->alert bridge (Global
+// Constraints: "an active insight annotates a firing alert -- the alert
+// says what broke and the insight says why"). Pure: no component logic
+// at all, per the plan's own instruction -- the returned text is
+// already the complete "Cause: ..." / "Likely cause: ..." string, and
+// the component only ever renders it, never assembles it.
+//
+// A match requires BOTH kind and entity to agree -- an insight's
+// VictimKind vocabulary (container|host|array|disk|gpu) and an alert's
+// own Kind field share the same words for every case that can actually
+// collide in practice (array's own victim is always victim="" per
+// insight/rules.go's evalParitySlowdown, so it can never match an
+// entity-bearing alert row regardless). When more than one insight
+// names the same victim, the highest-ranked one (sortActiveInsights'
+// own severity/confidence/fired_at ordering) wins -- one annotation per
+// row, never a stack of them.
+export function annotateAlerts<T extends AnnotatableAlert>(
+  alerts: T[],
+  insights: AnnotationInsight[],
+): (T & { insightAnnotation?: InsightAnnotation })[] {
+  return alerts.map((a) => {
+    if (!a.entity) return { ...a };
+    const matches = insights.filter((i) => i.victim_kind === a.kind && i.victim === a.entity);
+    if (matches.length === 0) return { ...a };
+    const best = sortActiveInsights(matches)[0];
+    const label = best.confidence === 'confirmed' ? 'Cause' : 'Likely cause';
+    return { ...a, insightAnnotation: { text: `${label}: ${best.statement}`, href: '#/insights' } };
+  });
 }
 
 // --- rule descriptions (Task 11) -------------------------------------------

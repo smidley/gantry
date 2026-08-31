@@ -43,6 +43,7 @@
   import TimeChart from '../components/TimeChart.svelte';
   import CoreBudgetRibbon from '../components/CoreBudgetRibbon.svelte';
   import ContainerIcon from '../components/ContainerIcon.svelte';
+  import LiveValue from '../components/LiveValue.svelte';
 
   // initialResource: App.svelte's route table passes $route.params.resource
   // straight through (the "#/top/:resource" pattern -- see router.ts),
@@ -837,17 +838,28 @@
       {#if hasHostTotal && hostTotal}
         <div class="top-consumers__header-head">
           <span class="microlabel">{RESOURCE_LABEL[resource]} &middot; host total</span>
+          <!-- Every header figure renders through LiveValue (the
+            perpetual-glide pass -- the header used to step once per
+            ~2s arrival while the rows below it glided), keyed on
+            resource so a tab switch reseeds instead of gliding across
+            units; LiveValue's own doc carries the full gotcha. -->
           {#if isDirectional && hostTotal.direction}
             <div class="top-consumers__header-values">
-              <span class="top-consumers__header-value" style="color: var(--series-1)">
-                {ROW_DIRECTION_LABELS[resource]?.[0]} {FORMATTERS[resource](hostTotal.direction[0])}
-              </span>
-              <span class="top-consumers__header-value" style="color: var(--series-4)">
-                {ROW_DIRECTION_LABELS[resource]?.[1]} {FORMATTERS[resource](hostTotal.direction[1])}
-              </span>
+              {#key resource}
+                <span class="top-consumers__header-value" style="color: var(--series-1)">
+                  {ROW_DIRECTION_LABELS[resource]?.[0]}
+                  <LiveValue value={hostTotal.direction[0]} format={FORMATTERS[resource]} live={windowKey === 'now'} />
+                </span>
+                <span class="top-consumers__header-value" style="color: var(--series-4)">
+                  {ROW_DIRECTION_LABELS[resource]?.[1]}
+                  <LiveValue value={hostTotal.direction[1]} format={FORMATTERS[resource]} live={windowKey === 'now'} />
+                </span>
+              {/key}
             </div>
           {:else}
-            <span class="top-consumers__header-value">{FORMATTERS[resource](hostTotal.value)}</span>
+            <span class="top-consumers__header-value"
+              >{#key resource}<LiveValue value={hostTotal.value} format={FORMATTERS[resource]} live={windowKey === 'now'} />{/key}</span
+            >
           {/if}
         </div>
       {:else}

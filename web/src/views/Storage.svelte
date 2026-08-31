@@ -30,6 +30,7 @@
   } from '../lib/disks';
   import { band, bandToken } from '../lib/thresholds';
   import HealthDot from '../components/HealthDot.svelte';
+  import LiveValue from '../components/LiveValue.svelte';
   import TimeChart from '../components/TimeChart.svelte';
 
   const EVENTS_POLL_MS = 30_000;
@@ -46,6 +47,22 @@
   let disks = $derived(live.frame?.disks ?? {});
   let diskMeta = $derived(live.frame?.disk_meta ?? {});
   let diskNames = $derived(sortDiskEntities(Object.keys(disks)));
+  let alertedDiskNames = $derived(
+    new Set(
+      (live.frame?.alerts?.firing ?? [])
+        .filter((alert) => !alert.silenced && alert.kind === 'disk' && alert.entity)
+        .map((alert) => alert.entity),
+    ),
+  );
+  let displayDiskNames = $derived.by(() =>
+    [...diskNames].sort((a, b) => {
+      const aPct = diskUsagePct(disks[a]) ?? -1;
+      const bPct = diskUsagePct(disks[b]) ?? -1;
+      const aNeedsAttention = alertedDiskNames.has(a) || (disks[a]?.errors ?? 0) > 0 || aPct > 90;
+      const bNeedsAttention = alertedDiskNames.has(b) || (disks[b]?.errors ?? 0) > 0 || bPct > 90;
+      return Number(bNeedsAttention) - Number(aNeedsAttention) || bPct - aPct || a.localeCompare(b);
+    }),
+  );
   let array = $derived(live.frame?.unraid?.array ?? {});
   let dockerStorage = $derived(live.frame?.unraid?.docker ?? {});
   let sources = $derived(live.frame?.sources ?? {});
@@ -817,7 +834,7 @@
     <div class="card storage-disks">
       <span class="microlabel">Disks &middot; {diskNames.length}</span>
       <div class="storage-disks__list">
-        {#each diskNames as name (name)}
+        {#each displayDiskNames as name (name)}
           {@const metrics = disks[name]}
           {@const role = diskRole(name)}
           {@const mediaType = diskKind(diskMeta[name], metrics)}
@@ -854,8 +871,12 @@
                     style="width: {usagePct}%; background: {seqStep(usagePct)}; transition-duration: 150ms, {glideMs}ms"
                   ></div>
                 </div>
+                <!-- The percentage TEXT glides through LiveValue the
+                  same way the fill bar's width already does through
+                  its CSS transition -- the two read as one figure, so
+                  only one of them moving smoothly looked broken. -->
                 <span class="tabular-nums storage-disk__usage-pct" style={usageTint ? `color: ${usageTint}` : undefined}
-                  >{fmtPct(usagePct)}</span
+                  ><LiveValue value={usagePct} format={fmtPct} /></span
                 >
                 <span class="tabular-nums storage-disk__bytes">
                   {fmtBytes(metrics['fs.used_bytes'])} / {fmtBytes(metrics['fs.used_bytes'] + metrics['fs.free_bytes'])}

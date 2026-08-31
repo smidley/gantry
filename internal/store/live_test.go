@@ -3,6 +3,7 @@ package store
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -192,6 +193,153 @@ func TestLiveMatchSinceOldestTSPresentEvenWhenSamplesEmptyForSince(t *testing.T)
 	samples, oldest := l.MatchSince("host", "cpu.total", 500)
 	require.Empty(t, samples)
 	require.Equal(t, map[string]int64{"": 100}, oldest)
+}
+
+// TestLiveMatchPrefixSinceGroupsByEntityThenMetric pins the insight
+// engine's per-device attribution shape (Task 3): every series of this
+// kind whose metric starts with prefix comes back keyed first by entity,
+// then by its own full (unstripped) metric name -- "every container's IO
+// on every device" in one read-lock pass, the same N+1-avoiding reasoning
+// MatchSince documents for its own single (kind, metric) pair, one level
+// deeper because a prefix can match several metrics per entity (one per
+// device) that the caller doesn't know by name in advance.
+func TestLiveMatchPrefixSinceGroupsByEntityThenMetric(t *testing.T) {
+	l := NewLive(8)
+	l.Record(SeriesKey{Kind: "container", Entity: "qbittorrent", Metric: "live:io.sda.read_bps"}, 100, 10.0)
+	l.Record(SeriesKey{Kind: "container", Entity: "qbittorrent", Metric: "live:io.sda.write_bps"}, 100, 5.0)
+	l.Record(SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sda.read_bps"}, 100, 2.0)
+	l.Record(SeriesKey{Kind: "container", Entity: "qbittorrent", Metric: "cpu.pct"}, 100, 99.0)        // wrong prefix
+	l.Record(SeriesKey{Kind: "disk", Entity: "qbittorrent", Metric: "live:io.sda.read_bps"}, 100, 1.0) // wrong kind
+
+	got, _ := l.MatchPrefixSince("container", "live:io.", 0)
+
+	require.Equal(t, map[string]map[string][]Sample{
+		"qbittorrent": {
+			"live:io.sda.read_bps":  {{TS: 100, Val: 10.0}},
+			"live:io.sda.write_bps": {{TS: 100, Val: 5.0}},
+		},
+		"jellyfin": {
+			"live:io.sda.read_bps": {{TS: 100, Val: 2.0}},
+		},
+	}, got)
+}
+
+// TestLiveMatchPrefixSinceRespectsSince pins the window filter itself,
+// mirroring MatchSince's own since-filter test.
+func TestLiveMatchPrefixSinceRespectsSince(t *testing.T) {
+	l := NewLive(8)
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "live:io.sda.read_bps"}, 100, 10.0)
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "live:io.sda.read_bps"}, 200, 20.0)
+
+	got, _ := l.MatchPrefixSince("container", "live:io.", 150)
+	require.Equal(t, map[string]map[string][]Sample{
+		"web": {"live:io.sda.read_bps": {{TS: 200, Val: 20.0}}},
+	}, got)
+
+	got, _ = l.MatchPrefixSince("container", "live:io.", 500)
+	require.Empty(t, got)
+}
+
+// TestLiveMatchPrefixSinceEmptyForUnknownPrefix pins the always-non-nil,
+// empty-map convention every other Live accessor follows, for both
+// return values.
+func TestLiveMatchPrefixSinceEmptyForUnknownPrefix(t *testing.T) {
+	l := NewLive(8)
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "cpu.pct"}, 100, 1.0)
+
+	samples, oldest := l.MatchPrefixSince("container", "live:io.", 0)
+	require.NotNil(t, samples)
+	require.Empty(t, samples)
+	require.NotNil(t, oldest)
+	require.Empty(t, oldest)
+}
+
+// TestLiveMatchPrefixSinceOldestTSIsPerEntityAndMetric pins the same
+// oldestTS lesson MatchSince encodes (F1: the ring's true retention floor,
+// independent of since clipping the samples slice), extended one level:
+// since MatchPrefixSince can match several distinct metrics per entity
+// (one per device), the floor is reported per (entity, metric) pair, not
+// collapsed across a container's devices -- a container whose sda ring
+// has run for an hour and whose freshly-attached sdb ring has run for ten
+// seconds has two different true floors, and collapsing them would let
+// the newer ring silently borrow the older one's window-coverage claim.
+func TestLiveMatchPrefixSinceOldestTSIsPerEntityAndMetric(t *testing.T) {
+	l := NewLive(8)
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "live:io.sda.read_bps"}, 100, 1.0) // true floor for sda
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "live:io.sda.read_bps"}, 300, 3.0)
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "live:io.sdb.read_bps"}, 250, 9.0) // true floor for sdb
+
+	samples, oldest := l.MatchPrefixSince("container", "live:io.", 200) // clips sda to TS>=200
+
+	require.Equal(t, map[string]map[string][]Sample{
+		"web": {
+			"live:io.sda.read_bps": {{TS: 300, Val: 3.0}},
+			"live:io.sdb.read_bps": {{TS: 250, Val: 9.0}},
+		},
+	}, samples, "samples themselves stay clipped to since")
+	require.Equal(t, map[string]map[string]int64{
+		"web": {
+			"live:io.sda.read_bps": 100, // the ring's real floor, not the clipped fetch
+			"live:io.sdb.read_bps": 250,
+		},
+	}, oldest)
+}
+
+// TestLiveMatchPrefixSinceOldestTSPresentEvenWhenSamplesEmptyForSince pins
+// that oldestTS is reported off each matching ring's own existence,
+// independent of whatever the samples map excludes for having nothing in
+// [since, now] -- the two return values answer different questions, same
+// as MatchSince.
+func TestLiveMatchPrefixSinceOldestTSPresentEvenWhenSamplesEmptyForSince(t *testing.T) {
+	l := NewLive(8)
+	l.Record(SeriesKey{Kind: "container", Entity: "web", Metric: "live:io.sda.read_bps"}, 100, 1.0)
+
+	samples, oldest := l.MatchPrefixSince("container", "live:io.", 500)
+	require.Empty(t, samples)
+	require.Equal(t, map[string]map[string]int64{"web": {"live:io.sda.read_bps": 100}}, oldest)
+}
+
+// TestLiveMatchPrefixSinceNoDeadlockUnderConcurrentWriters is the
+// concurrent-writer probe MatchSince's single-lock-pass design exists to
+// survive: sync.RWMutex is not reentrant, so a read path that acquired
+// RLock more than once per call (an N+1-style walk instead of one pass)
+// could deadlock against a concurrent Lock() writer queued in between the
+// two RLock calls. Runs under -race so a torn read would also be caught.
+func TestLiveMatchPrefixSinceNoDeadlockUnderConcurrentWriters(t *testing.T) {
+	l := NewLive(64)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			k := SeriesKey{Kind: "container", Entity: string(rune('a' + g)), Metric: "live:io.sda.read_bps"}
+			for i := int64(0); ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					l.Record(k, i, float64(i))
+				}
+			}
+		}(g)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 200; i++ {
+			l.MatchPrefixSince("container", "live:io.", 0)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("MatchPrefixSince deadlocked under concurrent writers")
+	}
+	close(stop)
+	wg.Wait()
 }
 
 func TestLiveEvict(t *testing.T) {

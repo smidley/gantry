@@ -36,13 +36,13 @@
   let c = $derived(live.frame?.containers?.[name]);
   let m = $derived(c?.metrics ?? {});
   let ts = $derived(live.frame?.ts ?? 0);
-  let coresLabel = $derived(fmtCores(m['cpu.cores'] ?? 0));
 
   function tweenTo(tween, value) {
     tween.set(value, { duration: motion.reduced ? 0 : live.glideMs, easing: linear });
   }
 
   let cpuTween = new Tween(0, { duration: live.glideMs, easing: linear });
+  let coresTween = new Tween(0, { duration: live.glideMs, easing: linear });
   let memBytesTween = new Tween(0, { duration: live.glideMs, easing: linear });
   let memLimitPctTween = new Tween(0, { duration: live.glideMs, easing: linear });
   let netRxTween = new Tween(0, { duration: live.glideMs, easing: linear });
@@ -51,12 +51,20 @@
   let ioWriteTween = new Tween(0, { duration: live.glideMs, easing: linear });
 
   $effect(() => tweenTo(cpuTween, m['cpu.pct'] ?? 0));
+  $effect(() => tweenTo(coresTween, m['cpu.cores'] ?? 0));
   $effect(() => tweenTo(memBytesTween, m['mem.bytes'] ?? 0));
   $effect(() => tweenTo(memLimitPctTween, m['mem.limit_pct'] ?? 0));
   $effect(() => tweenTo(netRxTween, m['net.rx_bps'] ?? 0));
   $effect(() => tweenTo(netTxTween, m['net.tx_bps'] ?? 0));
   $effect(() => tweenTo(ioReadTween, m['io.read_bps'] ?? 0));
   $effect(() => tweenTo(ioWriteTween, m['io.write_bps'] ?? 0));
+
+  // coresLabel reads its own Tween like every sibling value above --
+  // it used to be the one figure in this row still stepping per
+  // arrival. fmtCores' own <0.05 blank rule applies to the TWEENED
+  // reading, so the annotation fades in the moment the glide clears
+  // the rounding floor, never on a raw pre-glide target.
+  let coresLabel = $derived(fmtCores(coresTween.current));
 </script>
 
 <tr class="compare-member-row">

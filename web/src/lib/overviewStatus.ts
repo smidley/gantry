@@ -9,16 +9,18 @@
 // CATEGORY: each unhealthy container gets its own anomaly (a real,
 // comparatively rare signal worth its own row and its own link into that
 // container's detail page), each flagged disk gets its own anomaly, and
-// so on. The one deliberate exception is "stopped" containers, which
-// stays a single aggregated anomaly no matter how many are stopped --
-// state=running is a common, often-intentional condition in a home-lab
-// (containers turned off on purpose), and per-container rows for that
-// would flood the attention module exactly the way the design's own
-// "spend each device once, stay calm" rule warns against. The headline's
-// own count is always anomalies.length, so "N things" and "N rows in the
-// attention module" can never disagree.
+// so on. Stopped containers are deliberately NOT a concern at all
+// (Scott: "stopped containers are not something that needs you") --
+// state!=running is a common, often-intentional condition in a home-lab
+// (containers turned off on purpose), so it contributes nothing to the
+// anomaly list or the headline count; the fleet sentence
+// ("X running · Y stopped", fleetSentence below) still states it as a
+// plain fact. The headline's own count is always anomalies.length, so
+// "N things" and "N rows in the attention module" can never disagree.
+import { anomalyHref } from './anomalyHref';
 import { diskUsagePct } from './disks';
 import { fmtPct } from './format';
+import { confidenceLabel, sortActiveInsights } from './insights';
 import type { HealthStatus } from './containerStatus';
 
 // AnomalyBase.severityOverride, when present, is the MAX of an anomaly's
@@ -43,9 +45,15 @@ interface AnomalyBase {
 // exit, parity errors -- each gets its own row linking to the Alerts
 // view. severity here is the alert's OWN mapped severity (there is no
 // "default" to override, unlike the five kinds above).
+//
+// Insights (Phase 5 Task 13) join the same way, one rung further out:
+// the 'insight' variant is an active finding's own statement, rendered
+// as a row linking to the Insights view -- but only when no alert row
+// already covers its victim (the insights merge below owns that rule;
+// see its doc). severity here is the finding's mapped severity, same
+// vocabulary and mapping as 'alert'.
 export type OverviewAnomaly =
   | ({ kind: 'unhealthy'; name: string } & AnomalyBase)
-  | ({ kind: 'stopped'; count: number } & AnomalyBase)
   | ({ kind: 'disk-usage'; slot: string; usagePct: number } & AnomalyBase)
   | ({ kind: 'disk-errors'; slot: string; errors: number } & AnomalyBase)
   | ({ kind: 'array-stopped' } & AnomalyBase)
@@ -63,7 +71,54 @@ export type OverviewAnomaly =
       // detail becomes the instance's own summary sentence instead).
       metric?: string;
       summary?: string;
-    } & AnomalyBase);
+      // why: the best active insight naming this alert's entity as its
+      // victim (the insights merge below) -- describeAnomaly folds it
+      // into the row's detail as a "Cause:"/"Likely cause:" suffix,
+      // annotateAlerts' exact wording. The alert stays the actionable
+      // row; the full annotation (with its link into #/insights) lives
+      // on the Alerts view this row already routes to.
+      why?: { statement: string; confidence: string };
+    } & AnomalyBase)
+  | ({ kind: 'insight'; statement: string; severity: HealthStatus; confidence: string } & AnomalyBase);
+
+// OverviewAckLike is the narrow slice of api.ts's OverviewAckDTO this
+// module actually needs (the FiringAlertLike convention right below):
+// the concrete (kind, entity) identity an acknowledgement suppresses,
+// plus its own expiry. until is checked HERE, per derivation run,
+// rather than trusting the list to be pre-pruned -- the frame
+// re-derives every ~2s tick, so an ack lapsing between store refetches
+// makes its anomaly reappear on the very next tick with no fetch.
+export interface OverviewAckLike {
+  kind: string;
+  entity: string;
+  until: number; // unix seconds
+}
+
+// ackKeyFor maps one anomaly onto the concrete (kind, entity) identity
+// an acknowledgement row carries (POST /api/acks' own closed
+// vocabulary): the container name, the disk slot, the literal "array"
+// (there is only ever one), the source name. null for 'alert' --
+// acknowledging an alert-backed callout IS an alert silence (one
+// mechanism per system; see deriveOverviewStatus's ack doc), so no ack
+// identity exists for it, and no ack row can ever quiet one. null for
+// 'insight' by the same rule: quieting a finding is DISMISSING it on
+// the Insights view, never a second parallel mechanism here.
+export function ackKeyFor(a: OverviewAnomaly): { kind: string; entity: string } | null {
+  switch (a.kind) {
+    case 'unhealthy':
+      return { kind: a.kind, entity: a.name };
+    case 'disk-usage':
+    case 'disk-errors':
+      return { kind: a.kind, entity: a.slot };
+    case 'array-stopped':
+      return { kind: a.kind, entity: 'array' };
+    case 'source-critical':
+      return { kind: a.kind, entity: a.source };
+    case 'alert':
+    case 'insight':
+      return null;
+  }
+}
 
 // FiringAlertLike is the narrow slice of api.ts's FiringAlertDTO this
 // module actually needs -- kept local rather than importing the wider
@@ -77,6 +132,12 @@ export interface FiringAlertLike {
   severity: string;
   entity: string;
   silenced: boolean;
+  // kind: the alert's own subject vocabulary (container|host|array|
+  // disk|gpu), matched against an insight's victim_kind by the insights
+  // merge (annotateAlerts' exact rule). Optional the same way metric/
+  // summary are: a caller or fixture without it just never matches an
+  // insight, it doesn't fail to type-check.
+  kind?: string;
   // metric/summary: see OverviewAnomaly's 'alert' variant doc. Optional
   // so a caller that hasn't wired the fuller FiringAlertDTO through yet
   // (or a test fixture that doesn't care) still type-checks.
@@ -84,9 +145,25 @@ export interface FiringAlertLike {
   summary?: string;
 }
 
+// OverviewInsightLike is the narrow slice of api.ts's InsightDTO the
+// insights merge needs (the FiringAlertLike convention above): the
+// victim identity an alert row is matched on, the statement/severity/
+// confidence a row or "why" suffix renders, and fired_at so
+// sortActiveInsights can rank competing findings the same way every
+// other consumer does.
+export interface OverviewInsightLike {
+  victim_kind: string;
+  victim: string;
+  statement: string;
+  // severity is the finding's own wire vocabulary (info|warning|alert)
+  // -- insight/rules.go shares store.Event's exact three slots.
+  severity: string;
+  confidence: string;
+  fired_at: number;
+}
+
 export interface OverviewStatusInput {
   unhealthyNames: string[];
-  stoppedCount: number;
   // array['array.started'] straight off the live frame -- undefined
   // (no unraid/array data yet) is deliberately NOT treated as "stopped":
   // an absent reading isn't evidence of a problem, only 0 is.
@@ -97,6 +174,20 @@ export interface OverviewStatusInput {
   // that hasn't wired alerts through yet -- treated as "nothing
   // firing", not an error).
   alerts?: FiringAlertLike[] | null;
+  // acks: every live acknowledgement (GET /api/acks, fetched by the
+  // acks store ALONGSIDE the frame -- acks deliberately don't ride in
+  // the frame itself). undefined on a page that hasn't wired acks
+  // through yet -- treated as "nothing acked", not an error.
+  acks?: OverviewAckLike[] | null;
+  // insights: the live frame's insights.active block (undefined on a
+  // page that hasn't wired insights through yet -- treated as "nothing
+  // active", not an error).
+  insights?: OverviewInsightLike[] | null;
+  // now (unix seconds) is read only to decide ack expiry -- injectable
+  // so tests can pin both sides of an ack's until deterministically.
+  // Defaults to the real clock; every other part of this derivation
+  // stays clock-free exactly as before.
+  now?: number;
 }
 
 // alertSeverityToHealth maps store.Event's three-slot vocabulary onto
@@ -151,18 +242,14 @@ const DISK_USAGE_WARN_PCT = 90;
 const CRITICAL_SOURCES = ['docker'];
 
 export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus {
-  const anomalies: OverviewAnomaly[] = [];
+  const frameAnomalies: OverviewAnomaly[] = [];
 
   for (const name of input.unhealthyNames) {
-    anomalies.push({ kind: 'unhealthy', name });
-  }
-  if (input.stoppedCount > 0) {
-    anomalies.push({ kind: 'stopped', count: input.stoppedCount });
+    frameAnomalies.push({ kind: 'unhealthy', name });
   }
 
   const disks = input.disks ?? {};
   const diskSlots = Object.keys(disks).sort();
-  const flaggedDiskSlots: string[] = [];
 
   // disk-usage: at most ONE anomaly, the single worst (highest-%) disk
   // over the threshold -- the mockup's own "one callout on the fullest,"
@@ -177,8 +264,7 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
     }
   }
   if (worst) {
-    anomalies.push({ kind: 'disk-usage', slot: worst.slot, usagePct: worst.usagePct });
-    flaggedDiskSlots.push(worst.slot);
+    frameAnomalies.push({ kind: 'disk-usage', slot: worst.slot, usagePct: worst.usagePct });
   }
 
   // disk-errors: unlike usage, one row PER erroring disk -- a real error
@@ -187,20 +273,47 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
   for (const slot of diskSlots) {
     const errors = disks[slot]?.['errors'] ?? 0;
     if (errors > 0) {
-      anomalies.push({ kind: 'disk-errors', slot, errors });
-      flaggedDiskSlots.push(slot);
+      frameAnomalies.push({ kind: 'disk-errors', slot, errors });
     }
   }
 
   if (input.arrayStarted === 0) {
-    anomalies.push({ kind: 'array-stopped' });
+    frameAnomalies.push({ kind: 'array-stopped' });
   }
 
   const sources = input.sources ?? {};
   for (const source of CRITICAL_SOURCES) {
     const detail = sources[source];
     if (detail !== undefined && detail !== 'ok') {
-      anomalies.push({ kind: 'source-critical', source, detail });
+      frameAnomalies.push({ kind: 'source-critical', source, detail });
+    }
+  }
+
+  // Acknowledgements (Scott: "We need to be able to acknowledge things
+  // that need you so they stop showing up for a period of time"): an
+  // acked (kind, entity) pair contributes nothing until its ack's own
+  // until passes -- the silenced-alert treatment one block down, applied
+  // to the frame-derived kinds. Filtered BEFORE the alerts merge, on
+  // purpose: an ack quiets the frame-derived row only, never a firing
+  // alert. If the same concern's alert rule fires unsilenced while the
+  // frame row is acked, the dedup below finds no surviving row to fold
+  // into and the alert surfaces on its own line -- an ack is not a
+  // silence, and only a silence may quiet an alert.
+  const now = input.now ?? Date.now() / 1000;
+  const liveAcks = (input.acks ?? []).filter((ack) => ack.until > now);
+  const anomalies = frameAnomalies.filter((a) => {
+    const key = ackKeyFor(a);
+    return !key || !liveAcks.some((ack) => ack.kind === key.kind && ack.entity === key.entity);
+  });
+
+  // flaggedDiskSlots derives from the SURVIVING disk anomalies (in list
+  // order, one entry per anomaly -- a slot flagged for usage AND errors
+  // appears twice, as before): an acked disk callout un-flags its bay-
+  // schematic bar too, the same "acked means quiet" the row itself gets.
+  const flaggedDiskSlots: string[] = [];
+  for (const a of anomalies) {
+    if (a.kind === 'disk-usage' || a.kind === 'disk-errors') {
+      flaggedDiskSlots.push(a.slot);
     }
   }
 
@@ -209,6 +322,10 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
   // alert contributes nothing here: silencing is a deliberate "don't
   // nag me about this" gesture, and it would be a strange product to
   // honor that everywhere except the one place a user can't dismiss it.
+  // alertRows remembers each pushed row alongside its source alert's
+  // own kind -- the insights merge below matches on kind+entity, and
+  // the anomaly itself deliberately doesn't carry the alert's kind.
+  const alertRows: { row: Extract<OverviewAnomaly, { kind: 'alert' }>; sourceKind?: string }[] = [];
   for (const alert of input.alerts ?? []) {
     if (alert.silenced) continue;
     const mappedSeverity = alertSeverityToHealth(alert.severity);
@@ -221,9 +338,52 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
       }
       continue;
     }
-    anomalies.push({
+    const row: Extract<OverviewAnomaly, { kind: 'alert' }> = {
       kind: 'alert', ruleId: alert.rule_id, ruleName: alert.rule_name, entity: alert.entity, severity: mappedSeverity,
       metric: alert.metric, summary: alert.summary,
+    };
+    anomalies.push(row);
+    alertRows.push({ row, sourceKind: alert.kind });
+  }
+
+  // Insights merge (Phase 5 Task 13, the Overview half) -- the same
+  // "coexist, not replace" shape as the alerts merge above, one rung
+  // further out: an insight is a diagnosis (culprit -> resource ->
+  // victim), so it earns an attention row only when it's load-bearing
+  // on its own. Three rules:
+  //
+  // - Only a finding at severity warning or worse becomes a row. An
+  //   info insight belongs on the Insights view, not in the headline
+  //   count -- and that holds regardless of confidence, so even a
+  //   confirmed info finding never lands here.
+  // - An insight never duplicates an alert row for the same entity,
+  //   matched on the alert's own kind+entity against the finding's
+  //   victim_kind+victim (annotateAlerts' exact rule; an empty victim
+  //   never matches): when both exist the alert row wins and gains the
+  //   "why" suffix instead (see the 'alert' variant's own doc) -- the
+  //   alert is the actionable one. Findings are walked best-first
+  //   (sortActiveInsights), so the suffix a row ends up with is the
+  //   same one annotateAlerts itself would pick: one annotation per
+  //   row, never a stack, and every lower-ranked finding naming the
+  //   same victim stays off the list entirely.
+  // - The headline count stays anomalies.length either way, the same
+  //   standing invariant the alerts merge already preserves.
+  const eligibleInsights = (input.insights ?? []).filter((i) => i.severity === 'warning' || i.severity === 'alert');
+  for (const insight of sortActiveInsights(eligibleInsights)) {
+    const host = insight.victim
+      ? alertRows.find((r) => r.sourceKind === insight.victim_kind && r.row.entity === insight.victim)
+      : undefined;
+    if (host) {
+      if (!host.row.why) {
+        host.row.why = { statement: insight.statement, confidence: insight.confidence };
+      }
+      continue;
+    }
+    anomalies.push({
+      kind: 'insight',
+      statement: insight.statement,
+      severity: alertSeverityToHealth(insight.severity),
+      confidence: insight.confidence,
     });
   }
 
@@ -250,9 +410,16 @@ export interface AnomalyText {
   // (the row's own link target) need the bare name separately from the
   // human sentence it's embedded in.
   linkContainer?: string;
-  // Present only for an 'alert' anomaly -- links the row to the Alerts
-  // view (Task 12: "the callouts link to the Alerts view"). The other
-  // five kinds either link via linkContainer or don't link at all.
+  // The route that explains this anomaly (anomalyHref -- Scott:
+  // "anything in the NEEDS YOU section needs to be clickable to get to
+  // information about that item"), carried on EVERY kind that has a
+  // page to land on: container concerns to that container's detail,
+  // disk/array concerns to Storage, alert-backed callouts to the Alerts
+  // view, a critical docker source to the fleet view it degrades.
+  // Absent only when no page exists for the concern (anomalyHref's own
+  // null convention). For 'unhealthy' it duplicates linkContainer's
+  // destination on purpose -- consumers that render generically read
+  // href alone.
   href?: string;
 }
 
@@ -263,8 +430,16 @@ export interface AnomalyText {
 // formatters are. describeAnomaly (below) is the public entry point;
 // this one exists separately so the severity-override check has a
 // "what would this kind's severity be on its own" to compare against
-// without recursing into itself.
+// without recursing into itself. href is attached once, after the
+// switch, from anomalyHref -- the one shared routing table -- rather
+// than each case naming its own destination.
 function describeAnomalyCore(a: OverviewAnomaly): AnomalyText {
+  const href = anomalyHref(a);
+  const text = anomalyTextFor(a);
+  return href ? { ...text, href } : text;
+}
+
+function anomalyTextFor(a: OverviewAnomaly): AnomalyText {
   switch (a.kind) {
     case 'unhealthy':
       return {
@@ -272,12 +447,6 @@ function describeAnomalyCore(a: OverviewAnomaly): AnomalyText {
         title: `${a.name} is unhealthy`,
         detail: 'Failing its health check.',
         linkContainer: a.name,
-      };
-    case 'stopped':
-      return {
-        severity: 'warning',
-        title: a.count === 1 ? '1 container is stopped' : `${a.count} containers are stopped`,
-        detail: '',
       };
     case 'disk-usage':
       return {
@@ -295,13 +464,24 @@ function describeAnomalyCore(a: OverviewAnomaly): AnomalyText {
       return { severity: 'serious', title: 'Array is stopped', detail: 'No parity protection while it is down.' };
     case 'source-critical':
       return { severity: 'critical', title: `${a.source} needs attention`, detail: a.detail };
-    case 'alert':
+    case 'alert': {
       // A threshold alert's metric is always non-empty -- detail stays
       // the bare entity, unchanged. An event alert has no metric (and
       // so no meaningful value/threshold at all -- see FiringAlertDTO's
       // own doc): its summary sentence is the only real description,
       // falling back to entity on the off chance summary is also empty.
-      return { severity: a.severity, title: a.ruleName, detail: a.metric ? a.entity : a.summary || a.entity, href: '#/alerts' };
+      // A matched insight's "why" rides the same detail slot, in
+      // annotateAlerts' exact wording -- see the variant's own doc.
+      const base = a.metric ? a.entity : a.summary || a.entity;
+      const why = a.why ? `${a.why.confidence === 'confirmed' ? 'Cause' : 'Likely cause'}: ${a.why.statement}` : null;
+      return { severity: a.severity, title: a.ruleName, detail: why ? `${base} · ${why}` : base };
+    }
+    case 'insight':
+      // The statement IS the finding ("qbittorrent is starving jellyfin
+      // on disk3") -- it carries subject and reason in one sentence, so
+      // the detail slot only adds the confidence reading, the same
+      // Likely/Confirmed vocabulary the Insights view's chip uses.
+      return { severity: a.severity, title: a.statement, detail: confidenceLabel(a.confidence) };
   }
 }
 

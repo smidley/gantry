@@ -39,6 +39,17 @@ const KIND_MARKER: Record<string, { severity: MarkerSeverity; label: string }> =
   // marker of its own: the fired marker plus the chart's own data
   // recovering already tells that story without a second glyph.
   'alert.fired': { severity: 'critical', label: 'Alert' },
+  // insight.detected (Phase 5, insight/engine.go's upsertFinding):
+  // severity 'info' per the plan's own contract (Task 11: "an
+  // insight.detected marker, severity info, label Insight") --
+  // deliberately the quietest marker on this chart, unlike alert.fired's
+  // 'critical': an insight is a correlational claim, never as alarming
+  // as a fired alert by design (Global Constraints: "insights never
+  // page"), and this marker's own visual weight should say so.
+  // insight.resolved gets no marker of its own, the exact alert.resolved
+  // precedent just above -- the detected marker plus the chart's own
+  // data clearing already tells that story.
+  'insight.detected': { severity: 'info', label: 'Insight' },
 };
 
 export function eventsToMarkers(events: GantryEvent[] | null | undefined): ChartMarker[] {

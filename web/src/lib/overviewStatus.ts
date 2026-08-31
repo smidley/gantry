@@ -9,14 +9,14 @@
 // CATEGORY: each unhealthy container gets its own anomaly (a real,
 // comparatively rare signal worth its own row and its own link into that
 // container's detail page), each flagged disk gets its own anomaly, and
-// so on. The one deliberate exception is "stopped" containers, which
-// stays a single aggregated anomaly no matter how many are stopped --
-// state=running is a common, often-intentional condition in a home-lab
-// (containers turned off on purpose), and per-container rows for that
-// would flood the attention module exactly the way the design's own
-// "spend each device once, stay calm" rule warns against. The headline's
-// own count is always anomalies.length, so "N things" and "N rows in the
-// attention module" can never disagree.
+// so on. Stopped containers are deliberately NOT a concern at all
+// (Scott: "stopped containers are not something that needs you") --
+// state!=running is a common, often-intentional condition in a home-lab
+// (containers turned off on purpose), so it contributes nothing to the
+// anomaly list or the headline count; the fleet sentence
+// ("X running · Y stopped", fleetSentence below) still states it as a
+// plain fact. The headline's own count is always anomalies.length, so
+// "N things" and "N rows in the attention module" can never disagree.
 import { diskUsagePct } from './disks';
 import { fmtPct } from './format';
 import type { HealthStatus } from './containerStatus';
@@ -45,7 +45,6 @@ interface AnomalyBase {
 // "default" to override, unlike the five kinds above).
 export type OverviewAnomaly =
   | ({ kind: 'unhealthy'; name: string } & AnomalyBase)
-  | ({ kind: 'stopped'; count: number } & AnomalyBase)
   | ({ kind: 'disk-usage'; slot: string; usagePct: number } & AnomalyBase)
   | ({ kind: 'disk-errors'; slot: string; errors: number } & AnomalyBase)
   | ({ kind: 'array-stopped' } & AnomalyBase)
@@ -86,7 +85,6 @@ export interface FiringAlertLike {
 
 export interface OverviewStatusInput {
   unhealthyNames: string[];
-  stoppedCount: number;
   // array['array.started'] straight off the live frame -- undefined
   // (no unraid/array data yet) is deliberately NOT treated as "stopped":
   // an absent reading isn't evidence of a problem, only 0 is.
@@ -155,9 +153,6 @@ export function deriveOverviewStatus(input: OverviewStatusInput): OverviewStatus
 
   for (const name of input.unhealthyNames) {
     anomalies.push({ kind: 'unhealthy', name });
-  }
-  if (input.stoppedCount > 0) {
-    anomalies.push({ kind: 'stopped', count: input.stoppedCount });
   }
 
   const disks = input.disks ?? {};
@@ -272,12 +267,6 @@ function describeAnomalyCore(a: OverviewAnomaly): AnomalyText {
         title: `${a.name} is unhealthy`,
         detail: 'Failing its health check.',
         linkContainer: a.name,
-      };
-    case 'stopped':
-      return {
-        severity: 'warning',
-        title: a.count === 1 ? '1 container is stopped' : `${a.count} containers are stopped`,
-        detail: '',
       };
     case 'disk-usage':
       return {

@@ -10,7 +10,6 @@ import {
 
 const BASE = {
   unhealthyNames: [] as string[],
-  stoppedCount: 0,
   arrayStarted: 1,
   disks: {},
   sources: {},
@@ -46,10 +45,16 @@ describe('deriveOverviewStatus', () => {
     ]);
   });
 
-  it('stopped containers stay ONE aggregated anomaly regardless of count', () => {
-    const status = deriveOverviewStatus({ ...BASE, stoppedCount: 5 });
-    expect(status.headline).toBe('1 thing needs you');
-    expect(status.anomalies).toEqual([{ kind: 'stopped', count: 5 }]);
+  it('stopped containers are NOT an anomaly: the input carries no stopped count at all, and a quiet frame stays ok', () => {
+    // Scott: "stopped containers are not something that needs you."
+    // The derivation has no stopped input anymore -- the fleet sentence
+    // (fleetSentence below) is the one place stopped is still stated,
+    // as a fact rather than a callout. This test pins the input SHAPE:
+    // nothing here can re-grow a stopped-derived anomaly without a test
+    // noticing the union/interface change.
+    const status = deriveOverviewStatus(BASE);
+    expect(status.ok).toBe(true);
+    expect(status.headline).toBe('Everything is running');
   });
 
   it('a disk at exactly the 90% threshold is not flagged', () => {
@@ -147,14 +152,13 @@ describe('deriveOverviewStatus', () => {
   it('combines every kind at once, with the headline counting every row', () => {
     const status = deriveOverviewStatus({
       unhealthyNames: ['sonarr'],
-      stoppedCount: 2,
       arrayStarted: 0,
       disks: { disk1: { 'fs.used_bytes': 95, 'fs.free_bytes': 5 } },
       sources: { docker: 'daemon unreachable' },
     });
-    // unhealthy(1) + stopped(1) + disk-usage(1) + array-stopped(1) + source-critical(1) = 5
-    expect(status.anomalies).toHaveLength(5);
-    expect(status.headline).toBe('5 things need you');
+    // unhealthy(1) + disk-usage(1) + array-stopped(1) + source-critical(1) = 4
+    expect(status.anomalies).toHaveLength(4);
+    expect(status.headline).toBe('4 things need you');
   });
 });
 
@@ -311,11 +315,6 @@ describe('describeAnomaly', () => {
     });
   });
 
-  it('stopped pluralizes on the boundary between 1 and many', () => {
-    expect(describeAnomaly({ kind: 'stopped', count: 1 }).title).toBe('1 container is stopped');
-    expect(describeAnomaly({ kind: 'stopped', count: 2 }).title).toBe('2 containers are stopped');
-  });
-
   it('disk-usage formats the percentage via fmtPct (one decimal, clamped)', () => {
     const text = describeAnomaly({ kind: 'disk-usage', slot: 'disk6', usagePct: 95 });
     expect(text.title).toBe('disk6 is nearest to full');
@@ -369,7 +368,6 @@ describe('calloutTextBySlot', () => {
   it('ignores non-disk anomaly kinds', () => {
     const bySlot = calloutTextBySlot([
       { kind: 'unhealthy', name: 'sonarr' },
-      { kind: 'stopped', count: 2 },
       { kind: 'array-stopped' },
       { kind: 'source-critical', source: 'docker', detail: 'daemon unreachable' },
     ]);
@@ -384,7 +382,7 @@ describe('worstSeverity', () => {
 
   it('picks the single most severe anomaly present', () => {
     const anomalies: OverviewAnomaly[] = [
-      { kind: 'stopped', count: 1 }, // warning
+      { kind: 'disk-usage', slot: 'disk1', usagePct: 95 }, // warning
       { kind: 'disk-errors', slot: 'disk1', errors: 1 }, // serious
       { kind: 'unhealthy', name: 'sonarr' }, // critical
     ];
@@ -392,7 +390,10 @@ describe('worstSeverity', () => {
   });
 
   it('does not let a later, less severe anomaly downgrade the result', () => {
-    const anomalies: OverviewAnomaly[] = [{ kind: 'unhealthy', name: 'sonarr' }, { kind: 'stopped', count: 1 }];
+    const anomalies: OverviewAnomaly[] = [
+      { kind: 'unhealthy', name: 'sonarr' },
+      { kind: 'disk-usage', slot: 'disk1', usagePct: 95 },
+    ];
     expect(worstSeverity(anomalies)).toBe('critical');
   });
 });

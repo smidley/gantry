@@ -367,9 +367,32 @@ func (e *Engine) upsertFinding(f Finding, culprit, culprits string, existing []s
 		State: "active", Severity: f.Severity, Confidence: f.Confidence.String(), Tier: f.Tier.String(),
 		Statement: Statement(f), Evidence: string(evidence), StartedAt: now, FiredAt: now,
 	}
-	isNew := keep == nil
-	if keep != nil {
+	// isNew is false whenever this tuple already had an active row of
+	// ANY shape (keep, or one just resolved "superseded" above) -- I3
+	// (review): a culprit-shape flip (single <-> shared crossing the
+	// floor tick to tick) is the SAME contention, not a fresh
+	// detection, so it must neither append a second insight.detected
+	// nor reset the tuple's own age.
+	isNew := keep == nil && len(existing) == 0
+	switch {
+	case keep != nil:
 		inst.ID, inst.StartedAt, inst.FiredAt, inst.NotifiedAt = keep.ID, keep.StartedAt, keep.FiredAt, keep.NotifiedAt
+	case len(existing) > 0:
+		// Shape flip: every row in existing was just superseded above
+		// (none matched the new culprit/culprits shape). Carry the
+		// EARLIEST StartedAt/FiredAt forward rather than restarting at
+		// now -- idx_insight_active's own doc allows more than one
+		// superseded row to coexist only transiently, so this also
+		// covers that rare case honestly rather than just existing[0].
+		inst.StartedAt, inst.FiredAt = existing[0].StartedAt, existing[0].FiredAt
+		for _, ex := range existing[1:] {
+			if ex.StartedAt < inst.StartedAt {
+				inst.StartedAt = ex.StartedAt
+			}
+			if ex.FiredAt < inst.FiredAt {
+				inst.FiredAt = ex.FiredAt
+			}
+		}
 	}
 
 	id, err := e.Store.UpsertInsight(inst)

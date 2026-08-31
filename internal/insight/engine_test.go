@@ -400,6 +400,62 @@ func TestEngineSeamInvariant7NeverEmitsBothSingleAndSharedCulpritForSameTuple(t 
 	}
 }
 
+// TestEngineCulpritShapeFlipPreservesStartedAtAndSuppressesNewDetectedEvent
+// pins I3 (review): upsertFinding used to build the superseding row with
+// StartedAt=now and isNew=true whenever the culprit shape flipped (a
+// single dominant culprit crossing into a shared pair, or back) -- so a
+// share hovering near the floor reset the tuple's own age and appended a
+// fresh insight.detected on every flip, even though resolve's own doc
+// already says a "superseded" transition is the SAME contention
+// changing shape, not an actual new detection.
+func TestEngineCulpritShapeFlipPreservesStartedAtAndSuppressesNewDetectedEvent(t *testing.T) {
+	live := store.NewLive(2000)
+	fs := newFakeInsightStore()
+	now := time.Unix(3_500_000, 0)
+	startedAt := now.Unix()
+
+	eng := New(fs)
+	eng.MatchSince = live.MatchSince
+	eng.MatchPrefixSince = live.MatchPrefixSince
+	eng.Clock = func() time.Time { return now }
+	eng.Slots = func() map[string]SlotMeta { return map[string]SlotMeta{"disk3": {Device: "sde", Rotational: true}} }
+
+	recordDiskIOContention := func(qbitShare, jellyfinShare float64) {
+		for ts := now.Unix() - 700; ts <= now.Unix(); ts += 10 {
+			live.Record(store.SeriesKey{Kind: "host", Metric: "diskio.sde.util_pct"}, ts, 97)
+			val := 5.0
+			if ts >= now.Unix()-120 {
+				val = 45
+			}
+			live.Record(store.SeriesKey{Kind: "host", Metric: "diskio.sde.await_ms"}, ts, val)
+		}
+		for ts := now.Unix() - 100; ts <= now.Unix(); ts += 10 {
+			live.Record(store.SeriesKey{Kind: "container", Entity: "qbittorrent", Metric: "live:io.sde.read_bps"}, ts, qbitShare)
+			live.Record(store.SeriesKey{Kind: "container", Entity: "jellyfin", Metric: "live:io.sde.read_bps"}, ts, jellyfinShare)
+		}
+	}
+
+	// Tick 1: qbittorrent alone clears the 60% floor.
+	recordDiskIOContention(800, 100)
+	require.NoError(t, eng.Tick(context.Background()))
+	afterTick1, _ := fs.ActiveInsights(context.Background())
+	require.Len(t, afterTick1, 1)
+	require.Equal(t, startedAt, afterTick1[0].StartedAt)
+	require.Len(t, eventsOfKind(fs.events, "insight.detected"), 1)
+
+	// Tick 2 (seam invariant 7's own shares): the shape flips to a
+	// shared pair -- same real contention, different Dominant shape.
+	now = now.Add(300 * time.Second)
+	recordDiskIOContention(440, 310)
+	require.NoError(t, eng.Tick(context.Background()))
+
+	afterTick2, _ := fs.ActiveInsights(context.Background())
+	require.Len(t, afterTick2, 1)
+	require.True(t, afterTick2[0].Culprit == "" && afterTick2[0].Culprits != "", "tick 2 is the shared-culprit shape")
+	require.Equal(t, startedAt, afterTick2[0].StartedAt, "a shape flip must carry the ORIGINAL StartedAt forward, not reset the tuple's age")
+	require.Len(t, eventsOfKind(fs.events, "insight.detected"), 1, "a shape flip is the SAME contention, not a new detection -- no second insight.detected")
+}
+
 func splitCSV(s string) []string {
 	var out []string
 	cur := ""

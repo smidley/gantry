@@ -150,6 +150,54 @@ func (l *Live) MatchSince(kind, metric string, since int64) (samples map[string]
 	return samples, oldestTS
 }
 
+// MatchPrefixSince returns, for every currently-known series of this kind
+// whose metric begins with prefix, the samples at or after since, keyed
+// by entity and then by that series' own full (unstripped) metric name --
+// one read-lock pass regardless of how many entities or devices match.
+// This is the insight engine's per-device data source (internal/insight):
+// it asks once per tick for "all of live:io.*" across every container,
+// not once per (container, device) pair, so an N+1 shape (Keys() then
+// Since() per matching key) would multiply by container count times
+// device count every tick, on top of MatchSince's already-avoided
+// per-entity multiply. samples is always non-nil, and an entity is simply
+// absent as a key when none of its matching series has a sample in
+// [since, now] -- same no-data contract MatchSince documents.
+//
+// oldestTS mirrors MatchSince's own oldestTS lesson one level deeper: for
+// every (entity, metric) pair that has a ring for this kind+prefix at
+// all, it reports that ring's true retention floor, independent of since
+// and populated even when samples excludes the pair for having nothing in
+// the window. A container's rings don't all start at the same time (a
+// device can be attached, or a container restarted, well after another
+// device's ring has been filling for an hour), so the floor has to be
+// per metric, not collapsed to one value per entity -- collapsing it
+// would let a freshly-started ring borrow an older ring's window-coverage
+// claim.
+func (l *Live) MatchPrefixSince(kind, prefix string, since int64) (samples map[string]map[string][]Sample, oldestTS map[string]map[string]int64) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	samples = make(map[string]map[string][]Sample)
+	oldestTS = make(map[string]map[string]int64)
+	for k, r := range l.rings {
+		if k.Kind != kind || !strings.HasPrefix(k.Metric, prefix) {
+			continue
+		}
+		if s := r.Since(since); len(s) > 0 {
+			if samples[k.Entity] == nil {
+				samples[k.Entity] = make(map[string][]Sample)
+			}
+			samples[k.Entity][k.Metric] = s
+		}
+		if o, ok := r.Oldest(); ok {
+			if oldestTS[k.Entity] == nil {
+				oldestTS[k.Entity] = make(map[string]int64)
+			}
+			oldestTS[k.Entity][k.Metric] = o.TS
+		}
+	}
+	return samples, oldestTS
+}
+
 // Evict deletes every ring whose SeriesKey matches kind and entity.
 func (l *Live) Evict(kind, entity string) {
 	l.mu.Lock()

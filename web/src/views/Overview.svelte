@@ -95,9 +95,11 @@
   import { isTopResource, resourceScaleMax, TOP_RESOURCES, topFromFrame } from '../lib/topFromFrame';
   import { createRankStabilityState, stableTopN } from '../lib/rankStability';
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
-  import { calloutTextBySlot, deriveOverviewStatus, describeAnomaly, worstSeverity } from '../lib/overviewStatus';
+  import { acks } from '../lib/acks.svelte';
+  import { calloutTextBySlot, deriveOverviewStatus, worstSeverity } from '../lib/overviewStatus';
   import { band } from '../lib/thresholds';
 
+  import CalloutRow from '../components/CalloutRow.svelte';
   import StatTile from '../components/StatTile.svelte';
   import FleetStrip from '../components/FleetStrip.svelte';
   import BaySchematic from '../components/BaySchematic.svelte';
@@ -210,14 +212,12 @@
 
   // created (never-started) containers -- ephemeral CI-runner spawns are
   // the live example that prompted this -- are excluded from the fleet
-  // headline/strip entirely: nothing to monitor, and a churny burst of
-  // them would otherwise flood both. runningCount/stoppedCount both read
-  // containerRunState rather than the raw state string, so "stopped"
-  // here means exited/dead/etc., never created; the Containers view
-  // lists created containers separately (see its own partition).
+  // strip entirely: nothing to monitor, and a churny burst of them
+  // would otherwise flood it. containerRunState (not the raw state
+  // string) decides what counts as running, so "created" is never
+  // conflated with a real stop; the Containers view lists created
+  // containers separately (see its own partition).
   let containerEntries = $derived(Object.entries(live.frame?.containers ?? {}));
-  let runningCount = $derived(containerEntries.filter(([, c]) => containerRunState(c.state) === 'running').length);
-  let stoppedCount = $derived(containerEntries.filter(([, c]) => containerRunState(c.state) === 'stopped').length);
   let unhealthyNames = $derived(unhealthyContainerNames(live.frame?.containers ?? {}));
   let fleetContainers = $derived(
     containerEntries
@@ -232,10 +232,6 @@
       })),
   );
 
-  // total excludes created containers too (runningCount+stoppedCount,
-  // not containerEntries.length) -- fleetSentence's own "all running"
-  // phrasing must not count a never-started container as part of the
-  // fleet it's describing.
   // TOP_MODULE_LIMIT: this module's own top-N cut, per the D2 compact-
   // module brief. ALL_PRESENT_LIMIT feeds topFromFrame instead -- rank
   // stability (rankStability.ts) needs every present container's own
@@ -373,11 +369,11 @@
   let overviewStatus = $derived(
     deriveOverviewStatus({
       unhealthyNames,
-      stoppedCount,
       arrayStarted: started,
       disks,
       sources: live.frame?.sources ?? {},
       alerts: live.frame?.alerts?.firing ?? [],
+      acks: acks.list,
     }),
   );
   let statusColor = $derived(`var(--status-${worstSeverity(overviewStatus.anomalies)})`);
@@ -456,6 +452,10 @@
   }
 
   onMount(() => {
+    // acks load once alongside the first events fetch -- the list rides
+    // outside the SSE frame (see acks.svelte.ts), so the derivation
+    // above sees every standing acknowledgement from first render.
+    acks.ensureLoaded();
     loadEvents();
     const interval = setInterval(loadEvents, EVENTS_POLL_MS);
     window.addEventListener('focus', loadEvents);
@@ -491,19 +491,7 @@
           <section class="overview__attention">
             <span class="microlabel">Needs a look</span>
             {#each overviewStatus.anomalies as anomaly, i (i)}
-              {@const text = describeAnomaly(anomaly)}
-              <p class="overview__attn-line">
-                <span class="overview__attn-dot" style={`background:var(--status-${text.severity})`} aria-hidden="true"
-                ></span>
-                {#if text.linkContainer}
-                  <a class="overview__attn-title" href={`#/containers/${encodeURIComponent(text.linkContainer)}`}>{text.title}</a>
-                {:else if text.href}
-                  <a class="overview__attn-title" href={text.href}>{text.title}</a>
-                {:else}
-                  <span class="overview__attn-title">{text.title}</span>
-                {/if}
-                {#if text.detail}<span class="overview__attn-detail">&mdash; {text.detail}</span>{/if}
-              </p>
+              <CalloutRow {anomaly} />
             {/each}
           </section>
         {/if}
@@ -792,8 +780,8 @@
      other subline above it. No frame, no brackets, no leader line: the
      one rule surviving the corrective pass is that a line either
      separates two real regions or encodes real data. Each row is one
-     inline sentence (title + reason), not a title line over a separate
-     detail line -- the header-compaction pass. --------------------- */
+     CalloutRow (title + inline reason + ack control -- its own doc);
+     this section only owns the shared container they stack in. ------ */
 
   .overview__attention {
     display: flex;
@@ -804,32 +792,6 @@
     border-radius: 11px;
     background: color-mix(in oklab, var(--status-warning) 8%, var(--surface-muted));
     border: 1px solid color-mix(in oklab, var(--status-warning) 20%, var(--border));
-  }
-  .overview__attn-line {
-    display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin: 0;
-  }
-  .overview__attn-dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    align-self: center;
-  }
-  .overview__attn-title {
-    font-weight: 600;
-    font-size: 1.02rem;
-    color: var(--ink);
-  }
-  a.overview__attn-title {
-    color: inherit;
-  }
-  .overview__attn-detail {
-    color: var(--ink-2);
-    font-size: 0.88rem;
   }
   /* --- Top Consumers / Recent events (each now stacked in its own
      column above -- see overview__body's own doc) ------------------- */

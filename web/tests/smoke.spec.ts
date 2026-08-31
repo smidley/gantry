@@ -208,8 +208,9 @@ test('overview: Top Consumers and Recent events share one wide column, wider tha
 
 // Needs-a-look rows collapsed from a title line plus a separate detail
 // line into one inline sentence -- every row is a single flex line
-// (overview__attn-line), never a taller two-line block, regardless of
-// which anomaly happens to be active for a given fake-fleet run.
+// (CalloutRow's .callout-row, since the Overview integration), never a
+// taller two-line block, regardless of which anomaly happens to be
+// active for a given fake-fleet run.
 test('overview: needs-a-look rows render as one line, not a title line over a detail line', async ({ page }) => {
   await page.goto('#/');
 
@@ -218,7 +219,7 @@ test('overview: needs-a-look rows render as one line, not a title line over a de
     test.skip(true, 'fake fleet booted all-clear for this run -- nothing to check');
   }
 
-  const lines = page.locator('.overview__attn-line');
+  const lines = page.locator('.callout-row');
   await expect(lines.first()).toBeVisible();
   const count = await lines.count();
   for (let i = 0; i < count; i++) {

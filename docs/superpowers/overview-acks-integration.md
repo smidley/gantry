@@ -1,9 +1,10 @@
-# Overview integration: clickable + acknowledgeable callouts (pending)
+# Overview integration: clickable + acknowledgeable callouts (applied)
 
-Everything below is **built, tested, and shipped dark** on `d2-overview`;
-the one thing left is the wiring inside `web/src/views/Overview.svelte`,
-which was frozen mid-hand-edit when this landed. Apply the patch below
-once that file unfreezes.
+Everything below shipped dark on `d2-overview` while
+`web/src/views/Overview.svelte` was frozen mid-hand-edit; the patch
+below has since been applied on the redesign branch (CalloutRow rows,
+acks store into the derivation, parked UI spec unskipped). Kept as the
+record of what the integration consisted of.
 
 ## What already works without touching Overview
 

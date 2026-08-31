@@ -23,7 +23,13 @@ CREATE TABLE insight_instances (
 -- alert_instances precedent), not by engine bookkeeping.
 CREATE UNIQUE INDEX idx_insight_active ON insight_instances
     (rule_id, victim, culprit, resource) WHERE resolved_at = 0;
-CREATE INDEX idx_insight_started ON insight_instances (started_at);
+-- Indexed on resolved_at, not started_at: InsightHistory filters and
+-- sorts on resolved_at, and pruneInsights' age cutoff (maintain.go)
+-- keys on it too. started_at was 004's original spec but no query
+-- shape in the actual implementation ever keys on it, so it was a dead
+-- index -- dropped rather than kept alongside this one, the exact
+-- idx_alert_instances_resolved precedent (003_alerts.sql).
+CREATE INDEX idx_insight_resolved ON insight_instances (resolved_at);
 
 -- Per-rule tuning + enablement. Thresholds only; rule SHAPE is compiled in.
 CREATE TABLE insight_rule_config (

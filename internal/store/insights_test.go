@@ -14,7 +14,7 @@ import (
 // the partial unique index that is the one-active-finding-per-identity-
 // tuple invariant (enforced by the DB, not engine bookkeeping -- see
 // TestUpsertInsightRejectsSecondActiveForSameIdentityTuple below) is
-// actually present, alongside idx_insight_started.
+// actually present, alongside idx_insight_resolved.
 func TestInsightsMigrationCreatesSchema(t *testing.T) {
 	db, err := OpenDB(filepath.Join(t.TempDir(), "gantry.db"))
 	require.NoError(t, err)
@@ -30,11 +30,19 @@ func TestInsightsMigrationCreatesSchema(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version))
 	require.Equal(t, 4, version)
 
-	for _, idx := range []string{"idx_insight_active", "idx_insight_started"} {
-		var n int
-		require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&n))
-		require.Equal(t, 1, n, "missing index %s", idx)
-	}
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_insight_active'`).Scan(&n))
+	require.Equal(t, 1, n)
+
+	// idx_insight_resolved backs InsightHistory's filter/sort and
+	// pruneInsights' age cutoff, both of which key on resolved_at; 004's
+	// original started_at index was never actually queried by either and
+	// is gone -- the exact idx_alert_instances_resolved precedent
+	// (alerts_test.go) one migration earlier.
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_insight_resolved'`).Scan(&n))
+	require.Equal(t, 1, n, "missing idx_insight_resolved")
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_insight_started'`).Scan(&n))
+	require.Equal(t, 0, n, "orphaned idx_insight_started should have been dropped")
 }
 
 // fullInsight mirrors fullInstance's reasoning (alerts_test.go): every

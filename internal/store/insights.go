@@ -150,6 +150,82 @@ func (s *Store) InsightHistory(ctx context.Context, from, to int64, limit int) (
 	return out, rows.Err()
 }
 
+// InsightRuleConfig is one row of insight_rule_config -- one field per
+// column, in schema order. Overrides is a JSON blob (threshold name ->
+// value) at this layer, the same way AlertRule keeps its own
+// multi-value columns as plain strings; decoding it is the engine's job
+// (Tasks 6/7).
+type InsightRuleConfig struct {
+	RuleID    string
+	Enabled   bool
+	Notify    bool
+	Overrides string
+	UpdatedAt int64
+}
+
+// InsightRuleConfigs returns every configured rule, alphabetical by
+// rule_id -- there is no builtin/user split here (contrast AlertRules):
+// every row is a tuning knob over a rule that is always compiled in.
+func (s *Store) InsightRuleConfigs(ctx context.Context) ([]InsightRuleConfig, error) {
+	rows, err := s.readDB.QueryContext(ctx,
+		`SELECT rule_id, enabled, notify, overrides, updated_at FROM insight_rule_config ORDER BY rule_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []InsightRuleConfig
+	for rows.Next() {
+		var c InsightRuleConfig
+		if err := rows.Scan(&c.RuleID, &c.Enabled, &c.Notify, &c.Overrides, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// UpsertInsightRuleConfig inserts a new config row or, if rule_id
+// already exists, overwrites every column in place -- the rule-editor
+// write path (Task 9's PUT /api/insights/rules), the exact
+// UpsertAlertRule contract. Contrast SeedInsightRuleConfigs, which never
+// overwrites an existing row.
+func (s *Store) UpsertInsightRuleConfig(c InsightRuleConfig) error {
+	_, err := s.db.Exec(`INSERT INTO insight_rule_config (rule_id, enabled, notify, overrides, updated_at)
+		VALUES (?,?,?,?,?)
+		ON CONFLICT (rule_id) DO UPDATE SET
+			enabled=excluded.enabled, notify=excluded.notify, overrides=excluded.overrides, updated_at=excluded.updated_at`,
+		c.RuleID, c.Enabled, c.Notify, c.Overrides, c.UpdatedAt)
+	return err
+}
+
+// SeedInsightRuleConfigs inserts every config in defaults whose rule_id
+// is not already present, leaving any existing row -- edited, disabled,
+// or otherwise -- completely untouched. The exact SeedAlertRules
+// contract (alert_defaults.go): never updates, never deletes, idempotent
+// across any number of calls, and a rule added in a later version gets a
+// config row on the next boot of an existing DB with no separate
+// seed-version marker to maintain.
+func (s *Store) SeedInsightRuleConfigs(defaults []InsightRuleConfig) error {
+	now := s.clock().Unix()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, c := range defaults {
+		if c.UpdatedAt == 0 {
+			c.UpdatedAt = now
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO insight_rule_config (rule_id, enabled, notify, overrides, updated_at)
+			VALUES (?,?,?,?,?)`,
+			c.RuleID, c.Enabled, c.Notify, c.Overrides, c.UpdatedAt); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // StaleActiveInsights marks every still-active row (resolved_at = 0,
 // the same predicate idx_insight_active enforces) resolved with reason
 // 'restart' at time at. The live ring is empty after a restart, so no

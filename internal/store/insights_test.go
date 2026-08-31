@@ -276,3 +276,167 @@ func TestStaleActiveInsightsNoopOnEmptyStore(t *testing.T) {
 	s := newTestStore(t, nil)
 	require.NoError(t, s.StaleActiveInsights(1000))
 }
+
+// fullRuleConfig mirrors fullRule's reasoning (alerts_test.go): every
+// field gets a distinct non-zero-where-possible value so a round trip
+// catches a transposed column.
+func fullRuleConfig(ruleID string) InsightRuleConfig {
+	return InsightRuleConfig{
+		RuleID: ruleID, Enabled: true, Notify: false,
+		Overrides: `{"util_pct":95}`, UpdatedAt: 1756400000,
+	}
+}
+
+func insightConfigsByID(cfgs []InsightRuleConfig) map[string]InsightRuleConfig {
+	out := make(map[string]InsightRuleConfig, len(cfgs))
+	for _, c := range cfgs {
+		out[c.RuleID] = c
+	}
+	return out
+}
+
+// TestUpsertInsightRuleConfigRoundTripsEveryField pins the full column
+// set end-to-end -- the exact TestUpsertAlertRuleRoundTripsEveryField
+// contract, including the two boolean columns (enabled, notify) which
+// SQLite stores as INTEGER.
+func TestUpsertInsightRuleConfigRoundTripsEveryField(t *testing.T) {
+	s := newTestStore(t, nil)
+	want := fullRuleConfig("disk-io-contention")
+	require.NoError(t, s.UpsertInsightRuleConfig(want))
+
+	got, err := s.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, want, got[0])
+}
+
+// TestUpsertInsightRuleConfigUpdatesExistingRowOnConflict is the CRUD
+// "U": a second UpsertInsightRuleConfig call with the same rule_id
+// overwrites the row in place rather than adding a second one -- the
+// rule-editor path (Task 9 PUTs a whole-document replace), distinct from
+// SeedInsightRuleConfigs' INSERT-OR-IGNORE-if-absent contract tested
+// separately below.
+func TestUpsertInsightRuleConfigUpdatesExistingRowOnConflict(t *testing.T) {
+	s := newTestStore(t, nil)
+	c := fullRuleConfig("cpu-starvation")
+	require.NoError(t, s.UpsertInsightRuleConfig(c))
+
+	c.Enabled = false
+	c.Notify = true
+	c.Overrides = `{"cpu_pct":45}`
+	require.NoError(t, s.UpsertInsightRuleConfig(c))
+
+	got, err := s.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1, "must update in place, not insert a second row")
+	require.False(t, got[0].Enabled)
+	require.True(t, got[0].Notify)
+	require.Equal(t, `{"cpu_pct":45}`, got[0].Overrides)
+}
+
+// TestInsightRuleConfigsOrderedByRuleID pins a deterministic read order
+// (there is no builtin/user split for this table -- every row is a
+// tuning knob over a compiled-in rule).
+func TestInsightRuleConfigsOrderedByRuleID(t *testing.T) {
+	s := newTestStore(t, nil)
+	require.NoError(t, s.UpsertInsightRuleConfig(fullRuleConfig("parity-slowdown")))
+	require.NoError(t, s.UpsertInsightRuleConfig(fullRuleConfig("cpu-starvation")))
+	require.NoError(t, s.UpsertInsightRuleConfig(fullRuleConfig("disk-io-contention")))
+
+	got, err := s.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"cpu-starvation", "disk-io-contention", "parity-slowdown"},
+		[]string{got[0].RuleID, got[1].RuleID, got[2].RuleID})
+}
+
+// TestSeedInsightRuleConfigsInsertsAllDefaultsOnFreshDB pins the basic
+// seed path -- the exact TestSeedAlertRulesInsertsAllDefaultsOnFreshDB
+// contract, including the updated_at auto-stamp.
+func TestSeedInsightRuleConfigsInsertsAllDefaultsOnFreshDB(t *testing.T) {
+	s := newTestStore(t, nil)
+	defaults := []InsightRuleConfig{
+		{RuleID: "disk-io-contention", Enabled: true},
+		{RuleID: "cpu-starvation", Enabled: true},
+	}
+	require.NoError(t, s.SeedInsightRuleConfigs(defaults))
+
+	got, err := s.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for _, c := range got {
+		require.True(t, c.Enabled, "every seeded default starts enabled")
+		require.NotZero(t, c.UpdatedAt, "SeedInsightRuleConfigs must stamp updated_at")
+	}
+}
+
+// TestSeedInsightRuleConfigsIsIdempotent pins "seeding twice inserts
+// once" -- the exact TestSeedAlertRulesIsIdempotent contract.
+func TestSeedInsightRuleConfigsIsIdempotent(t *testing.T) {
+	s := newTestStore(t, nil)
+	defaults := []InsightRuleConfig{{RuleID: "disk-io-contention", Enabled: true}}
+	require.NoError(t, s.SeedInsightRuleConfigs(defaults))
+	require.NoError(t, s.SeedInsightRuleConfigs(defaults))
+
+	got, err := s.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1, "a second seed call must not duplicate the row")
+}
+
+// TestSeedInsightRuleConfigsNeverOverwritesAnEditedRow pins the
+// upgrade-safety contract: SeedInsightRuleConfigs only ever inserts a
+// row whose rule_id is absent -- it never touches a row that already
+// exists, however the user left it (disabled, notify flipped on,
+// thresholds overridden). This is the mechanism, named in the schema's
+// own comment, for a rule added by a later Gantry version to get a
+// config row on upgrade without ever stomping a threshold the user has
+// tuned.
+func TestSeedInsightRuleConfigsNeverOverwritesAnEditedRow(t *testing.T) {
+	s := newTestStore(t, nil)
+	require.NoError(t, s.SeedInsightRuleConfigs([]InsightRuleConfig{{RuleID: "disk-io-contention", Enabled: true}}))
+
+	cfgs, err := s.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	edited := cfgs[0]
+	edited.Enabled = false
+	edited.Notify = true
+	edited.Overrides = `{"util_pct":80}`
+	require.NoError(t, s.UpsertInsightRuleConfig(edited))
+
+	require.NoError(t, s.SeedInsightRuleConfigs([]InsightRuleConfig{{RuleID: "disk-io-contention", Enabled: true}}))
+
+	got, err := s.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1, "re-seeding must not add a duplicate row for an already-seeded id")
+	require.Equal(t, edited, got[0], "re-seeding must not resurrect the enabled state or clear the overrides")
+}
+
+// TestSeedInsightRuleConfigsInsertsANewlyAddedDefaultOnNextBoot pins the
+// actual upgrade mechanism: seeding is per-rule-id absence, not a global
+// version marker, so a default introduced by a later Gantry upgrade is
+// simply inserted the next time SeedInsightRuleConfigs runs -- while an
+// already-seeded, already-edited row is left untouched -- the exact
+// TestSeedAlertRulesInsertsANewlyAddedDefaultOnNextBoot contract.
+func TestSeedInsightRuleConfigsInsertsANewlyAddedDefaultOnNextBoot(t *testing.T) {
+	s := newTestStore(t, nil)
+	oldInstall := []InsightRuleConfig{{RuleID: "disk-io-contention", Enabled: true}}
+	upgradeIntroduced := InsightRuleConfig{RuleID: "gpu-engine-contention", Enabled: true}
+
+	require.NoError(t, s.SeedInsightRuleConfigs(oldInstall))
+
+	cfgs, err := s.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, cfgs, 1)
+	edited := cfgs[0]
+	edited.Enabled = false
+	require.NoError(t, s.UpsertInsightRuleConfig(edited))
+
+	require.NoError(t, s.SeedInsightRuleConfigs([]InsightRuleConfig{oldInstall[0], upgradeIntroduced})) // "upgrade"
+
+	got, err := s.InsightRuleConfigs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	newRow, ok := insightConfigsByID(got)[upgradeIntroduced.RuleID]
+	require.True(t, ok, "the newly-added default must be inserted on this boot")
+	require.True(t, newRow.Enabled)
+	require.False(t, insightConfigsByID(got)["disk-io-contention"].Enabled, "an already-seeded edited rule must survive the same boot untouched")
+}

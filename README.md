@@ -11,6 +11,7 @@ Design spec: [docs/superpowers/specs/2026-08-25-gantry-design.md](docs/superpowe
 ```sh
 docker run -d \
   --name gantry \
+  --label net.unraid.docker.icon=https://raw.githubusercontent.com/smidley/gantry/main/template/gantry-icon.png \
   -p 8380:8380 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v /var/local/emhttp:/unraid:ro \

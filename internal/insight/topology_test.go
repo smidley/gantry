@@ -198,3 +198,71 @@ func TestTopologyAgainstRealDisksIniCapture(t *testing.T) {
 	_, present := slots["parity"]
 	require.False(t, present, "this capture's parity is DISK_NP_DSBL (disabled), matching tickOneDisk's own presence gate")
 }
+
+// TestTopologyResolveNameMapsKnownNamesToSlot pins ResolveName as the
+// name-keyed twin of Resolve: every series the engine actually reads is
+// keyed by device name, not major:minor (host diskio.<name>.*, docker
+// live:io.<slug(name)>.*), so this never goes through the
+// deviceName(majMin) step -- nil deviceName here proves that.
+func TestTopologyResolveNameMapsKnownNamesToSlot(t *testing.T) {
+	slots := loadSlotMeta(t, "../collect/unraid/testdata/disks.ini")
+	topo := NewTopology(nil, slots)
+
+	parity, ok := topo.ResolveName("sdb")
+	require.True(t, ok)
+	require.Equal(t, Device{Name: "sdb", Slot: "parity", Role: RoleParity, Rotational: true}, parity)
+
+	disk1, ok := topo.ResolveName("sdc")
+	require.True(t, ok)
+	require.Equal(t, Device{Name: "sdc", Slot: "disk1", Role: RoleData, Rotational: true}, disk1)
+
+	cache, ok := topo.ResolveName("nvme0n1")
+	require.True(t, ok)
+	require.Equal(t, Device{Name: "nvme0n1", Slot: "cache", Role: RolePool, Rotational: false}, cache)
+}
+
+// TestTopologyResolveNameAgainstRealDisksIniCapture covers the roles
+// disks.ini's synthetic fixture doesn't carry (flash, a second
+// custom-named pool) plus the md-name choice this task pinned down:
+// nameToSlot carries both a data slot's raw device and its "mdN"
+// canonical alias to the same slot (see NewTopology), so
+// ResolveName("md1") is not a special case -- it comes back Named "md1"
+// simply because that's the name it was asked to resolve, already in
+// the form Canonical would have produced from the raw device.
+func TestTopologyResolveNameAgainstRealDisksIniCapture(t *testing.T) {
+	slots := loadSlotMeta(t, "../collect/unraid/testdata/disks_real.ini")
+	topo := NewTopology(nil, slots)
+
+	disk1, ok := topo.ResolveName("sdg")
+	require.True(t, ok)
+	require.Equal(t, Device{Name: "sdg", Slot: "disk1", Role: RoleData, Rotational: true}, disk1)
+
+	disk1ViaMD, ok := topo.ResolveName("md1")
+	require.True(t, ok)
+	require.Equal(t, Device{Name: "md1", Slot: "disk1", Role: RoleData, Rotational: true}, disk1ViaMD,
+		"md1 is disk1's canonical array device -- ResolveName resolves it directly, matching Canonical's model")
+
+	rocketPool, ok := topo.ResolveName("nvme0n1")
+	require.True(t, ok)
+	require.Equal(t, Device{Name: "nvme0n1", Slot: "rocket_pool", Role: RolePool, Rotational: false}, rocketPool)
+
+	flash, ok := topo.ResolveName("sdi")
+	require.True(t, ok)
+	require.Equal(t, Device{Name: "sdi", Slot: "flash", Role: RoleFlash, Rotational: true}, flash)
+}
+
+// TestTopologyResolveNameUnknownNameReturnsFalse pins ResolveName's
+// stricter contract against Resolve's: a name matching no known slot at
+// all means ResolveName has nothing to say about it. Resolve can fall
+// back to RoleUnknown because its prior deviceName(majMin) call already
+// proved a real kernel device exists; ResolveName has no such proof for
+// an arbitrary name, so an unmatched one comes back empty rather than a
+// fabricated RoleUnknown device.
+func TestTopologyResolveNameUnknownNameReturnsFalse(t *testing.T) {
+	slots := loadSlotMeta(t, "../collect/unraid/testdata/disks.ini")
+	topo := NewTopology(nil, slots)
+
+	_, ok := topo.ResolveName("nvme2n1")
+
+	require.False(t, ok)
+}

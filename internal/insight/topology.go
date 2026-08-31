@@ -135,6 +135,37 @@ func (t *Topology) Resolve(majMin string) (Device, bool) {
 	}, true
 }
 
+// ResolveName maps a device name directly to the Device it names, for
+// callers that already have a kernel device name rather than a
+// cgroup-reported "major:minor" -- every live series the engine reads is
+// keyed by device name, not majMin (host diskio.<name>.*, docker
+// live:io.<slug(name)>.*). It is the second half of Resolve: the
+// deviceName(majMin) step that produces a kernel name is skipped because
+// the caller already has one.
+//
+// Unlike Resolve, ok is false whenever name matches no known slot.
+// Resolve can fall back to RoleUnknown because its prior deviceName call
+// already proved a real kernel device exists; ResolveName has no such
+// proof for an arbitrary name, so an unmatched one comes back empty
+// rather than a fabricated RoleUnknown device.
+//
+// name may be either a slot's raw device ("sdc") or a data slot's
+// canonical "mdN" form ("md1") -- nameToSlot carries both to the same
+// slot (see NewTopology), so ResolveName("md1") comes back already in
+// Canonical's output form without ResolveName treating md specially.
+func (t *Topology) ResolveName(name string) (Device, bool) {
+	slot, known := t.nameToSlot[name]
+	if !known {
+		return Device{}, false
+	}
+	return Device{
+		Name:       name,
+		Slot:       slot,
+		Role:       classifyRole(slot),
+		Rotational: t.slotRot[slot],
+	}, true
+}
+
 // Contended reports whether d may be named as a contended resource in
 // its own right. False only for RoleParity -- see RoleParity's own doc.
 func (t *Topology) Contended(d Device) bool {

@@ -130,11 +130,15 @@ func digestRefsOrNone(digests []string) []string {
 }
 
 // gantryConfirmHeader/gantryConfirmValue are the write-path guardrail
-// requireMutationAllowed checks for. Gantry has no auth, so without
-// this, any website open in the LAN user's browser could fire a blind
-// cross-origin form POST straight at the daemon and have it just work;
-// requiring a custom header forces the browser to CORS-preflight the
-// request first, which a plain form POST can never trigger.
+// requireMutationAllowed checks for: without it, any website open in
+// the LAN user's browser could fire a blind cross-origin form POST
+// straight at the daemon and have it just work; requiring a custom
+// header forces the browser to CORS-preflight the request first, which
+// a plain form POST can never trigger. gate.go has since generalized
+// that preflight-forcing property to EVERY mutating route (and added
+// the optional session gate on top); this per-resource VALUE check
+// remains as the destructive routes' own extra "the caller really
+// means this specific resource" layer.
 const (
 	gantryConfirmHeader = "X-Gantry-Confirm"
 	gantryConfirmValue  = "images"
@@ -142,9 +146,9 @@ const (
 
 // mutationMaxRequestBytes caps every mutating /api/images and
 // /api/containers/maintenance route's request body (via
-// http.MaxBytesReader) -- Gantry has no auth (see gantryConfirmHeader's
-// own doc), so nothing else stops a request from forcing an unbounded
-// read into memory before validation even runs. mutationMaxIDs caps
+// http.MaxBytesReader) -- auth is optional and off by default (see
+// gate.go), so nothing else reliably stops a request from forcing an
+// unbounded read into memory before validation even runs. mutationMaxIDs caps
 // POST /api/images/remove's and POST /api/containers/maintenance/
 // remove's ids array for the same reason, one layer further in: a body
 // under the byte cap could still carry an unreasonable number of short

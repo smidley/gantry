@@ -19,6 +19,7 @@
   import Maintenance from './views/Maintenance.svelte';
   import GPU from './views/GPU.svelte';
   import Events from './views/Events.svelte';
+  import Insights from './views/Insights.svelte';
   import Alerts from './views/Alerts.svelte';
   import Settings from './views/Settings.svelte';
 
@@ -70,6 +71,8 @@
     <GPU />
   {:else if $route.name === 'events'}
     <Events />
+  {:else if $route.name === 'insights'}
+    <Insights mode={$route.params.mode} />
   {:else if $route.name === 'alerts'}
     <Alerts />
   {:else if $route.name === 'settings'}

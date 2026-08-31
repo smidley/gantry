@@ -149,6 +149,46 @@ func TestUpsertInsightWithIDUpdatesExistingRowInPlace(t *testing.T) {
 	require.Equal(t, "qbittorrent is starving jellyfin on disk3", got[0].Statement)
 }
 
+// TestInsightByIDFindsActiveAndResolvedRows pins the evidence drawer's
+// own fetch (Task 11: GET /api/insights/{id} must find a row regardless
+// of which of ActiveInsights/InsightHistory it currently lives in) --
+// InsightByID must return an active row unchanged, and a resolved one
+// (State/ResolvedAt/ResolveReason all reflecting the resolve) just as
+// readily, since a resolved instance's evidence is exactly as inspectable
+// as an active one's.
+func TestInsightByIDFindsActiveAndResolvedRows(t *testing.T) {
+	s := newTestStore(t, nil)
+	activeID, err := s.UpsertInsight(fullInsight("disk-io-contention", "jellyfin", "qbittorrent", "disk3"))
+	require.NoError(t, err)
+	resolvedID, err := s.UpsertInsight(fullInsight("memory-squeeze", "", "plex", "memory"))
+	require.NoError(t, err)
+	require.NoError(t, s.ResolveInsight(resolvedID, 1756402000, "cleared"))
+
+	got, ok, err := s.InsightByID(context.Background(), activeID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, activeID, got.ID)
+	require.Equal(t, "active", got.State)
+
+	got, ok, err = s.InsightByID(context.Background(), resolvedID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "resolved", got.State)
+	require.Equal(t, int64(1756402000), got.ResolvedAt)
+	require.Equal(t, "cleared", got.ResolveReason)
+}
+
+// TestInsightByIDReturnsFalseNotErrorForUnknownID mirrors sql.ErrNoRows'
+// own "not found is not an error" convention every other single-row
+// lookup in this package follows -- an id already pruned by Maintain,
+// or never real, is a normal negative answer, not a 500 upstream.
+func TestInsightByIDReturnsFalseNotErrorForUnknownID(t *testing.T) {
+	s := newTestStore(t, nil)
+	_, ok, err := s.InsightByID(context.Background(), 999)
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
 // TestActiveInsightsExcludesResolved pins the resolved_at = 0 filter: a
 // resolved instance never appears in ActiveInsights, regardless of how
 // many other active ones exist -- the exact

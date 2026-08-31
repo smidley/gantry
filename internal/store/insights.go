@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -110,6 +112,25 @@ func (s *Store) ResolveInsight(id, at int64, reason string) error {
 		return fmt.Errorf("insight instance %d: not found", id)
 	}
 	return nil
+}
+
+// InsightByID returns one instance by id, active or resolved -- the
+// evidence drawer's own fetch (Task 11: "clicking a card fetches
+// /api/insights/{id}"), which must find a row regardless of which of
+// ActiveInsights/InsightHistory it currently lives in. ok is false for
+// an id that doesn't exist (already pruned by Maintain, or never real),
+// matching sql.ErrNoRows' own "not found is not an error" convention
+// store.Store's other single-row lookups already follow.
+func (s *Store) InsightByID(ctx context.Context, id int64) (InsightInstance, bool, error) {
+	row := s.readDB.QueryRowContext(ctx, `SELECT `+insightInstanceColumns+` FROM insight_instances WHERE id = ?`, id)
+	var i InsightInstance
+	if err := scanInsightInstance(row, &i); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return InsightInstance{}, false, nil
+		}
+		return InsightInstance{}, false, err
+	}
+	return i, true, nil
 }
 
 // InsightHistory returns resolved instances (resolved_at > 0; an active

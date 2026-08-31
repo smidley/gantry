@@ -194,19 +194,15 @@ const ICON_SETTINGS = strokeIcon(
 // reached by clicking a container row rather than through nav, so it's
 // never in this table at all.
 //
-// TabBar.svelte/Sidebar.svelte are NOT updated for this tenth entry as
-// part of this change (both currently sit as uncommitted, foreign-owned
-// work in this tree -- see this branch's own notes) -- both already
-// render generically off this exported array (TabBar's moreRoutes
-// filter is a subtractive `!primaryNames.has(...)`, so a name absent
-// from every explicit list lands in its own "More" overflow rather than
-// vanishing), so Insights surfaces on mobile without any edit here.
-// Sidebar's own three groups (monitorRoutes/operateRoutes/systemRoutes)
-// are each an EXPLICIT allow-list, though, and none currently names
-// 'insights' -- until that file's own foreign edits land and add it
-// (naturally alongside 'events'/'alerts' in its "Operate" group), the
-// desktop sidebar has no visible link to this route; #/insights (and
-// TabBar's More menu) both still reach it directly.
+// TabBar.svelte/Sidebar.svelte both render off this exported array.
+// TabBar needs no per-entry edit ever: its moreRoutes filter is a
+// subtractive `!primaryNames.has(...)`, so a name absent from every
+// explicit list lands in its own "More" overflow rather than
+// vanishing. Sidebar's three groups (monitorRoutes/operateRoutes/
+// systemRoutes) are each an EXPLICIT allow-list; its Monitor group
+// names 'insights' -- a finding is something you watch and read, not a
+// lever you pull, so it sits with Overview/Metrics/Storage rather than
+// with Maintenance/Alerts in Operate.
 export const routes: NavItem[] = [
   { name: 'overview', hash: '#/', label: 'Overview', icon: ICON_OVERVIEW },
   {

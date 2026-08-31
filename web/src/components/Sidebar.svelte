@@ -6,7 +6,9 @@
 <script>
   import { route, routes } from '../lib/router';
 
-  const monitorRoutes = routes.filter((item) => ['overview', 'containers', 'top', 'storage', 'gpu'].includes(item.name));
+  const monitorRoutes = routes.filter((item) =>
+    ['overview', 'containers', 'top', 'storage', 'gpu', 'insights'].includes(item.name),
+  );
   const operateRoutes = routes.filter((item) => ['maintenance', 'events', 'alerts'].includes(item.name));
   const systemRoutes = routes.filter((item) => item.name === 'settings');
 </script>

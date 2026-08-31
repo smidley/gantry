@@ -23,6 +23,7 @@
     storage: ['Monitor', 'Storage'],
     maintenance: ['Operate', 'Maintenance'],
     gpu: ['Monitor', 'GPU'],
+    insights: ['Monitor', 'Insights'],
     events: ['Operate', 'Events'],
     alerts: ['Operate', 'Alerts'],
     settings: ['System', 'Settings'],

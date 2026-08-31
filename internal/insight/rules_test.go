@@ -108,6 +108,31 @@ func TestEvalDiskIOContentionFiresWithBothSides(t *testing.T) {
 	require.ElementsMatch(t, []string{"jellyfin", "sonarr"}, f.Evidence.OtherUsers)
 }
 
+// TestEvalDiskIOContentionRequiresGenuineHistoryForBaselineNotSelfReferential
+// pins I6 (review): with no await_ms samples OLDER than the evidence
+// window itself (a cold-started device, or a ring that hasn't
+// accumulated BaselineLookbackSecs yet), Baseline's own opening-samples
+// fallback would use `recent` -- the SAME window Sustained is about to
+// test -- as its own baseline. That's safe only by arithmetic accident
+// with the default await_multiplier (2): here the window's first 30s
+// sits at 10ms (pulling the window's own median down to 10) while the
+// trailing 90s spikes to 45ms -- comfortably "sustained above 2x" a
+// baseline computed from the very data being tested. A genuine cold
+// start must report no verdict, not a baseline computed from the thing
+// it's testing.
+func TestEvalDiskIOContentionRequiresGenuineHistoryForBaselineNotSelfReferential(t *testing.T) {
+	in := diskIOContentionIn(testNow, true, true)
+	low := seriesRange(testNow-120, testNow-91, 1, 10)
+	high := seriesRange(testNow-90, testNow, 30, 45)
+	await := append(append([]store.Sample{}, low...), high...)
+	in.HostDiskIO.Samples[""]["diskio.sde.await_ms"] = await
+	in.HostDiskIO.Oldest[""]["diskio.sde.await_ms"] = await[0].TS
+
+	findings := evalDiskIOContention(in, librarySpecs[0].defaults)
+
+	require.Empty(t, findings, "no history older than the evidence window itself must yield no verdict, not a self-referential baseline")
+}
+
 func TestEvalDiskIOContentionDoesNotFireWithoutVictimEvidence(t *testing.T) {
 	findings := evalDiskIOContention(diskIOContentionIn(testNow, false, true), librarySpecs[0].defaults)
 	require.Empty(t, findings)

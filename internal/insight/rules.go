@@ -489,6 +489,18 @@ func evalDiskIOContention(in In, th map[string]float64) []Finding {
 		awaitMetric := "diskio." + hd.RawName + ".await_ms"
 		awaitSamples := metrics[awaitMetric]
 		older, recent := splitWindow(awaitSamples, in.Now-EvidenceWindowSecs)
+		if len(older) == 0 {
+			// I6 (review): with no history older than the evidence
+			// window itself, Baseline's own opening-samples fallback
+			// would use `recent` -- the SAME window Sustained is about
+			// to test -- as its own baseline, comparing the window
+			// against its own median. Safe only by arithmetic accident
+			// with the default await_multiplier (2); an override below
+			// 1.0 (or an unlucky distribution) would make an ordinary
+			// window compare as "elevated" against itself. A cold start
+			// must report no verdict, not a self-referential one.
+			continue
+		}
 		baseline, haveBaseline := Baseline(valuesOf(older), valuesOf(recent))
 		if !haveBaseline {
 			continue

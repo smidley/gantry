@@ -26,6 +26,13 @@ type SnapshotDTO struct {
 	GPUMeta       map[string]GPUMetaDTO         `json:"gpu_meta"` // pdev (or "gpu0"/"nvidia0") -> vendor+driver meta (strings can't ride GPU's float64 map)
 	Sources       map[string]string             `json:"sources"`  // collector name -> "ok" | unavailability detail
 	Alerts        AlertsBlockDTO                `json:"alerts"`   // Phase 4: firing alerts + channel health, so the UI is live without polling /api/alerts
+	// Insights (Phase 5): active cross-container impact findings + the
+	// live pressure tier, so the Insights view, the interaction map, and
+	// ContainerDetail's impact panel are all live without polling
+	// /api/insights. Evidence bundles are deliberately excluded here --
+	// see InsightsBlockDTO's own doc -- fetched on demand when a drawer
+	// opens.
+	Insights InsightsBlockDTO `json:"insights"`
 }
 
 // GPUMetaDTO is one GPU entity's vendor + driver -- the frontend's card

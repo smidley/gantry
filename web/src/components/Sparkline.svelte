@@ -117,13 +117,27 @@
       {
         stroke: resolved,
         width: 2,
-        fill: withAlpha(resolved, 12),
+        cap: 'round', // D2 pass: "rounded joins/caps" (joins already default to round in this uPlot version)
+        // A vertical fade (color -> transparent), not the old flat 12%
+        // wash -- D2 pass: "single-series charts... get a vertical fade
+        // fill (series color -> transparent, ~18%->0)". A plain function
+        // (not a static color) so it reads the CURRENT plot bbox on
+        // every draw, same as TimeChart's own seriesFill.
+        fill: (u) => {
+          const top = u.bbox.top;
+          const bottom = Math.max(top + 1, u.bbox.top + u.bbox.height);
+          const grad = u.ctx.createLinearGradient(0, top, 0, bottom);
+          grad.addColorStop(0, withAlpha(resolved, 18));
+          grad.addColorStop(1, withAlpha(resolved, 0));
+          return grad;
+        },
         points: { show: false },
       },
     ];
     if (points2) {
       const resolved2 = resolveToken(color2);
-      series.push({ stroke: resolved2, width: 2, points: { show: false } }); // no fill -- two overlapping fills read as noise, not signal
+      // no fill -- two overlapping fills read as noise, not signal
+      series.push({ stroke: resolved2, width: 2, cap: 'round', points: { show: false } });
     }
     chart = new uPlot(
       {

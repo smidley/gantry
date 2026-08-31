@@ -144,6 +144,85 @@ func allSilenceIDs(s *Store) ([]int64, error) {
 	return ids, rows.Err()
 }
 
+// TestMaintainPrunesInsightTablesButLeavesActiveInstancesAlone mirrors
+// TestMaintainPrunesAlertTablesButLeavesActiveInstancesAlone for the
+// insight tables: resolved instances past ret.R2 (the same knob
+// pruneAlerts already uses for alert_instances) and dismissals past
+// their own until are pruned, while an active instance (resolved_at = 0)
+// survives regardless of how old its started_at is, since the age
+// filter only ever looks at resolved_at.
+func TestMaintainPrunesInsightTablesButLeavesActiveInstancesAlone(t *testing.T) {
+	s := newTestStore(t, nil)
+	ret := DefaultRetention()
+	now := at("12:00:00")
+	nowUnix := now.Unix()
+
+	oldResolvedID, err := s.UpsertInsight(fullInsight("disk-io-contention", "jellyfin", "qbittorrent", "disk3"))
+	require.NoError(t, err)
+	require.NoError(t, s.ResolveInsight(oldResolvedID, nowUnix-int64(ret.R2.Seconds())-100, "cleared"))
+
+	recentResolvedID, err := s.UpsertInsight(fullInsight("io-driven-cpu-load", "", "sabnzbd", "cpu"))
+	require.NoError(t, err)
+	require.NoError(t, s.ResolveInsight(recentResolvedID, nowUnix-100, "cleared"))
+
+	// Active, with a StartedAt far older than R2 -- proving the prune
+	// filter keys on resolved_at (0 here), never on started_at's age.
+	active := fullInsight("memory-squeeze", "", "plex", "memory")
+	active.StartedAt = 1
+	activeID, err := s.UpsertInsight(active)
+	require.NoError(t, err)
+
+	expiredDismissalID, err := s.AddInsightDismissal(InsightDismissal{RuleID: "disk-io-contention", Until: nowUnix - 100, CreatedAt: 0})
+	require.NoError(t, err)
+	activeDismissalID, err := s.AddInsightDismissal(InsightDismissal{RuleID: "cpu-starvation", Until: nowUnix + 100, CreatedAt: 0})
+	require.NoError(t, err)
+
+	require.NoError(t, s.Maintain(context.Background(), now, ret))
+
+	remainingInstances, err := allInsightInstanceIDs(s)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{recentResolvedID, activeID}, remainingInstances, "old resolved instance pruned; recent resolved and active survive")
+
+	remainingDismissals, err := allInsightDismissalIDs(s)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{activeDismissalID}, remainingDismissals, "expired dismissal pruned; unexpired one survives")
+	require.NotContains(t, remainingDismissals, expiredDismissalID)
+}
+
+func allInsightInstanceIDs(s *Store) ([]int64, error) {
+	rows, err := s.DB().Query(`SELECT id FROM insight_instances`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func allInsightDismissalIDs(s *Store) ([]int64, error) {
+	rows, err := s.DB().Query(`SELECT id FROM insight_dismissals`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func TestRetentionFromConfig(t *testing.T) {
 	vals := map[string]int{"retention.r1_hours": 24, "retention.r3_days": 60, "retention.size_cap_mb": 128}
 	get := func(key string, def int) int {

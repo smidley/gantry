@@ -88,39 +88,39 @@
   {/if}
   {#if text.detail}<span class="callout-row__detail">&mdash; {text.detail}</span>{/if}
   {#if ackable}
-  <span class="callout-row__ack">
-    {#if open}
-      {#each DURATIONS as d (d.hours)}
+    <span class="callout-row__ack">
+      {#if open}
+        {#each DURATIONS as d (d.hours)}
+          <button
+            type="button"
+            class="callout-row__ack-btn"
+            disabled={pending}
+            aria-label={`Acknowledge for ${d.label}: ${text.title}`}
+            onclick={() => ackFor(d.hours)}
+          >
+            {d.label}
+          </button>
+        {/each}
+        <button
+          type="button"
+          class="callout-row__ack-btn callout-row__ack-cancel"
+          disabled={pending}
+          aria-label={`Cancel acknowledging: ${text.title}`}
+          onclick={() => (open = false)}
+        >
+          &times;
+        </button>
+      {:else}
         <button
           type="button"
           class="callout-row__ack-btn"
-          disabled={pending}
-          aria-label={`Acknowledge for ${d.label}: ${text.title}`}
-          onclick={() => ackFor(d.hours)}
+          aria-label={`Acknowledge: ${text.title}`}
+          onclick={() => (open = true)}
         >
-          {d.label}
+          Ack
         </button>
-      {/each}
-      <button
-        type="button"
-        class="callout-row__ack-btn callout-row__ack-cancel"
-        disabled={pending}
-        aria-label={`Cancel acknowledging: ${text.title}`}
-        onclick={() => (open = false)}
-      >
-        &times;
-      </button>
-    {:else}
-      <button
-        type="button"
-        class="callout-row__ack-btn"
-        aria-label={`Acknowledge: ${text.title}`}
-        onclick={() => (open = true)}
-      >
-        Ack
-      </button>
-    {/if}
-  </span>
+      {/if}
+    </span>
   {/if}
   {#if error}<span class="callout-row__error" role="alert">{error}</span>{/if}
 </p>

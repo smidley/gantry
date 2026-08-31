@@ -226,6 +226,52 @@ func (s *Store) SeedInsightRuleConfigs(defaults []InsightRuleConfig) error {
 	return tx.Commit()
 }
 
+// InsightDismissal is one row of insight_dismissals -- "this wasn't
+// useful" feedback without ML (Open question 3): a suppressed identity
+// tuple with an expiry, no ranking or learning behind it.
+type InsightDismissal struct {
+	ID        int64
+	RuleID    string
+	Victim    string
+	Culprit   string
+	Resource  string
+	Until     int64
+	CreatedAt int64
+}
+
+// InsightDismissals returns every dismissal whose Until is still in the
+// future relative to now -- the exact Silences contract: an
+// already-expired row is excluded from the read even before Maintain
+// prunes it.
+func (s *Store) InsightDismissals(ctx context.Context, now int64) ([]InsightDismissal, error) {
+	rows, err := s.readDB.QueryContext(ctx,
+		`SELECT id, rule_id, victim, culprit, resource, until, created_at FROM insight_dismissals WHERE until > ? ORDER BY until`, now)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []InsightDismissal
+	for rows.Next() {
+		var d InsightDismissal
+		if err := rows.Scan(&d.ID, &d.RuleID, &d.Victim, &d.Culprit, &d.Resource, &d.Until, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// AddInsightDismissal inserts a new dismissal and returns its generated id.
+func (s *Store) AddInsightDismissal(d InsightDismissal) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO insight_dismissals (rule_id, victim, culprit, resource, until, created_at) VALUES (?,?,?,?,?,?)`,
+		d.RuleID, d.Victim, d.Culprit, d.Resource, d.Until, d.CreatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
 // StaleActiveInsights marks every still-active row (resolved_at = 0,
 // the same predicate idx_insight_active enforces) resolved with reason
 // 'restart' at time at. The live ring is empty after a restart, so no

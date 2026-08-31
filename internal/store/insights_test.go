@@ -440,3 +440,39 @@ func TestSeedInsightRuleConfigsInsertsANewlyAddedDefaultOnNextBoot(t *testing.T)
 	require.True(t, newRow.Enabled)
 	require.False(t, insightConfigsByID(got)["disk-io-contention"].Enabled, "an already-seeded edited rule must survive the same boot untouched")
 }
+
+// TestAddInsightDismissalRoundTripsEveryField pins AddInsightDismissal/
+// InsightDismissals end to end -- the exact TestAddSilenceRoundTripsEveryField
+// contract.
+func TestAddInsightDismissalRoundTripsEveryField(t *testing.T) {
+	s := newTestStore(t, nil)
+	want := InsightDismissal{RuleID: "disk-io-contention", Victim: "jellyfin", Culprit: "qbittorrent",
+		Resource: "disk3", Until: 2000, CreatedAt: 1000}
+	id, err := s.AddInsightDismissal(want)
+	require.NoError(t, err)
+	require.Greater(t, id, int64(0))
+	want.ID = id
+
+	got, err := s.InsightDismissals(context.Background(), 1500) // now < until: not expired
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, want, got[0])
+}
+
+// TestInsightDismissalsExcludesExpired pins the read-side half of expiry
+// (Maintain prunes expired rows separately -- this proves a call in
+// between the two still never sees one) -- the exact
+// TestSilencesExcludesExpired contract.
+func TestInsightDismissalsExcludesExpired(t *testing.T) {
+	s := newTestStore(t, nil)
+	expiredID, err := s.AddInsightDismissal(InsightDismissal{RuleID: "disk-io-contention", Until: 1000, CreatedAt: 0})
+	require.NoError(t, err)
+	activeID, err := s.AddInsightDismissal(InsightDismissal{RuleID: "cpu-starvation", Until: 3000, CreatedAt: 0})
+	require.NoError(t, err)
+
+	got, err := s.InsightDismissals(context.Background(), 2000)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, activeID, got[0].ID)
+	require.NotEqual(t, expiredID, got[0].ID)
+}

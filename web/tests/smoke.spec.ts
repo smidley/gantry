@@ -35,7 +35,7 @@ test('overview: status headline reflects fleet/array/disk state, the fleet strip
   // either the all-clear or a counted "N things need you" -- the fake
   // fleet boots 100% running/healthy (fake.go's Metas()) and its one
   // disk.errors trigger is 5 real minutes into server uptime, well
-  // outside this test's own window, so "Everything is running" is the
+  // outside this test's own window, so "Nothing needs you" is the
   // expected reading fresh off a CI-built server; a long-lived reused
   // local dev server (reuseExistingServer, non-CI only) could
   // legitimately have crossed that mark, so both readings are accepted
@@ -43,7 +43,7 @@ test('overview: status headline reflects fleet/array/disk state, the fleet strip
   const headline = page.locator('.overview__headline-text');
   await expect(headline).toBeVisible();
   const headlineText = await headline.textContent();
-  const isAllClear = headlineText === 'Everything is running';
+  const isAllClear = headlineText === 'Nothing needs you';
   expect(isAllClear || /^\d+ things? need(s)? you$/.test(headlineText ?? '')).toBe(true);
   await expect(page.locator('.overview__attention')).toHaveCount(isAllClear ? 0 : 1);
 

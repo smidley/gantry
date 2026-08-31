@@ -185,6 +185,16 @@ type Options struct {
 	// don't wire one: every GET route reports its own meaningful empty;
 	// every write route 404s, matching Alerts' own convention.
 	Insights InsightsIface
+
+	// Acks backs GET/POST /api/acks and DELETE /api/acks/{id} -- the
+	// Overview attention module's "stop showing me this for a while"
+	// control over frame-derived anomalies (main wiring: a small adapter
+	// over *store.Store -- see api_acks.go's AcksIface). Nil in tests
+	// that don't wire one: GET reports an empty list; POST/DELETE 404,
+	// matching Alerts' own convention. Deliberately NOT ReadOnly-gated:
+	// an ack, like a silence, only reduces what's shown (see
+	// handleAcksPost's own doc for the silences precedent).
+	Acks AcksIface
 }
 
 type Server struct {
@@ -257,6 +267,10 @@ func New(o Options) *Server {
 	s.mux.Handle("DELETE /api/alerts/silences/{id}", withGzip(http.HandlerFunc(s.handleAlertsSilencesDelete)))
 	s.mux.Handle("GET /api/alerts/webhooks", withGzip(http.HandlerFunc(s.handleAlertsWebhooksGet)))
 	s.mux.Handle("PUT /api/alerts/webhooks", withGzip(http.HandlerFunc(s.handleAlertsWebhooksPut)))
+
+	s.mux.Handle("GET /api/acks", withGzip(http.HandlerFunc(s.handleAcksGet)))
+	s.mux.Handle("POST /api/acks", withGzip(http.HandlerFunc(s.handleAcksPost)))
+	s.mux.Handle("DELETE /api/acks/{id}", withGzip(http.HandlerFunc(s.handleAcksDelete)))
 
 	// Insights (Phase 5, Task 9): registered in id-then-verb order the
 	// way alerts' own block above reads -- /api/insights/{id} sits

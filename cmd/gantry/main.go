@@ -420,6 +420,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Alerts:   alertsAdapter{st: st, dispatcher: dispatcher},
 		Webhooks: webhooksAdapter{st: st, envLocked: webhookURLEnv != ""},
 		Insights: insightsAdapter{st: st, engine: insightEngine, pressureTier: pr.Tier},
+		Acks:     acksAdapter{st: st},
 
 		ReadOnly:    readOnly,
 		AppendEvent: st.AppendEvent,
@@ -1596,6 +1597,30 @@ func (a alertsAdapter) AddSilence(sil store.Silence) (store.Silence, error) {
 func (a alertsAdapter) DeleteSilence(id int64) error { return a.st.DeleteSilence(id) }
 
 func (a alertsAdapter) Channels() map[string]string { return channelHealthMap(a.dispatcher) }
+
+// acksAdapter implements server.AcksIface over *store.Store -- kept in
+// main, not the server package, the same reason alertsAdapter is:
+// server stays store-shape-agnostic. Acks resolves "now" here (the
+// alertsAdapter.Silences convention) so the server package never
+// decides what expired means.
+type acksAdapter struct {
+	st *store.Store
+}
+
+func (a acksAdapter) Acks(ctx context.Context) ([]store.OverviewAck, error) {
+	return a.st.Acks(ctx, time.Now().Unix())
+}
+
+func (a acksAdapter) AddAck(ack store.OverviewAck) (store.OverviewAck, error) {
+	id, err := a.st.AddAck(ack)
+	if err != nil {
+		return store.OverviewAck{}, err
+	}
+	ack.ID = id
+	return ack, nil
+}
+
+func (a acksAdapter) DeleteAck(id int64) error { return a.st.DeleteAck(id) }
 
 // insightsAdapter implements server.InsightsIface (Phase 5 Task 9) over
 // *store.Store plus the running *insight.Engine's own Dropped() and the

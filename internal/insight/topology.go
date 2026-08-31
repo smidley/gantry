@@ -92,6 +92,7 @@ type Topology struct {
 	deviceName func(majMin string) (string, bool)
 	nameToSlot map[string]string // kernel device name (raw OR canonical mdN) -> Unraid slot
 	slotRot    map[string]bool   // Unraid slot -> rotational
+	slotName   map[string]string // Unraid slot -> its raw kernel device name (ResolveSlot's own reverse lookup)
 }
 
 // NewTopology builds one tick's Topology snapshot. deviceName resolves a
@@ -111,16 +112,18 @@ func NewTopology(deviceName func(majMin string) (string, bool), slots map[string
 	}
 	nameToSlot := make(map[string]string, len(slots)*2)
 	slotRot := make(map[string]bool, len(slots))
+	slotName := make(map[string]string, len(slots))
 	for slot, meta := range slots {
 		slotRot[slot] = meta.Rotational
 		if meta.Device != "" {
 			nameToSlot[meta.Device] = slot
+			slotName[slot] = meta.Device
 		}
 		if md, ok := mdName(slot); ok {
 			nameToSlot[md] = slot
 		}
 	}
-	return &Topology{deviceName: deviceName, nameToSlot: nameToSlot, slotRot: slotRot}
+	return &Topology{deviceName: deviceName, nameToSlot: nameToSlot, slotRot: slotRot, slotName: slotName}
 }
 
 // Resolve maps a cgroup-reported "major:minor" to the Device it names.
@@ -172,6 +175,27 @@ func (t *Topology) ResolveName(name string) (Device, bool) {
 		Rotational:      t.slotRot[slot],
 		RotationalKnown: known,
 	}, true
+}
+
+// ResolveSlot maps an Unraid array/pool slot name directly to the Device
+// it names, for callers that have a SLOT (as disk/<slot>/spun_up and
+// disk/<slot>/rotational series are keyed -- the disk-spinup-churn rule's
+// own entry point) rather than a device name or a major:minor. This is a
+// Task 6 addition to the topology resolver, alongside Resolve/ResolveName:
+// the same slot->device join NewTopology already builds internally
+// (SlotMeta.Device) had no external accessor of its own until a rule
+// needed one.
+//
+// ok is false when slot is not a currently-present, known slot -- there
+// is no RoleUnknown degrade here (contrast ResolveName): an arbitrary
+// slot string with no backing SlotMeta names no real device at all, so
+// there is nothing to construct even a degraded Device around.
+func (t *Topology) ResolveSlot(slot string) (Device, bool) {
+	name, ok := t.slotName[slot]
+	if !ok {
+		return Device{}, false
+	}
+	return t.ResolveName(name)
 }
 
 // Contended reports whether d may be named as a contended resource in

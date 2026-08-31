@@ -20,7 +20,7 @@ describe('deriveOverviewStatus', () => {
   it('is ok, with the plain headline, when every signal is quiet', () => {
     const status = deriveOverviewStatus(BASE);
     expect(status.ok).toBe(true);
-    expect(status.headline).toBe('Everything is running');
+    expect(status.headline).toBe('Nothing needs you');
     expect(status.anomalies).toEqual([]);
     expect(status.flaggedDiskSlots).toEqual([]);
   });
@@ -55,7 +55,7 @@ describe('deriveOverviewStatus', () => {
     // noticing the union/interface change.
     const status = deriveOverviewStatus(BASE);
     expect(status.ok).toBe(true);
-    expect(status.headline).toBe('Everything is running');
+    expect(status.headline).toBe('Nothing needs you');
   });
 
   it('a disk at exactly the 90% threshold is not flagged', () => {
@@ -330,7 +330,7 @@ describe('deriveOverviewStatus acknowledgements', () => {
       now: NOW,
     });
     expect(status.ok).toBe(true);
-    expect(status.headline).toBe('Everything is running');
+    expect(status.headline).toBe('Nothing needs you');
   });
 
   it('an ack filters only its exact (kind, entity) pair -- neither field matches loosely', () => {

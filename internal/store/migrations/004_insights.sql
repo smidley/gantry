@@ -16,7 +16,7 @@ CREATE TABLE insight_instances (
     started_at     INTEGER NOT NULL,
     fired_at       INTEGER NOT NULL DEFAULT 0,
     resolved_at    INTEGER NOT NULL DEFAULT 0,
-    resolve_reason TEXT NOT NULL DEFAULT '',  -- cleared|no-data|restart|rule-disabled|dismissed
+    resolve_reason TEXT NOT NULL DEFAULT '',  -- cleared|restart|rule-disabled|dismissed
     notified_at    INTEGER NOT NULL DEFAULT 0
 );
 -- One ACTIVE finding per identity tuple, enforced by the DB (the Phase 4

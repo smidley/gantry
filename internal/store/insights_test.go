@@ -176,14 +176,14 @@ func TestResolveInsightSetsResolvedAtAndReason(t *testing.T) {
 	s := newTestStore(t, nil)
 	id, err := s.UpsertInsight(fullInsight("disk-spinup-churn", "disk5", "plex", "disk5"))
 	require.NoError(t, err)
-	require.NoError(t, s.ResolveInsight(id, 1756402000, "no-data"))
+	require.NoError(t, s.ResolveInsight(id, 1756402000, "cleared"))
 
 	got, err := s.InsightHistory(context.Background(), 0, 0, 100)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, "resolved", got[0].State)
 	require.Equal(t, int64(1756402000), got[0].ResolvedAt)
-	require.Equal(t, "no-data", got[0].ResolveReason)
+	require.Equal(t, "cleared", got[0].ResolveReason)
 }
 
 // TestResolveInsightErrorsWhenIDDoesNotExist pins the RowsAffected guard:

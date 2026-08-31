@@ -70,6 +70,21 @@
   col-left/col-right are gone entirely; the status band and modules band
   are now two independent full-width rows, each free to pick its own
   column split.
+
+  Adaptive all-clear pass (Scott: "When there is nothing that needs
+  attention... the other sections should be expanded to use the
+  available space and then we won't need to scroll down so far to see
+  other things"): with zero callouts the status band's left column has
+  nothing left to say -- the array facts live in BaySchematic's own
+  head now (facts-relocation pass) and the attention section doesn't
+  exist -- so the whole two-column band is conditional on
+  !overviewStatus.ok. All-clear instead renders the headline card as a
+  compact strip (overview__headline-zone--clear) and promotes the fleet
+  strip + bay schematic into overview__clear-band, a full-width row of
+  their own (side by side at >=64rem, stacked below), pulling the
+  modules band and GPU strip up the page by roughly the dead column's
+  height. With callouts present the attention layout above stays
+  exactly as it was.
 -->
 <script>
   import { onMount, untrack } from 'svelte';
@@ -315,13 +330,20 @@
     prevParitySample = { ts, pct: parityPct };
   });
 
+  // Both array fact lines render inside BaySchematic's own head now
+  // (Scott: "Move the warmest disk reading into the storage array
+  // section along with the array started mover idle status") -- card
+  // sublines, not prose, so no trailing periods. The derivations stay
+  // here because they read what the schematic deliberately doesn't:
+  // the parity tween below, and the FULL disks map (hottestDisk scans
+  // parity members too, which have no filesystem and so no bar).
   let arrayStateSentence = $derived.by(() => {
-    if (started === 0) return 'Array is stopped.';
-    if (started === undefined) return 'Array state unknown.';
+    if (started === 0) return 'Array is stopped';
+    if (started === undefined) return 'Array state unknown';
     if (parityRunning) {
-      return `Parity check running · ${fmtPct(parityPctTween.current)}${parityEta !== null ? `, ETA ${fmtDuration(parityEta)}` : ''}.`;
+      return `Parity check running · ${fmtPct(parityPctTween.current)}${parityEta !== null ? `, ETA ${fmtDuration(parityEta)}` : ''}`;
     }
-    return `Array started · mover ${moverRunning ? 'running' : 'idle'}.`;
+    return `Array started · mover ${moverRunning ? 'running' : 'idle'}`;
   });
 
   let disks = $derived(live.frame?.disks ?? {});
@@ -336,7 +358,7 @@
     return best;
   });
   let hottestSentence = $derived(
-    hottestDisk ? `${hottestDisk.slot} warmest · ${hottestDisk.temp.toFixed(1)}°C.` : null,
+    hottestDisk ? `${hottestDisk.slot} warmest at ${hottestDisk.temp.toFixed(1)}°C` : null,
   );
 
   // diskEntries: every disk/pool entity with a filesystem view, same
@@ -467,11 +489,34 @@
   });
 </script>
 
+<!-- statusVisuals: the fleet strip + bay schematic pair, rendered in
+  exactly one of two homes -- the attention band's right column, or the
+  all-clear's own full-width band (see the adaptive all-clear pass in
+  the top-of-file doc). Each sits in its own __visual-slot so the two
+  layouts only differ in how the slots flow, and the schematic's slot
+  disappears with it (BaySchematic renders nothing for zero entries)
+  rather than holding an empty half open. -->
+{#snippet statusVisuals()}
+  <div class="overview__visual-slot">
+    <FleetStrip containers={fleetContainers} />
+  </div>
+  {#if baySchematicEntries.length > 0}
+    <div class="overview__visual-slot">
+      <BaySchematic
+        entries={baySchematicEntries}
+        summary={closingLine}
+        stateLine={arrayStateSentence}
+        warmestLine={hottestSentence}
+      />
+    </div>
+  {/if}
+{/snippet}
+
 <div class="overview">
   <h1 class="page-title">Overview</h1>
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
-  <div class="card overview__headline-zone">
+  <div class="card overview__headline-zone" class:overview__headline-zone--clear={overviewStatus.ok}>
     <div class="overview__headline-row">
       <span
         class="overview__headline-dot"
@@ -481,28 +526,28 @@
       ></span>
       <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
     </div>
-    <div class="overview__status-band">
-      <div class="overview__status-facts">
-        <p class="overview__sub-line overview__sub-line--quiet">{arrayStateSentence}</p>
-        {#if hottestSentence}
-          <p class="overview__sub-line overview__sub-line--quiet">{hottestSentence}</p>
-        {/if}
-
-        {#if !overviewStatus.ok}
+    {#if !overviewStatus.ok}
+      <div class="overview__status-band">
+        <div class="overview__status-facts">
           <section class="overview__attention">
             <span class="microlabel">Needs a look</span>
             {#each overviewStatus.anomalies as anomaly, i (i)}
               <CalloutRow {anomaly} />
             {/each}
           </section>
-        {/if}
+        </div>
+        <div class="overview__status-visuals">
+          {@render statusVisuals()}
+        </div>
       </div>
-      <div class="overview__status-visuals">
-        <FleetStrip containers={fleetContainers} />
-        <BaySchematic entries={baySchematicEntries} summary={closingLine} />
-      </div>
-    </div>
+    {/if}
   </div>
+
+  {#if overviewStatus.ok}
+    <div class="overview__clear-band">
+      {@render statusVisuals()}
+    </div>
+  {/if}
 
   <div class="overview__modules-band">
     <div class="overview__modules-wide">
@@ -664,6 +709,41 @@
       radial-gradient(circle at 92% 5%, color-mix(in oklab, var(--accent) 11%, transparent), transparent 18rem),
       var(--surface-raised);
   }
+  /* All-clear: the card holds only the headline row (the adaptive
+     all-clear pass, top-of-file doc), so it slims to a strip -- the
+     vertical padding drops while the horizontal stays aligned with the
+     attention state's own. */
+  .overview__headline-zone--clear {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+  }
+
+  /* --- All-clear band: the fleet strip + bay schematic at full page
+     width, side by side once there's room for two real modules
+     (>=64rem -- at the app's usual 48rem split the sidebar is already
+     eating ~15rem, which would squeeze each module under ~24rem),
+     stacked below that. The slots flex equally; each component already
+     fills its slot (width: 100%). ---- */
+  .overview__clear-band {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+  .overview__visual-slot {
+    min-width: 0;
+  }
+  .overview__clear-band .overview__visual-slot {
+    flex: 1 1 0;
+  }
+  @media (max-width: 63.9375rem) {
+    .overview__clear-band {
+      flex-direction: column;
+    }
+    .overview__clear-band .overview__visual-slot {
+      flex: none;
+      width: 100%;
+    }
+  }
 
   .overview__headline-row {
     display: flex;
@@ -719,18 +799,14 @@
     }
   }
 
-  /* --- Status band: facts+attention (left) + fleet strip/schematic
-     (right) at >=768px (unified with every other view's own mobile
-     breakpoint, dropped from the header-compaction pass's one-off
-     64rem), one vertical stack below it. overview__status-facts' own
-     gap (0.6rem, the Balance pass) now separates BOTH the three fact
-     lines from each other AND the last of them from "Needs a look"
-     (moved in from a separate full-width block below the band -- see
-     that pass's own doc) -- looser than the header-compaction pass's
-     original 0.35rem (tuned for fact lines alone), tight enough that
-     the three lines still read as one group, loose enough that
-     attention reads as its own paragraph rather than a fourth fact
-     line. ---- */
+  /* --- Status band: attention (left) + fleet strip/schematic (right)
+     at >=768px (unified with every other view's own mobile breakpoint,
+     dropped from the header-compaction pass's one-off 64rem), one
+     vertical stack below it. The array/warmest fact lines that used to
+     lead the left column live inside BaySchematic's own head now (the
+     facts-relocation pass -- see arrayStateSentence's doc), so the
+     column is just the "Needs a look" section, top-aligned with the
+     visuals beside it. ---- */
   .overview__status-band {
     display: flex;
     flex-direction: column;
@@ -758,16 +834,6 @@
     flex-direction: column;
     gap: 0.75rem;
   }
-  .overview__sub-line {
-    margin: 0;
-    font-size: 0.94rem;
-    color: var(--ink);
-  }
-  .overview__sub-line--quiet {
-    color: var(--ink-2);
-    font-size: 0.88rem;
-  }
-
   .overview__metrics-rail {
     display: flex;
     flex-direction: column;
@@ -788,7 +854,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.55rem;
-    margin-top: 0.6rem;
     padding: 0.9rem 1rem;
     border-radius: 11px;
     background: color-mix(in oklab, var(--status-warning) 8%, var(--surface-muted));

@@ -55,4 +55,27 @@ describe('BaySchematic', () => {
       '2 other array members are within normal range.',
     );
   });
+
+  // The facts-relocation pass (Scott: "Move the warmest disk reading
+  // into the storage array section along with the array started mover
+  // idle status"): both lines arrive as finished strings and render as
+  // a second summary line -- absent props render no second line at all.
+  it('renders the array-state and warmest-disk facts as a second summary line', () => {
+    const body = render(BaySchematic, {
+      props: { entries: ENTRIES, stateLine: 'Array started · mover idle', warmestLine: 'disk2 warmest at 41.5°C' },
+    }).body;
+    expect(body).toContain('Array started · mover idle');
+    expect(body).toContain('disk2 warmest at 41.5°C');
+  });
+
+  it('renders either fact alone, still as one extra summary line', () => {
+    const body = render(BaySchematic, { props: { entries: ENTRIES, stateLine: 'Array started · mover idle' } }).body;
+    expect(body).toContain('Array started · mover idle');
+    expect(body.match(/bay-schematic__summary/g)).toHaveLength(2);
+  });
+
+  it('renders no facts line when neither fact is provided', () => {
+    const body = renderBays(ENTRIES);
+    expect(body.match(/bay-schematic__summary/g)).toHaveLength(1);
+  });
 });

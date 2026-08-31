@@ -23,10 +23,30 @@
   the visible key exactly. Hover AND keyboard focus reveal a small label
   (icon+name+CPU+mem, CoreBudgetRibbon's own hover-label convention)
   since the strip otherwise carries this information in aria-label alone.
+
+  Active-now pass (Scott: "Container fleet shows glowing blocks as
+  active now, but they all look the same"): the box-shadow pulse alone
+  couldn't separate an active unit from a quiet one because both shared
+  the identical full-accent FILL. Quiet running units are now muted
+  (--fleet-running, accent mixed well down toward the group surface)
+  and an active unit gets the full accent fill PLUS a glow that never
+  drops to zero mid-pulse -- distinct even in a static screenshot, and
+  under reduced motion (static glow, no pulse). "Active" itself is
+  unchanged and deliberately not near-zero: cpu.pct > 1 is one percent
+  of the WHOLE HOST (host-share, not docker-stats per-core), the same
+  bar the Containers view's "Active now" filter and each unit's
+  aria-label already share. Status colors stay the loudest layer: a
+  warning/serious/critical unit keeps its status fill even while
+  active (the glow then pulses in that same status color), and stopped
+  stays muted ink. Animation honors motion.reduced -- the Settings
+  animation override folded together with the OS preference -- via the
+  --still class, not a bare prefers-reduced-motion media query (which
+  could never honor Settings' "on" override).
 -->
 <script>
   import { containerHealthStatus } from '../lib/containerStatus';
   import { fmtBytes, fmtPct } from '../lib/format';
+  import { motion } from '../lib/motion.svelte';
   import ContainerIcon from './ContainerIcon.svelte';
 
   // containers: [{ name, state, health, icon?, cpuPct?, memBytes? }] --
@@ -72,7 +92,7 @@
   }
 </script>
 
-<section class="fleet-strip-wrap" aria-labelledby="fleet-strip-title">
+<section class="fleet-strip-wrap" class:fleet-strip-wrap--still={motion.reduced} aria-labelledby="fleet-strip-title">
   <div class="fleet-strip__head">
     <div>
       <h3 id="fleet-strip-title" class="fleet-strip__title">Container fleet</h3>
@@ -158,6 +178,12 @@
 
 <style>
   .fleet-strip-wrap {
+    /* --fleet-running: the quiet "running clean" fill -- accent mixed
+       well down toward the group surface so the full-accent ACTIVE
+       fill reads as the bright exception, not the wallpaper (the
+       active-now pass, top-of-file doc). Defined once here so the
+       units, the summary key, and the group dot can never drift apart. */
+    --fleet-running: color-mix(in oklab, var(--accent) 45%, var(--surface-soft));
     display: flex;
     flex-direction: column;
     gap: 0.8rem;
@@ -203,13 +229,16 @@
     height: 7px;
     flex-shrink: 0;
     border-radius: 2px;
-    background: var(--accent);
+    background: var(--fleet-running);
   }
   .fleet-strip__key--stopped {
     background: color-mix(in oklab, var(--ink) 40%, transparent);
   }
+  /* The activity key teaches the active encoding: full accent fill +
+     the same never-zero glow the units themselves carry. */
   .fleet-strip__key--activity {
     --unit-color: var(--accent);
+    background: var(--accent);
     animation: fleet-activity-glow 2.2s ease-in-out infinite;
   }
   .fleet-strip__key-stack {
@@ -262,7 +291,7 @@
     height: 7px;
     flex-shrink: 0;
     border-radius: 2px;
-    background: var(--accent);
+    background: var(--fleet-running);
   }
   .fleet-strip__group-dot--stopped {
     background: color-mix(in oklab, var(--ink) 40%, transparent);
@@ -309,7 +338,7 @@
     display: flex;
   }
   .fleet-unit {
-    --unit-color: var(--accent);
+    --unit-color: var(--fleet-running);
     display: block;
     width: 8px;
     height: 16px;
@@ -323,6 +352,23 @@
   .fleet-unit:hover,
   .fleet-unit:focus-visible {
     filter: brightness(1.3);
+  }
+  /* Active now (cpu.pct > 1, host-share -- see the top-of-file doc):
+     the bright exception against the muted running fill, distinct with
+     animation off; the never-zero glow adds the live pulse on top.
+     Declared BEFORE the status classes below so a unit that is both
+     active and warning/serious/critical keeps the STATUS fill -- status
+     stays the loudest layer -- while its glow then pulses in that same
+     status color via --unit-color. */
+  .fleet-unit--active {
+    --unit-color: var(--accent);
+    background: var(--unit-color);
+    animation: fleet-activity-glow 2.2s ease-in-out infinite;
+    animation-delay: var(--activity-delay, 0ms);
+  }
+  .fleet-unit--busy {
+    animation-name: fleet-activity-glow-busy;
+    animation-duration: 1.45s;
   }
   /* Stopped: muted, NOT enlarged -- a container turned off on purpose is
      common in a home-lab (see overviewStatus.ts's own doc), not a
@@ -371,30 +417,25 @@
     background: var(--status-critical);
     filter: brightness(1.1);
   }
-  .fleet-unit--active {
-    animation: fleet-activity-glow 2.2s ease-in-out infinite;
-    animation-delay: var(--activity-delay, 0ms);
-  }
-  .fleet-unit--busy {
-    animation-name: fleet-activity-glow-busy;
-    animation-duration: 1.45s;
-  }
+  /* Both glows bottom out at a visible base rather than zero -- an
+     active unit stays lit between pulse peaks, so activity survives a
+     glance (and a screenshot), not just a patient stare. */
   @keyframes fleet-activity-glow {
     0%,
     100% {
-      box-shadow: 0 0 0 0 color-mix(in oklab, var(--unit-color) 0%, transparent);
+      box-shadow: 0 0 3px 0.5px color-mix(in oklab, var(--unit-color) 32%, transparent);
     }
     50% {
-      box-shadow: 0 0 7px 1px color-mix(in oklab, var(--unit-color) 52%, transparent);
+      box-shadow: 0 0 8px 2px color-mix(in oklab, var(--unit-color) 60%, transparent);
     }
   }
   @keyframes fleet-activity-glow-busy {
     0%,
     100% {
-      box-shadow: 0 0 0 0 color-mix(in oklab, var(--unit-color) 0%, transparent);
+      box-shadow: 0 0 4px 1px color-mix(in oklab, var(--unit-color) 40%, transparent);
     }
     50% {
-      box-shadow: 0 0 11px 3px color-mix(in oklab, var(--unit-color) 62%, transparent);
+      box-shadow: 0 0 12px 3.5px color-mix(in oklab, var(--unit-color) 72%, transparent);
     }
   }
 
@@ -429,12 +470,16 @@
     }
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .fleet-strip__key--activity,
-    .fleet-unit--active,
-    .fleet-unit--busy {
-      animation: none;
-      box-shadow: 0 0 0 2px color-mix(in oklab, var(--unit-color) 28%, transparent);
-    }
+  /* motion.reduced (the Settings animation override resolved together
+     with the OS preference -- lib/motion.svelte.ts) rather than a bare
+     prefers-reduced-motion media query: the media query alone could
+     never honor Settings' "on" (force animations even when the OS says
+     reduce). The bright active fill needs no substitute; the pulse
+     collapses to its constant mid-strength glow. */
+  .fleet-strip-wrap--still .fleet-strip__key--activity,
+  .fleet-strip-wrap--still .fleet-unit--active,
+  .fleet-strip-wrap--still .fleet-unit--busy {
+    animation: none;
+    box-shadow: 0 0 5px 1px color-mix(in oklab, var(--unit-color) 45%, transparent);
   }
 </style>

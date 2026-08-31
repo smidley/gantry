@@ -11,7 +11,7 @@ import { test, expect } from '@playwright/test';
 
 test('fleet strip lays units on a fixed-pitch grid -- whole columns, aligned across rows', async ({ page }) => {
   await page.goto('#/');
-  const strip = page.locator('.fleet-strip');
+  const strip = page.locator('.fleet-strip').first();
   await expect(strip).toBeVisible();
   await expect.poll(() => page.locator('.fleet-strip .fleet-unit').count()).toBeGreaterThan(0);
 
@@ -25,7 +25,7 @@ test('fleet strip lays units on a fixed-pitch grid -- whole columns, aligned acr
   expect(columns).toMatch(/^8px( 8px)*$/);
 });
 
-test('bay schematic sizes to its own content -- no full-width footprint stranding dead space', async ({ page }) => {
+test('storage array fills its module and keeps its device grid stable on hover', async ({ page }) => {
   await page.goto('#/');
   const schematic = page.locator('.bay-schematic');
   // Waits on the first live frame's disks; generous for a cold CI boot.
@@ -42,11 +42,10 @@ test('bay schematic sizes to its own content -- no full-width footprint strandin
   // rather than flaky.
   test.skip(parentWidth < 400, `schematic parent is only ${parentWidth}px wide -- nothing to measure against`);
 
-  expect(schematicBox!.width).toBeLessThan(parentWidth - 40);
+  expect(schematicBox!.width).toBeGreaterThan(parentWidth - 4);
 
-  // Hovering a bar reveals the label row; the label is excluded from
-  // intrinsic sizing (width:0 + min-width:100%), so the fit-content
-  // footprint must not move mid-hover.
+  // Hovering a device reveals richer detail without changing the
+  // module's width or reflowing the surrounding overview.
   await schematic.locator('.bay-schematic__bar').first().hover();
   await expect(schematic.locator('.bay-schematic__label--visible')).toBeVisible();
   const hoveredBox = await schematic.boundingBox();

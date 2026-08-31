@@ -85,7 +85,8 @@ const routeDefs: RouteDef[] = [
 // same as the overview route -- every one of them has zero path
 // segments once the leading "#" and empty splits are stripped.
 export function parseHash(hash: string): Route {
-  const path = hash.replace(/^#/, '');
+  const raw = hash.replace(/^#/, '');
+  const [path, queryString = ''] = raw.split('?', 2);
   const segments = path.split('/').filter((s) => s.length > 0);
 
   for (const def of routeDefs) {
@@ -101,7 +102,11 @@ export function parseHash(hash: string): Route {
         break;
       }
     }
-    if (matched) return { name: def.name, params };
+    if (matched) {
+      const query = new URLSearchParams(queryString);
+      for (const [key, value] of query) params[key] = value;
+      return { name: def.name, params };
+    }
   }
   return { name: 'not-found', params: {} };
 }

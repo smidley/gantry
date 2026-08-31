@@ -446,16 +446,21 @@ test('container detail: storage panel renders mounts with kind badges, capacity,
   expect(destMedia.x).toBeGreaterThan(destConfig.x + destConfig.width); // the right-hand CSS column, not stacked under the left
 
   // Devices sort by raw device name (deviceIOFromSamples) -- loop2,
-  // nvme0n1, sda -- exercising all three of unraid.ResolveDeviceLabel's
-  // own paths at once: a loop device's backing_file (docker.img, via
-  // fake mode's own override -- fake.go's DeviceLabels, since fake mode
-  // has no real /sys to read), a DiskMeta slot join (nvme0n1 ->
-  // rocket_pool, kind nvme), and raw passthrough (sda isn't any of the
-  // fake fleet's own disk devices). jellyfin's own devices always carry
-  // real (nonzero) IO in fake mode, so the noise rule (its own mocked
-  // tests below) never hides any of these three.
+  // nvme0n1, sda, sdc -- exercising all three of unraid.
+  // ResolveDeviceLabel's own paths at once: a loop device's backing_file
+  // (docker.img, via fake mode's own override -- fake.go's DeviceLabels,
+  // since fake mode has no real /sys to read), a DiskMeta slot join
+  // (nvme0n1 -> rocket_pool, kind nvme; sdc -> disk1, kind hdd), and raw
+  // passthrough (sda isn't any of the fake fleet's own disk devices).
+  // sdc is the Phase 5 insight demo's contended device: jellyfin holds a
+  // small CONSTANT witness share of it from boot (fake.go's
+  // insightDemoWitnessBps -- disk-io-contention's co-tenancy
+  // requirement), so it's a permanent fourth row here, not a scheduled
+  // flicker. jellyfin's own devices always carry real (nonzero) IO in
+  // fake mode, so the noise rule (its own mocked tests below) never
+  // hides any of these four.
   await expect(page.locator('.storage-device').first()).toBeVisible({ timeout: 10_000 });
-  await expect(page.locator('.storage-device')).toHaveCount(3);
+  await expect(page.locator('.storage-device')).toHaveCount(4);
 
   const loopRow = page.locator('.storage-device').nth(0);
   await expect(loopRow.locator('.storage-device__label')).toContainText('docker.img');
@@ -477,6 +482,11 @@ test('container detail: storage panel renders mounts with kind badges, capacity,
   await expect(rawRow.locator('.storage-device__raw')).toBeEmpty(); // sda isn't any known slot's device -- stays raw, no secondary
   await expect(rawRow.locator('.storage-device__kind')).toHaveCount(0);
 
+  const witnessRow = page.locator('.storage-device').nth(3);
+  await expect(witnessRow.locator('.storage-device__label')).toContainText('disk1');
+  await expect(witnessRow.locator('.storage-device__raw')).toHaveText('sdc');
+  await expect(witnessRow.locator('.storage-device__kind')).toContainText('HDD');
+
   await expect(page.locator('.storage-device-header', { hasText: 'Read' })).toBeVisible();
   await expect(page.locator('.storage-device-header', { hasText: 'Write' })).toBeVisible();
 
@@ -489,7 +499,7 @@ test('container detail: storage panel renders mounts with kind badges, capacity,
   const valueXs = await page
     .locator('.storage-device__value')
     .evaluateAll((els) => els.map((el) => Math.round(el.getBoundingClientRect().x)));
-  expect(valueXs).toHaveLength(8); // 3 devices + Total, x2 each
+  expect(valueXs).toHaveLength(10); // 4 devices + Total, x2 each
   const readXs = valueXs.filter((_, i) => i % 2 === 0);
   const writeXs = valueXs.filter((_, i) => i % 2 === 1);
   expect(new Set(readXs).size).toBe(1);
@@ -1194,7 +1204,13 @@ test('LivePulse shows live state while frames flow', async ({ page }) => {
 // that must still be true regardless: data keeps flowing, just without
 // any animation smoothing it.
 test.describe('reduced motion', () => {
-  test.use({ reducedMotion: 'reduce' });
+  // contextOptions, not a bare test.use({ reducedMotion }): this
+  // Playwright version has no top-level `reducedMotion` test option, so
+  // the bare form is silently ignored and the page runs under normal
+  // motion -- caught by live-glide.spec.ts's stricter discreteness
+  // assertion (see its own reduced-motion doc), which this block's
+  // "still ticks" poll alone could never distinguish.
+  test.use({ contextOptions: { reducedMotion: 'reduce' } });
 
   test('overview still renders and ticks discretely under prefers-reduced-motion', async ({ page }) => {
     await page.goto('#/');

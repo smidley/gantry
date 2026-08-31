@@ -36,6 +36,10 @@ class ScrubBus {
   clear(sourceId: unknown) {
     this.#state = clearScrubIfOwner(this.#state, sourceId);
   }
+
+  isOwner(sourceId: unknown) {
+    return this.#state.sourceId === sourceId;
+  }
 }
 
 export const scrubBus = new ScrubBus();

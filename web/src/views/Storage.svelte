@@ -46,6 +46,22 @@
   let disks = $derived(live.frame?.disks ?? {});
   let diskMeta = $derived(live.frame?.disk_meta ?? {});
   let diskNames = $derived(sortDiskEntities(Object.keys(disks)));
+  let alertedDiskNames = $derived(
+    new Set(
+      (live.frame?.alerts?.firing ?? [])
+        .filter((alert) => !alert.silenced && alert.kind === 'disk' && alert.entity)
+        .map((alert) => alert.entity),
+    ),
+  );
+  let displayDiskNames = $derived.by(() =>
+    [...diskNames].sort((a, b) => {
+      const aPct = diskUsagePct(disks[a]) ?? -1;
+      const bPct = diskUsagePct(disks[b]) ?? -1;
+      const aNeedsAttention = alertedDiskNames.has(a) || (disks[a]?.errors ?? 0) > 0 || aPct > 90;
+      const bNeedsAttention = alertedDiskNames.has(b) || (disks[b]?.errors ?? 0) > 0 || bPct > 90;
+      return Number(bNeedsAttention) - Number(aNeedsAttention) || bPct - aPct || a.localeCompare(b);
+    }),
+  );
   let array = $derived(live.frame?.unraid?.array ?? {});
   let dockerStorage = $derived(live.frame?.unraid?.docker ?? {});
   let sources = $derived(live.frame?.sources ?? {});
@@ -817,7 +833,7 @@
     <div class="card storage-disks">
       <span class="microlabel">Disks &middot; {diskNames.length}</span>
       <div class="storage-disks__list">
-        {#each diskNames as name (name)}
+        {#each displayDiskNames as name (name)}
           {@const metrics = disks[name]}
           {@const role = diskRole(name)}
           {@const mediaType = diskKind(diskMeta[name], metrics)}

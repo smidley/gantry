@@ -10,10 +10,29 @@
    regardless of OS setting) -- so the manual toggle always wins over
    the OS in both directions. */
 :root {
-  --page: #f9f9f7;
-  --surface: #fcfcfb;
-  --ink: #0b0b0b;
-  --ink-2: #52514e;
+  /* Gantry's visual language: quiet graphite neutrals with a cobalt
+     accent. The surfaces are deliberately a little translucent so the
+     shell feels layered without turning an infrastructure dashboard into
+     a stack of heavy boxes. */
+  --page: #f5f6fa;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-soft: #eceff6;
+  --surface-muted: #fafbfe;
+  --ink: #191c26;
+  --ink-2: #626979;
+  --ink-3: #8d94a3;
+  --border: #e0e3eb;
+  --border-strong: #cdd2de;
+  --accent: #5269e8;
+  --accent-strong: #3f53c9;
+  --accent-soft: #e9edff;
+  --sidebar: #171922;
+  --sidebar-surface: #252936;
+  --sidebar-ink: #f7f7fb;
+  --sidebar-muted: #9da3b2;
+  --shadow-sm: 0 1px 2px rgb(25 31 54 / 0.05), 0 8px 24px rgb(25 31 54 / 0.055);
+  --shadow-md: 0 14px 44px rgb(25 31 54 / 0.1);
 
   /* Categorical series slots -- fixed order, never cycled or
      reassigned by rank. A caller with >10 series buckets the rest into
@@ -21,24 +40,24 @@
      magenta/orchid) fill the two widest gaps left open by the first 8's
      own OKLCH hue spacing (roughly 209deg and 320deg), not just appended
      past the end of the hue wheel. */
-  --series-1: #2a78d6;
-  --series-2: #eb6834;
-  --series-3: #1baf7a;
-  --series-4: #eda100;
-  --series-5: #e87ba4;
-  --series-6: #008300;
-  --series-7: #4a3aa7;
-  --series-8: #e34948;
-  --series-9: #008a9a;
-  --series-10: #a355b3;
+  --series-1: #5269e8;
+  --series-2: #df6c57;
+  --series-3: #2399a8;
+  --series-4: #d99a18;
+  --series-5: #b95d93;
+  --series-6: #4e9a68;
+  --series-7: #7866c7;
+  --series-8: #d85162;
+  --series-9: #287db2;
+  --series-10: #945ea8;
 
   /* Status colors are reserved for health/severity meaning ONLY --
      always paired with an icon or text label, never used for series
      identity. */
-  --status-good: #0ca30c;
-  --status-warning: #fab219;
-  --status-serious: #ec835a;
-  --status-critical: #d03b3b;
+  --status-good: #18a36f;
+  --status-warning: #e7a416;
+  --status-serious: #e2783e;
+  --status-critical: #d84f5f;
 
   /* Sequential ramp for magnitude fills (e.g. disk-usage heat) --
      evenly interpolated between the given endpoints, same in both
@@ -63,38 +82,68 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
-    --page: #0d0d0d;
-    --surface: #1a1a19;
-    --ink: #ffffff;
-    --ink-2: #c3c2b7;
+    --page: #0f1117;
+    --surface: #171a22;
+    --surface-raised: #1b1f29;
+    --surface-soft: #232733;
+    --surface-muted: #13161d;
+    --ink: #f4f5f8;
+    --ink-2: #a9afbc;
+    --ink-3: #747b8a;
+    --border: #292e3a;
+    --border-strong: #3b4252;
+    --accent: #8ea0ff;
+    --accent-strong: #aab6ff;
+    --accent-soft: #282f53;
+    --sidebar: #0b0d12;
+    --sidebar-surface: #191d27;
+    --sidebar-ink: #f7f7fb;
+    --sidebar-muted: #8e95a4;
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.18), 0 12px 30px rgb(0 0 0 / 0.12);
+    --shadow-md: 0 18px 54px rgb(0 0 0 / 0.24);
 
-    --series-1: #3987e5;
-    --series-2: #d95926;
-    --series-3: #199e70;
-    --series-4: #c98500;
-    --series-5: #d55181;
-    --series-6: #008300;
-    --series-7: #9085e9;
-    --series-8: #e66767;
-    --series-9: #00acc0;
-    --series-10: #bd6ece;
+    --series-1: #8ea0ff;
+    --series-2: #f08a74;
+    --series-3: #54c0cd;
+    --series-4: #efb84f;
+    --series-5: #dc80ad;
+    --series-6: #75bd8b;
+    --series-7: #a79eee;
+    --series-8: #ed7780;
+    --series-9: #50c3d3;
+    --series-10: #ca8bdd;
   }
 }
 
 :root[data-theme='dark'] {
-  --page: #0d0d0d;
-  --surface: #1a1a19;
-  --ink: #ffffff;
-  --ink-2: #c3c2b7;
+  --page: #0f1117;
+  --surface: #171a22;
+  --surface-raised: #1b1f29;
+  --surface-soft: #232733;
+  --surface-muted: #13161d;
+  --ink: #f4f5f8;
+  --ink-2: #a9afbc;
+  --ink-3: #747b8a;
+  --border: #292e3a;
+  --border-strong: #3b4252;
+  --accent: #8ea0ff;
+  --accent-strong: #aab6ff;
+  --accent-soft: #282f53;
+  --sidebar: #0b0d12;
+  --sidebar-surface: #191d27;
+  --sidebar-ink: #f7f7fb;
+  --sidebar-muted: #8e95a4;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.18), 0 12px 30px rgb(0 0 0 / 0.12);
+  --shadow-md: 0 18px 54px rgb(0 0 0 / 0.24);
 
-  --series-1: #3987e5;
-  --series-2: #d95926;
-  --series-3: #199e70;
-  --series-4: #c98500;
-  --series-5: #d55181;
-  --series-6: #008300;
-  --series-7: #9085e9;
-  --series-8: #e66767;
-  --series-9: #00acc0;
-  --series-10: #bd6ece;
+  --series-1: #8ea0ff;
+  --series-2: #f08a74;
+  --series-3: #54c0cd;
+  --series-4: #efb84f;
+  --series-5: #dc80ad;
+  --series-6: #75bd8b;
+  --series-7: #a79eee;
+  --series-8: #ed7780;
+  --series-9: #50c3d3;
+  --series-10: #ca8bdd;
 }

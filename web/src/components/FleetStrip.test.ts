@@ -22,7 +22,13 @@ function renderStrip(containers: object[]): string {
 describe('FleetStrip', () => {
   it('renders one linked unit per container, with the fleet total in the list label', () => {
     const body = renderStrip(CONTAINERS);
+    expect(body).toContain('Container fleet');
+    expect(body).toContain('2 running');
+    expect(body).toContain('1 stopped');
+    expect(body).toContain('1 needs attention');
     expect(body).toContain('aria-label="Container fleet, 3 total"');
+    expect(body).toContain('aria-label="Running containers, 2"');
+    expect(body).toContain('aria-label="Stopped containers, 1"');
     expect(body.match(/class="fleet-unit/g)).toHaveLength(3);
     expect(body).toContain('href="#/containers/jellyfin"');
     expect(body).toContain('href="#/containers/sonarr"');
@@ -31,7 +37,7 @@ describe('FleetStrip', () => {
 
   it('carries each unit\'s state (and meaningful health) in its own aria-label', () => {
     const body = renderStrip(CONTAINERS);
-    expect(body).toContain('aria-label="jellyfin: running"');
+    expect(body).toContain('aria-label="jellyfin: running, 12.0% CPU"');
     expect(body).toContain('aria-label="sonarr: running, unhealthy"');
     expect(body).toContain('aria-label="prowlarr: exited"');
   });
@@ -45,6 +51,7 @@ describe('FleetStrip', () => {
   it('renders an empty fleet as an empty (but labeled) list, not an error', () => {
     const body = renderStrip([]);
     expect(body).toContain('aria-label="Container fleet, 0 total"');
+    expect(body).toContain('aria-label="Running containers, 0"');
     expect(body).not.toContain('fleet-unit');
   });
 });

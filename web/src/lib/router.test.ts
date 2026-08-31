@@ -27,6 +27,13 @@ describe('parseHash', () => {
     });
   });
 
+  it('parses hash query parameters for filtered views', () => {
+    expect(parseHash('#/containers?state=active')).toEqual({
+      name: 'containers',
+      params: { state: 'active' },
+    });
+  });
+
   it('parses a top route with a resource param, for the Overview switcher deep link', () => {
     expect(parseHash('#/top/mem')).toEqual({ name: 'top', params: { resource: 'mem' } });
   });

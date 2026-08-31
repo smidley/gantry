@@ -237,7 +237,7 @@
     height: 24rem;
     overflow-y: auto;
     overflow-x: auto;
-    font-family: var(--font-mono);
+    font-family: var(--font-code);
     font-size: 0.78rem;
     line-height: 1.5;
   }
@@ -268,7 +268,7 @@
     border-radius: 8px;
   }
   .log-viewer__empty-detail {
-    font-family: var(--font-mono);
+    font-family: var(--font-code);
     font-size: 0.78rem;
     margin-top: 0.4rem;
   }

@@ -34,6 +34,7 @@
     channelLabel,
     SILENCE_PRESET_HOURS,
     annotateAlerts,
+    alertGuidance,
   } from '../lib/alerts';
   import HealthDot from '../components/HealthDot.svelte';
   import RuleEditor from '../components/RuleEditor.svelte';
@@ -280,6 +281,7 @@
         {#each activeSorted as a (rowKey(a))}
           {@const covering = a.silenced ? coveringSilence(a.rule_id, a.entity) : null}
           {@const href = alertEntityHref(a.kind, a.entity)}
+          {@const guidance = alertGuidance(a)}
           <li class="alerts-view__row" class:alerts-view__row--silenced={a.silenced}>
             <HealthDot status={SEVERITY_STATUS[a.severity] ?? 'warning'} />
             <div class="alerts-view__row-body">
@@ -309,9 +311,14 @@
                   {/if}
                 </div>
               {/if}
-              {#if a.insightAnnotation}
-                <a class="alerts-view__row-annotation" href={a.insightAnnotation.href}>{a.insightAnnotation.text}</a>
-              {/if}
+              <div class="alerts-view__guidance">
+                {#if a.insightAnnotation}
+                  <a class="alerts-view__row-annotation" href={a.insightAnnotation.href}>{a.insightAnnotation.text}</a>
+                {:else}
+                  <p><span>Likely cause</span>{guidance.cause}</p>
+                {/if}
+                <p><span>Next step</span><a href={guidance.href}>{guidance.nextStep} &rarr;</a></p>
+              </div>
             </div>
             {#if !a.silenced}
               <div class="alerts-view__silence-control">
@@ -544,6 +551,37 @@
   }
   .alerts-view__row-annotation:hover {
     text-decoration: underline;
+  }
+  .alerts-view__guidance {
+    display: flex;
+    flex-direction: column;
+    gap: 0.28rem;
+    margin-top: 0.25rem;
+    padding: 0.55rem 0.65rem;
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--accent) 4%, var(--surface-soft));
+  }
+  .alerts-view__guidance p {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 0.74rem;
+    line-height: 1.4;
+  }
+  .alerts-view__guidance p > span {
+    min-width: 4.5rem;
+    color: var(--ink-3);
+    font-size: 0.66rem;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .alerts-view__guidance p a {
+    color: var(--accent-strong);
+    font-weight: 600;
+    text-decoration: none;
   }
   .alerts-view__lift {
     min-height: 32px;

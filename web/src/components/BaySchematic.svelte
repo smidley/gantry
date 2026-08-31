@@ -53,7 +53,7 @@
   // kind-colored top-cap stroke, independent of the flagged outline and
   // the usage-proportional fill -- a type signal, not a health one.
   // Absent/"hdd" (the ordinary/majority case) draws no cap at all.
-  let { entries = [] } = $props();
+  let { entries = [], summary = null } = $props();
 
   // glideMs: see the module doc above -- the CSS transition on each
   // bar's own fill reads this straight off the shared driver.
@@ -69,6 +69,7 @@
 
   let hoveredSlot = $state(null);
   let hoveredEntry = $derived(entries.find((d) => d.slot === hoveredSlot) ?? null);
+  let flaggedCount = $derived(entries.filter((d) => d.flagged).length);
 
   // tempTint mirrors Storage.svelte's own banding exactly (nvme gets the
   // hotter-tolerant family) so the same disk reads the same temp color
@@ -82,11 +83,32 @@
     if (d.tempState.kind === 'reading') return `${d.tempState.celsius.toFixed(1)}°C`;
     return d.tempState.kind === 'spun-down' ? 'Spun down' : 'No sensor';
   }
+
+  function kindText(kind) {
+    if (kind === 'ssd') return 'SSD';
+    if (kind === 'nvme') return 'NVMe';
+    if (kind === 'usb') return 'USB';
+    return 'HDD';
+  }
 </script>
 
 {#if entries.length > 0}
-  <div class="bay-schematic">
-    <span class="microlabel">Array &middot; {entries.length} member{entries.length === 1 ? '' : 's'}</span>
+  <section class="bay-schematic" aria-labelledby="bay-schematic-title">
+    <div class="bay-schematic__head">
+      <div>
+        <h3 id="bay-schematic-title" class="bay-schematic__title">Storage array</h3>
+        <p class="bay-schematic__summary">
+          {entries.length} device{entries.length === 1 ? '' : 's'}
+          <span aria-hidden="true">&middot;</span>
+          {#if flaggedCount > 0}
+            <strong>{flaggedCount} need{flaggedCount === 1 ? 's' : ''} attention</strong>
+          {:else}
+            <span>All within normal range</span>
+          {/if}
+        </p>
+      </div>
+      <a class="bay-schematic__link" href="#/storage">View details <span aria-hidden="true">&rarr;</span></a>
+    </div>
     <div class="bay-schematic__bars">
       {#each entries as d (d.slot)}
         <a
@@ -102,10 +124,26 @@
           onfocus={() => (hoveredSlot = d.slot)}
           onblur={() => (hoveredSlot = null)}
         >
-          <span
-            class="bay-schematic__fill"
-            style={`height: ${Math.min(100, Math.max(0, d.pct))}%; background: ${seqStep(d.pct)}; transition-duration: ${glideMs}ms`}
-          ></span>
+          <span class="bay-schematic__bar-head">
+            <span class="bay-schematic__slot">{d.slot}</span>
+            <span class="bay-schematic__pct tabular-nums">{fmtPct(d.pct)}</span>
+          </span>
+          <span class="bay-schematic__track" aria-hidden="true">
+            <span
+              class="bay-schematic__fill"
+              style={`width: ${Math.min(100, Math.max(0, d.pct))}%; background: ${seqStep(d.pct)}; transition-duration: ${glideMs}ms`}
+            ></span>
+          </span>
+          <span class="bay-schematic__meta">
+            {#if d.flagged}
+              <span class="bay-schematic__warning">Needs attention</span>
+            {:else}
+              <span>{kindText(d.kind)}</span>
+            {/if}
+            {#if tempText(d)}
+              <span class="tabular-nums" style={tempTint(d) ? `color: ${tempTint(d)}` : undefined}>{tempText(d)}</span>
+            {/if}
+          </span>
         </a>
       {/each}
     </div>
@@ -123,9 +161,13 @@
             {fmtBytes(hoveredEntry.usedBytes)} / {fmtBytes(hoveredEntry.usedBytes + hoveredEntry.freeBytes)}
           </span>
         {/if}
+      {:else if summary}
+        <span class="bay-schematic__reassurance"><i aria-hidden="true">&check;</i>{summary}</span>
+      {:else}
+        <span class="bay-schematic__label-muted">Usage bars show how full each device is.</span>
       {/if}
     </div>
-  </div>
+  </section>
 {/if}
 
 <style>
@@ -142,32 +184,79 @@
   .bay-schematic {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
-    width: fit-content;
-    max-width: 100%;
+    gap: 0.8rem;
+    width: 100%;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: color-mix(in oklab, var(--surface) 78%, transparent);
+  }
+  .bay-schematic__head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .bay-schematic__title {
+    margin: 0;
+    color: var(--ink);
+    font-size: 0.92rem;
+    font-weight: 650;
+    letter-spacing: -0.015em;
+  }
+  .bay-schematic__summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem;
+    margin: 0.3rem 0 0;
+    color: var(--ink-2);
+    font-size: 0.76rem;
+  }
+  .bay-schematic__summary strong {
+    color: var(--status-warning);
+    font-weight: 650;
+  }
+  .bay-schematic__link {
+    flex-shrink: 0;
+    color: var(--accent);
+    font-size: 0.76rem;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .bay-schematic__link:hover {
+    color: var(--accent-strong);
   }
   .bay-schematic__bars {
-    display: flex;
-    align-items: flex-end;
-    gap: 6px;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(145px, 100%), 1fr));
+    gap: 0.55rem;
   }
   .bay-schematic__bar {
-    position: relative;
-    width: 22px;
-    height: 130px;
-    background: color-mix(in oklab, var(--ink) 7%, transparent);
-    border-radius: 2px;
-    flex-shrink: 0;
-    display: block;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    min-width: 0;
+    padding: 0.65rem 0.7rem;
+    border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
+    border-radius: 9px;
+    background: var(--surface-soft);
+    color: inherit;
+    text-decoration: none;
+    transition:
+      border-color 150ms ease,
+      background-color 150ms ease,
+      transform 150ms ease;
   }
   .bay-schematic__bar:hover,
   .bay-schematic__bar:focus-visible {
-    filter: brightness(1.1);
+    border-color: color-mix(in oklab, var(--accent) 38%, var(--border));
+    background: color-mix(in oklab, var(--accent) 5%, var(--surface-soft));
+    transform: translateY(-1px);
   }
   .bay-schematic__bar--flag {
-    outline: 2px solid var(--status-warning);
-    outline-offset: 1px;
+    border-color: color-mix(in oklab, var(--status-warning) 70%, var(--border));
+    box-shadow: inset 3px 0 0 var(--status-warning);
   }
   /* Type signal, not a health one -- a --series-* token (never a
      --status-* one) so it reads as "different kind of member," not as
@@ -175,26 +264,55 @@
      own outline. One color per kind, matching Storage's own type-badge
      mapping exactly so the same disk reads the same identity on both
      views; hdd (the ordinary/majority case) gets no cap at all. */
-  .bay-schematic__bar--ssd {
-    border-top: 3px solid var(--series-3);
+  .bay-schematic__bar-head,
+  .bay-schematic__meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
   }
-  .bay-schematic__bar--nvme {
-    border-top: 3px solid var(--series-1);
+  .bay-schematic__slot {
+    overflow: hidden;
+    color: var(--ink);
+    font-size: 0.78rem;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .bay-schematic__bar--usb {
-    border-top: 3px solid var(--series-4);
+  .bay-schematic__pct {
+    flex-shrink: 0;
+    color: var(--ink);
+    font-size: 0.76rem;
+    font-weight: 600;
+  }
+  .bay-schematic__track {
+    position: relative;
+    display: block;
+    height: 7px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--ink) 8%, transparent);
   }
   .bay-schematic__fill {
     position: absolute;
+    top: 0;
     bottom: 0;
     left: 0;
-    width: 100%;
     display: block;
     /* duration is inline (transition-duration, above) -- the shared
        driver's own live glideMs, per pct-changing frame. */
-    transition-property: height;
+    transition-property: width;
     transition-timing-function: linear;
-    border-radius: 1px 1px 0 0;
+    border-radius: inherit;
+  }
+  .bay-schematic__meta {
+    min-height: 1rem;
+    color: var(--ink-2);
+    font-size: 0.68rem;
+  }
+  .bay-schematic__warning {
+    color: var(--status-warning);
+    font-weight: 650;
   }
   /* Fixed-height label row, always present in layout (opacity-toggled,
      not conditionally rendered) so the bars' own position never shifts
@@ -211,20 +329,46 @@
     align-items: baseline;
     flex-wrap: wrap;
     gap: 0.5rem;
-    width: 0;
-    min-width: 100%;
     min-height: 1.2rem;
     font-size: 0.8rem;
     font-weight: 600;
     color: var(--ink);
-    opacity: 0;
-    transition: opacity 150ms ease;
+    opacity: 0.78;
+    transition:
+      color 150ms ease,
+      opacity 150ms ease;
   }
   .bay-schematic__label--visible {
     opacity: 1;
+    color: var(--ink);
   }
   .bay-schematic__label-muted {
     font-weight: 400;
     color: var(--ink-2);
+  }
+  .bay-schematic__reassurance {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--ink-2);
+    font-weight: 400;
+  }
+  .bay-schematic__reassurance i {
+    display: inline-grid;
+    width: 16px;
+    height: 16px;
+    place-items: center;
+    border-radius: 50%;
+    background: color-mix(in oklab, var(--status-good) 14%, transparent);
+    color: var(--status-good);
+    font-size: 0.68rem;
+    font-style: normal;
+    font-weight: 700;
+  }
+
+  @media (max-width: 27rem) {
+    .bay-schematic__head {
+      gap: 0.65rem;
+    }
   }
 </style>

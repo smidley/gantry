@@ -15,24 +15,28 @@ const ENTRIES = [
   { slot: 'cache', pct: 61, kind: 'nvme' },
 ];
 
-function renderBays(entries: object[]): string {
-  return render(BaySchematic, { props: { entries } }).body;
+function renderBays(entries: object[], summary: string | null = null): string {
+  return render(BaySchematic, { props: { entries, summary } }).body;
 }
 
 describe('BaySchematic', () => {
-  it('renders one Storage-linked bar per entry, with the member count in the microlabel', () => {
+  it('renders one Storage-linked device per entry, with a clear array summary', () => {
     const body = renderBays(ENTRIES);
-    expect(body).toContain('Array · 3 members');
+    expect(body).toContain('Storage array');
+    expect(body).toContain('3 devices');
+    expect(body).toContain('1 needs attention');
     // The trailing space excludes the container's own bay-schematic__barS class.
     expect(body.match(/class="bay-schematic__bar /g)).toHaveLength(3);
-    expect(body.match(/href="#\/storage"/g)).toHaveLength(3);
+    expect(body).toContain('class="bay-schematic__link');
+    expect(body).toContain('href="#/storage">View details');
   });
 
-  it('draws each fill at its own usage-proportional inline height', () => {
+  it('draws each fill at its own usage-proportional inline width and prints the value', () => {
     const body = renderBays(ENTRIES);
-    expect(body).toContain('height: 42%');
-    expect(body).toContain('height: 95%');
-    expect(body).toContain('height: 61%');
+    expect(body).toContain('width: 42%');
+    expect(body).toContain('width: 95%');
+    expect(body).toContain('width: 61%');
+    expect(body).toContain('42.0%');
   });
 
   it('marks a flagged bar and a non-hdd kind with their own modifier classes, and folds the callout into the aria-label', () => {
@@ -44,5 +48,11 @@ describe('BaySchematic', () => {
 
   it('renders nothing at all for an empty entry list (only SSR anchor comments)', () => {
     expect(renderBays([])).not.toContain('bay-schematic');
+  });
+
+  it('keeps the healthy-array reassurance inside the storage module', () => {
+    expect(renderBays(ENTRIES, '2 other array members are within normal range.')).toContain(
+      '2 other array members are within normal range.',
+    );
   });
 });

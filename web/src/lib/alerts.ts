@@ -128,6 +128,54 @@ export function alertEntityHref(kind: string, entity: string): string | null {
   return null;
 }
 
+export interface AlertGuidanceLike {
+  rule_id: string;
+  kind: string;
+  entity: string;
+}
+
+export interface AlertGuidance {
+  cause: string;
+  nextStep: string;
+  href: string;
+}
+
+// A conservative cause hypothesis plus one concrete next destination.
+// A correlated insight, when present, replaces this generic cause in
+// the view; this function never claims a root cause as confirmed.
+export function alertGuidance(alert: AlertGuidanceLike): AlertGuidance {
+  const containerHref = alert.entity ? `#/containers/${encodeURIComponent(alert.entity)}` : '#/containers';
+  switch (alert.rule_id) {
+    case 'host-cpu-high':
+      return { cause: 'A sustained workload or runaway process is consuming host CPU.', nextStep: 'Inspect CPU consumers', href: '#/top/cpu' };
+    case 'host-mem-high':
+      return { cause: 'A workload, cache, or container is holding more memory than usual.', nextStep: 'Inspect memory consumers', href: '#/top/mem' };
+    case 'disk-usage-high':
+      return { cause: 'Data growth is outpacing the device’s remaining capacity.', nextStep: 'Review storage usage', href: '#/storage' };
+    case 'disk-temp-high':
+    case 'disk-temp-nvme-high':
+      return { cause: 'Sustained I/O, cooling, or airflow may be keeping this device hot.', nextStep: 'Review device activity and temperature', href: '#/storage' };
+    case 'container-mem-limit-high':
+      return { cause: 'The workload is approaching its configured memory limit.', nextStep: 'Inspect the container', href: containerHref };
+    case 'array-stopped':
+      return { cause: 'The array was stopped or did not complete startup.', nextStep: 'Check array status', href: '#/storage' };
+    case 'container-unhealthy':
+      return { cause: 'The container’s configured health check is failing.', nextStep: 'Inspect health and recent logs', href: containerHref };
+    case 'container-oom':
+      return { cause: 'The container exceeded available or configured memory.', nextStep: 'Inspect memory and limits', href: containerHref };
+    case 'container-exit-nonzero':
+      return { cause: 'The main process returned an error during shutdown or restart.', nextStep: 'Inspect recent container logs', href: containerHref };
+    case 'disk-errors':
+      return { cause: 'The device reported new I/O or health errors.', nextStep: 'Inspect the affected device', href: '#/storage' };
+    case 'parity-errors':
+      return { cause: 'The latest parity operation completed with one or more errors.', nextStep: 'Review parity history', href: '#/storage' };
+    default:
+      if (alert.kind === 'container') return { cause: 'The container crossed one of its configured alert conditions.', nextStep: 'Inspect the container', href: containerHref };
+      if (alert.kind === 'disk' || alert.kind === 'unraid') return { cause: 'Storage crossed one of its configured alert conditions.', nextStep: 'Inspect storage', href: '#/storage' };
+      return { cause: 'A configured alert condition has remained active.', nextStep: 'Review related metrics', href: '#/top' };
+  }
+}
+
 // --- value/threshold formatting --------------------------------------------
 
 // formatMetricValue renders a live threshold-rule reading with its own

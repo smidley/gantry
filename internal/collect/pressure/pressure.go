@@ -62,14 +62,35 @@ func New(sink store.MetricSink, procRoot, cgroupRoot string, running func() []do
 func (c *Collector) Name() string            { return "pressure" }
 func (c *Collector) Interval() time.Duration { return tickInterval }
 
+// psiAvailable reports whether the kernel exposes PSI at all, checking
+// /proc/pressure/io as PSI's canary: on a kernel that has it enabled at
+// all, Unraid exposes cpu/io/memory together. Probe and Tier both defer
+// to this one check so the two can never disagree about availability.
+func (c *Collector) psiAvailable() bool {
+	_, err := os.Stat(filepath.Join(c.procRoot, "pressure", "io"))
+	return err == nil
+}
+
 // Probe checks for /proc/pressure/io specifically as PSI's canary: on a
 // kernel that has it enabled at all, Unraid exposes cpu/io/memory
 // together.
 func (c *Collector) Probe(context.Context) collect.Status {
-	if _, err := os.Stat(filepath.Join(c.procRoot, "pressure", "io")); err != nil {
+	if !c.psiAvailable() {
 		return collect.Status{Available: false, Detail: psiDisabledDetail}
 	}
 	return collect.Status{Available: true}
+}
+
+// Tier reports which evidence tier is currently live: "psi" once the
+// kernel exposes pressure stall information, "proxy" on stock Unraid's
+// default (PSI compiled in but disabled). Callers use this typed value
+// to report what enabling psi=1 would add, instead of string-matching
+// Probe's hint text.
+func (c *Collector) Tier() string {
+	if c.psiAvailable() {
+		return "psi"
+	}
+	return "proxy"
 }
 
 // Tick records host and container PSI unconditionally (each resource,

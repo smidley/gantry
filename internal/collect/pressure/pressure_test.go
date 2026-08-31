@@ -104,6 +104,16 @@ func TestProbeAvailableIffPressureIoExists(t *testing.T) {
 	require.True(t, c.Probe(context.Background()).Available)
 }
 
+func TestTierReturnsProxyThenPsiAsPressureIoAppears(t *testing.T) {
+	procRoot := t.TempDir()
+	c := New(newFakeSink(), procRoot, t.TempDir(), func() []docker.Meta { return nil })
+
+	require.Equal(t, "proxy", c.Tier(), "no /proc/pressure/io yet -- stock Unraid's default")
+
+	writeFile(t, filepath.Join(procRoot, "pressure", "io"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+	require.Equal(t, "psi", c.Tier())
+}
+
 // TestDocsPsiMdQuotesTheProbeDetailStringExactly pins docs/psi.md's own
 // quote of this hint against psiDisabledDetail itself, so a future edit
 // to either one that lets them drift apart fails a test instead of

@@ -9,8 +9,9 @@ import {
   describeRule,
   alertEntityHref,
   channelLabel,
+  annotateAlerts,
 } from './alerts';
-import type { DescribableRule } from './alerts';
+import type { AnnotatableAlert, AnnotationInsight, DescribableRule } from './alerts';
 
 describe('alertEntityHref', () => {
   it('links a container to its own detail page', () => {
@@ -285,5 +286,58 @@ describe('describeRule', () => {
       metric: 'cpu.total', op: '>', threshold: 50, for_seconds: 120, event_kinds: '', severity: 'warning',
     });
     expect(text).toBe('Warn when container "sonarr" goes over 50% for 2 minutes');
+  });
+});
+
+describe('annotateAlerts', () => {
+  function alert(partial: Partial<AnnotatableAlert>): AnnotatableAlert {
+    return { kind: 'container', entity: 'jellyfin', ...partial };
+  }
+  function insight(partial: Partial<AnnotationInsight>): AnnotationInsight {
+    return {
+      victim_kind: 'container', victim: 'jellyfin', statement: 'qbittorrent is likely slowing jellyfin on disk3',
+      severity: 'warning', confidence: 'likely', fired_at: 100, ...partial,
+    };
+  }
+
+  it('annotates a matching kind+entity with a "Likely cause" line for a likely finding', () => {
+    const [a] = annotateAlerts([alert({})], [insight({})]);
+    expect(a.insightAnnotation).toEqual({
+      text: 'Likely cause: qbittorrent is likely slowing jellyfin on disk3',
+      href: '#/insights',
+    });
+  });
+
+  it('uses "Cause" (not "Likely cause") for a confirmed finding', () => {
+    const [a] = annotateAlerts([alert({})], [insight({ confidence: 'confirmed', statement: 'qbittorrent is starving jellyfin on disk3' })]);
+    expect(a.insightAnnotation?.text).toBe('Cause: qbittorrent is starving jellyfin on disk3');
+  });
+
+  it('never annotates when kind matches but entity does not, or vice versa', () => {
+    const [byEntity] = annotateAlerts([alert({ entity: 'sonarr' })], [insight({})]);
+    expect(byEntity.insightAnnotation).toBeUndefined();
+    const [byKind] = annotateAlerts([alert({ kind: 'disk' })], [insight({})]);
+    expect(byKind.insightAnnotation).toBeUndefined();
+  });
+
+  it('leaves an alert with no entity (a host-wide rule) unannotated rather than matching by accident', () => {
+    const [a] = annotateAlerts([alert({ kind: 'host', entity: '' })], [insight({ victim_kind: 'host', victim: '' })]);
+    expect(a.insightAnnotation).toBeUndefined();
+  });
+
+  it('picks the highest-ranked insight (sortActiveInsights order) when more than one matches the same row', () => {
+    const weak = insight({ severity: 'info', confidence: 'likely', statement: 'weak finding' });
+    const strong = insight({ severity: 'alert', confidence: 'confirmed', statement: 'strong finding' });
+    const [a] = annotateAlerts([alert({})], [weak, strong]);
+    expect(a.insightAnnotation?.text).toBe('Cause: strong finding');
+  });
+
+  it('leaves every other alert field untouched and never mutates the input arrays', () => {
+    const alerts = [alert({ entity: 'sonarr' })];
+    const insights = [insight({})];
+    const [a] = annotateAlerts(alerts, insights);
+    expect(a.kind).toBe('container');
+    expect(a.entity).toBe('sonarr');
+    expect(alerts[0]).not.toHaveProperty('insightAnnotation');
   });
 });

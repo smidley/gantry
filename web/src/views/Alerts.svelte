@@ -33,6 +33,7 @@
     alertEntityHref,
     channelLabel,
     SILENCE_PRESET_HOURS,
+    annotateAlerts,
   } from '../lib/alerts';
   import HealthDot from '../components/HealthDot.svelte';
   import RuleEditor from '../components/RuleEditor.svelte';
@@ -47,7 +48,12 @@
   // --- Active -----------------------------------------------------------
 
   let firing = $derived(live.frame?.alerts?.firing ?? []);
-  let activeSorted = $derived(sortActiveAlerts(firing));
+  // annotated: the sanctioned insight->alert bridge (Phase 5 Task 13) --
+  // reads straight off the SAME live frame's own insights.active block,
+  // no extra fetch, so a fired/upgraded/resolved insight's "why" line
+  // updates on the identical 2s cadence as everything else on this row.
+  let annotated = $derived(annotateAlerts(firing, live.frame?.insights?.active ?? []));
+  let activeSorted = $derived(sortActiveAlerts(annotated));
   let firingCount = $derived(live.frame?.alerts?.firing_count ?? 0);
   let truncated = $derived(live.frame?.alerts?.truncated ?? 0);
 
@@ -303,6 +309,9 @@
                   {/if}
                 </div>
               {/if}
+              {#if a.insightAnnotation}
+                <a class="alerts-view__row-annotation" href={a.insightAnnotation.href}>{a.insightAnnotation.text}</a>
+              {/if}
             </div>
             {#if !a.silenced}
               <div class="alerts-view__silence-control">
@@ -522,6 +531,19 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+  }
+  /* insight annotation (Phase 5 Task 13): the alert says what broke,
+     this line says why -- deliberately quieter than the row's own
+     value line (italic, muted) so it reads as supporting context, not
+     a second alarm competing with the real one. */
+  .alerts-view__row-annotation {
+    font-size: 0.8rem;
+    font-style: italic;
+    color: var(--ink-2);
+    text-decoration: none;
+  }
+  .alerts-view__row-annotation:hover {
+    text-decoration: underline;
   }
   .alerts-view__lift {
     min-height: 32px;

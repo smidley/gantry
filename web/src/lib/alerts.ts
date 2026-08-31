@@ -5,6 +5,7 @@
 // ordering is deliberately the same "worst severity first, then oldest
 // within it" rule that file's own worstSeverity/anomaly ordering uses).
 import { fmtDuration } from './format';
+import { sortActiveInsights } from './insights';
 
 // --- resolve reasons ---------------------------------------------------
 
@@ -161,6 +162,63 @@ export function channelLabel(id: string): string {
   if (id === 'notify') return 'Unraid notifications';
   if (id.startsWith('webhook:')) return `Webhook: ${id.slice('webhook:'.length)}`;
   return id;
+}
+
+// --- insight annotation (Phase 5 Task 13) -----------------------------------
+
+// AnnotatableAlert/AnnotationInsight are the minimal shapes
+// annotateAlerts needs -- a firing alert's own kind+entity, and an
+// active insight's victim identity + rendered statement + ordering
+// fields (the exact SortableInsight shape sortActiveInsights already
+// takes). Deliberately narrow so this works against either the frame's
+// compact insights.active items or a fuller REST one interchangeably.
+export interface AnnotatableAlert {
+  kind: string;
+  entity: string;
+}
+
+export interface AnnotationInsight {
+  victim_kind: string;
+  victim: string;
+  statement: string;
+  severity: string;
+  confidence: string;
+  fired_at: number;
+}
+
+export interface InsightAnnotation {
+  text: string;
+  href: string;
+}
+
+// annotateAlerts is the sanctioned insight->alert bridge (Global
+// Constraints: "an active insight annotates a firing alert -- the alert
+// says what broke and the insight says why"). Pure: no component logic
+// at all, per the plan's own instruction -- the returned text is
+// already the complete "Cause: ..." / "Likely cause: ..." string, and
+// the component only ever renders it, never assembles it.
+//
+// A match requires BOTH kind and entity to agree -- an insight's
+// VictimKind vocabulary (container|host|array|disk|gpu) and an alert's
+// own Kind field share the same words for every case that can actually
+// collide in practice (array's own victim is always victim="" per
+// insight/rules.go's evalParitySlowdown, so it can never match an
+// entity-bearing alert row regardless). When more than one insight
+// names the same victim, the highest-ranked one (sortActiveInsights'
+// own severity/confidence/fired_at ordering) wins -- one annotation per
+// row, never a stack of them.
+export function annotateAlerts<T extends AnnotatableAlert>(
+  alerts: T[],
+  insights: AnnotationInsight[],
+): (T & { insightAnnotation?: InsightAnnotation })[] {
+  return alerts.map((a) => {
+    if (!a.entity) return { ...a };
+    const matches = insights.filter((i) => i.victim_kind === a.kind && i.victim === a.entity);
+    if (matches.length === 0) return { ...a };
+    const best = sortActiveInsights(matches)[0];
+    const label = best.confidence === 'confirmed' ? 'Cause' : 'Likely cause';
+    return { ...a, insightAnnotation: { text: `${label}: ${best.statement}`, href: '#/insights' } };
+  });
 }
 
 // --- rule descriptions (Task 11) -------------------------------------------

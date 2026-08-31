@@ -36,15 +36,19 @@ const (
 const (
 	EvidenceWindowSecs int64 = 120
 	SustainForSecs     int64 = 90
-	// awaitBaselineLookbackSecs is how far back disk-io-contention's
-	// gather step reads diskio.<dev>.await_ms so Baseline has real
-	// history to compute a rolling median from, distinct from (and
-	// larger than) the 120s evidence window itself.
-	awaitBaselineLookbackSecs int64 = 600
-	// spinupLookbackSecs is disk-spinup-churn's own required window
+	// BaselineLookbackSecs is how far back the engine's gather step reads
+	// a series that needs a rolling-median Baseline rather than a plain
+	// threshold: disk-io-contention's diskio.<dev>.await_ms and
+	// parity-slowdown's parity.speed_bps both split their fetched window
+	// at Now-EvidenceWindowSecs into "history" (everything older, fed to
+	// Baseline) and "recent" (the evidence window itself) -- so both need
+	// real history beyond the 120s window to compute a baseline from at
+	// all, not just the window Sustained itself checks.
+	BaselineLookbackSecs int64 = 600
+	// SpinupLookbackSecs is disk-spinup-churn's own required window
 	// (Task 6's table: "3 within 60m") -- comfortably inside the 15s
 	// unraid collector's ~112-minute ring coverage (Global Constraints).
-	spinupLookbackSecs int64 = 3600
+	SpinupLookbackSecs int64 = 3600
 )
 
 // MatchResult mirrors one Live.MatchSince call's pair of returns.

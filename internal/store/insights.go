@@ -149,3 +149,15 @@ func (s *Store) InsightHistory(ctx context.Context, from, to int64, limit int) (
 	}
 	return out, rows.Err()
 }
+
+// StaleActiveInsights marks every still-active row (resolved_at = 0,
+// the same predicate idx_insight_active enforces) resolved with reason
+// 'restart' at time at. The live ring is empty after a restart, so no
+// rule can be evaluated for the first window and a carried-over "active"
+// finding would be asserting something the engine cannot currently see
+// (Open question 5) -- if the contention is still happening, the engine
+// re-fires within two ticks anyway. An already-resolved row is untouched.
+func (s *Store) StaleActiveInsights(at int64) error {
+	_, err := s.db.Exec(`UPDATE insight_instances SET state='resolved', resolved_at=?, resolve_reason='restart' WHERE resolved_at = 0`, at)
+	return err
+}

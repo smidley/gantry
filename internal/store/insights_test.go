@@ -232,3 +232,47 @@ func TestInsightHistoryRespectsFromToAndLimit(t *testing.T) {
 	require.Len(t, limited, 2)
 	require.Equal(t, int64(4000), limited[0].ResolvedAt, "newest first, limit keeps the two newest")
 }
+
+// TestStaleActiveInsightsResolvesActivesWithRestartReason pins Open
+// question 5's recommendation: every still-active row is resolved with
+// reason 'restart' at boot, since the live ring is empty after a restart
+// and a carried-over "active" finding would be asserting something the
+// engine cannot currently see. An already-resolved row (with its own,
+// different reason) is left completely untouched.
+func TestStaleActiveInsightsResolvesActivesWithRestartReason(t *testing.T) {
+	s := newTestStore(t, nil)
+	activeID, err := s.UpsertInsight(fullInsight("disk-io-contention", "jellyfin", "qbittorrent", "disk3"))
+	require.NoError(t, err)
+
+	priorResolvedID, err := s.UpsertInsight(fullInsight("memory-squeeze", "", "plex", "memory"))
+	require.NoError(t, err)
+	require.NoError(t, s.ResolveInsight(priorResolvedID, 1000, "cleared"))
+
+	require.NoError(t, s.StaleActiveInsights(2000))
+
+	got, err := s.InsightHistory(context.Background(), 0, 0, 100)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+
+	byID := make(map[int64]InsightInstance, len(got))
+	for _, i := range got {
+		byID[i.ID] = i
+	}
+	require.Equal(t, "resolved", byID[activeID].State)
+	require.Equal(t, int64(2000), byID[activeID].ResolvedAt)
+	require.Equal(t, "restart", byID[activeID].ResolveReason)
+
+	require.Equal(t, "cleared", byID[priorResolvedID].ResolveReason, "an already-resolved row must be untouched")
+	require.Equal(t, int64(1000), byID[priorResolvedID].ResolvedAt, "an already-resolved row's resolved_at must be untouched")
+
+	active, err := s.ActiveInsights(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, active, "no active insight should survive a restart")
+}
+
+// TestStaleActiveInsightsNoopOnEmptyStore pins the degenerate case: a
+// fresh boot with no rows at all must not error.
+func TestStaleActiveInsightsNoopOnEmptyStore(t *testing.T) {
+	s := newTestStore(t, nil)
+	require.NoError(t, s.StaleActiveInsights(1000))
+}

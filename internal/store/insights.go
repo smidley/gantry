@@ -1,0 +1,151 @@
+package store
+
+import (
+	"context"
+	"fmt"
+)
+
+// InsightInstance is one row of insight_instances -- one field per column,
+// in schema order. See migrations/004_insights.sql for what each column
+// means; the comments live there, not duplicated here.
+type InsightInstance struct {
+	ID            int64
+	RuleID        string
+	VictimKind    string
+	Victim        string
+	Culprit       string
+	Culprits      string
+	Resource      string
+	State         string
+	Severity      string
+	Confidence    string
+	Tier          string
+	Statement     string
+	Evidence      string
+	StartedAt     int64
+	FiredAt       int64
+	ResolvedAt    int64
+	ResolveReason string
+	NotifiedAt    int64
+}
+
+const insightInstanceColumns = `id, rule_id, victim_kind, victim, culprit, culprits, resource, state, severity,
+	confidence, tier, statement, evidence, started_at, fired_at, resolved_at, resolve_reason, notified_at`
+
+func scanInsightInstance(row rowScanner, i *InsightInstance) error {
+	return row.Scan(&i.ID, &i.RuleID, &i.VictimKind, &i.Victim, &i.Culprit, &i.Culprits, &i.Resource, &i.State,
+		&i.Severity, &i.Confidence, &i.Tier, &i.Statement, &i.Evidence, &i.StartedAt, &i.FiredAt, &i.ResolvedAt,
+		&i.ResolveReason, &i.NotifiedAt)
+}
+
+// ActiveInsights returns every instance with resolved_at = 0 -- the exact
+// ActiveAlertInstances contract: what the engine (Task 7) walks every
+// tick and what the frame's `insights` block (Task 9) is filtered from.
+func (s *Store) ActiveInsights(ctx context.Context) ([]InsightInstance, error) {
+	rows, err := s.readDB.QueryContext(ctx, `SELECT `+insightInstanceColumns+` FROM insight_instances WHERE resolved_at = 0 ORDER BY started_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []InsightInstance
+	for rows.Next() {
+		var i InsightInstance
+		if err := scanInsightInstance(rows, &i); err != nil {
+			return nil, err
+		}
+		out = append(out, i)
+	}
+	return out, rows.Err()
+}
+
+// UpsertInsight inserts a new instance when ID is 0 (returning the
+// generated id) or updates the existing row in place otherwise -- the
+// exact UpsertAlertInstance contract. The insert path is where
+// idx_insight_active actually does its job: two concurrently-active rows
+// for the same (rule_id, victim, culprit, resource) violate that partial
+// unique index and this returns the resulting constraint error unchanged
+// -- there is no Go-side pre-check, by design (see the index's own
+// comment in 004_insights.sql).
+func (s *Store) UpsertInsight(i InsightInstance) (int64, error) {
+	if i.ID != 0 {
+		_, err := s.db.Exec(`UPDATE insight_instances SET rule_id=?, victim_kind=?, victim=?, culprit=?, culprits=?,
+			resource=?, state=?, severity=?, confidence=?, tier=?, statement=?, evidence=?, started_at=?, fired_at=?,
+			resolved_at=?, resolve_reason=?, notified_at=? WHERE id=?`,
+			i.RuleID, i.VictimKind, i.Victim, i.Culprit, i.Culprits, i.Resource, i.State, i.Severity, i.Confidence,
+			i.Tier, i.Statement, i.Evidence, i.StartedAt, i.FiredAt, i.ResolvedAt, i.ResolveReason, i.NotifiedAt, i.ID)
+		return i.ID, err
+	}
+	res, err := s.db.Exec(`INSERT INTO insight_instances (rule_id, victim_kind, victim, culprit, culprits, resource,
+		state, severity, confidence, tier, statement, evidence, started_at, fired_at, resolved_at, resolve_reason,
+		notified_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		i.RuleID, i.VictimKind, i.Victim, i.Culprit, i.Culprits, i.Resource, i.State, i.Severity, i.Confidence,
+		i.Tier, i.Statement, i.Evidence, i.StartedAt, i.FiredAt, i.ResolvedAt, i.ResolveReason, i.NotifiedAt)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ResolveInsight closes out an instance: state, resolved_at, and
+// resolve_reason are the only columns a resolve ever touches (the
+// evidence bundle keeps whatever it last held while firing -- Open
+// question 4's denormalised-at-fire-time numbers are a snapshot, not a
+// live view) -- the exact ResolveAlertInstance contract, including its
+// not-found guard: a plain UPDATE...WHERE matches zero rows without
+// erroring on its own, which would otherwise hide a caller (Task 7's
+// engine, which may hold a cached instance id) racing a row that was
+// already pruned or never existed.
+func (s *Store) ResolveInsight(id, at int64, reason string) error {
+	res, err := s.db.Exec(`UPDATE insight_instances SET state='resolved', resolved_at=?, resolve_reason=? WHERE id=?`,
+		at, reason, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("insight instance %d: not found", id)
+	}
+	return nil
+}
+
+// InsightHistory returns resolved instances (resolved_at > 0; an active
+// instance never appears here regardless of how old it started) with
+// resolved_at in [from, to] when either bound is non-zero, newest
+// resolution first, capped at limit -- the exact AlertHistory contract.
+func (s *Store) InsightHistory(ctx context.Context, from, to int64, limit int) ([]InsightInstance, error) {
+	q := `SELECT ` + insightInstanceColumns + ` FROM insight_instances WHERE resolved_at > 0`
+	var args []any
+	if from > 0 {
+		q += ` AND resolved_at >= ?`
+		args = append(args, from)
+	}
+	if to > 0 {
+		q += ` AND resolved_at <= ?`
+		args = append(args, to)
+	}
+	q += ` ORDER BY resolved_at DESC`
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := s.readDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []InsightInstance
+	for rows.Next() {
+		var i InsightInstance
+		if err := scanInsightInstance(rows, &i); err != nil {
+			return nil, err
+		}
+		out = append(out, i)
+	}
+	return out, rows.Err()
+}

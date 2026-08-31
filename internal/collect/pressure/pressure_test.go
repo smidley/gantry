@@ -52,38 +52,64 @@ func TestParseLineExtractsAvg10ForTheRequestedLineKindOnly(t *testing.T) {
 	require.False(t, ok, "a full line must not satisfy a some request")
 }
 
-func TestReadLineAvg10FindsTheRequestedLineRegardlessOfOrder(t *testing.T) {
+// TestReadAvg10PairFindsBothLinesRegardlessOfOrder covers the case
+// TestReadAvg10PairReadsBothValuesFromOneFileRead doesn't: "full"
+// appearing before "some" in the file must resolve identically, since
+// recordLine/readLineAvg10 (which readAvg10Pair replaces) scanned every
+// line rather than assuming position.
+func TestReadAvg10PairFindsBothLinesRegardlessOfOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "io")
+	writeFile(t, path, "full avg10=2.22 avg60=0 avg300=0 total=0\n"+
+		"some avg10=1.11 avg60=0 avg300=0 total=0\n")
+
+	some, someOK, full, fullOK := readAvg10Pair(path)
+
+	require.True(t, someOK)
+	require.InDelta(t, 1.11, some, 1e-9)
+	require.True(t, fullOK)
+	require.InDelta(t, 2.22, full, 1e-9)
+}
+
+// TestReadAvg10PairReturnsFalseForTheAbsentLineOnly mirrors
+// /proc/pressure/cpu at the host level: only "some", never "full" -- the
+// missing line must not be reported as a zero, and must not affect the
+// line that IS present.
+func TestReadAvg10PairReturnsFalseForTheAbsentLineOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cpu")
+	writeFile(t, path, "some avg10=1.50 avg60=0 avg300=0 total=0\n")
+
+	some, someOK, full, fullOK := readAvg10Pair(path)
+
+	require.True(t, someOK)
+	require.InDelta(t, 1.50, some, 1e-9)
+	require.False(t, fullOK, "a missing full line must not be reported as a zero")
+	require.Zero(t, full)
+}
+
+func TestReadAvg10PairMissingFile(t *testing.T) {
+	_, someOK, _, fullOK := readAvg10Pair(filepath.Join(t.TempDir(), "does-not-exist"))
+	require.False(t, someOK)
+	require.False(t, fullOK)
+}
+
+// TestReadAvg10PairReadsBothValuesFromOneFileRead pins P1's fix: some
+// and full used to cost two independent opens/scans of the same PSI
+// file (recordLine called once per line kind); readAvg10Pair extracts
+// both from a single open and a single scan.
+func TestReadAvg10PairReadsBothValuesFromOneFileRead(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "io")
 	writeFile(t, path, "some avg10=1.11 avg60=0 avg300=0 total=0\n"+
 		"full avg10=2.22 avg60=0 avg300=0 total=0\n")
 
-	val, ok := readLineAvg10(path, "some")
-	require.True(t, ok)
-	require.InDelta(t, 1.11, val, 1e-9)
+	some, someOK, full, fullOK := readAvg10Pair(path)
 
-	val, ok = readLineAvg10(path, "full")
-	require.True(t, ok)
-	require.InDelta(t, 2.22, val, 1e-9)
-}
-
-func TestReadLineAvg10ReturnsFalseWhenTheLineIsAbsent(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cpu")
-	// Mirrors /proc/pressure/cpu at the host level: only "some", never "full".
-	writeFile(t, path, "some avg10=1.50 avg60=0 avg300=0 total=0\n")
-
-	val, ok := readLineAvg10(path, "some")
-	require.True(t, ok)
-	require.InDelta(t, 1.50, val, 1e-9)
-
-	_, ok = readLineAvg10(path, "full")
-	require.False(t, ok, "a missing full line must not be reported as a zero")
-}
-
-func TestReadLineAvg10MissingFile(t *testing.T) {
-	_, ok := readLineAvg10(filepath.Join(t.TempDir(), "does-not-exist"), "some")
-	require.False(t, ok)
+	require.True(t, someOK)
+	require.InDelta(t, 1.11, some, 1e-9)
+	require.True(t, fullOK)
+	require.InDelta(t, 2.22, full, 1e-9)
 }
 
 func TestPressureNameAndInterval(t *testing.T) {

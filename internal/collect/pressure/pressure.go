@@ -103,7 +103,7 @@ func (c *Collector) Tier() string {
 // never emits one there, by definition -- the host's own idle task is
 // always eligible to run when nothing else can, so the CPU can never be
 // *fully* stalled system-wide. That falls out naturally here: the same
-// recordLine call that skips a missing file also skips a missing line
+// recordPair call that skips a missing file also skips a missing line
 // inside a file it opened fine, so there's no special case for cpu vs.
 // io/memory, or for host vs. container.
 func (c *Collector) Tick(ctx context.Context, now time.Time) error {
@@ -111,51 +111,69 @@ func (c *Collector) Tick(ctx context.Context, now time.Time) error {
 
 	for _, r := range resources {
 		path := filepath.Join(c.procRoot, "pressure", r.hostFile)
-		c.recordLine(store.SeriesKey{Kind: "host", Metric: "psi." + r.metric + ".some_pct"}, path, "some", ts)
-		c.recordLine(store.SeriesKey{Kind: "host", Metric: "psi." + r.metric + ".full_pct"}, path, "full", ts)
+		c.recordPair(store.SeriesKey{Kind: "host"}, r.metric, path, ts)
 	}
 
 	for _, m := range c.running() {
 		for _, r := range resources {
 			path := filepath.Join(c.cgroupRoot, "docker", m.ID, r.cgroupFile)
-			c.recordLine(store.SeriesKey{Kind: "container", Entity: m.Name, Metric: "psi." + r.metric + ".some_pct"}, path, "some", ts)
-			c.recordLine(store.SeriesKey{Kind: "container", Entity: m.Name, Metric: "psi." + r.metric + ".full_pct"}, path, "full", ts)
+			c.recordPair(store.SeriesKey{Kind: "container", Entity: m.Name}, r.metric, path, ts)
 		}
 	}
 	return nil
 }
 
-// recordLine reads one line kind ("some" or "full") from a PSI file and
-// records it under key if present. Absence -- a missing file, or a
+// recordPair reads path's "some" and "full" avg10 lines in a single
+// scan (readAvg10Pair) and records whichever are present under keyBase's
+// psi.<metric>.{some,full}_pct series. Absence -- a missing file, or a
 // missing line inside a file that opened fine -- means no series, never
 // a zero: a real 0%-stalled reading and "we don't have this number" are
 // different facts, and the second must never be reported as the first.
-func (c *Collector) recordLine(key store.SeriesKey, path, want string, ts int64) {
-	pct, ok := readLineAvg10(path, want)
-	if !ok {
-		return
+func (c *Collector) recordPair(keyBase store.SeriesKey, metric, path string, ts int64) {
+	some, someOK, full, fullOK := readAvg10Pair(path)
+	if someOK {
+		key := keyBase
+		key.Metric = "psi." + metric + ".some_pct"
+		c.sink.Record(key, ts, some)
 	}
-	c.sink.Record(key, ts, pct)
+	if fullOK {
+		key := keyBase
+		key.Metric = "psi." + metric + ".full_pct"
+		c.sink.Record(key, ts, full)
+	}
 }
 
-// readLineAvg10 opens a PSI file and extracts avg10 from whichever line
-// has want ("some" or "full") as its leading token, scanning every line
-// rather than assuming position. ok=false on any read failure, a
-// missing line, or an unparsable value.
-func readLineAvg10(path, want string) (float64, bool) {
+// readAvg10Pair opens a PSI file once and extracts avg10 from both its
+// "some" and "full" lines in a single scan, replacing two independent
+// opens/scans of the same file (one per line kind) with one. ok is
+// false for whichever line is absent or unparsable; a missing file
+// returns both false without error. Stops as soon as both are found --
+// a PSI file never carries more than one line of each kind.
+func readAvg10Pair(path string) (some float64, someOK bool, full float64, fullOK bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, false
+		return 0, false, 0, false
 	}
 	defer func() { _ = f.Close() }()
 
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		if val, ok := parseLine(sc.Text(), want); ok {
-			return val, true
+		line := sc.Text()
+		if !someOK {
+			if v, ok := parseLine(line, "some"); ok {
+				some, someOK = v, true
+			}
+		}
+		if !fullOK {
+			if v, ok := parseLine(line, "full"); ok {
+				full, fullOK = v, true
+			}
+		}
+		if someOK && fullOK {
+			break
 		}
 	}
-	return 0, false
+	return some, someOK, full, fullOK
 }
 
 // parseLine extracts avg10 from one PSI line if its leading token

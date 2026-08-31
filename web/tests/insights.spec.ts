@@ -59,8 +59,17 @@ test('demo-fire: a real finding fires through the engine and renders in Active o
   const finding = (activeNow ?? seenInHistory)!;
 
   await page.goto('#/insights');
+  // Map is the DEFAULT mode whenever something's active (the plan's
+  // own "the picture is the better first read" rule) -- List's own
+  // markup isn't even in the DOM until selected, so force it before
+  // looking for a List-only row.
+  await page.locator('.segmented__btn', { hasText: 'List' }).click();
   if (activeNow) {
-    const row = page.locator('.insights-view__row', { hasText: finding.statement.slice(0, 30) });
+    // :not(--history): the shared .insights-view__row class also
+    // marks a History row (see ActiveRowVs HistoryRow's own doc on
+    // dismiss round-trip below) -- this branch means to find the
+    // ACTIVE card specifically.
+    const row = page.locator('.insights-view__row:not(.insights-view__row--history)', { hasText: finding.statement.slice(0, 30) });
     await expect(row).toBeVisible();
     await expect(row.locator('.insights-view__chip')).toBeVisible();
   } else {
@@ -95,6 +104,10 @@ test('evidence drawer opens from an Active or History row, shows the statement a
   expect(id, 'at least one insight (active or historical) must exist within 4 minutes').not.toBeNull();
 
   await page.goto('#/insights');
+  // Force List mode -- see demo-fire's own identical doc: Map is the
+  // default whenever something's active, and the Active card's own
+  // markup (unlike History, which always renders) only exists in List.
+  await page.locator('.segmented__btn', { hasText: 'List' }).click();
   const row = page.locator('.insights-view__row, .insights-view__row--history').first();
   await expect(row).toBeVisible();
   await row.locator('.insights-view__statement-btn').click();
@@ -132,14 +145,26 @@ test('dismiss round-trip: dismissing an active card removes it and adds a histor
   // List mode explicitly -- the dismiss control lives on the Active
   // card, not the map.
   await page.locator('.segmented__btn', { hasText: 'List' }).click();
-  const row = page.locator('.insights-view__row', { hasText: target!.statement.slice(0, 30) });
+  // :not(--history): the shared .insights-view__row class also marks
+  // a History row, and this SAME statement text can plausibly already
+  // exist there too by the time this test runs on a shared server --
+  // an un-scoped selector would resolve to two elements (a real
+  // strict-mode failure this test hit once) and, worse, "not visible"
+  // would never truly go false since the history twin stays visible
+  // after dismiss regardless of what happens to the active one.
+  const row = page.locator('.insights-view__row:not(.insights-view__row--history)', { hasText: target!.statement.slice(0, 30) });
   await expect(row).toBeVisible();
 
   await row.locator('.insights-view__dismiss-btn').click();
   await row.locator('.insights-view__dismiss-menu .segmented__btn', { hasText: '1d' }).click();
 
   await expect(row).not.toBeVisible();
-  const historyRow = page.locator('.insights-view__row--history', { hasText: target!.statement.slice(0, 30) });
+  // .first(): InsightHistory orders newest-resolution-first (store's
+  // own doc), and Insights.svelte renders that order unchanged -- if
+  // this exact statement text was already in history from an earlier
+  // natural resolve, the row THIS dismiss just created is the newest,
+  // i.e. the first match.
+  const historyRow = page.locator('.insights-view__row--history', { hasText: target!.statement.slice(0, 30) }).first();
   await expect(historyRow).toBeVisible();
   await expect(historyRow).toContainText('dismissed');
 });

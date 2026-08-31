@@ -299,6 +299,39 @@ func TestEngineRuleDisabledMidFlightResolvesActivesWithRuleDisabled(t *testing.T
 	require.Equal(t, "rule-disabled", fs.instances[active[0].ID].ResolveReason)
 }
 
+// TestEngineRuleDisabledThenReenabledRefiresImmediatelyNoCooldown pins I2
+// (review): resolve used to arm the 30-min flap-guard cooldown for
+// EVERY reason but "superseded", including "rule-disabled" -- so
+// re-enabling a rule a human just disabled (or disabled briefly by
+// accident) locked the tuple out for 30 minutes even though nothing
+// about ITS OWN evidence ever cleared. Cap and flap guard are different
+// concerns: the cooldown protects against a real resolve flapping, not
+// against a rule's enabled bit changing twice in a row.
+func TestEngineRuleDisabledThenReenabledRefiresImmediatelyNoCooldown(t *testing.T) {
+	eng, fs, _, now := newOOMEngine(t)
+	fireOOM(fs, now.Unix())
+	require.NoError(t, eng.Tick(context.Background()))
+	active, _ := fs.ActiveInsights(context.Background())
+	require.Len(t, active, 1)
+
+	fs.configs = []store.InsightRuleConfig{{RuleID: RuleMemorySqueeze, Enabled: false}}
+	*now = now.Add(10 * time.Second)
+	require.NoError(t, eng.Tick(context.Background()))
+	stillActive, _ := fs.ActiveInsights(context.Background())
+	require.Empty(t, stillActive)
+
+	// Re-enable well inside what would have been the 1800s
+	// (DefaultCooldownSecs) flap-guard window, had one been armed. The
+	// ORIGINAL OOM event is still comfortably within the 120s evidence
+	// window, so re-enabling alone is enough to make the rule see it again.
+	fs.configs = nil
+	*now = now.Add(10 * time.Second)
+	require.NoError(t, eng.Tick(context.Background()))
+
+	refired, _ := fs.ActiveInsights(context.Background())
+	require.Len(t, refired, 1, "a rule-disabled resolve must never arm the cooldown -- re-enabling must let it fire again immediately")
+}
+
 // --- seam invariant 7: never both a single- and shared-culprit row --------
 
 // TestEngineSeamInvariant7NeverEmitsBothSingleAndSharedCulpritForSameTuple
@@ -415,13 +448,76 @@ func TestEngineGlobalCapKeepsHigherPriorityAndDropsTheRest(t *testing.T) {
 		}
 	}
 
-	require.Equal(t, len(victims)-eng.MaxActive, eng.Dropped())
+	// 3 drops, not 2 (len(victims)-eng.MaxActive): every victim's raw
+	// container.oom event stays in fs.events and in the 120s evidence
+	// window for the whole static-clock loop, so v4 -- capped at i=3 --
+	// is re-evaluated at i=4 too. Since I2's fix (review) correctly
+	// stops a "capped" resolve from arming the flap-guard cooldown, v4
+	// legitimately re-competes for the cap slot at i=4 (tied
+	// started_at, loses the same fetch-order tiebreak as v5) and is
+	// capped a second time: 1 (v4 at i=3) + 2 (v4 and v5 at i=4) = 3.
+	require.Equal(t, 3, eng.Dropped())
 	active, _ := fs.ActiveInsights(context.Background())
 	var gotVictims []string
 	for _, a := range active {
 		gotVictims = append(gotVictims, a.Victim)
 	}
 	require.ElementsMatch(t, victims[:eng.MaxActive], gotVictims, "the OLDEST tuples (earliest started_at) are the ones kept")
+}
+
+// TestEngineCappedThenRoomFreesRefiresImmediatelyNoCooldown pins I2
+// (review): a "capped" resolve must never arm the flap-guard cooldown
+// either. A finding crowded off by the display cap is a display
+// decision, not evidence that the contention itself resolved; locking
+// it out for 30 minutes even after room frees makes the active set
+// sticky for no reason tied to the evidence.
+func TestEngineCappedThenRoomFreesRefiresImmediatelyNoCooldown(t *testing.T) {
+	live := store.NewLive(2000)
+	fs := newFakeInsightStore()
+	now := time.Unix(4_100_000, 0)
+
+	eng := New(fs)
+	eng.MatchSince = live.MatchSince
+	eng.MatchPrefixSince = live.MatchPrefixSince
+	eng.Clock = func() time.Time { return now }
+	eng.MaxActive = 1
+
+	for ts := now.Unix() - 100; ts <= now.Unix()+50; ts += 10 {
+		live.Record(store.SeriesKey{Kind: "container", Entity: "redis", Metric: "mem.pct"}, ts, 42)
+	}
+
+	fs.events = append(fs.events, store.Event{TS: now.Unix(), Kind: "container.oom", Entity: "v1", Severity: "alert"})
+	require.NoError(t, eng.Tick(context.Background()))
+	active, _ := fs.ActiveInsights(context.Background())
+	require.Len(t, active, 1)
+	require.Equal(t, "v1", active[0].Victim)
+
+	// v2 competes for the one slot; tied on started_at (same static
+	// clock), so the fetch-order tiebreak keeps v1 (fired first) and
+	// caps v2.
+	fs.events = append(fs.events, store.Event{TS: now.Unix(), Kind: "container.oom", Entity: "v2", Severity: "alert"})
+	require.NoError(t, eng.Tick(context.Background()))
+	active, _ = fs.ActiveInsights(context.Background())
+	require.Len(t, active, 1)
+	require.Equal(t, "v1", active[0].Victim, "v1 fired first and keeps the one slot")
+	require.Equal(t, 1, eng.Dropped())
+
+	// Room frees: v2's OWN OOM event is still comfortably within the
+	// 120s evidence window, so raising the cap alone must let it become
+	// active immediately -- a capped resolve must never have armed a
+	// 30-minute cooldown against it.
+	eng.MaxActive = 2
+	require.NoError(t, eng.Tick(context.Background()))
+
+	active, _ = fs.ActiveInsights(context.Background())
+	require.Len(t, active, 2)
+	var gotV2 bool
+	for _, a := range active {
+		if a.Victim == "v2" {
+			gotV2 = true
+		}
+	}
+	require.True(t, gotV2, "a capped resolve must never arm the cooldown -- v2 must be active once room frees")
 }
 
 // --- gather: exactly one call per (kind, prefix)/(kind, metric) per tick --

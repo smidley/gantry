@@ -415,6 +415,16 @@ func (e *Engine) resolve(inst store.InsightInstance, now int64, reason string) {
 	if _, err := e.Store.AppendEvent(store.Event{Kind: "insight.resolved", Entity: inst.Victim, Severity: "info", Detail: detail}); err != nil {
 		log.Printf("insight engine: append insight.resolved event: %v", err)
 	}
+	if reason == "capped" || reason == "rule-disabled" {
+		// I2 (review): neither reason is evidence that the contention
+		// itself resolved -- "capped" is a display decision (Task 7's
+		// own cap, nothing about the tuple's own signal changed) and
+		// "rule-disabled" can be undone by the same human who did it.
+		// Arming the flap-guard here locked a tuple out for 30 minutes
+		// even after room freed or the rule was re-enabled, which is
+		// the cooldown protecting against the wrong kind of flap.
+		return
+	}
 	e.cooldownUntil[tupleKey{inst.RuleID, inst.Victim, inst.Resource}] = now + e.CooldownSecs
 }
 

@@ -77,6 +77,7 @@ export interface SnapshotDTO {
   gpu_meta: Record<string, GPUMetaDTO>; // pdev (or "gpu0"/"nvidia0") -> vendor+driver meta
   sources: Record<string, string>;
   alerts: AlertsBlockDTO;
+  insights: InsightsBlockDTO;
 }
 
 // FiringAlertDTO mirrors server.FiringAlertDTO -- one firing instance's
@@ -334,6 +335,202 @@ export async function putWebhookTargets(targets: WebhookTargetInput[]): Promise<
     throw new Error(body.error ?? `PUT /api/alerts/webhooks: ${res.status} ${res.statusText}`);
   }
   return body;
+}
+
+// --- insights (Phase 5) --------------------------------------------------
+
+// EvidenceDTO mirrors server.EvidenceDTO -- insight.Evidence's wire
+// shape. Not every field applies to every rule/shape/confidence
+// combination (the Go struct's own doc names which); an unused field is
+// simply its zero value here too. insights.ts's formatEvidenceNumber
+// decides which numbers a given finding's evidence drawer actually
+// renders, rather than this type trying to encode that itself.
+export interface EvidenceDTO {
+  culprit_share_pct: number;
+  device_util_pct: number;
+  await_ms: number;
+  victim_stall_pct: number;
+  window_minutes: number;
+  other_users: string[];
+  iowait_pct: number;
+  host_cpu_pct: number;
+  spin_count: number;
+  spin_window_minutes: number;
+  engine_busy_pct: number;
+  baseline_pct: number;
+}
+
+// InsightDTO mirrors server.InsightDTO -- one insight_instances row.
+// evidence is absent on the SSE frame's own insights.active items
+// (server's own doc: "statements included, evidence excluded") and
+// present everywhere else this type is used (GET /api/insights,
+// /api/insights/history, /api/insights/{id}, and the dismiss response).
+export interface InsightDTO {
+  id: number;
+  rule_id: string;
+  victim_kind: string;
+  victim: string;
+  culprit: string;
+  culprits: string;
+  resource: string;
+  state: string;
+  severity: string;
+  confidence: string;
+  tier: string;
+  statement: string;
+  started_at: number;
+  fired_at: number;
+  resolved_at: number;
+  resolve_reason: string;
+  evidence?: EvidenceDTO;
+}
+
+// InsightsBlockDTO mirrors server.InsightsBlockDTO -- SnapshotDTO's own
+// insights block AND GET /api/insights' response envelope share this
+// exact shape (see the Go type's own doc for why one struct serves
+// both: they differ only in whether each active item's evidence is
+// populated).
+export interface InsightsBlockDTO {
+  active: InsightDTO[];
+  tier: 'proxy' | 'psi';
+  suppressed: number;
+}
+
+// InsightRuleDTO mirrors server.InsightRuleDTO -- one compiled-in rule's
+// current tuning, for the Insights view's own Rules section. defaults
+// is the compiled-in set with no overrides applied, so the UI's own
+// "reset to default" control never has to hardcode the seven rules'
+// thresholds itself.
+export interface InsightRuleDTO {
+  rule_id: string;
+  title: string;
+  tier: 'proxy' | 'psi';
+  psi_upgrade: boolean;
+  enabled: boolean;
+  notify: boolean;
+  thresholds: Record<string, number>;
+  defaults: Record<string, number>;
+  updated_at: number;
+}
+
+export interface InsightRulesResponse {
+  rules: InsightRuleDTO[];
+}
+
+// InsightRuleInput is PUT /api/insights/rules' per-rule wire shape:
+// enable/notify/overrides only -- see server.insightRuleInput's own doc
+// for why a rule's SHAPE (its metric, its evaluator) has nowhere on
+// this type to even land.
+export interface InsightRuleInput {
+  rule_id: string;
+  enabled: boolean;
+  notify: boolean;
+  overrides: Record<string, number>;
+}
+
+// GraphNodeDTO/GraphEdgeDTO/InsightGraphDTO mirror server's own DTOs of
+// the same names exactly (api_insights.go) -- GET /api/insights/graph's
+// payload, mapLayout.ts's own input shape. See GraphEdgeDTO's Go doc
+// for the hub-and-spoke edge shape: a culprit edge always runs
+// container -> resource; a victim edge (only present when the finding
+// names a specific victim CONTAINER) runs resource -> container. Every
+// edge therefore always has exactly two endpoints.
+export interface GraphNodeDTO {
+  id: string;
+  kind: 'container' | 'resource';
+  label: string;
+}
+
+export interface GraphEdgeDTO {
+  id: string;
+  from: string;
+  to: string;
+  kind: 'culprit' | 'victim';
+  insight_id: number;
+  rule_id: string;
+  confidence: string;
+  severity: string;
+  share_pct: number;
+}
+
+export interface InsightGraphDTO {
+  nodes: GraphNodeDTO[];
+  edges: GraphEdgeDTO[];
+}
+
+// fetchInsights backs the Insights view's own initial load (the frame's
+// live insights.active block covers every later update with no polling
+// needed) -- this is the one call site that actually gets evidence
+// bundles for every active row up front, matching GET /api/insights'
+// own contract.
+export function fetchInsights(signal?: AbortSignal): Promise<InsightsBlockDTO> {
+  return getJSON<InsightsBlockDTO>('/api/insights', signal);
+}
+
+// fetchInsight backs the evidence drawer: one instance, active or
+// resolved, always WITH its evidence bundle.
+export function fetchInsight(id: number, signal?: AbortSignal): Promise<InsightDTO> {
+  return getJSON<InsightDTO>(`/api/insights/${id}`, signal);
+}
+
+export function fetchInsightHistory(
+  params: { from?: number; to?: number; limit?: number; signal?: AbortSignal } = {},
+): Promise<InsightDTO[]> {
+  const q = new URLSearchParams();
+  if (params.from !== undefined) q.set('from', String(params.from));
+  if (params.to !== undefined) q.set('to', String(params.to));
+  if (params.limit !== undefined) q.set('limit', String(params.limit));
+  const qs = q.toString();
+  return getJSON<InsightDTO[]>(`/api/insights/history${qs ? `?${qs}` : ''}`, params.signal);
+}
+
+export function fetchInsightRules(signal?: AbortSignal): Promise<InsightRulesResponse> {
+  return getJSON<InsightRulesResponse>('/api/insights/rules', signal);
+}
+
+// putInsightRules is the whole-document replace: the caller submits its
+// own already-edited full list, exactly as GET returned it (see
+// putAlertRules' own doc for the identical contract on the alerts
+// side -- the insights side has no builtin/user split to worry about,
+// every rule here is always compiled-in).
+export async function putInsightRules(rules: InsightRuleInput[]): Promise<InsightRulesResponse> {
+  const res = await fetch('/api/insights/rules', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rules }),
+  });
+  const body = (await res.json()) as InsightRulesResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `PUT /api/insights/rules: ${res.status} ${res.statusText}`);
+  }
+  return body;
+}
+
+// dismissInsight backs the Active row's own "not useful" control
+// (1d/7d/30d) -- resolves the instance server-side and returns its
+// fresh (now resolved) state, so the caller can move it straight into
+// History without a full refetch.
+export async function dismissInsight(id: number, days: number): Promise<InsightDTO> {
+  const res = await fetch(`/api/insights/${id}/dismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ days }),
+  });
+  const body = (await res.json()) as InsightDTO & { error?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `POST /api/insights/${id}/dismiss: ${res.status} ${res.statusText}`);
+  }
+  return body;
+}
+
+// fetchInsightGraph backs the interaction map's own load (mapLayout.ts
+// then lays it out client-side) -- the frame carries no graph block of
+// its own (Task 9's frame contract is active-findings-only), so the map
+// re-polls this on the same cadence the frame ticks rather than
+// deriving it from data already in hand; the payload is small (at most
+// MaxActive=10 findings' worth of nodes/edges) so this is cheap.
+export function fetchInsightGraph(signal?: AbortSignal): Promise<InsightGraphDTO> {
+  return getJSON<InsightGraphDTO>('/api/insights/graph', signal);
 }
 
 export interface ContainerInfo {

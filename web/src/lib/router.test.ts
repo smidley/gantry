@@ -15,6 +15,7 @@ describe('parseHash', () => {
     expect(parseHash('#/maintenance')).toEqual({ name: 'maintenance', params: {} });
     expect(parseHash('#/gpu')).toEqual({ name: 'gpu', params: {} });
     expect(parseHash('#/events')).toEqual({ name: 'events', params: {} });
+    expect(parseHash('#/insights')).toEqual({ name: 'insights', params: {} });
     expect(parseHash('#/alerts')).toEqual({ name: 'alerts', params: {} });
     expect(parseHash('#/settings')).toEqual({ name: 'settings', params: {} });
   });
@@ -28,6 +29,10 @@ describe('parseHash', () => {
 
   it('parses a top route with a resource param, for the Overview switcher deep link', () => {
     expect(parseHash('#/top/mem')).toEqual({ name: 'top', params: { resource: 'mem' } });
+  });
+
+  it('parses the insights map deep link into a mode param, same route name', () => {
+    expect(parseHash('#/insights/map')).toEqual({ name: 'insights', params: { mode: 'map' } });
   });
 
   it('parses a compare route, capturing the raw comma-joined names segment', () => {

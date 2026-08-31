@@ -19,6 +19,8 @@
   import { theme, resolveToken } from '../lib/theme.svelte';
   import { fmtRelTime } from '../lib/format';
   import { needsRebuild } from '../lib/chartRebuild';
+  import { buildAlignedData } from '../lib/seriesAlign';
+  import { xRange as resolveXRange } from '../lib/chartRange';
   import { advanceHeadState, headValue, liveWindowRange, LIVE_WINDOW_SEC } from '../lib/streamdriver';
   import { subscribeWhileVisible } from '../lib/streamdriver.svelte';
   import { live as liveStore } from '../lib/sse.svelte';
@@ -54,6 +56,14 @@
   // reimplementing either: uPlot indexes series from 1 (0 is the shared
   // x-axis), matching `series`'s own array position + 1 -- callers pass
   // that same 1-based index back in.
+
+  // xDomain (additive, optional -- D2 chart-integrity pass): [from, to]
+  // unix seconds, the REQUESTED window a fetched (non-live) caller asked
+  // /api/series for. When given, the x-axis shows exactly this span
+  // regardless of how much of it actually has data -- see
+  // lib/chartRange.ts's own doc for the sparse-data bug this fixes.
+  // Never set by a live caller (the sliding window below already owns
+  // live mode's own x-range every tick).
   let {
     series = [],
     unit = '',
@@ -63,6 +73,7 @@
     formatValue = undefined,
     live = false,
     showLegend = true,
+    xDomain = undefined,
   } = $props();
 
   export function focusSeries(idx) {
@@ -95,30 +106,13 @@
     critical: '--status-critical',
   };
 
-  // MIN_X_SPAN_SEC floors the x-axis's own domain width. Reproduced live
-  // while building the GPU/Events views: a chart fed by liveRing (any
-  // live-mode TimeChart -- Container Detail, GPU) starts with just one
-  // or two points in the first couple of seconds after mounting, and
-  // uPlot's own auto tick-picker mishandles that near-zero-width domain
-  // -- it renders YEAR-granularity gridlines (seen: "2027", "2028",
-  // "2029") with no visible data at all, rather than the correct
-  // few-second range, for as long as the real span stays under this
-  // floor. Once enough points arrive the natural span always exceeds
-  // 10s within a couple more ticks (2s cadence), so this only smooths
-  // over that brief startup window -- it never affects a real range
-  // (every history-fetched range is hours-to-months wide).
-  const MIN_X_SPAN_SEC = 10;
-
-  // xRange is uPlot's Range.Function for the x scale: pads a too-narrow
-  // [initMin, initMax] out symmetrically to MIN_X_SPAN_SEC, and passes
-  // a genuinely empty domain (no points at all yet) through unchanged
-  // rather than inventing a fake one.
-  function xRange(_u, initMin, initMax) {
-    if (initMin == null || initMax == null) return [initMin, initMax];
-    const span = initMax - initMin;
-    if (span >= MIN_X_SPAN_SEC) return [initMin, initMax];
-    const pad = (MIN_X_SPAN_SEC - span) / 2;
-    return [initMin - pad, initMax + pad];
+  // xScaleRange is uPlot's Range.Function for the x scale -- the actual
+  // padding-vs-explicit-domain decision is lib/chartRange.ts's pure
+  // xRange (unit-tested there); this is just the glue that hands it the
+  // CURRENT xDomain prop, which a plain top-level function closing over
+  // $props() already reads live (Svelte 5 props are signals).
+  function xScaleRange(_u, initMin, initMax) {
+    return resolveXRange(initMin, initMax, xDomain);
   }
 
   let container;
@@ -137,24 +131,13 @@
   let tooltip = $state(null); // {x, y, ts, rows: [{label, color, value}]}
   let hoverMarker = $state(null); // {x, marker}
 
-  // buildAlignedData unions every series' own timestamps into one
-  // shared x-axis (uPlot requires a single aligned x per plot), filling
-  // any series' missing timestamps with null -- a real gap, not a
-  // false zero.
-  function buildAlignedData(seriesList) {
-    const tsSet = new Set();
-    for (const s of seriesList) for (const [ts] of s.points) tsSet.add(ts);
-    const xs = Array.from(tsSet).sort((a, b) => a - b);
-    const idx = new Map(xs.map((ts, i) => [ts, i]));
-    const ys = seriesList.map(() => new Array(xs.length).fill(null));
-    seriesList.forEach((s, si) => {
-      for (const [ts, val] of s.points) {
-        const i = idx.get(ts);
-        if (i !== undefined) ys[si][i] = val;
-      }
-    });
-    return [xs, ...ys];
-  }
+  // buildAlignedData: see lib/seriesAlign.ts (moved there so it's
+  // independently unit-testable, matching this file's own established
+  // split for streamdriver/livering/theme -- see their own docs). Also
+  // now bridges an isolated small per-series gap via interpolation (that
+  // module's own doc has the full root-cause story for why this, not
+  // cross-series timestamp realignment, turned out to be the fix the
+  // "disconnected patches" bug actually needed).
 
   // alignedData is the last REAL buildAlignedData(series) result -- the
   // pristine target values every series is currently easing TOWARD in
@@ -340,7 +323,7 @@
         width,
         height,
         padding: [8, 8, 8, 8],
-        scales: { x: { time: true, range: xRange } },
+        scales: { x: { time: true, range: xScaleRange } },
         axes: [
           { stroke: ink, grid: { stroke: gridColor, width: 1 } },
           {
@@ -411,15 +394,18 @@
   $effect(() => {
     // Track every input that can affect either path below: a structural
     // one (series shape, unit, formatValue, a theme flip) goes through
-    // build(), same as before; markers is tracked here too even though
-    // it's absent from currentShape()'s shape, purely so a marker-only
-    // change still re-runs this effect at all -- drawMarkers/handleCursor
-    // already read the live `markers`/`series` bindings fresh on every
-    // uPlot redraw, so the setData call below is all a marker change
-    // needs to actually show up.
+    // build(), same as before; markers/xDomain are tracked here too even
+    // though they're absent from currentShape()'s shape, purely so a
+    // marker- or domain-only change still re-runs this effect at all --
+    // drawMarkers/handleCursor/xScaleRange already read the live
+    // `markers`/`series`/`xDomain` bindings fresh on every uPlot redraw,
+    // so the setData call below (which re-triggers uPlot's own x-scale
+    // auto-ranging for a non-live chart) is all either needs to actually
+    // show up.
     series;
     unit;
     markers;
+    xDomain;
     formatValue;
     theme.resolved;
 

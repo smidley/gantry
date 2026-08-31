@@ -106,12 +106,19 @@
   let fetchedSeries = $state({});
   let fetchInFlight = $state(false);
   let fetchFailed = $state(false);
+  // fetchedRange: the [from, to] this effect actually asked /api/series
+  // for -- handed to the chart below as xDomain (D2 chart-integrity
+  // pass) so the axis shows the FULL requested window even when this
+  // entity's own real history covers only a sliver of it. See
+  // lib/chartRange.ts's own doc for the sparse-data bug this fixes.
+  let fetchedRange = $state(undefined);
 
   $effect(() => {
     const range = activeRange;
     const gpuEntity = entity;
     if (range === 'live') {
       fetchedSeries = {};
+      fetchedRange = undefined;
       fetchFailed = false;
       fetchInFlight = false;
       return;
@@ -119,6 +126,7 @@
     const seconds = RANGE_SECONDS[range];
     const to = Math.floor(Date.now() / 1000);
     const from = to - seconds;
+    fetchedRange = [from, to];
     const controller = new AbortController();
     fetchInFlight = true;
     fetchFailed = false;
@@ -184,7 +192,7 @@
   {:else if fetchInFlight}
     <p class="microlabel gpu-entity-card__loading">Loading…</p>
   {:else if series.length > 0}
-    <TimeChart {series} formatValue={fmtPct} {syncKey} live={activeRange === 'live'} />
+    <TimeChart {series} formatValue={fmtPct} {syncKey} live={activeRange === 'live'} xDomain={activeRange === 'live' ? undefined : fetchedRange} />
   {:else if activeRange === 'live' && liveSeedPending}
     <!-- Live ring is still cold AND we don't yet know whether the seed
          found real history -- rendering nothing here (rather than the

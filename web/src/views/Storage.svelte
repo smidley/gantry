@@ -57,17 +57,21 @@
   // temperature. Each line on the chart should be a separate drive."
   // Reuses the Metrics page's own multi-line hero pattern (TopConsumers.
   // svelte: legend chips, focus-on-hover, click-to-toggle) plus its own
-  // live-seed history fix (heroSlots' seed()/resetAssignment(), mirrored
-  // below by makeDiskSlot) -- every drive is visible from mount (Scott's
-  // own follow-up ask: no default-hidden set, "one /api/series per drive
+  // live-seed history fix (heroLines' seed/prune, mirrored below by
+  // makeDiskSlot) -- every drive is visible from mount (Scott's own
+  // follow-up ask: no default-hidden set, "one /api/series per drive
   // per metric on the ring tier is cheap"), each with its own categorical
-  // line color by SLOT POSITION (seriesColorVar, same "color follows
-  // position" rule Compare/the hero chart already use), not the kind
-  // tint the legend used to draw its whole chip in -- the kind tint is
-  // demoted to a small accent dot on the chip instead (diskKind's own
-  // ssd/nvme/usb/hdd read), since a categorical hue is the thing that
-  // actually tells two same-kind drives (disk1 vs disk2) apart, while
-  // kind is still worth a quiet secondary glance.
+  // line color by SLOT POSITION (seriesColorVar) -- unlike the Metrics
+  // hero chart and Compare (containerColor's own per-name hash, since a
+  // container can leave and re-enter a ranking), a disk BAY'S slot IS
+  // the stable identity here: it keeps the same position for the life of
+  // the array regardless of which physical drive currently occupies it,
+  // so position-based color stays correct. Not the kind tint the legend
+  // used to draw its whole chip in -- the kind tint is demoted to a
+  // small accent dot on the chip instead (diskKind's own ssd/nvme/usb/
+  // hdd read), since a categorical hue is the thing that actually tells
+  // two same-kind drives (disk1 vs disk2) apart, while kind is still
+  // worth a quiet secondary glance.
   //
   // diskio has no per-disk-ENTITY series of its own (host.go's real
   // per-device counters, and fake.go's own mirror of that shape, are
@@ -420,24 +424,33 @@
   let fetchedDiskSeries = $state({});
   let chartLoading = $state(false);
   let chartFailed = $state(false);
+  // fetchedChartRange: the [from, to] this effect actually asked
+  // /api/series for -- handed to the header chart as xDomain (D2
+  // chart-integrity pass) so the axis shows the FULL requested window
+  // even when a drive's own real history covers only a sliver of it. See
+  // lib/chartRange.ts's own doc for the sparse-data bug this fixes.
+  let fetchedChartRange = $state(undefined);
 
   $effect(() => {
     const w = chartWindow;
     if (w === 'now') {
       fetchedDiskSeries = {};
+      fetchedChartRange = undefined;
       chartFailed = false;
       chartLoading = false;
       return;
     }
+    const seconds = CHART_WINDOW_SECONDS[w];
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - seconds;
+    fetchedChartRange = [from, to];
+
     const names = untrack(() => diskNames);
     const dm = untrack(() => diskMeta);
     if (names.length === 0) {
       fetchedDiskSeries = {};
       return;
     }
-    const seconds = CHART_WINDOW_SECONDS[w];
-    const to = Math.floor(Date.now() / 1000);
-    const from = to - seconds;
     const controller = new AbortController();
     chartLoading = true;
     chartFailed = false;
@@ -713,6 +726,7 @@
         series={visibleChartSeries}
         formatValue={CHART_FORMATTERS[chartMetric]}
         live={chartWindow === 'now'}
+        xDomain={chartWindow === 'now' ? undefined : fetchedChartRange}
         height={240}
         showLegend={false}
       />

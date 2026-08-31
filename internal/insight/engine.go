@@ -96,6 +96,21 @@ type Engine struct {
 	ClearForSecs int64
 	CooldownSecs int64
 	MaxActive    int
+	// FakeSustainSecs, set only in fake-data mode (main.go, alongside
+	// ClearForSecs/CooldownSecs above), compresses every sustain-bearing
+	// rule's own "sustain_secs" threshold at READ time (Tick, via
+	// applyFakeSustainCompression below) -- I5 (review): this used to be
+	// a compressed override DefaultRuleConfigs(fast) baked into
+	// insight_rule_config at seed time, which persisted past the
+	// fake-data session that needed it (SeedInsightRuleConfigs' own
+	// insert-or-ignore contract never re-touches an existing row) and
+	// silently compressed every later REAL boot of the same database.
+	// Nothing here is ever written to the store, so a real boot (this
+	// field left 0, its own zero value) always sees the true 90s/120s
+	// numbers, and a real override a user set through the rule editor
+	// still wins over this compression -- see
+	// applyFakeSustainCompression's own doc for exactly how.
+	FakeSustainSecs int64
 
 	// lastSeen tracks, per tuple, the most recent tick's unix-seconds
 	// `now` at which some rule returned a Finding for it -- the clear-for
@@ -205,6 +220,8 @@ func (e *Engine) Tick(ctx context.Context) error {
 		}
 		overrides[c.RuleID] = ov
 	}
+	rules := Rules(overrides)
+	applyFakeSustainCompression(rules, overrides, e.FakeSustainSecs)
 
 	active, err := e.Store.ActiveInsights(ctx)
 	if err != nil {
@@ -224,7 +241,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 	in := e.gather(ctx, now)
 
 	seen := make(map[tupleKey]bool, len(active))
-	for _, rule := range Rules(overrides) {
+	for _, rule := range rules {
 		cfg, hasCfg := cfgByID[rule.ID]
 		if hasCfg && !cfg.Enabled {
 			continue
@@ -270,6 +287,45 @@ func (e *Engine) Tick(ctx context.Context) error {
 
 	e.enforceCap(ctx, now)
 	return nil
+}
+
+// applyFakeSustainCompression compresses every sustain-bearing rule's
+// (already-merged) Thresholds["sustain_secs"] to secs, in place on
+// rules -- UNLESS dbOverrides, the raw map Tick decoded straight from
+// store.InsightRuleConfig.Overrides, already names "sustain_secs" for
+// that rule: a real value a user set through the rule editor always
+// wins over fake mode's own demo compression.
+//
+// This runs AFTER Rules(dbOverrides) has already built rules, and
+// mutates each Thresholds map directly rather than re-entering
+// mergeThresholds -- deliberately: mergeThresholds' own floor (I4,
+// review; thresholdMinimums["sustain_secs"] = 30) exists to stop a REAL
+// override from compressing sustain_secs into a single-sample trigger,
+// but fake mode's compression is a distinct, engine-level decision
+// (typically 10s, well below that floor) that must bypass it entirely
+// rather than be clamped back up to 30 and defeat Task 10's whole demo
+// schedule. Since Rule.Thresholds and each Rule's own Eval closure share
+// the SAME map (Rules' own construction), mutating it here changes what
+// Eval reads too -- no second plumbing path needed.
+//
+// I5 (review): this is the engine's OWN read-time mechanism, replacing
+// DefaultRuleConfigs(fake)'s old seed-time override -- nothing here is
+// ever written back to the store, so a fake-data boot can never leave a
+// compressed number for a later real boot to inherit. secs<=0 (New's
+// own zero-value default, and every real-mode boot) is a complete no-op.
+func applyFakeSustainCompression(rules []Rule, dbOverrides map[string]map[string]float64, secs int64) {
+	if secs <= 0 {
+		return
+	}
+	for i := range rules {
+		if _, hasSustain := rules[i].Thresholds["sustain_secs"]; !hasSustain {
+			continue
+		}
+		if _, userSet := dbOverrides[rules[i].ID]["sustain_secs"]; userSet {
+			continue // a real override survives fake mode's own compression
+		}
+		rules[i].Thresholds["sustain_secs"] = float64(secs)
+	}
 }
 
 // safeEval isolates one rule's panic from the rest of the tick --

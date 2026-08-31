@@ -7,7 +7,6 @@
 package insight
 
 import (
-	"encoding/json"
 	"sort"
 	"strings"
 
@@ -190,20 +189,86 @@ var librarySpecs = []ruleSpec{
 	},
 }
 
+// thresholdMinimums is mergeThresholds' own floor, beside each rule's
+// defaults (I4, review): an override may raise or lower a threshold from
+// its compiled-in default, but never past the point where the check it
+// gates stops meaning what its name says -- "sustain_secs:1" is a
+// single-sample trigger even against the collectors' own ~15s poll
+// interval, not "sustained" by any reading of the word.
+//
+// sustain_secs' floor (30s, two collector polls) is the one entry not
+// derived from the smallest compiled default sharing a key name: every
+// rule's own sustain_secs default is already 90s or 120s (rules.go's
+// librarySpecs), comfortably above 30, so this floor exists purely to
+// keep the WORD "sustained" honest, not to preserve any rule's tuning
+// headroom -- see rules_test.go's own TestSustainSecsOverrideCompressesTheFiringWindow,
+// which uses 30 directly as the shortest a real (non-fake-mode)
+// override may ever go.
+//
+// Every other entry is the smallest compiled default librarySpecs
+// already ships under that same key name (e.g. culprit_share_floor_pct's
+// 10 is gpu-engine-contention's own default), so the floor never
+// disagrees with a shipped, reviewed default -- it only blocks an
+// override from going MORE permissive than anything the library has
+// actually been designed and reviewed for. min_culprits is its own
+// case: 2 is not "somewhat safer than zero", it IS the co-tenancy
+// requirement gpu-engine-contention's Eval enforces in code (a lone
+// busy container is not contention) -- an override of 1 would defeat
+// that requirement through a threshold edit rather than a code change,
+// so its floor equals its only sane value rather than some fraction of
+// it.
+//
+// fake-data mode's own sustain_secs compression (Engine.FakeSustainSecs,
+// engine.go) is applied AFTER this merge, not through it -- see that
+// field's own doc for why it must bypass this floor rather than clamp
+// against it.
+var thresholdMinimums = map[string]float64{
+	"sustain_secs":                     30,
+	"util_pct_floor":                   50,
+	"await_multiplier":                 1.0,
+	"culprit_share_floor_pct":          10,
+	"psi_stall_floor":                  5,
+	"iowait_pct_floor":                 5,
+	"psi_io_some_floor":                5,
+	"psi_io_full_floor":                5,
+	"throttled_pct_floor":              1,
+	"psi_cpu_some_floor":               5,
+	"culprit_cpu_pct_floor":            10,
+	"host_cpu_total_floor":             50,
+	"speed_floor_fraction_of_baseline": 0.1,
+	"min_transitions":                  2,
+	"window_minutes":                   10,
+	"attribution_window_secs":          10,
+	"engine_busy_floor":                50,
+	"min_culprits":                     2,
+	"mem_used_pct_floor":               50,
+	"psi_mem_some_floor":               5,
+	"culprit_mem_pct_floor":            10,
+}
+
 // mergeThresholds returns a fresh map: every default, with override's
 // entries applied on top -- an override may only ever change a VALUE for
 // an already-named threshold; it can neither add a new knob an evaluator
 // doesn't read nor remove one the evaluator needs, since the evaluator
 // always reads by name with the default map as its own fallback base.
+// An override's value is clamped up to thresholdMinimums[k] when one is
+// named for that key (I4, review); a default is never clamped -- it's
+// already a compiled-in, reviewed number, and fake mode's own compressed
+// defaults (applyFakeSustainCompression, engine.go) depend on being able
+// to sit below sustain_secs' own floor here.
 func mergeThresholds(defaults, overrides map[string]float64) map[string]float64 {
 	out := make(map[string]float64, len(defaults))
 	for k, v := range defaults {
 		out[k] = v
 	}
 	for k, v := range overrides {
-		if _, known := defaults[k]; known {
-			out[k] = v
+		if _, known := defaults[k]; !known {
+			continue
 		}
+		if min, hasMin := thresholdMinimums[k]; hasMin && v < min {
+			v = min
+		}
+		out[k] = v
 	}
 	return out
 }
@@ -233,45 +298,33 @@ func Rules(overrides map[string]map[string]float64) []Rule {
 // (tests, and the engine's own first tick before it has read any).
 func DefaultRules() []Rule { return Rules(nil) }
 
-// fastSustainSecsOverride is every sustain-bearing rule's own
-// "sustain_secs" threshold, compressed for fake-data mode -- the
-// DefaultAlertRules(fast) counterpart for this schema (Task 10): a real
-// box always seeds the true 90s/120s numbers (DefaultRuleConfigs(false)),
-// but a demo session needs a rule to count as sustained within seconds,
-// not minutes, to complete its whole scripted story in a few short
-// minutes of wall-clock time.
-const fastSustainSecsOverride = 10
-
 // DefaultRuleConfigs returns one store.InsightRuleConfig per compiled-in
 // rule -- enabled, notify off (Global Constraints: no seeded rule may
-// ever page by default) -- for main.go's boot-time SeedInsightRuleConfigs
-// call, the exact store.DefaultAlertRules counterpart for this schema.
-// UpdatedAt is left 0; SeedInsightRuleConfigs stamps it at insert time,
-// matching DefaultAlertRules' own convention. Lives here, not in package
-// store, because the rule ID list's one authoritative source is this
-// compiled-in library (librarySpecs) -- duplicating those seven strings
-// into a second, store-side list would be exactly the kind of
-// hand-maintained copy this phase's own review keeps flagging.
+// ever page by default), no overrides -- for main.go's boot-time
+// SeedInsightRuleConfigs call, the exact store.DefaultAlertRules
+// counterpart for this schema. UpdatedAt is left 0; SeedInsightRuleConfigs
+// stamps it at insert time, matching DefaultAlertRules' own convention.
+// Lives here, not in package store, because the rule ID list's one
+// authoritative source is this compiled-in library (librarySpecs) --
+// duplicating those seven strings into a second, store-side list would
+// be exactly the kind of hand-maintained copy this phase's own review
+// keeps flagging.
 //
-// fast, true only in fake-data mode, overrides every rule's own
-// "sustain_secs" threshold (the ones that have one -- disk-spinup-churn
-// doesn't) down to fastSustainSecsOverride, mirroring
-// DefaultAlertRules(fast)'s identical compression of for_seconds/
-// clear_seconds. This is SeedInsightRuleConfigs' own insert-or-ignore
-// contract: it only ever takes effect on the very first boot of a fresh
-// database, exactly like the alert rules' own fast seed.
-func DefaultRuleConfigs(fast bool) []store.InsightRuleConfig {
+// This used to take a `fast bool` and bake a compressed "sustain_secs"
+// override into fake-data mode's seeded rows -- I5 (review): that
+// override was written through the SAME insert-or-ignore seed a real
+// boot uses, so SeedInsightRuleConfigs' own never-touch-an-existing-row
+// contract meant one fake-data boot's compression outlived it, silently
+// compressing every later REAL boot of the same database forever.
+// Fake-mode compression is now applied at read time instead
+// (Engine.FakeSustainSecs, applyFakeSustainCompression -- engine.go):
+// nothing fake-mode-specific is ever written to the store, so a real
+// boot always sees the true numbers regardless of what any earlier boot
+// was started with.
+func DefaultRuleConfigs() []store.InsightRuleConfig {
 	out := make([]store.InsightRuleConfig, len(librarySpecs))
 	for i, spec := range librarySpecs {
-		c := store.InsightRuleConfig{RuleID: spec.id, Enabled: true, Notify: false}
-		if fast {
-			if _, hasSustain := spec.defaults["sustain_secs"]; hasSustain {
-				if b, err := json.Marshal(map[string]float64{"sustain_secs": fastSustainSecsOverride}); err == nil {
-					c.Overrides = string(b)
-				}
-			}
-		}
-		out[i] = c
+		out[i] = store.InsightRuleConfig{RuleID: spec.id, Enabled: true, Notify: false}
 	}
 	return out
 }

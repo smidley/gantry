@@ -684,3 +684,58 @@ func TestDismissalMatchesSeamInvariant6(t *testing.T) {
 	require.False(t, dismissalMatches(store.InsightDismissal{}, RuleDiskIOContention, "jellyfin", "qbittorrent", "disk3"),
 		"an all-empty dismissal matches NOTHING -- there is no scope:all marker column in 004_insights.sql to opt in with")
 }
+
+// --- applyFakeSustainCompression (I5, review) ------------------------------
+
+// TestApplyFakeSustainCompressionCompressesEverySustainBearingRule pins
+// Task 10's own fake-mode requirement, now met at read time instead of
+// via a seeded override: every rule that HAS a sustain_secs threshold
+// gets it compressed BELOW mergeThresholds' own 30s floor (I4) --
+// proving this bypasses that floor entirely rather than being clamped
+// back up and defeating the whole demo schedule. disk-spinup-churn
+// (which has no sustain_secs at all) is left alone.
+func TestApplyFakeSustainCompressionCompressesEverySustainBearingRule(t *testing.T) {
+	rules := DefaultRules()
+
+	applyFakeSustainCompression(rules, nil, 10)
+
+	byID := make(map[string]Rule, len(rules))
+	for _, r := range rules {
+		byID[r.ID] = r
+	}
+	for _, id := range []string{RuleDiskIOContention, RuleIODrivenCPULoad, RuleCPUStarvation, RuleParitySlowdown, RuleGPUEngineContention, RuleMemorySqueeze} {
+		require.Equal(t, 10.0, byID[id].Thresholds["sustain_secs"], "rule %s must be compressed BELOW the 30s floor", id)
+	}
+	require.NotContains(t, byID[RuleDiskSpinupChurn].Thresholds, "sustain_secs", "disk-spinup-churn has no sustain_secs threshold to compress")
+}
+
+// TestApplyFakeSustainCompressionLeavesARealUserOverrideAlone pins the
+// other half of I5's fix: a value a user actually set through the rule
+// editor (dbOverrides, the raw map Tick decodes from
+// store.InsightRuleConfig.Overrides) must survive fake mode's own
+// compression, not be silently overwritten by it.
+func TestApplyFakeSustainCompressionLeavesARealUserOverrideAlone(t *testing.T) {
+	dbOverrides := map[string]map[string]float64{RuleDiskIOContention: {"sustain_secs": 45}}
+	rules := Rules(dbOverrides)
+
+	applyFakeSustainCompression(rules, dbOverrides, 10)
+
+	byID := make(map[string]Rule, len(rules))
+	for _, r := range rules {
+		byID[r.ID] = r
+	}
+	require.Equal(t, 45.0, byID[RuleDiskIOContention].Thresholds["sustain_secs"], "a real override the user set must win over fake mode's compression")
+	require.Equal(t, 10.0, byID[RuleCPUStarvation].Thresholds["sustain_secs"], "every other sustain-bearing rule is still compressed")
+}
+
+// TestApplyFakeSustainCompressionNoOpWhenSecsIsZero pins real mode's own
+// behavior: FakeSustainSecs' zero value (New's own default, and every
+// real boot) must never touch the built rules at all.
+func TestApplyFakeSustainCompressionNoOpWhenSecsIsZero(t *testing.T) {
+	rules := DefaultRules()
+	want := rules[0].Thresholds["sustain_secs"]
+
+	applyFakeSustainCompression(rules, nil, 0)
+
+	require.Equal(t, want, rules[0].Thresholds["sustain_secs"])
+}

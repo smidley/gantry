@@ -645,30 +645,39 @@ func TestDefaultRulesReturnsAllSevenWithCompiledInDefaults(t *testing.T) {
 // no separate engine-level compression path is needed.
 func TestSustainSecsOverrideCompressesTheFiringWindow(t *testing.T) {
 	in := diskIOContentionIn(testNow, true, true)
-	// Shrink the covered history to 15s -- far short of the DEFAULT 90s
-	// sustain_secs, but comfortably past a 5s override.
-	in.HostDiskIO.Samples[""]["diskio.sde.util_pct"] = seriesRange(testNow-15, testNow, 5, 97)
-	in.HostDiskIO.Oldest[""]["diskio.sde.util_pct"] = testNow - 15
+	// Shrink the covered history to 35s -- far short of the DEFAULT 90s
+	// sustain_secs, but comfortably past a 30s override (I4's own floor,
+	// review: an override may never compress sustain_secs below 30s --
+	// a 5s override, as this test originally used, would itself now
+	// clamp up to 30, so this uses the floor value directly).
+	in.HostDiskIO.Samples[""]["diskio.sde.util_pct"] = seriesRange(testNow-35, testNow, 5, 97)
+	in.HostDiskIO.Oldest[""]["diskio.sde.util_pct"] = testNow - 35
 	older := seriesRange(testNow-700, testNow-130, 10, 5)
-	recent := seriesRange(testNow-15, testNow, 5, 45)
+	recent := seriesRange(testNow-35, testNow, 5, 45)
 	await := append(append([]store.Sample{}, older...), recent...)
 	in.HostDiskIO.Samples[""]["diskio.sde.await_ms"] = await
 	in.HostDiskIO.Oldest[""]["diskio.sde.await_ms"] = testNow - 700
 
-	require.Empty(t, DefaultRules()[0].Eval(in), "15s of history cannot satisfy the default 90s sustain_secs")
+	require.Empty(t, DefaultRules()[0].Eval(in), "35s of history cannot satisfy the default 90s sustain_secs")
 
-	compressed := Rules(map[string]map[string]float64{RuleDiskIOContention: {"sustain_secs": 5}})
-	require.NotEmpty(t, compressed[0].Eval(in), "the same 15s of history satisfies a 5s sustain_secs override")
+	compressed := Rules(map[string]map[string]float64{RuleDiskIOContention: {"sustain_secs": 30}})
+	require.NotEmpty(t, compressed[0].Eval(in), "the same 35s of history satisfies a 30s sustain_secs override")
 }
 
-func TestDefaultRuleConfigsSeedsAllSevenEnabledWithNotifyOff(t *testing.T) {
-	configs := DefaultRuleConfigs(false)
+// TestDefaultRuleConfigsSeedsAllSevenEnabledWithNotifyOffNoOverrides pins
+// I5's own fix (review): DefaultRuleConfigs no longer takes a `fast`
+// parameter at all -- fake-mode's sustain_secs compression moved to the
+// engine's own read-time step (applyFakeSustainCompression, engine.go),
+// so nothing this function returns is ever mode-dependent. Every boot,
+// fake or real, seeds the exact same seven rows.
+func TestDefaultRuleConfigsSeedsAllSevenEnabledWithNotifyOffNoOverrides(t *testing.T) {
+	configs := DefaultRuleConfigs()
 
 	require.Len(t, configs, 7)
 	for _, c := range configs {
 		require.True(t, c.Enabled, "rule %s must default enabled", c.RuleID)
 		require.False(t, c.Notify, "rule %s must default notify off -- Global Constraints: no seeded rule pages by default", c.RuleID)
-		require.Empty(t, c.Overrides, "a real (non-fake) boot seeds no overrides -- the true 90s/120s numbers")
+		require.Empty(t, c.Overrides, "nothing fake-mode-specific is ever seeded -- see applyFakeSustainCompression")
 	}
 	ids := make([]string, len(configs))
 	for i, c := range configs {
@@ -680,38 +689,61 @@ func TestDefaultRuleConfigsSeedsAllSevenEnabledWithNotifyOff(t *testing.T) {
 	}, ids)
 }
 
-// TestDefaultRuleConfigsFastCompressesSustainSecsOnEverySustainBearingRule
-// pins Task 10's own fake-mode requirement: every rule that HAS a
-// sustain_secs threshold gets it compressed; disk-spinup-churn (which has
-// none) is left with no override at all rather than one that would be
-// silently ignored.
-func TestDefaultRuleConfigsFastCompressesSustainSecsOnEverySustainBearingRule(t *testing.T) {
-	configs := DefaultRuleConfigs(true)
-
-	byID := make(map[string]store.InsightRuleConfig, len(configs))
-	for _, c := range configs {
-		byID[c.RuleID] = c
-	}
-
-	for _, id := range []string{RuleDiskIOContention, RuleIODrivenCPULoad, RuleCPUStarvation, RuleParitySlowdown, RuleGPUEngineContention, RuleMemorySqueeze} {
-		require.NotEmpty(t, byID[id].Overrides, "rule %s must carry a compressed sustain_secs override in fast mode", id)
-		require.JSONEq(t, `{"sustain_secs": 10}`, byID[id].Overrides)
-	}
-	require.Empty(t, byID[RuleDiskSpinupChurn].Overrides, "disk-spinup-churn has no sustain_secs threshold to compress")
-
-	// The override must actually take effect through the normal Rules()
-	// merge path -- proving this isn't just a config row nothing reads.
-	rules := Rules(map[string]map[string]float64{RuleDiskIOContention: {"sustain_secs": fastSustainSecsOverride}})
-	for _, r := range rules {
-		if r.ID == RuleDiskIOContention {
-			require.Equal(t, float64(fastSustainSecsOverride), r.Thresholds["sustain_secs"])
-		}
-	}
-}
-
 func TestMergeThresholdsIgnoresUnknownOverrideKeys(t *testing.T) {
 	defaults := map[string]float64{"a": 1, "b": 2}
 	got := mergeThresholds(defaults, map[string]float64{"b": 20, "c": 30})
 
 	require.Equal(t, map[string]float64{"a": 1, "b": 20}, got, "an override for a threshold the rule doesn't define is silently dropped, never smuggled in as a new knob")
+}
+
+// TestMergeThresholdsClampsSustainSecsOverrideToTheReviewedFloor pins I4
+// (review) 's own named example: sustain_secs:1 is a single-sample
+// trigger, so an override may never push it below 30s (two 15s
+// collector polls) regardless of what a user, or a hand-edited settings
+// blob, tries to set it to.
+func TestMergeThresholdsClampsSustainSecsOverrideToTheReviewedFloor(t *testing.T) {
+	defaults := map[string]float64{"sustain_secs": 90}
+
+	got := mergeThresholds(defaults, map[string]float64{"sustain_secs": 1})
+
+	require.Equal(t, map[string]float64{"sustain_secs": 30}, got, "an override below the floor clamps up to it")
+}
+
+// TestMergeThresholdsDoesNotClampAnOverrideAtOrAboveItsMinimum proves the
+// floor is a floor, not a pin: an override that already clears its
+// minimum passes through completely unchanged.
+func TestMergeThresholdsDoesNotClampAnOverrideAtOrAboveItsMinimum(t *testing.T) {
+	defaults := map[string]float64{"sustain_secs": 90}
+
+	got := mergeThresholds(defaults, map[string]float64{"sustain_secs": 45})
+
+	require.Equal(t, map[string]float64{"sustain_secs": 45}, got)
+}
+
+// TestMergeThresholdsClampsMinCulpritsToTheCoTenancyFloor pins the
+// review's other named case: min_culprits isn't just "somewhat safer
+// than zero" for gpu-engine-contention, it IS the co-tenancy requirement
+// that rule's own Eval enforces in code (a lone busy container is not
+// contention). An override of 1 would silently defeat that requirement
+// through a threshold edit rather than a code change, so its floor
+// equals its only sane value.
+func TestMergeThresholdsClampsMinCulpritsToTheCoTenancyFloor(t *testing.T) {
+	defaults := map[string]float64{"min_culprits": 2}
+
+	got := mergeThresholds(defaults, map[string]float64{"min_culprits": 1})
+
+	require.Equal(t, map[string]float64{"min_culprits": 2}, got)
+}
+
+// TestMergeThresholdsUnknownKeyIsNeverClamped proves the floor only ever
+// applies to a NAMED, known threshold -- mirroring
+// TestMergeThresholdsIgnoresUnknownOverrideKeys's own contract, an
+// override for a key the rule doesn't define is dropped entirely before
+// a minimum could ever apply to it.
+func TestMergeThresholdsUnknownKeyIsNeverClamped(t *testing.T) {
+	defaults := map[string]float64{"a": 1}
+
+	got := mergeThresholds(defaults, map[string]float64{"a": -100})
+
+	require.Equal(t, map[string]float64{"a": -100}, got, "\"a\" has no entry in thresholdMinimums, so nothing clamps it")
 }

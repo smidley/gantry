@@ -99,16 +99,20 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	}
 	// Insight rule configs (Task 4's own INSERT-OR-IGNORE seed, same
 	// idempotent-on-every-boot posture as SeedAlertRules just above) --
-	// there is no "fast" variant here: unlike alert_rules' for_seconds/
-	// clear_seconds, the insight engine's sustain/clear-for/cooldown are
-	// Engine struct fields, not seeded rows (see insight.Engine's own
-	// doc), so fake mode compresses them below at construction time
-	// instead. StaleActiveInsights runs right after: Open question 5's
-	// own recommendation -- the live ring is empty at boot, so a
-	// carried-over "active" row would assert something this process
-	// cannot currently see; if the contention is still real, the engine
-	// re-fires within two ticks anyway.
-	if err := st.SeedInsightRuleConfigs(insight.DefaultRuleConfigs(fakeMode)); err != nil {
+	// there is no "fast" variant here at all: unlike alert_rules'
+	// for_seconds/clear_seconds, the insight engine's sustain/clear-for/
+	// cooldown are all Engine struct fields, not seeded rows (see
+	// insight.Engine's own doc), so fake mode compresses them below at
+	// construction time instead -- I5 (review): sustain_secs used to be
+	// the one exception, compressed via a seeded override that outlived
+	// the fake-data session that needed it, so DefaultRuleConfigs no
+	// longer takes a fake/fast parameter at all. StaleActiveInsights
+	// runs right after: Open question 5's own recommendation -- the
+	// live ring is empty at boot, so a carried-over "active" row would
+	// assert something this process cannot currently see; if the
+	// contention is still real, the engine re-fires within two ticks
+	// anyway.
+	if err := st.SeedInsightRuleConfigs(insight.DefaultRuleConfigs()); err != nil {
 		return fmt.Errorf("seed insight rule configs: %w", err)
 	}
 	if err := st.StaleActiveInsights(time.Now().Unix()); err != nil {
@@ -324,10 +328,11 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// AlertNotification shape without fabricating fields it would then
 	// read for its own flap/silence bookkeeping -- a real delivery bridge
 	// is later work, not this phase's engine task. In fake-data mode,
-	// ClearForSecs/CooldownSecs are compressed the same way
-	// DefaultRuleConfigs(fakeMode) already compressed sustain_secs, so a
-	// scripted insight can fire, upgrade, and resolve inside one short
-	// demo session.
+	// ClearForSecs/CooldownSecs/FakeSustainSecs are all compressed here
+	// (FakeSustainSecs is I5's own read-time replacement for what used
+	// to be a DefaultRuleConfigs(fakeMode) seeded override -- see its
+	// own doc), so a scripted insight can fire, upgrade, and resolve
+	// inside one short demo session.
 	insightEngine := insight.New(st)
 	insightEngine.MatchSince = st.Live().MatchSince
 	insightEngine.MatchPrefixSince = st.Live().MatchPrefixSince
@@ -335,6 +340,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	insightEngine.Slots = buildInsightSlots(ur.DiskMeta, fakeDiskMeta, st.Live())
 	insightEngine.PressureTier = pr.Tier
 	if fakeMode {
+		insightEngine.FakeSustainSecs = 10
 		insightEngine.ClearForSecs = 20
 		insightEngine.CooldownSecs = 60
 	}

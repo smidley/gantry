@@ -312,6 +312,202 @@ func TestHostTickEmitsNetDiskIOAndHwmon(t *testing.T) {
 	require.False(t, ok, "partitions must be filtered from emitted diskio metrics")
 }
 
+func loadDiskstatsFixture(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	require.NoError(t, err)
+	return string(data)
+}
+
+// TestHostTickComputesDiskSaturationLatencyAndQueue pins a hand-computed
+// case against testdata/diskstats_saturation_{1,2}.txt's sda row (a 2s
+// tick): io_ticks +1600ms -> util_pct 80 (1600/2000ms); time_in_queue
+// +2400ms -> queue_avg 1.2 (2400/2000ms); (msReading+msWriting)=(300+500)
+// over (reads+writes)=(50+50) -> await_ms 8.0; inflight is field 12's raw
+// value, a gauge rather than a delta.
+func TestHostTickComputesDiskSaturationLatencyAndQueue(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stat", statA)
+	writeFile(t, dir, "meminfo", meminfoA)
+	writeFile(t, dir, "diskstats", loadDiskstatsFixture(t, "diskstats_saturation_1.txt"))
+
+	sink := newFakeSink()
+	c := New(sink, dir, t.TempDir())
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	inflight, ok := sink.value("diskio.sda.inflight")
+	require.True(t, ok, "inflight is a gauge and must be live from the first tick")
+	require.Equal(t, 3.0, inflight)
+	_, ok = sink.value("diskio.sda.util_pct")
+	require.False(t, ok, "first tick has no baseline yet for the delta-derived series")
+	_, ok = sink.value("diskio.sda.await_ms")
+	require.False(t, ok)
+	_, ok = sink.value("diskio.sda.queue_avg")
+	require.False(t, ok)
+
+	writeFile(t, dir, "diskstats", loadDiskstatsFixture(t, "diskstats_saturation_2.txt"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1002, 0)))
+
+	util, ok := sink.value("diskio.sda.util_pct")
+	require.True(t, ok)
+	require.InDelta(t, 80.0, util, 1e-9)
+
+	await, ok := sink.value("diskio.sda.await_ms")
+	require.True(t, ok)
+	require.InDelta(t, 8.0, await, 1e-9)
+
+	queue, ok := sink.value("diskio.sda.queue_avg")
+	require.True(t, ok)
+	require.InDelta(t, 1.2, queue, 1e-9)
+
+	inflight, ok = sink.value("diskio.sda.inflight")
+	require.True(t, ok)
+	require.Equal(t, 4.0, inflight, "inflight must reflect the live gauge, not tick 1's value")
+}
+
+// TestHostTickDiskSaturationCoversMdDevices proves md* devices go through
+// the identical saturation/latency path as sd*/nvme* -- the array's own
+// parity rule needs util/await on md1, not just its members.
+func TestHostTickDiskSaturationCoversMdDevices(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stat", statA)
+	writeFile(t, dir, "meminfo", meminfoA)
+	writeFile(t, dir, "diskstats", loadDiskstatsFixture(t, "diskstats_saturation_1.txt"))
+
+	sink := newFakeSink()
+	c := New(sink, dir, t.TempDir())
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	writeFile(t, dir, "diskstats", loadDiskstatsFixture(t, "diskstats_saturation_2.txt"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1002, 0)))
+
+	util, ok := sink.value("diskio.md1.util_pct")
+	require.True(t, ok, "md* devices must get the full saturation set, not just sd*/nvme*")
+	require.InDelta(t, 80.0, util, 1e-9)
+	await, ok := sink.value("diskio.md1.await_ms")
+	require.True(t, ok)
+	require.InDelta(t, 8.0, await, 1e-9)
+	queue, ok := sink.value("diskio.md1.queue_avg")
+	require.True(t, ok)
+	require.InDelta(t, 1.2, queue, 1e-9)
+}
+
+const diskstatsUtilClampA = "   8       0 sda 1000 0 1000 100 2000 0 2000 200 2 1000 1000\n"
+const diskstatsUtilClampB = "   8       0 sda 1000 0 1000 100 2000 0 2000 200 5 4000 1000\n"
+
+// TestHostTickUtilPctClampsAt100 covers io_ticks incrementing by more
+// milliseconds than the tick interval contains -- possible because the
+// field is millisecond-granular and a short tick can round above it.
+// 3000ms of io_ticks over a 2000ms interval must read 100, not 150.
+func TestHostTickUtilPctClampsAt100(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stat", statA)
+	writeFile(t, dir, "meminfo", meminfoA)
+	writeFile(t, dir, "diskstats", diskstatsUtilClampA)
+
+	sink := newFakeSink()
+	c := New(sink, dir, t.TempDir())
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	writeFile(t, dir, "diskstats", diskstatsUtilClampB)
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1002, 0)))
+
+	util, ok := sink.value("diskio.sda.util_pct")
+	require.True(t, ok)
+	require.Equal(t, 100.0, util)
+}
+
+const diskstatsNoCompletedIOA = "   8       0 sda 500 0 5000 200 800 0 8000 300 1 2000 2000\n"
+const diskstatsNoCompletedIOB = "   8       0 sda 500 0 5200 200 800 0 8200 300 1 2400 2300\n"
+
+// TestHostTickAwaitMsOmittedWhenNoCompletedIO covers a device that had
+// activity (io_ticks and sector counts moved) but zero completed reads or
+// writes across the window: await_ms must be absent, not zero, because a
+// zero would read as "instant" rather than "unmeasurable this tick".
+func TestHostTickAwaitMsOmittedWhenNoCompletedIO(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stat", statA)
+	writeFile(t, dir, "meminfo", meminfoA)
+	writeFile(t, dir, "diskstats", diskstatsNoCompletedIOA)
+
+	sink := newFakeSink()
+	c := New(sink, dir, t.TempDir())
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	writeFile(t, dir, "diskstats", diskstatsNoCompletedIOB)
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1002, 0)))
+
+	_, ok := sink.value("diskio.sda.await_ms")
+	require.False(t, ok, "no reads or writes completed in the window: await_ms must be absent")
+
+	util, ok := sink.value("diskio.sda.util_pct")
+	require.True(t, ok, "util_pct is independent of completed IO -- io_ticks moved regardless")
+	require.InDelta(t, 20.0, util, 1e-9)
+}
+
+const diskstatsBackwardsA = "   8       0 sda 100 0 1000 50 200 0 2000 80 1 5000 5000\n"
+const diskstatsBackwardsB = "   8       0 sda 150 0 1100 150 250 0 2200 180 2 4000 6000\n"
+
+// TestHostTickCounterGoingBackwardsSkipsThatSampleOnly covers io_ticks
+// decreasing tick-over-tick (a counter reset) while reads/writes/ms
+// counters keep advancing normally: util_pct must be skipped for that
+// tick, never reported as a negative rate, and the sibling series that
+// don't depend on io_ticks must be unaffected -- degradation is
+// per-counter, not per-device.
+func TestHostTickCounterGoingBackwardsSkipsThatSampleOnly(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stat", statA)
+	writeFile(t, dir, "meminfo", meminfoA)
+	writeFile(t, dir, "diskstats", diskstatsBackwardsA)
+
+	sink := newFakeSink()
+	c := New(sink, dir, t.TempDir())
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	writeFile(t, dir, "diskstats", diskstatsBackwardsB)
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1002, 0)))
+
+	_, ok := sink.value("diskio.sda.util_pct")
+	require.False(t, ok, "io_ticks went backwards (5000->4000): must skip, never report a negative rate")
+
+	await, ok := sink.value("diskio.sda.await_ms")
+	require.True(t, ok, "await_ms doesn't depend on io_ticks and must still be recorded")
+	require.InDelta(t, 2.0, await, 1e-9)
+}
+
+const diskstatsShortRowA = "   8       0 sdb 1000 5 1000 100 2000 10 2000 200 0\n"
+const diskstatsShortRowB = "   8       0 sdb 1010 5 1100 110 2010 10 2200 220 0\n"
+
+// TestHostTickShortRowYieldsThroughputOnlyNoLatencySeries covers a
+// pre-4.18 12-field row end to end through Tick: read_bps/write_bps must
+// still be emitted, and none of util_pct/await_ms/queue_avg/inflight may
+// appear, because the kernel never reported the fields they need.
+func TestHostTickShortRowYieldsThroughputOnlyNoLatencySeries(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "stat", statA)
+	writeFile(t, dir, "meminfo", meminfoA)
+	writeFile(t, dir, "diskstats", diskstatsShortRowA)
+
+	sink := newFakeSink()
+	c := New(sink, dir, t.TempDir())
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+
+	writeFile(t, dir, "diskstats", diskstatsShortRowB)
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1002, 0)))
+
+	readBps, ok := sink.value("diskio.sdb.read_bps")
+	require.True(t, ok, "a pre-4.18 12-field row must still yield throughput")
+	require.InDelta(t, 25600.0, readBps, 1e-6)
+	writeBps, ok := sink.value("diskio.sdb.write_bps")
+	require.True(t, ok)
+	require.InDelta(t, 51200.0, writeBps, 1e-6)
+
+	for _, metric := range []string{"util_pct", "await_ms", "queue_avg", "inflight"} {
+		_, ok := sink.value("diskio.sdb." + metric)
+		require.False(t, ok, "a short row must not report "+metric)
+	}
+}
+
 func TestHostDeviceNameBeforeFirstTick(t *testing.T) {
 	c := New(newFakeSink(), t.TempDir(), t.TempDir())
 	_, ok := c.DeviceName("8:0")

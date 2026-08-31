@@ -180,6 +180,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	putReq, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%d/api/settings", port),
 		strings.NewReader(`{"retention":{"r1_hours":72,"r2_days":30,"r3_days":390,"size_cap_mb":512}}`))
 	require.NoError(t, err)
+	putReq.Header.Set("X-Requested-With", "gantry") // the cross-site header every mutating route requires
 	putResp, err := http.DefaultClient.Do(putReq)
 	require.NoError(t, err)
 	drainAndClose(putResp)
@@ -218,6 +219,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	groupsPutReq, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%d/api/groups", port),
 		strings.NewReader(`{"groups":[{"name":"media","members":["jellyfin","sonarr"]}]}`))
 	require.NoError(t, err)
+	groupsPutReq.Header.Set("X-Requested-With", "gantry") // see the settings PUT above
 	groupsPutResp, err := http.DefaultClient.Do(groupsPutReq)
 	require.NoError(t, err)
 	drainAndClose(groupsPutResp)
@@ -269,9 +271,12 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	pruneResp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), "application/json", strings.NewReader(`{"mode":"unused"}`))
 	require.NoError(t, err)
 	drainAndClose(pruneResp)
-	// No X-Gantry-Confirm header on this request: must 428, proving the
-	// guardrail is really wired into the live route, not bypassed.
-	require.Equal(t, http.StatusPreconditionRequired, pruneResp.StatusCode)
+	// No custom header at all on this request: the mux-wide cross-site
+	// check (server/gate.go) rejects it before the route's own confirm
+	// guardrail even runs, proving the wrapper is wired into the live
+	// server -- the per-route 428 for a wrong confirm VALUE is pinned in
+	// the server package's own tests.
+	require.Equal(t, http.StatusForbidden, pruneResp.StatusCode)
 
 	pruneReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), strings.NewReader(`{"mode":"unused"}`))
 	require.NoError(t, err)

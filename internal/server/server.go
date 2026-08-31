@@ -201,6 +201,14 @@ type Server struct {
 	opts Options
 	mux  *http.ServeMux
 
+	// root is what actually serves requests (Handler and ListenAndServe
+	// both): the mux wrapped in the request-security layer (gate.go) --
+	// cross-site header enforcement for every mutating /api route, and
+	// the session gate when a password is set. Wrapping the whole mux
+	// rather than each route keeps both checks default-closed for any
+	// route a later change adds.
+	root http.Handler
+
 	// drain is closed by ListenAndServe the moment ctx fires, before
 	// hs.Shutdown -- the general form of the signal Broadcaster.Drain
 	// already gives SSE clients (see its doc), for every OTHER long-
@@ -288,10 +296,11 @@ func New(o Options) *Server {
 	s.mux.Handle("POST /api/insights/{id}/dismiss", withGzip(http.HandlerFunc(s.handleInsightDismiss)))
 
 	s.mux.Handle("GET /", withGzip(webHandler()))
+	s.root = s.secureAPI(s.mux)
 	return s
 }
 
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) Handler() http.Handler { return s.root }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	sources := map[string]string{}
@@ -335,7 +344,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	hs := &http.Server{
 		Addr:              fmt.Sprintf(":%d", s.opts.Port),
-		Handler:           s.mux,
+		Handler:           s.root,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errCh := make(chan error, 1)

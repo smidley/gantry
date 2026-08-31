@@ -6,6 +6,10 @@ mount and flag below so a stock install needs zero edits. This page exists
 so you can read exactly what the template does, line by line, before you
 trust it with your Docker socket.
 
+The template's icon (`template/gantry-icon.png`) renders from
+`assets/icon/gantry.svg` -- edit the SVG and re-export if it ever needs
+to change.
+
 ## What it mounts, and why
 
 | Purpose | Host path | Container path | Mode | Why |
@@ -83,9 +87,6 @@ wants a strictly read-only monitor.
 
 ## Known gaps as of this template (pre-release checklist)
 
-- **Icon art is a placeholder.** `template/gantry-icon.png` is a plain
-  flat-color monogram, not designed brand art. Replace it before
-  submitting to Community Applications.
 - **Support URL is a placeholder.** `<Support>` currently points at the
   GitHub issue tracker because no Unraid forum support thread exists yet.
   Create the thread and update `<Support>` in `template/gantry.xml` before

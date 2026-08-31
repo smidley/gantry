@@ -3,6 +3,7 @@ package insight
 import (
 	"context"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -452,6 +453,41 @@ func TestEngineGatherPerformsExactlyOnePrefixCallPerFamilyPerTick(t *testing.T) 
 
 	for key, n := range matchCalls {
 		require.Equal(t, 1, n, "%s must be fetched exactly once per tick", key)
+	}
+}
+
+// TestEngineGatherUsesMemSegmentNeverMemorySeamInvariant4 pins seam
+// invariant 4: the PSI metric segment for memory is "mem", explicitly --
+// pressure.go's own resources table maps the "memory" file/cgroup-file to
+// metric segment "mem" (psi.mem.some_pct/full_pct), and that mapping must
+// never be re-derived from the word "memory" itself anywhere in this
+// engine. gather must ask Live for exactly "psi.mem.some_pct"/
+// "psi.mem.full_pct" for both host and container, never "psi.memory.*".
+func TestEngineGatherUsesMemSegmentNeverMemorySeamInvariant4(t *testing.T) {
+	fs := newFakeInsightStore()
+	eng := New(fs)
+	now := time.Unix(6_000_000, 0)
+	eng.Clock = func() time.Time { return now }
+
+	var psiMetrics []string
+	eng.MatchSince = func(kind, metric string, since int64) (map[string][]store.Sample, map[string]int64) {
+		if strings.HasPrefix(metric, "psi.") {
+			psiMetrics = append(psiMetrics, kind+"|"+metric)
+		}
+		return nil, nil
+	}
+	eng.MatchPrefixSince = func(kind, prefix string, since int64) (map[string]map[string][]store.Sample, map[string]map[string]int64) {
+		return nil, nil
+	}
+
+	require.NoError(t, eng.Tick(context.Background()))
+
+	require.Contains(t, psiMetrics, "host|psi.mem.some_pct")
+	require.Contains(t, psiMetrics, "host|psi.mem.full_pct")
+	require.Contains(t, psiMetrics, "container|psi.mem.some_pct")
+	require.Contains(t, psiMetrics, "container|psi.mem.full_pct")
+	for _, m := range psiMetrics {
+		require.NotContains(t, m, "psi.memory.", "the memory PSI segment must be \"mem\", never \"memory\" (%s)", m)
 	}
 }
 

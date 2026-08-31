@@ -523,6 +523,32 @@ func TestEvalMemorySqueezeHostPSIUpgrade(t *testing.T) {
 	require.Equal(t, ConfidenceConfirmed, findings[0].Confidence)
 }
 
+// --- seam invariant 5: one shared window-coverage helper ---------------
+
+// TestBothOldestTSShapesGateCoverageThroughSustainedSeamInvariant5 pins
+// the foundations review's own regression class (a Phase 4 F1 critical):
+// Live.MatchSince's oldestTS is a flat map[entity]int64 (MatchResult),
+// while Live.MatchPrefixSince's is nested, map[entity]map[metric]int64
+// (PrefixResult) -- two different shapes carrying the SAME "can the ring
+// prove this window is covered" fact. Both must gate through the
+// identical Sustained coverage check with no second, hand-written
+// "is this covered" implementation for the nested shape. Exercised
+// through two real rules, one per shape: io-driven-cpu-load reads
+// HostCPUIowait (a MatchResult), gpu-engine-contention reads GPUEngine
+// (a PrefixResult) -- both fixtures otherwise fire cleanly (see their
+// own "fires with both sides" tests); only the coverage floor changes.
+func TestBothOldestTSShapesGateCoverageThroughSustainedSeamInvariant5(t *testing.T) {
+	flatIn := ioDrivenCPULoadIn(testNow, true, true)
+	flatIn.HostCPUIowait.Oldest[""] = testNow - 5 // 5s of proven history, far short of sustain_secs=90
+	require.Empty(t, evalIODrivenCPULoad(flatIn, librarySpecs[1].defaults),
+		"a flat MatchResult oldestTS must gate an uncovered window exactly like any other Sustained call")
+
+	nestedIn := gpuEngineContentionIn(testNow, true, true)
+	nestedIn.GPUEngine.Oldest["gpu0"]["engine.video.busy_pct"] = testNow - 5
+	require.Empty(t, evalGPUEngineContention(nestedIn, librarySpecs[5].defaults),
+		"a nested PrefixResult oldestTS must gate an uncovered window the SAME way -- no second, hand-written coverage check for this shape")
+}
+
 // --- Rules()/DefaultRules() plumbing --------------------------------
 
 func TestDefaultRulesReturnsAllSevenWithCompiledInDefaults(t *testing.T) {

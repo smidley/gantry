@@ -41,8 +41,8 @@ var resources = []resource{
 	{hostFile: "memory", cgroupFile: "memory.pressure", metric: "mem"},
 }
 
-// Collector reads PSI "some avg10" from /proc/pressure (host) and each
-// running container's cgroup {cpu,io,memory}.pressure files. Name
+// Collector reads PSI "some"/"full" avg10 from /proc/pressure (host) and
+// each running container's cgroup {cpu,io,memory}.pressure files. Name
 // "pressure", Interval 2s.
 type Collector struct {
 	sink       store.MetricSink
@@ -72,38 +72,56 @@ func (c *Collector) Probe(context.Context) collect.Status {
 	return collect.Status{Available: true}
 }
 
-// Tick records host PSI unconditionally (each resource independently —
-// a single missing file doesn't block the others) and per-container PSI
-// for every currently-running container, skipping any resource whose
-// cgroup file is absent (partial PSI exists on some kernels).
+// Tick records host and container PSI unconditionally (each resource,
+// and each of its "some"/"full" lines, independently -- one missing
+// file or line never blocks the rest). "full" tracks the share of time
+// every non-idle task was stalled simultaneously, which is a strictly
+// stronger claim than "some" (at least one task stalled).
+//
+// /proc/pressure/cpu has no "full" line at the host level: the kernel
+// never emits one there, by definition -- the host's own idle task is
+// always eligible to run when nothing else can, so the CPU can never be
+// *fully* stalled system-wide. That falls out naturally here: the same
+// recordLine call that skips a missing file also skips a missing line
+// inside a file it opened fine, so there's no special case for cpu vs.
+// io/memory, or for host vs. container.
 func (c *Collector) Tick(ctx context.Context, now time.Time) error {
 	ts := now.Unix()
 
 	for _, r := range resources {
-		pct, ok := readSomeAvg10(filepath.Join(c.procRoot, "pressure", r.hostFile))
-		if !ok {
-			continue
-		}
-		c.sink.Record(store.SeriesKey{Kind: "host", Metric: "psi." + r.metric + ".some_pct"}, ts, pct)
+		path := filepath.Join(c.procRoot, "pressure", r.hostFile)
+		c.recordLine(store.SeriesKey{Kind: "host", Metric: "psi." + r.metric + ".some_pct"}, path, "some", ts)
+		c.recordLine(store.SeriesKey{Kind: "host", Metric: "psi." + r.metric + ".full_pct"}, path, "full", ts)
 	}
 
 	for _, m := range c.running() {
 		for _, r := range resources {
-			pct, ok := readSomeAvg10(filepath.Join(c.cgroupRoot, "docker", m.ID, r.cgroupFile))
-			if !ok {
-				continue
-			}
-			c.sink.Record(store.SeriesKey{Kind: "container", Entity: m.Name, Metric: "psi." + r.metric + ".some_pct"}, ts, pct)
+			path := filepath.Join(c.cgroupRoot, "docker", m.ID, r.cgroupFile)
+			c.recordLine(store.SeriesKey{Kind: "container", Entity: m.Name, Metric: "psi." + r.metric + ".some_pct"}, path, "some", ts)
+			c.recordLine(store.SeriesKey{Kind: "container", Entity: m.Name, Metric: "psi." + r.metric + ".full_pct"}, path, "full", ts)
 		}
 	}
 	return nil
 }
 
-// readSomeAvg10 parses one PSI file's first ("some") line and extracts
-// avg10. ok=false on any read or parse failure (missing file, unexpected
-// format) — every call site treats that as "skip this series", not an
-// error.
-func readSomeAvg10(path string) (float64, bool) {
+// recordLine reads one line kind ("some" or "full") from a PSI file and
+// records it under key if present. Absence -- a missing file, or a
+// missing line inside a file that opened fine -- means no series, never
+// a zero: a real 0%-stalled reading and "we don't have this number" are
+// different facts, and the second must never be reported as the first.
+func (c *Collector) recordLine(key store.SeriesKey, path, want string, ts int64) {
+	pct, ok := readLineAvg10(path, want)
+	if !ok {
+		return
+	}
+	c.sink.Record(key, ts, pct)
+}
+
+// readLineAvg10 opens a PSI file and extracts avg10 from whichever line
+// has want ("some" or "full") as its leading token, scanning every line
+// rather than assuming position. ok=false on any read failure, a
+// missing line, or an unparsable value.
+func readLineAvg10(path, want string) (float64, bool) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, false
@@ -111,21 +129,24 @@ func readSomeAvg10(path string) (float64, bool) {
 	defer func() { _ = f.Close() }()
 
 	sc := bufio.NewScanner(f)
-	if !sc.Scan() {
-		return 0, false
+	for sc.Scan() {
+		if val, ok := parseLine(sc.Text(), want); ok {
+			return val, true
+		}
 	}
-	return parseSomeLine(sc.Text())
+	return 0, false
 }
 
-// parseSomeLine extracts avg10 from one PSI "some ..." line, e.g.
-// "some avg10=1.23 avg60=4.56 avg300=7.89 total=12345678". The second
-// ("full") line is a different line entirely and is never passed here by
-// readSomeAvg10 (which only scans the first line) — but parseSomeLine
-// also rejects it directly (via the leading-token check) so it can be
-// unit-tested on its own.
-func parseSomeLine(line string) (float64, bool) {
+// parseLine extracts avg10 from one PSI line if its leading token
+// matches want ("some" or "full"), e.g. "some avg10=1.23 avg60=4.56
+// avg300=7.89 total=12345678". avg60/avg300/total stay unread -- the
+// insight engine samples avg10 every tick across its own window, which
+// is a better-resolved version of the same information. ok=false when
+// the leading token doesn't match want or the avg10 field is
+// missing/unparsable.
+func parseLine(line, want string) (float64, bool) {
 	fields := strings.Fields(line)
-	if len(fields) == 0 || fields[0] != "some" {
+	if len(fields) == 0 || fields[0] != want {
 		return 0, false
 	}
 	for _, f := range fields[1:] {

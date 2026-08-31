@@ -13,7 +13,9 @@ import { test, expect } from '@playwright/test';
 //    happens THEN, not before. A test landing on a genuinely-fresh
 //    server can see "Nothing is alerting" for those first ~10s. Every
 //    assertion that depends on grafana already firing uses a generous
-//    (20s) timeout rather than the default 5s.
+//    (20s) timeout rather than the default 5s; the channel-health one
+//    below waits even longer, since the dispatch it needs trails the
+//    fire itself by another tick or two (~25-30s from boot, measured).
 // 2. The fake-mode alert demo's own schedule (internal/fake/fake.go's
 //    alertDemoDiskEntity: fires ~2min after boot, resolves ~6min after
 //    boot) may be at ANY point in its lifecycle by the time the
@@ -47,6 +49,9 @@ test('alerts view renders its heading and a real Active section (grafana is unhe
 });
 
 test('channels strip renders the real notify (ok) and both fake webhook targets, one healthy one failing', async ({ page }) => {
+  // The 45s dispatch wait below plus the strip's own render waits can
+  // outlive the 30s default test timeout on a fresh boot.
+  test.setTimeout(90_000);
   await page.goto('#/alerts');
   const channels = page.locator('.alerts-view__channels');
   await expect(channels).toContainText('Unraid notifications');
@@ -54,8 +59,12 @@ test('channels strip renders the real notify (ok) and both fake webhook targets,
   await expect(channels).toContainText('Webhook: fake-fail');
   // The failing target's own verbatim health text (channel_webhook.go's
   // Health()) -- never a generic "error" banner. Needs the engine's
-  // first tick plus one dispatch attempt, hence the generous timeout.
-  await expect(channels).toContainText('last delivery failed', { timeout: 20_000 });
+  // first tick (~10s after boot) PLUS the fire-and-dispatch that only
+  // lands on a later tick: measured ~25-30s after a fresh boot. A run
+  // that starts this test right after boot (a solo run, or a parallel
+  // local worker landing here first) needs the full window; against the
+  // suite's long-running shared server it resolves immediately.
+  await expect(channels).toContainText('last delivery failed', { timeout: 45_000 });
 });
 
 test('silence round-trip: silencing an active row dims it with a countdown, lifting it restores the live control', async ({ page }) => {

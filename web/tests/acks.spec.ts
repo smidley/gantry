@@ -22,6 +22,7 @@ test('ack round-trip: POST creates with the requested window, GET lists it, DELE
   const probeEntity = 'gantry-e2e-ack-probe';
 
   const created = await request.post('/api/acks', {
+    headers: { 'X-Requested-With': 'gantry' },
     data: { kind: 'unhealthy', entity: probeEntity, hours: 1 },
   });
   expect(created.ok()).toBe(true);
@@ -36,7 +37,7 @@ test('ack round-trip: POST creates with the requested window, GET lists it, DELE
     const listed = await (await request.get('/api/acks')).json();
     expect(listed.acks.some((a: { id: number }) => a.id === ack.id)).toBe(true);
   } finally {
-    const deleted = await request.delete(`/api/acks/${ack.id}`);
+    const deleted = await request.delete(`/api/acks/${ack.id}`, { headers: { 'X-Requested-With': 'gantry' } });
     expect(deleted.status()).toBe(204);
   }
 
@@ -44,7 +45,7 @@ test('ack round-trip: POST creates with the requested window, GET lists it, DELE
   expect(after.acks.some((a: { id: number }) => a.id === ack.id)).toBe(false);
 
   // Lifting an already-lifted ack is idempotent (204, never an error).
-  expect((await request.delete(`/api/acks/${ack.id}`)).status()).toBe(204);
+  expect((await request.delete(`/api/acks/${ack.id}`, { headers: { 'X-Requested-With': 'gantry' } })).status()).toBe(204);
 });
 
 test('POST /api/acks rejects every shape that must not exist', async ({ request }) => {
@@ -63,7 +64,7 @@ test('POST /api/acks rejects every shape that must not exist', async ({ request 
     { kind: 'unhealthy', entity: 'sonarr', hours: 169 },
   ];
   for (const body of rejected) {
-    const resp = await request.post('/api/acks', { data: body });
+    const resp = await request.post('/api/acks', { headers: { 'X-Requested-With': 'gantry' }, data: body });
     expect(resp.status(), JSON.stringify(body)).toBe(400);
   }
 
@@ -97,7 +98,7 @@ test('acking a Needs-a-look row hides it for the chosen window', async ({ page, 
     const listed = await (await request.get('/api/acks')).json();
     for (const a of listed.acks as { id: number; kind: string; entity: string }[]) {
       if (a.kind === 'unhealthy' && a.entity === 'grafana') {
-        await request.delete(`/api/acks/${a.id}`);
+        await request.delete(`/api/acks/${a.id}`, { headers: { 'X-Requested-With': 'gantry' } });
       }
     }
   }

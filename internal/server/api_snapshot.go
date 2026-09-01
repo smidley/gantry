@@ -15,17 +15,23 @@ import "net/http"
 // so an SSE client sees a collector degrading live, not just on its next
 // healthz poll.
 type SnapshotDTO struct {
-	TS            int64                         `json:"ts"`
-	UnraidVersion string                        `json:"unraid_version"`
-	Host          map[string]float64            `json:"host"`       // metric -> latest
-	Containers    map[string]ContainerDTO       `json:"containers"` // name -> meta+metrics
-	Disks         map[string]map[string]float64 `json:"disks"`
-	DiskMeta      map[string]DiskMetaDTO        `json:"disk_meta"` // slot -> device+type meta (strings can't ride Disks' float64 map)
-	Unraid        map[string]map[string]float64 `json:"unraid"`    // entity ("array"|"docker") -> metric -> value
-	GPU           map[string]map[string]float64 `json:"gpu"`
-	GPUMeta       map[string]GPUMetaDTO         `json:"gpu_meta"` // pdev (or "gpu0"/"nvidia0") -> vendor+driver meta (strings can't ride GPU's float64 map)
-	Sources       map[string]string             `json:"sources"`  // collector name -> "ok" | unavailability detail
-	Alerts        AlertsBlockDTO                `json:"alerts"`   // Phase 4: firing alerts + channel health, so the UI is live without polling /api/alerts
+	TS            int64  `json:"ts"`
+	UnraidVersion string `json:"unraid_version"`
+	// ServerName is the box's own identity -- var.ini's NAME field, or
+	// (main wiring's resolveServerName) the HOST_HOSTNAME env fallback,
+	// or this container's own hostname as a last resort -- "" only when
+	// every source comes up empty. Lets a multi-server user tell which
+	// box a given dashboard is looking at (see Sidebar.svelte).
+	ServerName string                        `json:"server_name"`
+	Host       map[string]float64            `json:"host"`       // metric -> latest
+	Containers map[string]ContainerDTO       `json:"containers"` // name -> meta+metrics
+	Disks      map[string]map[string]float64 `json:"disks"`
+	DiskMeta   map[string]DiskMetaDTO        `json:"disk_meta"` // slot -> device+type meta (strings can't ride Disks' float64 map)
+	Unraid     map[string]map[string]float64 `json:"unraid"`    // entity ("array"|"docker") -> metric -> value
+	GPU        map[string]map[string]float64 `json:"gpu"`
+	GPUMeta    map[string]GPUMetaDTO         `json:"gpu_meta"` // pdev (or "gpu0"/"nvidia0") -> vendor+driver meta (strings can't ride GPU's float64 map)
+	Sources    map[string]string             `json:"sources"`  // collector name -> "ok" | unavailability detail
+	Alerts     AlertsBlockDTO                `json:"alerts"`   // Phase 4: firing alerts + channel health, so the UI is live without polling /api/alerts
 	// Insights (Phase 5): active cross-container impact findings + the
 	// live pressure tier, so the Insights view, the interaction map, and
 	// ContainerDetail's impact panel are all live without polling

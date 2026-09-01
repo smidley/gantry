@@ -91,7 +91,8 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	snapResp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/live/snapshot", port))
 	require.NoError(t, err)
 	var snapBody struct {
-		TS         int64 `json:"ts"`
+		TS         int64  `json:"ts"`
+		ServerName string `json:"server_name"`
 		Containers map[string]struct {
 			State string `json:"state"`
 		} `json:"containers"`
@@ -100,6 +101,10 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	drainAndClose(snapResp)
 	require.Equal(t, http.StatusOK, snapResp.StatusCode)
 	require.Greater(t, snapBody.TS, int64(0))
+	// fake-data mode must report fk's fixed demo identity, never this
+	// test box's own real hostname -- the whole point of the fake
+	// override (see buildSnapshot's serverName doc).
+	require.Equal(t, "gantry-demo", snapBody.ServerName)
 	require.NotEmpty(t, snapBody.Containers, "fake mode's Metas() must survive the DTO-v2 container filter unconditionally")
 	jf, ok := snapBody.Containers["jellyfin"]
 	require.True(t, ok, "fake fleet member must appear in the frame")
@@ -541,12 +546,13 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{"host": "ok"} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil, nil)() // nil fakeMetas/fakeDiskMeta: not exercising the fake-mode path here
 
 	require.Equal(t, 12.5, snap.Host["cpu.total"])
 	require.Equal(t, 31.0, snap.Disks["disk1"]["temp.c"])
 	require.Equal(t, 5.5, snap.GPU["gpu0"]["engine.render.busy_pct"])
 	require.Equal(t, "", snap.UnraidVersion, "unraid.Version() before any Tick is empty")
+	require.Equal(t, "", snap.ServerName, "a nil serverName closure must not panic buildSnapshot")
 	require.Empty(t, dc.Running(), "docker.Running() before any Tick is empty")
 	require.Equal(t, map[string]string{"host": "ok"}, snap.Sources, "v2: Sources rides in the frame")
 
@@ -570,6 +576,60 @@ func TestBuildSnapshotGroupsSamplesByKindAndSkipsLivePrefixed(t *testing.T) {
 			require.False(t, strings.HasPrefix(metric, "live:"), "live:-prefixed metrics must never reach the snapshot")
 		}
 	}
+}
+
+// TestBuildSnapshotIncludesServerName pins the serverName closure's own
+// contract: whatever it returns rides straight onto SnapshotDTO.
+// ServerName, the same "just call the injected closure" wiring sources
+// and fakeMetas already use.
+func TestBuildSnapshotIncludesServerName(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dc := docker.New(st, st, st.Live().Evict, "/var/run/docker.sock")
+	ur := unraid.New(st, st, t.TempDir(), "/proc")
+	gp := gpu.New(st, "/proc", func(string) (string, bool) { return "", false })
+	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
+	serverName := func() string { return "chalk" }
+
+	snap := buildSnapshot(st, dc, ur, gp, nv, nil, nil, nil, nil, nil, nil, serverName)()
+	require.Equal(t, "chalk", snap.ServerName)
+}
+
+// TestResolveServerNamePrefersVarIniNameOverEnvAndHostname pins the
+// fallback chain's precedence: var.ini's own NAME (once the unraid
+// collector has ticked) beats HOST_HOSTNAME even when both are present.
+func TestResolveServerNamePrefersVarIniNameOverEnvAndHostname(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "var.ini"), []byte(`NAME="boxname"`+"\n"), 0o644))
+	ur := unraid.New(st, st, dir, "/proc")
+	require.NoError(t, ur.Tick(context.Background(), time.Now()))
+
+	env := map[string]string{"HOST_HOSTNAME": "should-lose-to-varini"}
+	require.Equal(t, "boxname", resolveServerName(ur, func(k string) string { return env[k] }))
+}
+
+// TestResolveServerNameFallsBackToHostHostnameThenOSHostname exercises
+// the two fallbacks behind var.ini's NAME, in order: HOST_HOSTNAME (not
+// a GANTRY_* setting -- Unraid's Docker manager injects this into every
+// managed container) when set, else this process's own os.Hostname().
+func TestResolveServerNameFallsBackToHostHostnameThenOSHostname(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	ur := unraid.New(st, st, t.TempDir(), "/proc") // never ticked: ur.ServerName() stays ""
+
+	env := map[string]string{"HOST_HOSTNAME": "tower"}
+	require.Equal(t, "tower", resolveServerName(ur, func(k string) string { return env[k] }))
+
+	osHostname, hErr := os.Hostname()
+	require.NoError(t, hErr)
+	require.Equal(t, osHostname, resolveServerName(ur, func(string) string { return "" }))
 }
 
 // TestBuildSnapshotIncludesFakeMetasWhenWired pins the ledger-carried
@@ -598,7 +658,7 @@ func TestBuildSnapshotIncludesFakeMetasWhenWired(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running", Health: "healthy", Image: "demo/jellyfin:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil, nil)()
 
 	require.Empty(t, dc.Running(), "dc's own registry never saw this container -- the fix must not depend on it")
 	c, ok := snap.Containers["jellyfin"]
@@ -641,7 +701,7 @@ func TestBuildSnapshotMapsMetaBadgeAndNetworkFieldsIntoContainerDTO(t *testing.T
 		}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["jellyfin"]
 	require.True(t, ok)
@@ -673,7 +733,7 @@ func TestBuildSnapshotZeroCreatedOmittedNotEpochGarbage(t *testing.T) {
 		return []docker.Meta{{Name: "jellyfin", State: "running"}} // Created left at its zero value
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil, nil)()
 
 	require.Equal(t, int64(0), snap.Containers["jellyfin"].Created)
 }
@@ -707,7 +767,7 @@ func TestBuildSnapshotDropsStaleSampleFromRunningContainer(t *testing.T) {
 		return []docker.Meta{{Name: "db", State: "running"}} // running unconditionally, per buildSnapshot's own entity-level contract
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -738,7 +798,7 @@ func TestBuildSnapshotIncludesStoppedContainerWithEmptyMetrics(t *testing.T) {
 		return []docker.Meta{{Name: "gitea", State: "exited", Health: "", Image: "demo/gitea:latest"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["gitea"]
 	require.True(t, ok, "a stopped-but-known container must still appear in the frame")
@@ -771,7 +831,7 @@ func TestBuildSnapshotPassesThroughComposeProject(t *testing.T) {
 		}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil, nil)()
 
 	require.Equal(t, "gridmind-cloud", snap.Containers["gridmind-api"].ComposeProject)
 	require.Equal(t, "", snap.Containers["jellyfin"].ComposeProject)
@@ -801,7 +861,7 @@ func TestBuildSnapshotPassesThroughCpusetAndExitCode(t *testing.T) {
 		}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil, nil)()
 
 	require.Equal(t, "0-1", snap.Containers["minecraft"].Cpuset)
 	require.Equal(t, 0, snap.Containers["minecraft"].ExitCode)
@@ -832,7 +892,7 @@ func TestBuildSnapshotDropsSampleAtExactlyContainerFrameMaxAgeBoundary(t *testin
 		return []docker.Meta{{Name: "db", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["db"]
 	require.True(t, ok)
@@ -864,7 +924,7 @@ func TestBuildSnapshotDropsStaleContainerGPUBusyPct(t *testing.T) {
 		return []docker.Meta{{Name: "plex", State: "running"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, fakeMetas, nil, nil, nil, nil, nil)()
 
 	c, ok := snap.Containers["plex"]
 	require.True(t, ok)
@@ -911,7 +971,7 @@ rotational="1"
 		return map[string]unraid.DiskMeta{"flash": {Device: "sdi", Kind: "usb"}}
 	}
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, fakeDiskMeta, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, fakeDiskMeta, nil, nil, nil, nil)()
 
 	require.Equal(t, server.DiskMetaDTO{Device: "sdc", Kind: "hdd"}, snap.DiskMeta["disk1"], "the real unraid collector's own DiskMeta must survive into the DTO")
 	require.Equal(t, server.DiskMetaDTO{Device: "sdi", Kind: "usb"}, snap.DiskMeta["flash"], "fake mode's own DiskMeta overlay must land alongside it, not replace it")
@@ -954,7 +1014,7 @@ func TestBuildSnapshotAlertsBlockFiltersFiringJoinsRuleNameAndFlagsSilenced(t *t
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil, nil)()
 
 	require.Len(t, snap.Alerts.Firing, 1, "the pending instance must be excluded from the frame")
 	f := snap.Alerts.Firing[0]
@@ -995,7 +1055,7 @@ func TestBuildSnapshotAlertsBlockCapsAtTwentyAndReportsTruncated(t *testing.T) {
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil, nil)()
 
 	require.Len(t, snap.Alerts.Firing, server.AlertsFrameCap)
 	require.Equal(t, 25, snap.Alerts.FiringCount)
@@ -1017,7 +1077,7 @@ func TestBuildSnapshotAlertsBlockEmptyChannelsWhenNoDispatcher(t *testing.T) {
 	nv := gpu.NewNvidia(st, "/proc", func(string) (string, bool) { return "", false })
 	sources := func() map[string]string { return map[string]string{} }
 
-	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil)()
+	snap := buildSnapshot(st, dc, ur, gp, nv, sources, nil, nil, nil, nil, nil, nil)()
 
 	require.Empty(t, snap.Alerts.Channels)
 	require.Empty(t, snap.Alerts.Firing)

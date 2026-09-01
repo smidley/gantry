@@ -93,6 +93,7 @@ func TestInterpretVarRealCaptureToleratesEveryUnreadKey(t *testing.T) {
 	require.InDelta(t, 0, state.ParityProgress, 1e-9)
 	require.InDelta(t, 0, state.ParitySpeedBps, 1e-9)
 	require.Equal(t, "7.3.2", state.Version)
+	require.Equal(t, "server", state.Name)
 	// This real box's own sbSyncErrs/sbSynced/sbSynced2/sbSyncExit are all
 	// "0" -- a clean capture, never a nonzero error count observed live --
 	// but they are present in the file and must parse rather than error.
@@ -165,6 +166,11 @@ func TestInterpretVarSyncFieldsZeroWhenAbsent(t *testing.T) {
 	require.Zero(t, state.SyncStart)
 	require.Zero(t, state.SyncFinish)
 	require.Zero(t, state.SyncExit)
+}
+
+func TestInterpretVarNameEmptyWhenAbsent(t *testing.T) {
+	state := interpretVar(map[string]map[string]string{"": {"mdState": "STARTED"}})
+	require.Empty(t, state.Name, "absent NAME must default to empty, not error")
 }
 
 // --- transitionEvents: pure edge-detector tests ---
@@ -296,6 +302,17 @@ func TestTickFirstObservationSetsVersionButEmitsNoEvents(t *testing.T) {
 
 	require.Equal(t, "7.3.2", c.Version())
 	require.Empty(t, events.events, "the first tick must only seed prev state, never emit a transition event")
+}
+
+func TestTickCapturesServerNameFromVarIni(t *testing.T) {
+	dir := t.TempDir()
+	c := New(newFakeSink(), &fakeEvents{}, dir, t.TempDir())
+
+	require.Empty(t, c.ServerName(), "before any Tick, ServerName is empty")
+
+	copyFixture(t, "testdata/var_real.ini", filepath.Join(dir, "var.ini"))
+	require.NoError(t, c.Tick(context.Background(), time.Unix(1000, 0)))
+	require.Equal(t, "server", c.ServerName())
 }
 
 func TestTickEmitsParityMetricsOnlyWhileRunning(t *testing.T) {

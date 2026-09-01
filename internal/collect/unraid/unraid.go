@@ -31,6 +31,7 @@ type Collector struct {
 
 	mu             sync.Mutex
 	version        string                    // guarded by mu; set on tickArray, read via Version()
+	name           string                    // guarded by mu; set on tickArray, read via ServerName()
 	poolSlots      []string                  // guarded by mu; set on tickDisks, read via Slots()
 	diskMeta       map[string]DiskMeta       // guarded by mu; set on tickDisks, read via DiskMeta()
 	sharePlacement map[string]SharePlacement // guarded by mu; set on tickShares, read via SharePlacement()
@@ -70,6 +71,15 @@ func (c *Collector) Version() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.version
+}
+
+// ServerName returns the most recently observed var.ini NAME field --
+// the box's own configured Unraid server name -- or "" before the first
+// tick. Safe for concurrent callers, same convention as Version().
+func (c *Collector) ServerName() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.name
 }
 
 // Slots returns the most recently observed pool slot names -- disks.

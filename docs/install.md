@@ -50,6 +50,7 @@ audited) by hand:
 ```sh
 docker run -d \
   --name=gantry \
+  --label net.unraid.docker.icon=https://raw.githubusercontent.com/smidley/gantry/main/template/gantry-icon.png \
   --pid=host \
   --cap-add=SYS_PTRACE \
   --cap-drop=ALL \
@@ -67,6 +68,11 @@ docker run -d \
 The update-status line is the one mount you can safely drop if that file
 doesn't exist on your system -- Gantry degrades to simply not showing
 update-available flags.
+
+The `--label` line is the icon Unraid's Docker page (and Gantry's own
+Containers view) shows for the container. A CA install sets it
+automatically from the template's `<Icon>`; a hand-run container only
+gets it if you spell it out.
 
 ## Optional: PSI (Pressure Stall Information)
 

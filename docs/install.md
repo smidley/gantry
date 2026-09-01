@@ -31,13 +31,16 @@ username and password you set the first time you open it (see
 ## Extra parameters
 
 ```
---pid=host --cap-add=SYS_PTRACE --cap-drop=ALL
+--pid=host --cap-add=SYS_PTRACE --cap-add=DAC_OVERRIDE --cap-drop=ALL
 ```
 
 - `--pid=host` -- shares the host's PID namespace so Gantry can attribute
   GPU and resource usage to the right container instead of falling back to
   host-only totals.
 - `--cap-add=SYS_PTRACE` -- needed to read other containers' `/proc/<pid>/fdinfo`.
+- `--cap-add=DAC_OVERRIDE` -- lets Gantry write its SQLite database into the
+  `/config` appdata folder, which Unraid creates owned by the array (not
+  root). Without it the container can't open its database and exits at start.
 - `--cap-drop=ALL` -- every other Linux capability the container would
   otherwise get by default is removed. This is the one capability Gantry
   actually needs, not the default set.
@@ -53,6 +56,7 @@ docker run -d \
   --label net.unraid.docker.icon=https://raw.githubusercontent.com/smidley/gantry/main/template/gantry-icon.png \
   --pid=host \
   --cap-add=SYS_PTRACE \
+  --cap-add=DAC_OVERRIDE \
   --cap-drop=ALL \
   -p 8380:8380 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \

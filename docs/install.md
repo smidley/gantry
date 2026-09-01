@@ -24,9 +24,9 @@ to change.
 
 Everything is read-only except the notifications mount and the config
 mount. Gantry does not run `--privileged`, does not use host networking,
-and needs no account of any kind. A password is optional -- off by
-default, one template variable or a Settings form away when you want it
-(see [Optional: password protection](#optional-password-protection)).
+and needs no cloud account. It does require a login -- a single local
+username and password you set the first time you open it (see
+[Authentication](#authentication)).
 
 ## Extra parameters
 
@@ -87,49 +87,61 @@ If you have an Nvidia GPU passed through with the Nvidia Driver plugin,
 add `--runtime=nvidia` to Extra Parameters and set `NVIDIA_VISIBLE_DEVICES=all`.
 Without both, the GPU panel simply shows its enable hint -- never an error.
 
-## Optional: password protection
+## Authentication
 
-Gantry is a LAN appliance and ships open: install it, open the UI, done.
-Settings shows a quiet reminder -- "no password set — anyone on your
-network can view and manage this server" -- until you either accept that
-trade or set a password. Two ways to set one:
+Gantry requires a login. It's a single local account -- a username and a
+password -- stored on your own box; there's no cloud account and no
+external service. There are two ways the credential gets set:
 
-- **The `GANTRY_PASSWORD` template variable** (masked in the CA form).
-  Applied at every container start; changing the variable changes the
-  password and signs out every session; an unchanged variable changes
-  nothing. Minimum 8 characters -- a shorter value is rejected with a
-  log line and the container boots open rather than half-locked.
-- **Settings → Access**, entirely in the UI. Setting a password keeps
-  the browser that set it signed in; changing it later requires the
-  current password and signs out every other session.
+- **First-run setup (the default).** The first time you open a box with
+  no credential, Gantry shows a one-time setup screen: pick a username
+  and a password (minimum 8 characters), and it signs you straight in.
+  Every visit after that is a normal login. Change either later in
+  **Settings → Access** (the current password is required; a change
+  signs out every other session).
+- **Preseed with `GANTRY_USERNAME` + `GANTRY_PASSWORD`** (the password
+  masked in the CA form), for a headless or Community Applications
+  install. Set **both** to create the login at first boot and skip the
+  setup screen. They're applied at every container start: changing
+  either changes the login and signs out every session; an unchanged
+  pair changes nothing. **Both are required together** -- only one set
+  (or a password under 8 characters) is ignored with a log line, and the
+  box falls back to the setup screen rather than booting half-configured.
 
-One more thing before you set it: `POST /api/auth/password` itself has
-to work without a session while the box is open -- there's nothing yet
-to require one from. That's not a real gap: anyone already on your LAN
-can view and manage the whole open dashboard in that window regardless,
-and a browser page trying to call it invisibly still needs the same
-custom header every mutating route requires, so a drive-by webpage is
-still shut out. Set a password promptly if you're on a network you
-don't fully trust. If you ever need to force a reset with no session
-and no current password on hand, `GANTRY_PASSWORD` rewrites the stored
-hash at the next restart -- see above.
+The first-run setup endpoint (`POST /api/auth/setup`) is reachable
+without a session -- there's nothing yet to authenticate against -- but
+only until a credential exists; afterward it answers 409. During that
+first-boot window everything else is already gated (a data route with no
+session gets a 401, which is exactly what shows the setup screen), and a
+drive-by web page still can't reach it: every mutating route requires a
+custom header no cross-site page can set. Set the credential promptly on
+a network you don't fully trust.
 
-One deliberate asymmetry to know about: **removing `GANTRY_PASSWORD`
-from the template does NOT turn the password off.** The stored password
-stays until you turn it off in Settings → Access (current password
-required). This is intentional -- a template edit, a copy-paste of
-someone else's template, or a CA update must never silently reopen the
-dashboard. Same idea in the other direction: a change made in Settings
-while the variable is still set lasts only until the next restart
-re-applies the variable, and the Access card says so.
+One deliberate asymmetry: **removing `GANTRY_USERNAME`/`GANTRY_PASSWORD`
+does NOT turn authentication off.** The stored login stays; auth is
+mandatory. A template edit, a copy-paste of someone else's template, or
+a CA update must never silently reopen the dashboard. To run without a
+login, use `GANTRY_AUTH=none` below -- an explicit choice, not a side
+effect. (A change made in Settings while the variables are still set
+lasts only until the next restart re-applies them, and the Access card
+says so.)
 
-What the lock actually does:
+Upgrading from a 0.1.0 install that had a password set? It keeps
+working: the password-only credential is migrated to the username
+`admin` on first boot under 0.1.1 (change it in Settings → Access).
+Nobody is locked out.
 
-- Every API route and the live stream require a login session. Sessions
-  are 256-bit random cookies (`HttpOnly`, `SameSite=Lax`, `Secure` when
-  served through a TLS-terminating proxy), valid for 7 days per visit
-  and 30 days at the absolute most; the token is stored server-side
-  only as a SHA-256 digest, and the password only as an argon2id hash.
+What the login actually does:
+
+- Every API route and the live stream require a session. The session
+  cookie is a **session cookie** (`HttpOnly`, `SameSite=Lax`, `Secure`
+  when served through a TLS-terminating proxy, and no fixed lifetime),
+  so it's cleared **when you close your browser**. Server-side backstops
+  still expire an idle session after 8 hours and any session after 24
+  hours, so a never-closed kiosk browser can't stay signed in forever.
+  The token is stored only as a SHA-256 digest and the password only as
+  an argon2id hash; the username is stored as entered (it isn't a
+  secret).
 - `GET /api/healthz` stays reachable without a session -- the Docker
   HEALTHCHECK and reverse-proxy checks depend on it -- but answers an
   unauthenticated caller `{"status":"ok"}` and nothing else. Version,
@@ -137,21 +149,22 @@ What the lock actually does:
 - Login is rate-limited (5/minute per address, 20/minute overall) and
   audited: `auth.login_ok` / `auth.login_failed` events show up in the
   Events view, failures coalesced per address so a guessing run can't
-  flood the feed. The 20/minute ceiling is shared across every
-  address, so a flood of guesses can temporarily block your own login
-  too while it's happening. There is deliberately no hard lockout --
-  on a LAN, a lockout is a lever anything on the network could pull
-  against you; the refilling limit bounds guessing just as well and
-  recovers alone.
+  flood the feed. A wrong username costs exactly what a wrong password
+  does, so neither can be probed by timing. The 20/minute ceiling is
+  shared across every address, so a flood of guesses can temporarily
+  block your own login too while it's happening. There is deliberately
+  no hard lockout -- on a LAN, a lockout is a lever anything on the
+  network could pull against you; the refilling limit bounds guessing
+  just as well and recovers alone.
 - The SPA and any script calling the API must send a custom header on
-  mutating requests (this is enforced with or without a password --
-  it is what makes cross-site request forgery a dead end):
+  mutating requests (enforced whether or not authentication is on -- it
+  is what makes cross-site request forgery a dead end):
 
   ```sh
   curl -X POST http://tower:8380/api/auth/login \
     -H 'X-Requested-With: gantry' \
     -H 'Content-Type: application/json' \
-    -d '{"password":"..."}' -c cookies.txt
+    -d '{"username":"...","password":"..."}' -c cookies.txt
   curl -X PUT http://tower:8380/api/settings -b cookies.txt \
     -H 'X-Requested-With: gantry' \
     -H 'Content-Type: application/json' -d '{"retention":{...}}'
@@ -161,15 +174,24 @@ Gantry itself serves plain HTTP. On a trusted LAN that's the normal
 deployment; if you expose it beyond one, put a TLS-terminating reverse
 proxy in front rather than sending the password over cleartext hops.
 
+### `GANTRY_AUTH=none`
+
+The explicit opt-out: set `GANTRY_AUTH=none` and Gantry runs with **no
+authentication at all** -- no setup screen, no login, the whole
+dashboard open to anyone who can reach it. Only for a fully trusted
+network. The custom-header cross-site defense still applies, so a
+drive-by page still can't reach the write paths, but anyone on the
+network can. This is the only way to run Gantry open.
+
 ### `GANTRY_AUTH=proxy`
 
 For installs where a reverse proxy (authelia, SWAG, an nginx
 `auth_request` setup) already authenticates every request before Gantry
 sees it: set `GANTRY_AUTH=proxy` and Gantry's own gate switches off --
-no login screen, no Settings nudge, and the built-in password routes
-answer 409 so the inert gate can't be mistaken for a working one. Any
-other value of `GANTRY_AUTH` is logged and treated as `auto` (the
-password-controlled default) -- an auth typo fails closed, never open.
+no setup or login screen, and the built-in credential routes answer 409
+so the inert gate can't be mistaken for a working one. Any other value
+of `GANTRY_AUTH` is logged and treated as `auto` (login required) -- an
+auth typo fails closed, never open.
 
 ## `GANTRY_READ_ONLY`
 
@@ -177,12 +199,11 @@ Off by default. Set to `1` to make Gantry's write-capable paths (docker
 mutations, webhook-target configuration) refuse to run, for anyone who
 wants a strictly read-only monitor.
 
-Read-only and the password are orthogonal by design: `GANTRY_READ_ONLY`
-limits what a logged-in (or open-mode) user can do, `GANTRY_PASSWORD`
-limits who gets in at all. In particular, password set/change/disable
-still work in read-only mode -- being unable to *secure* a read-only
-box would invert the switch's purpose. Use both for a locked,
-look-don't-touch monitor.
+Read-only and the login are orthogonal by design: `GANTRY_READ_ONLY`
+limits what a logged-in user can do, the login limits who gets in at
+all. In particular, changing the username or password still works in
+read-only mode -- being unable to *secure* a read-only box would invert
+the switch's purpose. Use both for a locked, look-don't-touch monitor.
 
 ## Known gaps as of this template (pre-release checklist)
 

@@ -63,16 +63,28 @@ func TestContainerLogsEndpointAgainstRealDaemon(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/containers/" + name + "/logs?tail=500")
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, "text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
+	var status int
+	var contentType, body string
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(ts.URL + "/api/containers/" + name + "/logs?tail=500")
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	lines := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
-	require.GreaterOrEqual(t, len(lines), 2, "expected at least two lines, got: %q", string(body))
-	require.Contains(t, string(body), "line1")
-	require.Contains(t, string(body), "line2")
+		b, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		status = resp.StatusCode
+		contentType = resp.Header.Get("Content-Type")
+		body = string(b)
+
+		lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+		return status == http.StatusOK && len(lines) >= 2
+	}, 10*time.Second, 200*time.Millisecond, "logs endpoint for %s never returned at least two lines", name)
+
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "text/plain; charset=utf-8", contentType)
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	require.GreaterOrEqual(t, len(lines), 2, "expected at least two lines, got: %q", body)
+	require.Contains(t, body, "line1")
+	require.Contains(t, body, "line2")
 }

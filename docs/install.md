@@ -15,7 +15,7 @@ to change.
 | Purpose | Host path | Container path | Mode | Why |
 |---|---|---|---|---|
 | Web UI | -- | -- | TCP `8380` | The dashboard. |
-| Docker socket | `/var/run/docker.sock` | `/var/run/docker.sock` | ro | Container inventory, stats, health, logs, events. Gantry never issues docker commands through it. |
+| Docker socket | `/var/run/docker.sock` | `/var/run/docker.sock` | ro | Container inventory, stats, health, logs, events. Read-only for monitoring; also how the Maintenance view removes dangling images and stopped containers when you ask it to (confirmable, off under `GANTRY_READ_ONLY`). |
 | Host sysfs | `/sys` | `/host/sys` | ro | hwmon sensors, GPU/DRM info, the cgroup v2 fast path. |
 | Unraid state | `/var/local/emhttp` | `/unraid` | ro | Array status, parity progress, disk/pool/share info -- the same files the Unraid webGUI reads. |
 | Notifications | `/tmp/notifications` | `/notify` | **rw** | The only other read-write mount. Lets Gantry hand alerts to Unraid's own notification center. |

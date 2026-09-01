@@ -3,7 +3,9 @@
   <Profile>
 Gantry is a single-container, zero-configuration Docker and server monitor built for Unraid.
 
-Install it, open the web UI, and the dashboard is already live -- a realtime view of every container's CPU, memory, network, disk IO and per-container GPU usage, your array and pool disks with capacity and temperature, and cross-container insights that explain when one container is slowing another or the array. It is read-only and safe: it never issues docker commands and never touches your array configuration.
+Install it, open the web UI, and the dashboard is already live -- a realtime view of every container's CPU, memory, network, disk IO and per-container GPU usage, your array and pool disks with capacity and temperature, and cross-container insights that explain when one container is slowing another or the array.
+
+Monitoring is read-only and never touches your array configuration. The only writes Gantry can make are the explicit cleanup you trigger yourself from the Maintenance view -- removing dangling images and stopped containers -- each behind a confirmation, never force-removing, never touching a running container or a volume. Set GANTRY_READ_ONLY=1 to disable even that. It never runs privileged.
 
 **Support:** open an issue at https://github.com/smidley/gantry/issues
   </Profile>

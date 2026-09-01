@@ -20,7 +20,7 @@ Optional, host-level: Unraid ships PSI (Pressure Stall Information) compiled in 
 Optional, GPU: if you pass --runtime=nvidia (add it to Extra Parameters) and set NVIDIA_VISIBLE_DEVICES below, Gantry shows per-container GPU utilization. Without it, the GPU panel just shows a plain "not available" hint -- never an error.</Overview>
   <Category>Tools: Network:Management</Category>
   <WebUI>http://[IP]:[PORT:8380]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/smidley/gantry/main/template/gantry.xml</TemplateURL>
+  <TemplateURL>https://raw.githubusercontent.com/smidley/gantry/main/templates/gantry.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/smidley/gantry/main/template/gantry-icon.png</Icon>
   <ExtraParams>--pid=host --cap-add=SYS_PTRACE --cap-add=DAC_OVERRIDE --cap-drop=ALL</ExtraParams>
   <DateInstalled></DateInstalled>

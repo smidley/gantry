@@ -13,7 +13,7 @@
 
 Every mount below is pre-filled so a stock install needs no edits. All of them are read-only except two: the notifications mount (so Gantry can hand alerts to Unraid's own notification center) and the config mount (Gantry's own small SQLite database). Monitoring is entirely read-only -- Gantry never writes to /sys and never touches your array configuration. The one exception is deliberate: the Maintenance view lets you remove dangling images and stopped containers, each behind a confirmation, never force-removing and never touching a running container or a volume. Set GANTRY_READ_ONLY=1 below to disable that too and keep the container strictly read-only.
 
-The Extra Parameters are already set for you; there's nothing to add. --pid=host lets Gantry attribute GPU and resource usage to the right container instead of host-only totals, --cap-add=SYS_PTRACE lets it read other containers' /proc/&lt;pid&gt;/fdinfo, and --cap-add=DAC_OVERRIDE lets it write its own database into the appdata folder Unraid created for it (which the array owns, not root). Every other Linux capability is dropped with --cap-drop=ALL; the container does not run --privileged and does not use host networking.
+The Extra Parameters are already set for you; there's nothing to add. --pid=host lets Gantry attribute GPU and resource usage to the right container instead of host-only totals, and --cap-add=SYS_PTRACE lets it read other containers' /proc/&lt;pid&gt;/fdinfo. Gantry runs as an ordinary container (Docker's default capabilities plus SYS_PTRACE); it does not run --privileged and does not use host networking.
 
 Optional, host-level: Unraid ships PSI (Pressure Stall Information) compiled in but disabled. Adding psi=1 to your flash boot device's syslinux append line and rebooting lets Gantry record fuller CPU/memory/IO stall metrics. Nothing to configure on the container itself -- see the PSI note below and docs/psi.md in the repo.
 
@@ -22,7 +22,7 @@ Optional, GPU: if you pass --runtime=nvidia (add it to Extra Parameters) and set
   <WebUI>http://[IP]:[PORT:8380]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/smidley/gantry/main/templates/gantry.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/smidley/gantry/main/template/gantry-icon.png</Icon>
-  <ExtraParams>--pid=host --cap-add=SYS_PTRACE --cap-add=DAC_OVERRIDE --cap-drop=ALL</ExtraParams>
+  <ExtraParams>--pid=host --cap-add=SYS_PTRACE</ExtraParams>
   <DateInstalled></DateInstalled>
   <DonateText></DonateText>
   <DonateLink></DonateLink>

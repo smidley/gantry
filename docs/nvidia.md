@@ -133,8 +133,6 @@ docker run -d \
   -e NVIDIA_VISIBLE_DEVICES=all \
   --pid=host \
   --cap-add=SYS_PTRACE \
-  --cap-add=DAC_OVERRIDE \
-  --cap-drop=ALL \
   -p 8380:8380 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v /sys:/host/sys:ro \

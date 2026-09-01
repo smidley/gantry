@@ -399,7 +399,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// phase's job, not this wiring's) plus one webhook channel per
 	// enabled, valid configured target. Its workers start lazily on the
 	// first Dispatch call; Run here only wires their shutdown to runCtx.
-	dispatcher, err := buildDispatcher(st, cfg, getenv, ver, fakeMode)
+	dispatcher, err := buildDispatcher(st, cfg, getenv, ver, fakeMode, filepath.Dir(dbPath))
 	if err != nil {
 		return fmt.Errorf("build alert dispatcher: %w", err)
 	}
@@ -1213,19 +1213,34 @@ func buildWebhookChannels(targets []alert.WebhookTarget, version string, clock f
 // box with no real /notify mount at all. The directory is never cleaned
 // up by this process; it's a demo aid for the life of one run, not a
 // durable path, and the OS reclaims temp storage on its own schedule.
-func resolveNotifyDir(getenv func(string) string, fakeMode bool) (string, error) {
+//
+// A missing system temp dir must never be fatal (issue #42: the
+// pre-0.1.3 scratch image shipped no /tmp, so MkdirTemp's parent lookup
+// failed and took down startup): it falls back to a fixed "fake-notify"
+// directory next to the database, the one path already proven writable
+// by the store opening. If even that can't be created, the path is
+// returned anyway so the notify channel's own construction probe
+// degrades to the unwritable-spool hint -- the same posture a real box
+// with no /notify mount gets. No branch fails, so this returns no error.
+func resolveNotifyDir(getenv func(string) string, fakeMode bool, dbDir string) string {
 	if v := getenv("GANTRY_NOTIFY_DIR"); v != "" {
-		return v, nil
+		return v
 	}
 	if !fakeMode {
-		return "/notify", nil
+		return "/notify"
 	}
 	dir, err := os.MkdirTemp("", "gantry-fake-notify-")
-	if err != nil {
-		return "", fmt.Errorf("create fake notify dir: %w", err)
+	if err == nil {
+		log.Printf("fake data mode: notify spool at %s", dir)
+		return dir
 	}
-	log.Printf("fake data mode: notify spool at %s", dir)
-	return dir, nil
+	fallback := filepath.Join(dbDir, "fake-notify")
+	if mkErr := os.MkdirAll(fallback, 0o755); mkErr != nil {
+		log.Printf("fake data mode: notify spool unavailable: %v (fallback: %v)", err, mkErr)
+	} else {
+		log.Printf("fake data mode: notify spool at %s (no system temp dir: %v)", fallback, err)
+	}
+	return fallback
 }
 
 // buildDispatcher assembles the alert.Dispatcher wired to
@@ -1238,11 +1253,8 @@ func resolveNotifyDir(getenv func(string) string, fakeMode bool) (string, error)
 // closures -- a settings change takes effect on the very next dispatch,
 // no restart, the same resolved-fresh-every-tick posture the retention
 // settings above use.
-func buildDispatcher(st *store.Store, cfg *config.Config, getenv func(string) string, version string, fakeMode bool) (*alert.Dispatcher, error) {
-	notifyDir, err := resolveNotifyDir(getenv, fakeMode)
-	if err != nil {
-		return nil, err
-	}
+func buildDispatcher(st *store.Store, cfg *config.Config, getenv func(string) string, version string, fakeMode bool, dbDir string) (*alert.Dispatcher, error) {
+	notifyDir := resolveNotifyDir(getenv, fakeMode, dbDir)
 	linkBase := func() string {
 		v, _, _ := st.SettingGet("alert.link_base")
 		return v

@@ -1958,7 +1958,7 @@ func TestBuildDispatcherIncludesNotifyAndConfiguredWebhookChannels(t *testing.T)
 	}))
 	cfg := config.New(st, func(string) string { return "" })
 
-	d, err := buildDispatcher(st, cfg, func(string) string { return "" }, "v-test", false)
+	d, err := buildDispatcher(st, cfg, func(string) string { return "" }, "v-test", false, t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(d.Stop)
 
@@ -1987,7 +1987,7 @@ func TestAlertEngineFiresThroughDispatcherToNotifySpool(t *testing.T) {
 	}
 	cfg := config.New(st, getenv)
 
-	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test", false)
+	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test", false, t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(dispatcher.Stop)
 
@@ -2163,20 +2163,18 @@ func TestRunWiresAlertsAndWebhooksAPIEndToEnd(t *testing.T) {
 
 func TestResolveNotifyDirEnvAlwaysWinsRegardlessOfMode(t *testing.T) {
 	for _, fakeMode := range []bool{false, true} {
-		dir, err := resolveNotifyDir(func(k string) string {
+		dir := resolveNotifyDir(func(k string) string {
 			if k == "GANTRY_NOTIFY_DIR" {
 				return "/custom/notify"
 			}
 			return ""
-		}, fakeMode)
-		require.NoError(t, err)
+		}, fakeMode, t.TempDir())
 		require.Equal(t, "/custom/notify", dir, "fakeMode=%v", fakeMode)
 	}
 }
 
 func TestResolveNotifyDirRealModeDefaultsToNotifyMount(t *testing.T) {
-	dir, err := resolveNotifyDir(func(string) string { return "" }, false)
-	require.NoError(t, err)
+	dir := resolveNotifyDir(func(string) string { return "" }, false, t.TempDir())
 	require.Equal(t, "/notify", dir)
 }
 
@@ -2187,14 +2185,28 @@ func TestResolveNotifyDirRealModeDefaultsToNotifyMount(t *testing.T) {
 // probe (channel_notify.go's Health doc) finds it writable and reports
 // "ok" immediately, with no operator action.
 func TestResolveNotifyDirFakeModeCreatesFreshWritableTempDir(t *testing.T) {
-	dirA, err := resolveNotifyDir(func(string) string { return "" }, true)
-	require.NoError(t, err)
+	dirA := resolveNotifyDir(func(string) string { return "" }, true, t.TempDir())
 	require.NotEqual(t, "/notify", dirA)
 	require.NoError(t, os.WriteFile(filepath.Join(dirA, "probe"), []byte("x"), 0o644))
 
-	dirB, err := resolveNotifyDir(func(string) string { return "" }, true)
-	require.NoError(t, err)
+	dirB := resolveNotifyDir(func(string) string { return "" }, true, t.TempDir())
 	require.NotEqual(t, dirA, dirB, "each call with no override must get its own fresh directory")
+}
+
+// TestResolveNotifyDirFakeModeSurvivesMissingSystemTempDir pins issue
+// #42's fix: the pre-0.1.3 scratch image shipped no /tmp, so MkdirTemp's
+// parent lookup failed and the returned error aborted startup entirely.
+// A demo aid must never be fatal -- with no usable system temp dir the
+// spool falls back to a fixed directory next to the database, which is
+// writable, and the container boots.
+func TestResolveNotifyDirFakeModeSurvivesMissingSystemTempDir(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	dbDir := t.TempDir()
+
+	dir := resolveNotifyDir(func(string) string { return "" }, true, dbDir)
+
+	require.Equal(t, filepath.Join(dbDir, "fake-notify"), dir)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "probe"), []byte("x"), 0o644))
 }
 
 func TestSeedFakeWebhookTargetsInsertsBothAndIsIdempotent(t *testing.T) {
@@ -2403,7 +2415,7 @@ func TestFakeModeAlertDemoFiresThenResolves(t *testing.T) {
 		return ""
 	}
 	cfg := config.New(st, getenv)
-	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test", true)
+	dispatcher, err := buildDispatcher(st, cfg, getenv, "v-test", true, t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(dispatcher.Stop)
 

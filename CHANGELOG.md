@@ -10,6 +10,14 @@ the GitHub Release body, so a section lands here under its own `##
 
 ## [0.1.3] - 2026-09-01
 
+### Added
+
+- **The Unraid server name now shows at the top of the sidebar**, so if
+  you run Gantry on more than one box you can tell at a glance which one
+  you're looking at. It reads the Unraid server identity from `var.ini`,
+  falling back to the container's host hostname; when neither is
+  available the sidebar reads exactly as before. (#39)
+
 ### Changed
 
 - **The image is now built on a minimal

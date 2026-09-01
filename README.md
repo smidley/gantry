@@ -83,8 +83,6 @@ docker run -d \
   --label net.unraid.docker.icon=https://raw.githubusercontent.com/smidley/gantry/main/template/gantry-icon.png \
   --pid=host \
   --cap-add=SYS_PTRACE \
-  --cap-add=DAC_OVERRIDE \
-  --cap-drop=ALL \
   -p 8380:8380 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v /sys:/host/sys:ro \
@@ -110,7 +108,7 @@ Then open `http://<your-unraid-ip>:8380/`. The first time, you'll set a username
 | Update status | `/var/lib/docker/unraid-update-status.json` | `/updates/unraid-update-status.json` | ro, optional | Container update-available flags. Missing or omitted: the flags just don't show, nothing else breaks. |
 | Config | `/mnt/user/appdata/gantry` | `/config` | **rw** | Gantry's own SQLite database and settings — the only place it stores anything persistent. |
 
-`/notify` and `/config` are the only writable mounts; everything else is mounted read-only. The extra parameters are `--pid=host` (so Gantry can attribute GPU and resource usage to the right container), `--cap-add=SYS_PTRACE` (to read other containers' `/proc/<pid>/fdinfo`), `--cap-add=DAC_OVERRIDE` (so it can write its database into the appdata folder Unraid owns as the array, not root), and `--cap-drop=ALL` (every other Linux capability removed). Gantry does not run `--privileged` and does not use host networking.
+`/notify` and `/config` are the only writable mounts; everything else is mounted read-only. The extra parameters are `--pid=host` (so Gantry can attribute GPU and resource usage to the right container) and `--cap-add=SYS_PTRACE` (to read other containers' `/proc/<pid>/fdinfo`). Gantry runs with Docker's default capabilities plus `SYS_PTRACE`; it writes its database into the appdata folder (owned by the array, not root) using `DAC_OVERRIDE`, which is part of that default set. Gantry does not run `--privileged` and does not use host networking.
 
 The `update-status` line is the one mount you can drop if that file doesn't exist on your system. Images are `linux/amd64`; every tagged release publishes semver-tagged images to [ghcr.io/smidley/gantry](https://github.com/smidley/gantry/pkgs/container/gantry).
 
@@ -135,7 +133,7 @@ All optional — Gantry works with none of them.
 
 - **Read-only for monitoring.** Gantry reads container stats, logs and container/disk state, and never touches your array configuration.
 - **Maintenance is the only exception, and it's opt-in.** The only writes Gantry can make are the cleanup you trigger from the Maintenance view: removing dangling and unused images, and stopped containers. Every deletion is behind a confirmation dialog, never force-removes, never touches a running container, and never removes volumes. Setting `GANTRY_READ_ONLY=1` disables all of it.
-- **Least privilege.** Gantry never runs `--privileged`, never uses host networking, and drops every Linux capability except `SYS_PTRACE` and `DAC_OVERRIDE`.
+- **No elevated access.** Gantry never runs `--privileged` and never uses host networking. It adds a single Linux capability, `SYS_PTRACE` (for per-container GPU and resource attribution), on top of Docker's default set.
 - **Required login.** A username and password — set on first run — protect the whole UI and live stream; sessions are argon2id-backed and end when you close your browser. Every mutating request additionally requires a custom header, so a drive-by web page can't reach the write paths even when authentication is turned off. Run open only on a trusted network with `GANTRY_AUTH=none`, or delegate auth to a reverse proxy with `GANTRY_AUTH=proxy`. Gantry serves plain HTTP — put a TLS-terminating proxy in front if you expose it beyond a trusted LAN.
 
 ## How it's built

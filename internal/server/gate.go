@@ -3,6 +3,7 @@ package server
 import (
 	"net"
 	"net/http"
+	"path"
 	"time"
 
 	"github.com/smidley/gantry/internal/auth"
@@ -196,13 +197,41 @@ func clientIP(r *http.Request) string {
 // session still gets the 401 its redirect-to-login flow keys on.
 func (s *Server) secureAPI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isAPIPath(r.URL.Path) {
-			if isMutatingMethod(r.Method) && !csrfExemptPaths[r.URL.Path] && !crossSiteHeaderPresent(r) {
+		// Classify on the CLEANED path, never the raw one. isAPIPath is a
+		// bare HasPrefix and the two exempt sets below are exact-match
+		// maps -- "//api/settings", "/foo/../api/settings", and
+		// "/./api/settings" all fail HasPrefix("/api/") outright, which
+		// would skip BOTH checks below for a request that, once
+		// normalized, is unmistakably a call to a gated route. ServeMux
+		// would go on to clean the same path and 307 the caller to the
+		// version we just failed to recognize -- so today's safety on
+		// those inputs is an accident of the mux's redirect running
+		// before any handler does, not a decision this gate actually
+		// made, and it disappears entirely for any caller that doesn't
+		// replay a 307 (most non-browser API clients default to not).
+		// path.Clean makes the gate's own verdict agree with where the
+		// mux will end up routing the request, instead of leaning on
+		// that redirect happening at all.
+		//
+		// path.Clean also drops a trailing slash, which the mux's own
+		// (unexported) path cleaner does not: "/api/healthz/" therefore
+		// classifies here as the exempt "/api/healthz", even though the
+		// mux -- trailing slash intact -- never matches that request to
+		// handleHealthz; it falls through to the SPA/placeholder's own
+		// isAPIPath check and 404s instead. So a trailing slash can
+		// widen which requests this gate waves through, but never which
+		// handler ends up running one, and nothing in authExemptPaths or
+		// csrfExemptPaths is sensitive to wave through in the first
+		// place -- see authExemptPaths' own doc. Deliberately not
+		// special-cased.
+		reqPath := path.Clean(r.URL.Path)
+		if isAPIPath(reqPath) {
+			if isMutatingMethod(r.Method) && !csrfExemptPaths[reqPath] && !crossSiteHeaderPresent(r) {
 				writeError(w, http.StatusForbidden,
 					"cross-site request blocked: send the "+requestedWithHeader+": "+requestedWithValue+" header")
 				return
 			}
-			if s.gateActive() && !authExemptPaths[r.URL.Path] && !s.requestAuthenticated(r) {
+			if s.gateActive() && !authExemptPaths[reqPath] && !s.requestAuthenticated(r) {
 				writeError(w, http.StatusUnauthorized, "authentication required")
 				return
 			}

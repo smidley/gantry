@@ -11,6 +11,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// pathConfusionVariants are three distinct ways to spell /api/settings
+// that all fail a bare HasPrefix(path, "/api/") check on the raw,
+// un-normalized request path -- a leading double slash, a dot-segment,
+// and a "current directory" segment -- even though path.Clean resolves
+// every one of them to the real, gated route. secureAPI must classify
+// all three as gated on its own; see gate.go's path.Clean comment.
+var pathConfusionVariants = []string{
+	"//api/settings",
+	"/foo/../api/settings",
+	"/./api/settings",
+}
+
+// noRedirectClient never follows a redirect. The path-confusion cases
+// above need to observe secureAPI's own immediate verdict -- if the
+// gate ever again classified one of them as outside /api/, the request
+// would sail through to the mux, which would 307 it to the clean path
+// instead of 401/403ing it directly. A client that dutifully replays
+// that redirect would land on the right status anyway and mask the
+// exact bug this pins -- see the mux's own cleanPath, which does the
+// same normalization one hop too late to matter here.
+func noRedirectClient() *http.Client {
+	return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+}
+
 // csrfMatrix is one request per mutating route family plus control
 // GETs -- the cross-site header check is enforced by one wrapper over
 // the whole mux, so one representative per shape is enough to pin the
@@ -102,6 +128,28 @@ func TestCrossSiteHeaderNotRequiredOnSafeMethodsOrExemptPaths(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp2.StatusCode)
 }
 
+// TestCrossSiteHeaderRequiredOnPathConfusionVariant pins the CSRF half
+// of the L1 path-normalization fix: a dirty path must be blocked for
+// missing the cross-site header on the FIRST hop, not waved through
+// secureAPI because isAPIPath missed it on the raw path and then
+// caught downstream by the mux's own redirect-then-recheck.
+func TestCrossSiteHeaderRequiredOnPathConfusionVariant(t *testing.T) {
+	s := New(Options{Version: "test", Started: time.Now()})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	client := noRedirectClient()
+
+	for _, p := range pathConfusionVariants {
+		req, err := http.NewRequest(http.MethodPut, ts.URL+p, strings.NewReader("{}"))
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		require.Equal(t, http.StatusForbidden, resp.StatusCode,
+			"PUT %s with no cross-site header must be blocked directly, not redirected first", p)
+	}
+}
+
 // --- session-gate matrix ----------------------------------------------------
 
 // gateMatrixRoutes is every registered route class (one representative
@@ -159,10 +207,27 @@ var gateMatrixRoutes = []struct {
 	{http.MethodGet, "/api/insights/1", false},
 	{http.MethodPost, "/api/insights/1/dismiss", false},
 	{http.MethodGet, "/api/route-from-a-future-version", false}, // unknown API paths are gated too
+
+	// Path confusion (L1 hardening): none of these are exempt -- each
+	// spells a real protected route, and the gate must classify every
+	// one as gated without any help from the mux's own redirect. See
+	// pathConfusionVariants' doc.
+	{http.MethodPut, "//api/settings", false},
+	{http.MethodPut, "/foo/../api/settings", false},
+	{http.MethodPut, "/./api/settings", false},
+	// A trailing slash must not de-gate an already-gated route either.
+	// HasPrefix never cared about trailing content, so this one holds
+	// with or without path.Clean -- pinned anyway since trailing-slash
+	// stripping is the specific new behavior Clean introduces here.
+	{http.MethodPut, "/api/settings/", false},
 }
 
 // gateReq issues one matrix request: cross-site header always present
 // (so the CSRF layer never masks the auth result), cookie optional.
+// Redirects are never followed: a dirty path the mux would 307 to its
+// own canonical form must show up here as that 307, not as whatever
+// status a client that replayed the redirect eventually landed on --
+// see noRedirectClient's doc.
 func gateReq(t *testing.T, base string, method, path, cookie string) int {
 	t.Helper()
 	req, err := http.NewRequest(method, base+path, strings.NewReader("{}"))
@@ -171,7 +236,7 @@ func gateReq(t *testing.T, base string, method, path, cookie string) int {
 	if cookie != "" {
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cookie})
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := noRedirectClient().Do(req)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 	return resp.StatusCode

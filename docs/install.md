@@ -89,7 +89,16 @@ it's on. Nothing on the container side needs to change either way.
 
 If you have an Nvidia GPU passed through with the Nvidia Driver plugin,
 add `--runtime=nvidia` to Extra Parameters and set `NVIDIA_VISIBLE_DEVICES=all`.
-Without both, the GPU panel simply shows its enable hint -- never an error.
+That's the whole setup -- there's no separate image to pull. Gantry's
+image is built on a small glibc base (`gcr.io/distroless/base-debian12`)
+precisely so the `nvidia-smi` the Nvidia runtime injects has a loader to
+run under; a bare `scratch` image would not, and the query would fail to
+start. Intel and AMD GPUs read DRM `fdinfo` in-process and need none of
+this.
+
+Without both settings, the GPU panel simply shows its enable hint --
+never an error. See [docs/nvidia.md](nvidia.md) for how it works and how
+to confirm per-container GPU stats on real hardware.
 
 ## Authentication
 

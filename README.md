@@ -128,7 +128,7 @@ Gantry requires a login. The first time you open it, a one-time setup screen ask
 All optional — Gantry works with none of them.
 
 - **PSI.** Add `psi=1` to your flash boot device's syslinux append line and reboot. Optional; it sharpens the Insights engine with kernel-measured stall data. See **[docs/psi.md](docs/psi.md)**.
-- **Nvidia GPU.** Add `--runtime=nvidia` to Extra Parameters and set `NVIDIA_VISIBLE_DEVICES=all`. Without both, the GPU panel simply shows an enable hint — never an error. (Intel and AMD need nothing extra.)
+- **Nvidia GPU.** Add `--runtime=nvidia` to Extra Parameters and set `NVIDIA_VISIBLE_DEVICES=all` — nothing else, and no special image tag; the standard image already carries the loader `nvidia-smi` needs. Without both, the GPU panel simply shows an enable hint — never an error. (Intel and AMD need nothing extra.) See **[docs/nvidia.md](docs/nvidia.md)**.
 - **`GANTRY_READ_ONLY=1`.** Makes every write-capable path — the Maintenance cleanups and webhook-target configuration — refuse to run, for a strictly look-don't-touch monitor.
 
 ## Security
@@ -140,11 +140,12 @@ All optional — Gantry works with none of them.
 
 ## How it's built
 
-Gantry is a single static Go binary in a `scratch` image — no base OS, no shell, no package manager, no runtime dependencies. It embeds a Svelte SPA, streams updates over Server-Sent Events instead of polling, and keeps history in an embedded SQLite database with configurable retention. It also graphs its own CPU and memory in Settings, so its footprint is never a mystery.
+Gantry is a single static Go binary on a minimal [distroless](https://github.com/GoogleContainerTools/distroless) base (`gcr.io/distroless/base-debian12`) — no shell, no package manager, nothing to log into, about 35 MB. The base is there for one reason: it carries a glibc dynamic loader, so the `nvidia-smi` the Nvidia runtime mounts into the container has an interpreter to run under (a bare `scratch` image has none — see [docs/nvidia.md](docs/nvidia.md)). Intel, AMD and CPU-only boxes don't need it and aren't affected. Gantry embeds a Svelte SPA, streams updates over Server-Sent Events instead of polling, and keeps history in an embedded SQLite database with configurable retention. It also graphs its own CPU and memory in Settings, so its footprint is never a mystery.
 
 ## Documentation
 
 - **[docs/install.md](docs/install.md)** — the full install reference: every mount and flag, the required login and first-run setup, PSI, Nvidia, read-only, and the proxy/none auth modes.
+- **[docs/nvidia.md](docs/nvidia.md)** — how Nvidia support works (why the image is built on a glibc base), how to enable it, and how to validate per-container GPU stats on real hardware.
 - **[docs/psi.md](docs/psi.md)** — what Pressure Stall Information is, what Gantry uses it for, and how to enable it on Unraid.
 - **[CHANGELOG.md](CHANGELOG.md)** — what shipped in each release.
 

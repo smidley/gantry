@@ -164,11 +164,11 @@ var gateMatrixRoutes = []struct {
 	{http.MethodGet, "/api/healthz", true},
 	{http.MethodPost, "/api/healthz", true},
 	{http.MethodGet, "/api/auth/status", true},
+	{http.MethodPost, "/api/auth/setup", true},
 	{http.MethodPost, "/api/auth/login", true},
 	{http.MethodPost, "/api/auth/logout", true},
 
-	{http.MethodPost, "/api/auth/password", false},
-	{http.MethodPost, "/api/auth/disable", false},
+	{http.MethodPost, "/api/auth/credential", false},
 	{http.MethodGet, "/api/version", false},
 	{http.MethodGet, "/api/live/snapshot", false},
 	{http.MethodGet, "/api/live", false}, // the SSE stream
@@ -261,10 +261,9 @@ func TestGateMatrixLockedWithoutSession(t *testing.T) {
 }
 
 func TestGateMatrixLockedWithValidSession(t *testing.T) {
-	// A fresh server per row: two matrix routes legitimately mutate auth
-	// state when they succeed (POST /api/auth/password wipes every other
-	// session, POST /api/auth/disable turns the gate off), which would
-	// otherwise poison the rows after them.
+	// A fresh server per row: POST /api/auth/credential legitimately
+	// wipes every other session when it succeeds, which would otherwise
+	// poison the rows after it.
 	for _, rt := range gateMatrixRoutes {
 		ts, _, token := lockedServer(t, Options{})
 		status := gateReq(t, ts.URL, rt.method, rt.path, token)
@@ -285,23 +284,26 @@ func TestGateMatrixLockedWithBogusCookie(t *testing.T) {
 }
 
 func TestGateMatrixOpenStates(t *testing.T) {
-	// Three open states, all equivalent at the gate: no manager wired,
-	// manager with no password set, and proxy mode (the reverse proxy
-	// authenticates; the built-in gate stands down). Fresh state per row
-	// -- see TestGateMatrixLockedWithValidSession: a successful POST
-	// /api/auth/password in the no-password state flips the gate on for
-	// every row after it.
+	// Three open states, all equivalent at the gate: no manager wired
+	// (test-only), proxy mode (the reverse proxy authenticates), and none
+	// mode (the operator explicitly opted the box open). There is no
+	// longer an open "no credential" state -- auth is mandatory, so an
+	// unconfigured auto-mode box is setup-pending and GATED (see
+	// TestGateMatrixSetupPendingGatesEverythingButSetup). Fresh state per
+	// row -- see TestGateMatrixLockedWithValidSession.
 	build := map[string]func() http.Handler{
 		"nil-auth": func() http.Handler {
 			return New(Options{Version: "test-1", Started: time.Now()}).Handler()
 		},
-		"no-password": func() http.Handler {
-			return New(Options{Version: "test-1", Started: time.Now(), Auth: newFakeAuth()}).Handler()
-		},
 		"proxy-mode": func() http.Handler {
 			fa := newFakeAuth()
 			fa.mode = auth.ModeProxy
-			fa.passwordSet = true
+			fa.credentialSet = true
+			return New(Options{Version: "test-1", Started: time.Now(), Auth: fa}).Handler()
+		},
+		"none-mode": func() http.Handler {
+			fa := newFakeAuth()
+			fa.mode = auth.ModeNone
 			return New(Options{Version: "test-1", Started: time.Now(), Auth: fa}).Handler()
 		},
 	}
@@ -312,5 +314,27 @@ func TestGateMatrixOpenStates(t *testing.T) {
 			require.NotEqual(t, http.StatusUnauthorized, status, "[%s] %s %s must not 401 while the gate is off", name, rt.method, rt.path)
 			ts.Close()
 		}
+	}
+}
+
+// TestGateMatrixSetupPendingGatesEverythingButSetup pins the mandatory-
+// auth first-run posture: auto mode with NO credential yet must 401 every
+// non-exempt route (forcing the SPA to the setup screen) while the
+// exempt paths -- setup, login, status, logout, healthz -- stay
+// reachable. A fresh server per row: POST /api/auth/setup with no cookie
+// legitimately creates the credential and would flip the state for later
+// rows.
+func TestGateMatrixSetupPendingGatesEverythingButSetup(t *testing.T) {
+	for _, rt := range gateMatrixRoutes {
+		fa := newFakeAuth() // auto mode, credentialSet=false -> setup-pending
+		fa.setupToken = "setup-token"
+		ts := httptest.NewServer(New(Options{Version: "test-1", Started: time.Now(), Auth: fa}).Handler())
+		status := gateReq(t, ts.URL, rt.method, rt.path, "")
+		if rt.exempt {
+			require.NotEqual(t, http.StatusUnauthorized, status, "%s %s is exempt and must stay reachable during setup", rt.method, rt.path)
+		} else {
+			require.Equal(t, http.StatusUnauthorized, status, "%s %s must 401 until first-run setup is done", rt.method, rt.path)
+		}
+		ts.Close()
 	}
 }

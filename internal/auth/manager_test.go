@@ -11,16 +11,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testManager wires a Manager over a real *store.Store with an
-// injectable clock -- the same store the wired binary uses, so token
-// hashing and expiry are exercised against real persistence, not a
-// double.
+// testStore opens a real *store.Store with an injectable clock -- the
+// same store the wired binary uses, so token hashing and expiry are
+// exercised against real persistence, not a double.
+func testStore(t *testing.T, now *time.Time) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), func() time.Time { return *now })
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+// testManager wires a Manager over a real store with the injectable
+// clock. The returned *time.Time is the shared clock both the store and
+// the manager read, so advancing it drives expiry and limiter refill.
 func testManager(t *testing.T) (*Manager, *store.Store, *time.Time) {
 	t.Helper()
 	now := time.Unix(1_700_000_000, 0)
-	st, err := store.Open(filepath.Join(t.TempDir(), "g.db"), func() time.Time { return now })
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = st.Close() })
+	st := testStore(t, &now)
 	m, err := New(Options{
 		Sessions:    st,
 		Settings:    st,
@@ -30,6 +38,15 @@ func testManager(t *testing.T) (*Manager, *store.Store, *time.Time) {
 	})
 	require.NoError(t, err)
 	return m, st, &now
+}
+
+// setup is the common first-run bootstrap most tests need before they can
+// log in.
+func (m *Manager) mustSetup(t *testing.T, username, password string) string {
+	t.Helper()
+	token, err := m.Setup("10.0.0.9", username, password)
+	require.NoError(t, err)
+	return token
 }
 
 func events(t *testing.T, st *store.Store, kind string) []store.Event {
@@ -48,8 +65,11 @@ func TestParseMode(t *testing.T) {
 		{"auto", ModeAuto, true},
 		{"proxy", ModeProxy, true},
 		{"PROXY", ModeProxy, true},
+		{"none", ModeNone, true},
+		{"NONE", ModeNone, true},
 		{"off", ModeAuto, false},
 		{"yes", ModeAuto, false},
+		{"disabled", ModeAuto, false},
 	} {
 		got, err := ParseMode(tc.in)
 		require.Equal(t, tc.want, got, "ParseMode(%q)", tc.in)
@@ -61,110 +81,156 @@ func TestParseMode(t *testing.T) {
 	}
 }
 
-func TestSetPasswordFirstSetNeedsNoCurrentAndIssuesSession(t *testing.T) {
+func TestSetupCreatesCredentialAndIssuesSession(t *testing.T) {
 	m, st, _ := testManager(t)
-	require.False(t, m.PasswordSet())
+	require.False(t, m.CredentialSet())
+	require.Empty(t, m.Username())
 
-	token, err := m.SetPassword("10.0.0.9", "", "a-decent-password")
+	token, err := m.Setup("10.0.0.9", "  alice  ", "a-decent-password")
 	require.NoError(t, err)
-	require.True(t, m.PasswordSet())
-	require.True(t, m.Authenticate(token), "first-set must leave the caller logged in")
+	require.True(t, m.CredentialSet())
+	require.Equal(t, "alice", m.Username(), "the username is trimmed before it is stored")
+	require.True(t, m.Authenticate(token), "setup must leave the caller logged in")
 
-	// Stored as an argon2id PHC string under the settings key -- never
-	// the password itself.
-	v, ok, err := st.SettingGet("auth.password_hash")
+	// The password is stored only as an argon2id PHC string; the username
+	// is stored in the clear (it is not a secret).
+	hash, ok, err := st.SettingGet("auth.password_hash")
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.True(t, strings.HasPrefix(v, "$argon2id$"))
-	require.NotContains(t, v, "a-decent-password")
+	require.True(t, strings.HasPrefix(hash, "$argon2id$"))
+	require.NotContains(t, hash, "a-decent-password")
+	user, ok, err := st.SettingGet("auth.username")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "alice", user)
+
+	require.Len(t, events(t, st, "auth.setup"), 1)
 }
 
-func TestSetPasswordPolicyBounds(t *testing.T) {
+func TestSetupIsOneShot(t *testing.T) {
 	m, _, _ := testManager(t)
-	_, err := m.SetPassword("ip", "", "short7!")
+	m.mustSetup(t, "alice", "a-decent-password")
+
+	// Once a credential exists, setup refuses forever -- regardless of the
+	// body it carries.
+	_, err := m.Setup("10.0.0.1", "mallory", "another-password")
+	require.ErrorIs(t, err, ErrCredentialExists)
+	require.Equal(t, "alice", m.Username(), "a rejected setup must not touch the existing credential")
+}
+
+func TestSetupPolicyBounds(t *testing.T) {
+	m, _, _ := testManager(t)
+	// Username rules.
+	_, err := m.Setup("ip", "   ", "a-decent-password")
+	require.ErrorIs(t, err, ErrUsernameEmpty)
+	_, err = m.Setup("ip", strings.Repeat("u", usernameMaxLen+1), "a-decent-password")
+	require.ErrorIs(t, err, ErrUsernameTooLong)
+	_, err = m.Setup("ip", "a\x00d", "a-decent-password")
+	require.ErrorIs(t, err, ErrUsernameInvalid)
+	_, err = m.Setup("ip", "line\nbreak", "a-decent-password")
+	require.ErrorIs(t, err, ErrUsernameInvalid)
+	// Password rules.
+	_, err = m.Setup("ip", "alice", "short7!")
 	require.ErrorIs(t, err, ErrPasswordTooShort)
-	_, err = m.SetPassword("ip", "", strings.Repeat("x", 257))
+	_, err = m.Setup("ip", "alice", strings.Repeat("x", passwordMaxLen+1))
 	require.ErrorIs(t, err, ErrPasswordTooLong)
-	require.False(t, m.PasswordSet())
+
+	require.False(t, m.CredentialSet(), "no rejected setup may leave a partial credential")
 }
 
-func TestSetPasswordChangeRequiresCurrentAndLogsOutOtherSessions(t *testing.T) {
+func TestLoginRequiresBothUsernameAndPassword(t *testing.T) {
 	m, _, _ := testManager(t)
-	_, err := m.SetPassword("ip", "", "first-password")
-	require.NoError(t, err)
-	otherTab, err := m.Login("10.0.0.2", "first-password")
-	require.NoError(t, err)
+	m.mustSetup(t, "alice", "the-password")
 
-	_, err = m.SetPassword("10.0.0.1", "wrong-current", "second-password")
+	// Right username, wrong password.
+	_, err := m.Login("10.0.0.1", "alice", "not-it")
 	require.ErrorIs(t, err, ErrBadCredentials)
-
-	fresh, err := m.SetPassword("10.0.0.1", "first-password", "second-password")
-	require.NoError(t, err)
-	require.False(t, m.Authenticate(otherTab), "a password change must log out every other session")
-	require.True(t, m.Authenticate(fresh), "the changer keeps a fresh session")
-
-	_, err = m.Login("10.0.0.3", "first-password")
+	// Wrong username, RIGHT password -- must still fail, and with the same
+	// generic error (no hint which half was wrong).
+	_, err = m.Login("10.0.0.2", "bob", "the-password")
 	require.ErrorIs(t, err, ErrBadCredentials)
-	_, err = m.Login("10.0.0.3", "second-password")
+	// Both right.
+	token, err := m.Login("10.0.0.3", "alice", "the-password")
+	require.NoError(t, err)
+	require.True(t, m.Authenticate(token))
+	// The username is trimmed on the way in, matching how it was stored.
+	_, err = m.Login("10.0.0.4", "  alice  ", "the-password")
 	require.NoError(t, err)
 }
 
-func TestLoginNoPasswordConfigured(t *testing.T) {
-	m, _, _ := testManager(t)
-	_, err := m.Login("10.0.0.1", "anything")
-	require.ErrorIs(t, err, ErrNoPassword)
-}
-
-func TestLoginWrongPasswordFailsAndRateLimits(t *testing.T) {
-	m, _, _ := testManager(t)
-	_, err := m.SetPassword("ip", "", "the-password")
-	require.NoError(t, err)
+func TestLoginWrongUsernameIsAFullCountedAttempt(t *testing.T) {
+	// A wrong username takes exactly the same path as a wrong password:
+	// it spends a limiter token and records an auth.login_failed event.
+	// That path always runs the argon2 derivation (Login's doc), so a
+	// wrong username cannot be told from a wrong password by timing.
+	m, st, _ := testManager(t)
+	m.mustSetup(t, "alice", "the-password")
 
 	for i := 0; i < loginPerIPCapacity; i++ {
-		_, err := m.Login("10.0.0.1", "not-it")
+		_, err := m.Login("10.0.0.8", "wronguser", "the-password")
 		require.ErrorIs(t, err, ErrBadCredentials)
 	}
-	_, err = m.Login("10.0.0.1", "not-it")
+	// Bucket now dry: even the RIGHT credential is rate-limited, so the
+	// wrong-username attempts really did consume the same tokens.
+	_, err := m.Login("10.0.0.8", "alice", "the-password")
 	require.ErrorIs(t, err, ErrRateLimited)
-	// Even the RIGHT password is limited once the bucket is empty --
-	// the limiter gates attempts, not outcomes, so it can't be used as
-	// a correctness oracle.
-	_, err = m.Login("10.0.0.1", "the-password")
+	// And the wrong-username run was audited as a failed login, not
+	// silently dropped.
+	require.Len(t, events(t, st, "auth.login_failed"), 1)
+}
+
+func TestLoginNoCredentialConfigured(t *testing.T) {
+	m, _, _ := testManager(t)
+	_, err := m.Login("10.0.0.1", "anyone", "anything")
+	require.ErrorIs(t, err, ErrNoCredential)
+}
+
+func TestLoginRateLimitGatesAttemptsNotOutcomes(t *testing.T) {
+	m, _, _ := testManager(t)
+	m.mustSetup(t, "alice", "the-password")
+
+	for i := 0; i < loginPerIPCapacity; i++ {
+		_, err := m.Login("10.0.0.1", "alice", "not-it")
+		require.ErrorIs(t, err, ErrBadCredentials)
+	}
+	_, err := m.Login("10.0.0.1", "alice", "not-it")
+	require.ErrorIs(t, err, ErrRateLimited)
+	// Even the RIGHT password is limited once the bucket is empty -- the
+	// limiter gates attempts, not outcomes, so it can't be a correctness
+	// oracle.
+	_, err = m.Login("10.0.0.1", "alice", "the-password")
 	require.ErrorIs(t, err, ErrRateLimited)
 	// Another IP is unaffected.
-	_, err = m.Login("10.0.0.2", "the-password")
+	_, err = m.Login("10.0.0.2", "alice", "the-password")
 	require.NoError(t, err)
 }
 
 func TestLoginEventsOkAndThrottledFailures(t *testing.T) {
 	m, st, now := testManager(t)
-	_, err := m.SetPassword("ip", "", "the-password")
-	require.NoError(t, err)
+	m.mustSetup(t, "alice", "the-password")
 
-	_, err = m.Login("10.0.0.7", "the-password")
+	_, err := m.Login("10.0.0.7", "alice", "the-password")
 	require.NoError(t, err)
 	okEvs := events(t, st, "auth.login_ok")
 	require.Len(t, okEvs, 1)
 	require.Equal(t, "10.0.0.7", okEvs[0].Entity)
 	require.NotContains(t, okEvs[0].Detail, "the-password")
 
-	// Six failed attempts inside the hour (five wrong passwords, then
-	// one rate-limited -- both kinds count): only the FIRST logs
-	// immediately (the alert dispatcher's once-per-entity-per-window
-	// discipline); the rest are counted, and surface on the first
-	// failure past the window with the suppressed count.
+	// Six failed attempts inside the hour (five wrong, then one
+	// rate-limited): only the FIRST logs immediately; the rest are
+	// counted and surface on the first failure past the window.
 	for i := 0; i < loginPerIPCapacity; i++ {
-		_, err := m.Login("10.0.0.8", "nope")
+		_, err := m.Login("10.0.0.8", "alice", "nope")
 		require.ErrorIs(t, err, ErrBadCredentials)
 	}
-	_, err = m.Login("10.0.0.8", "nope") // limited now, still a failed attempt
+	_, err = m.Login("10.0.0.8", "alice", "nope") // limited now, still a failed attempt
 	require.ErrorIs(t, err, ErrRateLimited)
 	failEvs := events(t, st, "auth.login_failed")
 	require.Len(t, failEvs, 1, "failures within the window must coalesce into the first event")
 	require.Equal(t, "10.0.0.8", failEvs[0].Entity)
 
 	*now = now.Add(61 * time.Minute)
-	_, err = m.Login("10.0.0.8", "nope")
+	_, err = m.Login("10.0.0.8", "alice", "nope")
 	require.ErrorIs(t, err, ErrBadCredentials)
 	failEvs = events(t, st, "auth.login_failed")
 	require.Len(t, failEvs, 2)
@@ -173,18 +239,14 @@ func TestLoginEventsOkAndThrottledFailures(t *testing.T) {
 
 func TestAuthenticateRejectsUnknownAndGarbageTokens(t *testing.T) {
 	m, _, _ := testManager(t)
-	_, err := m.SetPassword("ip", "", "the-password")
-	require.NoError(t, err)
+	m.mustSetup(t, "alice", "the-password")
 	require.False(t, m.Authenticate(""))
 	require.False(t, m.Authenticate("not-a-real-token"))
 }
 
 func TestSessionTokenStoredAsDigestNotRaw(t *testing.T) {
 	m, st, _ := testManager(t)
-	_, err := m.SetPassword("ip", "", "the-password")
-	require.NoError(t, err)
-	token, err := m.Login("10.0.0.1", "the-password")
-	require.NoError(t, err)
+	token := m.mustSetup(t, "alice", "the-password")
 
 	_, ok, err := st.GetSession(token)
 	require.NoError(t, err)
@@ -195,48 +257,46 @@ func TestSessionTokenStoredAsDigestNotRaw(t *testing.T) {
 	require.Len(t, sess.TokenHash, 64)
 }
 
-func TestSessionSlidingExpiry(t *testing.T) {
+func TestSessionIdleTimeoutEndsSilentSessions(t *testing.T) {
 	m, _, now := testManager(t)
-	_, err := m.SetPassword("ip", "", "the-password")
-	require.NoError(t, err)
-	token, err := m.Login("10.0.0.1", "the-password")
+	m.mustSetup(t, "alice", "the-password")
+	token, err := m.Login("10.0.0.1", "alice", "the-password")
 	require.NoError(t, err)
 
-	// 6 days idle: inside the 7d sliding window, still valid -- and the
-	// touch slides the window forward.
-	*now = now.Add(6 * 24 * time.Hour)
+	// 7h idle: inside the 8h idle window, still valid -- and the touch
+	// slides the window forward.
+	*now = now.Add(7 * time.Hour)
 	require.True(t, m.Authenticate(token))
-	*now = now.Add(6 * 24 * time.Hour)
-	require.True(t, m.Authenticate(token), "activity must have slid the window")
+	*now = now.Add(7 * time.Hour)
+	require.True(t, m.Authenticate(token), "activity must have slid the idle window")
 
-	// 8 days idle: past the sliding window.
-	*now = now.Add(8 * 24 * time.Hour)
+	// 9h of silence: past the idle window (and still shy of the 24h
+	// absolute cap, so this isolates the idle backstop).
+	*now = now.Add(9 * time.Hour)
 	require.False(t, m.Authenticate(token))
 	require.False(t, m.Authenticate(token), "an expired session stays dead")
 }
 
 func TestSessionAbsoluteCapEndsEvenActiveSessions(t *testing.T) {
 	m, _, now := testManager(t)
-	_, err := m.SetPassword("ip", "", "the-password")
-	require.NoError(t, err)
-	token, err := m.Login("10.0.0.1", "the-password")
+	m.mustSetup(t, "alice", "the-password")
+	token, err := m.Login("10.0.0.1", "alice", "the-password")
 	require.NoError(t, err)
 
-	// Touch every day: the sliding window never lapses, but the
-	// absolute cap anchored at created_at still must.
-	for day := 0; day < 29; day++ {
-		*now = now.Add(24 * time.Hour)
-		require.True(t, m.Authenticate(token), "day %d must still be valid", day+1)
+	// Touch every hour: the idle window never lapses, but the absolute
+	// cap anchored at created_at (24h) still must.
+	for h := 0; h < 23; h++ {
+		*now = now.Add(time.Hour)
+		require.True(t, m.Authenticate(token), "hour %d must still be valid", h+1)
 	}
-	*now = now.Add(2 * 24 * time.Hour)
+	*now = now.Add(2 * time.Hour)
 	require.False(t, m.Authenticate(token), "no amount of activity extends a session past the absolute cap")
 }
 
 func TestLogoutDeletesTheSession(t *testing.T) {
 	m, _, _ := testManager(t)
-	_, err := m.SetPassword("ip", "", "the-password")
-	require.NoError(t, err)
-	token, err := m.Login("10.0.0.1", "the-password")
+	m.mustSetup(t, "alice", "the-password")
+	token, err := m.Login("10.0.0.1", "alice", "the-password")
 	require.NoError(t, err)
 
 	m.Logout(token)
@@ -245,47 +305,101 @@ func TestLogoutDeletesTheSession(t *testing.T) {
 	m.Logout("garbage")
 }
 
-func TestDisableRequiresCurrentPasswordAndWipesSessions(t *testing.T) {
-	m, st, _ := testManager(t)
-	_, err := m.SetPassword("ip", "", "the-password")
-	require.NoError(t, err)
-	token, err := m.Login("10.0.0.1", "the-password")
+func TestUpdateCredentialRequiresCurrentAndLogsOutOtherSessions(t *testing.T) {
+	m, _, _ := testManager(t)
+	m.mustSetup(t, "alice", "first-password")
+	otherTab, err := m.Login("10.0.0.2", "alice", "first-password")
 	require.NoError(t, err)
 
-	require.ErrorIs(t, m.Disable("10.0.0.1", "wrong"), ErrBadCredentials)
-	require.True(t, m.PasswordSet())
+	// Wrong current password: rejected, nothing changes.
+	_, err = m.UpdateCredential("10.0.0.1", "wrong-current", "alice", "second-password")
+	require.ErrorIs(t, err, ErrBadCredentials)
 
-	require.NoError(t, m.Disable("10.0.0.1", "the-password"))
-	require.False(t, m.PasswordSet())
-	require.False(t, m.Authenticate(token), "disable must wipe sessions, not leave them dangling")
-	require.NoError(t, m.Disable("10.0.0.1", "whatever"), "disabling twice is a no-op")
-	require.Len(t, events(t, st, "auth.disabled"), 1)
+	// Right current password + a new password: every other session dies,
+	// the caller keeps a fresh one, and the new password is now live.
+	fresh, err := m.UpdateCredential("10.0.0.1", "first-password", "alice", "second-password")
+	require.NoError(t, err)
+	require.False(t, m.Authenticate(otherTab), "a credential change must log out every other session")
+	require.True(t, m.Authenticate(fresh), "the changer keeps a fresh session")
+
+	_, err = m.Login("10.0.0.3", "alice", "first-password")
+	require.ErrorIs(t, err, ErrBadCredentials)
+	_, err = m.Login("10.0.0.3", "alice", "second-password")
+	require.NoError(t, err)
 }
 
-func TestEnsureEnvPasswordBootSemantics(t *testing.T) {
+func TestUpdateCredentialChangesUsername(t *testing.T) {
+	m, _, _ := testManager(t)
+	m.mustSetup(t, "alice", "the-password")
+
+	// New username, blank new password: a username-only change keeps the
+	// existing password working.
+	_, err := m.UpdateCredential("10.0.0.1", "the-password", "  bob  ", "")
+	require.NoError(t, err)
+	require.Equal(t, "bob", m.Username())
+	_, err = m.Login("10.0.0.2", "bob", "the-password")
+	require.NoError(t, err, "the old password must still verify after a username-only change")
+	_, err = m.Login("10.0.0.2", "alice", "the-password")
+	require.ErrorIs(t, err, ErrBadCredentials, "the old username must no longer log in")
+}
+
+func TestUpdateCredentialPolicyBounds(t *testing.T) {
+	m, _, _ := testManager(t)
+	m.mustSetup(t, "alice", "the-password")
+
+	_, err := m.UpdateCredential("ip", "the-password", "", "")
+	require.ErrorIs(t, err, ErrUsernameEmpty)
+	_, err = m.UpdateCredential("ip", "the-password", "bob", "short7!")
+	require.ErrorIs(t, err, ErrPasswordTooShort)
+	// The rejected changes left the original credential intact.
+	_, err = m.Login("10.0.0.2", "alice", "the-password")
+	require.NoError(t, err)
+}
+
+func TestUpdateCredentialRequiresExistingCredential(t *testing.T) {
+	m, _, _ := testManager(t)
+	_, err := m.UpdateCredential("ip", "whatever", "alice", "a-decent-password")
+	require.ErrorIs(t, err, ErrNoCredential)
+}
+
+func TestEnsureEnvCredentialBootSemantics(t *testing.T) {
 	m, st, _ := testManager(t)
 
-	// First boot with the var: sets the password.
-	require.NoError(t, m.EnsureEnvPassword("env-password-1"))
-	require.True(t, m.PasswordSet())
+	// First boot with both vars: sets the credential.
+	require.NoError(t, m.EnsureEnvCredential("admin", "env-password-1"))
+	require.True(t, m.CredentialSet())
 	require.True(t, m.EnvManaged())
-	token, err := m.Login("10.0.0.1", "env-password-1")
+	require.Equal(t, "admin", m.Username())
+	token, err := m.Login("10.0.0.1", "admin", "env-password-1")
 	require.NoError(t, err)
 
-	// Same var on the next boot: hash verified equal, sessions survive.
-	require.NoError(t, m.EnsureEnvPassword("env-password-1"))
-	require.True(t, m.Authenticate(token), "an unchanged env password must not churn sessions on every boot")
+	// Same pair on the next boot: verified equal, sessions survive.
+	require.NoError(t, m.EnsureEnvCredential("admin", "env-password-1"))
+	require.True(t, m.Authenticate(token), "an unchanged env credential must not churn sessions on every boot")
 
-	// Changed var: hash rewritten, sessions wiped (a password change).
-	require.NoError(t, m.EnsureEnvPassword("env-password-2"))
+	// Changed password: rewritten, sessions wiped.
+	require.NoError(t, m.EnsureEnvCredential("admin", "env-password-2"))
 	require.False(t, m.Authenticate(token))
-	_, err = m.Login("10.0.0.1", "env-password-2")
+	_, err = m.Login("10.0.0.1", "admin", "env-password-2")
 	require.NoError(t, err)
 
-	// Policy applies to the env path too, and a rejected env value
-	// leaves the existing password (and EnvManaged reporting) alone.
-	require.ErrorIs(t, m.EnsureEnvPassword("short"), ErrPasswordTooShort)
-	_, err = m.Login("10.0.0.2", "env-password-2")
+	// Changed username (same password) is also a change: sessions wiped,
+	// the old username stops working.
+	token2, err := m.Login("10.0.0.1", "admin", "env-password-2")
+	require.NoError(t, err)
+	require.NoError(t, m.EnsureEnvCredential("root", "env-password-2"))
+	require.False(t, m.Authenticate(token2), "a username change through the env path wipes sessions too")
+	require.Equal(t, "root", m.Username())
+	_, err = m.Login("10.0.0.1", "admin", "env-password-2")
+	require.ErrorIs(t, err, ErrBadCredentials)
+	_, err = m.Login("10.0.0.1", "root", "env-password-2")
+	require.NoError(t, err)
+
+	// Policy applies to the env path too, and a rejected value leaves the
+	// existing credential (and EnvManaged reporting) alone.
+	require.ErrorIs(t, m.EnsureEnvCredential("root", "short"), ErrPasswordTooShort)
+	require.ErrorIs(t, m.EnsureEnvCredential("", "env-password-2"), ErrUsernameEmpty)
+	_, err = m.Login("10.0.0.2", "root", "env-password-2")
 	require.NoError(t, err)
 
 	// The stored hash never carries any env password in the clear.
@@ -293,19 +407,46 @@ func TestEnsureEnvPasswordBootSemantics(t *testing.T) {
 	require.NotContains(t, v, "env-password")
 }
 
-func TestEnsureEnvPasswordRecoversFromCorruptStoredHash(t *testing.T) {
-	m, st, _ := testManager(t)
+func TestEnsureEnvCredentialRecoversFromCorruptStoredHash(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	st := testStore(t, &now)
+	// A corrupt hash WITH a username already present -- no migration, so
+	// this isolates the corrupt-hash recovery path.
 	require.NoError(t, st.SettingSet("auth.password_hash", "garbage-not-a-phc"))
-	m2, err := New(Options{Sessions: st, Settings: st, Mode: ModeAuto, Now: m.now})
+	require.NoError(t, st.SettingSet("auth.username", "root"))
+	m, err := New(Options{Sessions: st, Settings: st, Mode: ModeAuto, Now: func() time.Time { return now }})
 	require.NoError(t, err)
-	require.True(t, m2.PasswordSet(), "a corrupt hash still counts as configured (fail closed)")
+	require.True(t, m.CredentialSet(), "a corrupt hash still counts as configured (fail closed)")
 
-	// A corrupt hash can't verify anything -- but the env path rewrites
+	// The corrupt hash can't verify anything -- but the env path rewrites
 	// it rather than bricking auth until manual surgery.
-	_, err = m2.Login("10.0.0.1", "anything-at-all")
+	_, err = m.Login("10.0.0.1", "root", "anything-at-all")
 	require.Error(t, err)
-	require.NoError(t, m2.EnsureEnvPassword("fresh-env-password"))
-	_, err = m2.Login("10.0.0.1", "fresh-env-password")
+	require.NoError(t, m.EnsureEnvCredential("root", "fresh-env-password"))
+	_, err = m.Login("10.0.0.1", "root", "fresh-env-password")
+	require.NoError(t, err)
+}
+
+func TestMigratesPasswordOnlyCredentialToAdmin(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	st := testStore(t, &now)
+	// Simulate a pre-0.1.1 install: a real password hash, no username row.
+	phc, err := HashPassword("legacy-password")
+	require.NoError(t, err)
+	require.NoError(t, st.SettingSet("auth.password_hash", phc))
+
+	m, err := New(Options{Sessions: st, Settings: st, Mode: ModeAuto, Now: func() time.Time { return now }})
+	require.NoError(t, err)
+	require.True(t, m.CredentialSet())
+	require.Equal(t, "admin", m.Username(), "a password-only install must migrate to username admin, not lock the owner out")
+
+	// The migrated username was persisted, and the existing password still
+	// verifies under it.
+	stored, ok, err := st.SettingGet("auth.username")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "admin", stored)
+	_, err = m.Login("10.0.0.1", "admin", "legacy-password")
 	require.NoError(t, err)
 }
 
@@ -313,4 +454,5 @@ func TestManagerModeAndEnvManagedDefaults(t *testing.T) {
 	m, _, _ := testManager(t)
 	require.Equal(t, ModeAuto, m.Mode())
 	require.False(t, m.EnvManaged())
+	require.False(t, m.CredentialSet())
 }

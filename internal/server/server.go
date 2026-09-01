@@ -285,14 +285,15 @@ func New(o Options) *Server {
 	s.mux.Handle("GET /api/alerts/webhooks", withGzip(http.HandlerFunc(s.handleAlertsWebhooksGet)))
 	s.mux.Handle("PUT /api/alerts/webhooks", withGzip(http.HandlerFunc(s.handleAlertsWebhooksPut)))
 
-	// Auth routes. login/logout/status are in gate.go's authExemptPaths
-	// (each for its own documented reason); password/disable are gated
-	// like any other route whenever the gate is on.
+	// Auth routes. setup/login/logout/status are in gate.go's
+	// authExemptPaths (each for its own documented reason); credential is
+	// gated like any other route -- there is always a live session behind
+	// a credential change.
 	s.mux.Handle("GET /api/auth/status", withGzip(http.HandlerFunc(s.handleAuthStatus)))
+	s.mux.Handle("POST /api/auth/setup", withGzip(http.HandlerFunc(s.handleAuthSetup)))
 	s.mux.Handle("POST /api/auth/login", withGzip(http.HandlerFunc(s.handleAuthLogin)))
 	s.mux.Handle("POST /api/auth/logout", withGzip(http.HandlerFunc(s.handleAuthLogout)))
-	s.mux.Handle("POST /api/auth/password", withGzip(http.HandlerFunc(s.handleAuthPassword)))
-	s.mux.Handle("POST /api/auth/disable", withGzip(http.HandlerFunc(s.handleAuthDisable)))
+	s.mux.Handle("POST /api/auth/credential", withGzip(http.HandlerFunc(s.handleAuthCredential)))
 
 	s.mux.Handle("GET /api/acks", withGzip(http.HandlerFunc(s.handleAcksGet)))
 	s.mux.Handle("POST /api/acks", withGzip(http.HandlerFunc(s.handleAcksPost)))

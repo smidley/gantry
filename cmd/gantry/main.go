@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,12 +64,25 @@ func envOnly(getenv func(string) string, key, def string) string {
 	return def
 }
 
+// storeOpenError wraps a failed store.Open. A can't-open / permission
+// failure -- the container's uid can't write the database's directory --
+// gets an actionable hint that names the directory and the DAC_OVERRIDE
+// capability the Community Applications template already sets for exactly
+// this; every other failure keeps the plain wrap. The original error is
+// always preserved (via %w) so nothing is swallowed.
+func storeOpenError(dbPath string, err error) error {
+	if store.IsCantOpen(err) {
+		return fmt.Errorf("open store at %s: %w -- if this is a permission error, the container needs write access to %s (the CA template sets --cap-add=DAC_OVERRIDE for exactly this; on a manual docker run add it)", dbPath, err, filepath.Dir(dbPath))
+	}
+	return fmt.Errorf("open store: %w", err)
+}
+
 func run(ctx context.Context, getenv func(string) string, ver string) error {
 	dbPath := envOnly(getenv, "GANTRY_DB_PATH", "/config/gantry.db")
 
 	st, err := store.Open(dbPath, nil)
 	if err != nil {
-		return fmt.Errorf("open store: %w", err)
+		return storeOpenError(dbPath, err)
 	}
 	defer func() {
 		if cerr := st.Close(); cerr != nil {

@@ -8,6 +8,21 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.4] - 2026-09-01
+
+### Fixed
+
+- **A chart's hover readout no longer sticks after the pointer leaves.**
+  On a container's detail page the metric charts share one crosshair, and
+  a live update repaints them every frame. Leaving a chart could lose a
+  race against that repaint and strand the "N ago" readout, which then
+  reappeared and held on every chart with the mouse well away. The scrub
+  now releases to live as soon as the pointer is off every chart.
+- **The Community Applications template can be refreshed again.** Its
+  `<TemplateURL>` pointed at the wrong path and returned 404, which
+  stopped Unraid from ever pulling template updates. Nothing about an
+  installed container changes; only the template's own update check.
+
 ## [0.1.3] - 2026-09-01
 
 ### Added

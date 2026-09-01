@@ -8,7 +8,7 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-08-31
 
 ### Added
 
@@ -21,9 +21,26 @@ the GitHub Release body, so a section lands here under its own `##
   (PSI), plus per-container cgroup v2 accounting.
 - SQLite-backed history with configurable retention and live updates
   over Server-Sent Events -- the UI never polls.
-- Nine-view web UI: Overview, Containers, Container detail, GPU,
-  Storage, Top Consumers, Events, Settings, and Alerts. Responsive,
-  light and dark.
+- Web UI: Overview, Containers, Container detail, Metrics, Storage,
+  GPU, Insights, Alerts, Maintenance, Compare, Events, and Settings.
+  Responsive, light and dark, with an all-clear Overview that expands to
+  fill the space when nothing needs attention, live-gliding charts, a
+  command palette, and a connection-health indicator.
+- Insights: an explainable cross-container engine that states in plain
+  language when one container is likely slowing another or the array --
+  with a confidence level, an interaction map, and an evidence drawer
+  showing the actual culprit IO share, device utilization, await, and
+  victim stall. Runs on proxy signals without PSI; upgrades to
+  kernel-measured stall when `psi=1` is enabled. Never pages by default.
+- Metrics: per-resource leaderboards (CPU, memory, network, disk IO,
+  GPU) over Now/1h/24h/7d, average or peak, above a multi-line chart
+  overlaying every container against the host total.
+- Compare: chart any set of containers together -- synced multi-line
+  charts per metric, live group totals, and saved groups. Compose
+  projects group automatically.
+- Update-available badges with changelog links (Unraid's own tooling
+  does the actual update), and acknowledge/silence/dismiss with preset
+  durations so a known condition stops nagging.
 - Alert engine: user-editable threshold and event rules with hysteresis
   (sustained-for and clear-for windows), delivered through Unraid's own
   notification spool and outbound webhooks, with dedup, re-notify,

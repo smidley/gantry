@@ -17,9 +17,8 @@ Most self-hosted monitors are a hub plus a per-host agent you deploy and pair �
 
 Gantry monitors read-only — it reads your containers, disks and array and never changes your array configuration. The one thing it can change, only when you ask, is Docker housekeeping from the Maintenance view (clearing stopped containers and unused images), behind a confirmation and disabled entirely by a single switch.
 
-> Gantry is pre-release and under active development. The Community Applications listing is on its way; the `docker run` below works today.
+> Gantry is pre-release and under active development. The Community Applications listing is on its way; the `docker run` below works today. Screenshots are being refreshed for the current UI.
 
-![Gantry Overview](https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/overview-light.png)
 
 ## Features
 
@@ -33,32 +32,6 @@ Gantry monitors read-only — it reads your containers, disks and array and neve
 - **Maintenance.** See which images have an update available (with changelog links; Unraid's own tooling does the actual update), reclaim space from unused and dangling images, and remove stopped containers — every deletion behind a confirmation dialog that itemizes exactly what will go. `GANTRY_READ_ONLY=1` turns all of it off.
 - **Compare.** Select any set of containers and chart them together — synced multi-line charts per metric, always-live group totals, and groups you can save.
 - **The rest.** A command palette, an always-on connection-health indicator, acknowledge / silence / dismiss with preset durations, optional password login, light and dark themes, a reduced-motion preference, and Gantry graphing its own CPU and memory so you can see exactly what it costs.
-
-### More screenshots
-
-<details>
-<summary>Containers, drill-down, Metrics, Storage, GPU, mobile</summary>
-
-**Containers** — every container's live stats, sortable and filterable.
-![Containers](https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/containers-dark.png)
-
-**Per-container drill-down** — multi-line history for CPU, memory, network, disk IO and GPU.
-![Container detail](https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/container-detail-dark.png)
-
-**Metrics** — per-resource leaderboards across the fleet.
-![Metrics](https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/top-consumers-dark.png)
-
-**Storage** — array, pools and every drive with capacity and temperature.
-![Storage](https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/storage-dark.png)
-
-**GPU** — per-engine utilization with per-container attribution.
-![GPU](https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/gpu-dark.png)
-
-**Mobile** — the full dashboard, responsive.
-
-<img src="https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/overview-mobile-dark.png" alt="Mobile overview" width="320">
-
-</details>
 
 ## Install
 

@@ -14,7 +14,14 @@ import { defineConfig, devices } from '@playwright/test';
 // `cd ..` first so `make release` (and the ./gantry it produces) run
 // from the repo root, matching how every other Makefile target expects
 // to be invoked.
-const PORT = 8391;
+// 8401 rather than the 8391 this suite used on the parent branch: a
+// PARALLEL WORKTREE of this repo runs the same suite on its own branch,
+// and with reuseExistingServer two suites sharing one port silently
+// adopt each other's half-matching servers (observed live: this
+// branch's auth specs failing against the sibling's pre-auth binary,
+// and both suites mutating one shared fake fleet). Each branch's suite
+// gets its own port block; tests/auth.spec.ts uses PORT+1/PORT+2.
+const PORT = 8401;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({

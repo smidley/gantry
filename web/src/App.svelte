@@ -9,6 +9,7 @@
   import { route } from './lib/router';
   import { live } from './lib/sse.svelte';
   import { alertRules } from './lib/alertRules.svelte';
+  import { auth } from './lib/auth.svelte';
 
   import Overview from './views/Overview.svelte';
   import Containers from './views/Containers.svelte';
@@ -22,23 +23,32 @@
   import Insights from './views/Insights.svelte';
   import Alerts from './views/Alerts.svelte';
   import Settings from './views/Settings.svelte';
+  import Login from './views/Login.svelte';
   import LoadingState from './components/LoadingState.svelte';
 
   const LIVE_ROUTES = new Set(['overview', 'containers', 'container-detail', 'compare', 'top', 'storage', 'gpu']);
 
+  // Auth first: one boot status fetch decides login screen vs app (see
+  // auth.svelte.ts). Everything that talks to the API at boot -- the
+  // SSE connection, the alert-rules band fetch (Task 12's own doc,
+  // unchanged otherwise) -- waits for the gate to be open and tears
+  // down when it closes again (a 401 mid-session flips needsLogin, e.g.
+  // a password set from another browser, or an expired session): a
+  // closed gate would just 401 the EventSource into a silent retry
+  // loop.
   onMount(() => {
-    live.connect();
+    auth.init();
     return () => live.disconnect();
   });
 
-  // Band unification (Task 12): one boot fetch of the current alert
-  // rules, so thresholds.ts's band() reads the SAME numbers the alert
-  // engine fires and clears on from the very first render -- see
-  // alertRules.svelte.ts's own doc for why this is the only place that
-  // ever calls ensureLoaded() at boot (the rule editor's own save()
-  // re-derives the band table itself, on every successful PUT).
-  onMount(() => {
-    alertRules.ensureLoaded();
+  $effect(() => {
+    if (!auth.ready) return;
+    if (auth.needsLogin) {
+      live.disconnect();
+    } else {
+      live.connect();
+      alertRules.ensureLoaded();
+    }
   });
 
   const ROUTE_TITLES = {
@@ -46,6 +56,12 @@
   };
 </script>
 
+{#if !auth.ready}
+  <!-- Nothing gate-dependent renders before the boot status answer: a
+       locked box must never flash the dashboard shell. -->
+{:else if auth.needsLogin}
+  <Login />
+{:else}
 <Layout>
   {#if LIVE_ROUTES.has($route.name) && !live.frame}
     <LoadingState title="Connecting to your server" detail="The first live system snapshot will appear here automatically." />
@@ -87,3 +103,4 @@
     <p class="microlabel">View content lands in a later task.</p>
   {/if}
 </Layout>
+{/if}

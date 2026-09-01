@@ -37,7 +37,10 @@ func (s *Store) Maintain(ctx context.Context, now time.Time, ret Retention) erro
 	if err := s.pruneInsights(ctx, now, ret); err != nil {
 		return err
 	}
-	return s.pruneAcks(ctx, now)
+	if err := s.pruneAcks(ctx, now); err != nil {
+		return err
+	}
+	return s.PruneSessions(ctx, now)
 }
 
 // pruneAlerts trims the three alert tables that accumulate history:

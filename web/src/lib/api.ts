@@ -715,15 +715,23 @@ async function apiFetch(url: string, init: ApiFetchInit = {}): Promise<Response>
 
 // --- auth --------------------------------------------------------------------
 
-// AuthStatus mirrors server.authStatusResponse. mode "proxy" means a
-// reverse proxy owns authentication (GANTRY_AUTH=proxy): the built-in
-// gate is off and Settings suppresses the no-password nudge.
-// env_managed means the password came from the GANTRY_PASSWORD template
-// variable at boot -- in-app changes hold only until the next restart
-// re-applies it.
+// AuthStatus mirrors server.authStatusResponse. `state` is the server's
+// single verdict for the SPA to switch on:
+//   - "setup"    -- mandatory auth, no credential yet: first-run setup
+//   - "login"    -- credential set, not signed in: the login screen
+//   - "authed"   -- signed in: the app
+//   - "disabled" -- GANTRY_AUTH=proxy (a reverse proxy authenticates) or
+//                   =none (explicitly open): the app, no gate
+// `username` is present only when authed (never leaked to an
+// unauthenticated caller). `env_managed` means the credential came from
+// GANTRY_USERNAME/GANTRY_PASSWORD at boot -- in-app changes hold only
+// until the next restart re-applies it.
+export type AuthState = 'setup' | 'login' | 'authed' | 'disabled';
+
 export interface AuthStatus {
-  mode: 'auto' | 'proxy';
-  password_set: boolean;
+  mode: 'auto' | 'proxy' | 'none';
+  state: AuthState;
+  username?: string;
   env_managed: boolean;
   authenticated: boolean;
 }
@@ -762,8 +770,15 @@ async function postAuth(url: string, body: unknown): Promise<void> {
   if (!res.ok) throw new AuthActionError(res.status, message);
 }
 
-export function postLogin(password: string): Promise<void> {
-  return postAuth('/api/auth/login', { password });
+// postAuthSetup runs the one-shot first-run bootstrap: it creates the
+// initial username + password credential and the server hands this
+// browser a session cookie in the same response.
+export function postAuthSetup(username: string, password: string): Promise<void> {
+  return postAuth('/api/auth/setup', { username, password });
+}
+
+export function postLogin(username: string, password: string): Promise<void> {
+  return postAuth('/api/auth/login', { username, password });
 }
 
 // postLogout goes through the normal (non-skipping) path deliberately:
@@ -776,15 +791,20 @@ export async function postLogout(): Promise<void> {
   }
 }
 
-// postAuthPassword sets (current empty while none is configured) or
-// changes the password. The server wipes every other session and hands
-// this browser a fresh cookie in the same response.
-export function postAuthPassword(currentPassword: string, newPassword: string): Promise<void> {
-  return postAuth('/api/auth/password', { current_password: currentPassword, new_password: newPassword });
-}
-
-export function postAuthDisable(currentPassword: string): Promise<void> {
-  return postAuth('/api/auth/disable', { current_password: currentPassword });
+// postAuthCredential changes the username and/or password. The current
+// password is always required; a blank newPassword is a username-only
+// change. The server wipes every other session and hands this browser a
+// fresh cookie in the same response.
+export function postAuthCredential(
+  currentPassword: string,
+  newUsername: string,
+  newPassword: string,
+): Promise<void> {
+  return postAuth('/api/auth/credential', {
+    current_password: currentPassword,
+    new_username: newUsername,
+    new_password: newPassword,
+  });
 }
 
 // signal (threaded through every helper below that a view might call

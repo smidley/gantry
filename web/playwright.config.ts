@@ -36,7 +36,11 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: `sh -c "cd .. && make release >/dev/null && GANTRY_FAKE_DATA=1 GANTRY_DB_PATH=$(mktemp -d)/g.db GANTRY_PORT=${PORT} ./gantry"`,
+    // GANTRY_AUTH=none: auth is mandatory now, so the shared instance
+    // explicitly opts open -- every non-auth spec keeps its zero-friction
+    // world (no setup or login screen in the way). tests/auth.spec.ts
+    // boots its OWN instances to exercise the real setup/login flow.
+    command: `sh -c "cd .. && make release >/dev/null && GANTRY_FAKE_DATA=1 GANTRY_AUTH=none GANTRY_DB_PATH=$(mktemp -d)/g.db GANTRY_PORT=${PORT} ./gantry"`,
     url: `${BASE_URL}/api/healthz`,
     // make release (npm ci + vite build + go build) comfortably clears
     // this from a cold cache; reuseExistingServer keeps local iteration

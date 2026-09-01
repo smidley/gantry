@@ -13,9 +13,9 @@
   import { motion } from '../lib/motion.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
-  import { fetchSeries, fetchSettings, fetchVersion, putSettings, fetchWebhookTargets, putWebhookTargets, postAuthPassword, postAuthDisable } from '../lib/api';
+  import { fetchSeries, fetchSettings, fetchVersion, putSettings, fetchWebhookTargets, putWebhookTargets, postAuthCredential } from '../lib/api';
   import { auth } from '../lib/auth.svelte';
-  import { loginErrorMessage } from '../lib/auth';
+  import { credentialFormError, loginErrorMessage } from '../lib/auth';
   import { fmtBytes, fmtPct } from '../lib/format';
   import { SOURCE_NOT_APPLICABLE } from '../lib/sourceStatus';
   import HealthDot from '../components/HealthDot.svelte';
@@ -283,45 +283,53 @@
     }
   }
 
-  // --- Access (optional password gate) ----------------------------------
+  // --- Access (mandatory login) -----------------------------------------
   // The card runs off the auth store (refreshed on mount so it reflects
-  // reality, not the boot snapshot). Set/change/disable all round-trip
-  // through /api/auth; a change signs out every other session (the
-  // server's own contract) and this browser keeps a fresh cookie from
-  // the same response, so nothing here ever logs the user out of the
-  // tab they're standing in. Passwords live in these fields only for
-  // the duration of the request and are never echoed anywhere.
+  // reality, not the boot snapshot). Auth is always on now; this card
+  // changes the username and/or password. The change round-trips through
+  // /api/auth/credential: it signs out every other session (the server's
+  // own contract) and this browser keeps a fresh cookie from the same
+  // response, so it never logs the user out of the tab they're standing
+  // in. A blank new password is a username-only change. Passwords live in
+  // these fields only for the duration of the request and are never
+  // echoed anywhere.
   let pwCurrent = $state('');
+  let newUsername = $state('');
   let pwNew = $state('');
   let pwConfirm = $state('');
   let pwSaving = $state(false);
   let pwError = $state(null);
   let pwSuccess = $state(null);
 
-  let disableArmed = $state(false);
-  let disableCurrent = $state('');
-  let disableBusy = $state(false);
-  let disableError = $state(null);
+  // Seed the username field from the current one the first time the store
+  // reports it (the boot status arrives after this component mounts),
+  // then leave the user's edits alone.
+  let usernameSeeded = false;
+  $effect(() => {
+    if (!usernameSeeded && auth.username) {
+      newUsername = auth.username;
+      usernameSeeded = true;
+    }
+  });
 
-  async function submitPassword(e) {
+  async function submitCredential(e) {
     e.preventDefault();
     pwError = null;
     pwSuccess = null;
-    if (pwNew.length < 8) {
-      pwError = 'Password must be at least 8 characters.';
+    const problem = credentialFormError({
+      username: newUsername,
+      password: pwNew,
+      confirm: pwConfirm,
+      passwordRequired: false,
+    });
+    if (problem) {
+      pwError = problem;
       return;
     }
-    if (pwNew !== pwConfirm) {
-      pwError = "Passwords don't match.";
-      return;
-    }
-    const firstSet = !auth.passwordSet;
     pwSaving = true;
     try {
-      await postAuthPassword(pwCurrent, pwNew);
-      pwSuccess = firstSet
-        ? 'Password set. This browser stays signed in.'
-        : 'Password changed. Every other session was signed out.';
+      await postAuthCredential(pwCurrent, newUsername, pwNew);
+      pwSuccess = 'Login updated. Every other session was signed out.';
       pwCurrent = '';
       pwNew = '';
       pwConfirm = '';
@@ -330,22 +338,6 @@
       pwError = loginErrorMessage(err);
     } finally {
       pwSaving = false;
-    }
-  }
-
-  async function submitDisable(e) {
-    e.preventDefault();
-    disableError = null;
-    disableBusy = true;
-    try {
-      await postAuthDisable(disableCurrent);
-      disableArmed = false;
-      disableCurrent = '';
-      await auth.refresh();
-    } catch (err) {
-      disableError = loginErrorMessage(err);
-    } finally {
-      disableBusy = false;
     }
   }
 
@@ -407,34 +399,45 @@
     <span class="microlabel">Access</span>
     {#if auth.mode === 'proxy'}
       <p class="settings-access__note">
-        Authentication is handled by your reverse proxy (GANTRY_AUTH=proxy). Gantry's built-in password gate is off,
-        and password settings are managed at the proxy, not here.
+        Authentication is handled by your reverse proxy (GANTRY_AUTH=proxy). Gantry's built-in login is off, and
+        credentials are managed at the proxy, not here.
+      </p>
+    {:else if auth.mode === 'none'}
+      <p class="settings-access__note">
+        Authentication is turned off (GANTRY_AUTH=none) — anyone who can reach this dashboard can view and manage it.
+        Remove that variable to require a login again.
       </p>
     {:else}
-      {#if auth.showsNudge}
-        <p class="settings-access__nudge">
-          No password set — anyone on your network can view and manage this server.
+      <p class="settings-access__note">
+        Signed in as <strong>{auth.username}</strong>. Signing in lasts until you close your browser.
+      </p>
+      {#if auth.envManaged}
+        <p class="settings-access__note settings-access__note--env">
+          The login comes from the GANTRY_USERNAME / GANTRY_PASSWORD container variables at every start — a change made
+          here lasts only until the next restart re-applies them. Update the variables in the container template to make
+          a change stick. Removing the variables does <em>not</em> turn authentication off.
         </p>
-      {:else}
-        <p class="settings-access__note">Password protection is on. Signing in lasts 7 days per visit, 30 days at most.</p>
-        {#if auth.envManaged}
-          <p class="settings-access__note settings-access__note--env">
-            The password comes from the GANTRY_PASSWORD container variable at every start — a change made here lasts
-            only until the next restart re-applies it. Update the variable in the container template to make a change
-            stick. Removing the variable does <em>not</em> turn the password off; only “Turn off password” below does.
-          </p>
-        {/if}
       {/if}
 
-      <form class="settings-access__form" onsubmit={submitPassword} novalidate>
-        {#if auth.passwordSet}
-          <label class="settings-access__field">
-            <span class="microlabel">Current password</span>
-            <input type="password" bind:value={pwCurrent} autocomplete="current-password" disabled={pwSaving} />
-          </label>
-        {/if}
+      <form class="settings-access__form" onsubmit={submitCredential} novalidate>
         <label class="settings-access__field">
-          <span class="microlabel">New password</span>
+          <span class="microlabel">Current password</span>
+          <input type="password" bind:value={pwCurrent} autocomplete="current-password" disabled={pwSaving} />
+        </label>
+        <label class="settings-access__field">
+          <span class="microlabel">Username</span>
+          <input
+            type="text"
+            bind:value={newUsername}
+            autocomplete="username"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+            disabled={pwSaving}
+          />
+        </label>
+        <label class="settings-access__field">
+          <span class="microlabel">New password <span class="settings-access__optional">— leave blank to keep</span></span>
           <input type="password" bind:value={pwNew} autocomplete="new-password" disabled={pwSaving} />
         </label>
         <label class="settings-access__field">
@@ -443,56 +446,17 @@
         </label>
         <div class="settings-access__actions">
           <button type="submit" class="settings-access__save" disabled={pwSaving}>
-            {pwSaving ? 'Saving…' : auth.passwordSet ? 'Change password' : 'Set password'}
+            {pwSaving ? 'Saving…' : 'Update login'}
           </button>
-          {#if auth.passwordSet}
-            <span class="microlabel">Changing the password signs out every other session.</span>
-          {/if}
+          <span class="microlabel">Updating your login signs out every other session.</span>
         </div>
         {#if pwError}<p class="microlabel settings-access__error" role="alert">{pwError}</p>{/if}
         {#if pwSuccess}<p class="microlabel settings-access__success">{pwSuccess}</p>{/if}
       </form>
 
-      {#if auth.passwordSet}
-        <div class="settings-access__session-row">
-          <button type="button" class="settings-access__secondary" onclick={logout}>Log out</button>
-          {#if !disableArmed}
-            <button type="button" class="settings-access__secondary" onclick={() => (disableArmed = true)}>
-              Turn off password…
-            </button>
-          {/if}
-        </div>
-        {#if disableArmed}
-          <form class="settings-access__disable" onsubmit={submitDisable} novalidate>
-            <p class="settings-access__note">
-              Turning the password off reopens this dashboard to anyone on your network and signs out every session.
-              Enter the current password to confirm.
-            </p>
-            <div class="settings-access__actions">
-              <label class="settings-access__field">
-                <span class="microlabel">Current password</span>
-                <input type="password" bind:value={disableCurrent} autocomplete="current-password" disabled={disableBusy} />
-              </label>
-              <button type="submit" class="settings-access__danger" disabled={disableBusy}>
-                {disableBusy ? 'Turning off…' : 'Turn off password'}
-              </button>
-              <button
-                type="button"
-                class="settings-access__secondary"
-                onclick={() => {
-                  disableArmed = false;
-                  disableCurrent = '';
-                  disableError = null;
-                }}
-                disabled={disableBusy}
-              >
-                Cancel
-              </button>
-            </div>
-            {#if disableError}<p class="microlabel settings-access__error" role="alert">{disableError}</p>{/if}
-          </form>
-        {/if}
-      {/if}
+      <div class="settings-access__session-row">
+        <button type="button" class="settings-access__secondary" onclick={logout}>Log out</button>
+      </div>
     {/if}
   </div>
 
@@ -862,15 +826,16 @@
     flex-direction: column;
     gap: 0.6rem;
   }
-  .settings-access__nudge {
-    margin: 0;
-    font-size: 0.85rem;
-    color: var(--status-warning);
-  }
   .settings-access__note {
     margin: 0;
     font-size: 0.82rem;
     color: var(--ink-2);
+  }
+  .settings-access__optional {
+    color: var(--ink-2);
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
   }
   .settings-access__note--env {
     padding: 0.5rem 0.6rem;
@@ -878,8 +843,7 @@
     background: color-mix(in oklab, var(--status-warning) 10%, transparent);
     color: var(--ink);
   }
-  .settings-access__form,
-  .settings-access__disable {
+  .settings-access__form {
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
@@ -929,20 +893,8 @@
     font-size: 0.8rem;
     cursor: pointer;
   }
-  .settings-access__danger {
-    min-height: 40px;
-    padding: 0 1rem;
-    border-radius: 6px;
-    border: 1px solid var(--status-warning);
-    background: color-mix(in oklab, var(--status-warning) 12%, transparent);
-    color: var(--status-warning);
-    font-size: 0.85rem;
-    font-weight: 500;
-    cursor: pointer;
-  }
   .settings-access__save:disabled,
-  .settings-access__secondary:disabled,
-  .settings-access__danger:disabled {
+  .settings-access__secondary:disabled {
     opacity: 0.6;
     cursor: not-allowed;
   }

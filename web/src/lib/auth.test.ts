@@ -1,44 +1,71 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { loginErrorMessage, needsLogin, showsNoPasswordNudge } from './auth';
+import { credentialFormError, loginErrorMessage, needsLogin, needsSetup } from './auth';
 import {
   AuthActionError,
   fetchAcks,
-  postAuthDisable,
-  postAuthPassword,
+  postAuthCredential,
+  postAuthSetup,
   postLogin,
   postLogout,
   putSettings,
   setUnauthorizedHandler,
 } from './api';
 
-describe('needsLogin', () => {
-  it('gates exactly when the server would 401: auto mode, password set, no session', () => {
-    expect(needsLogin({ mode: 'auto', passwordSet: true, authenticated: false })).toBe(true);
-    expect(needsLogin({ mode: 'auto', passwordSet: true, authenticated: true })).toBe(false);
-    expect(needsLogin({ mode: 'auto', passwordSet: false, authenticated: false })).toBe(false);
-    // Proxy mode never gates client-side -- the reverse proxy already
-    // authenticated the request or it wouldn't have arrived.
-    expect(needsLogin({ mode: 'proxy', passwordSet: true, authenticated: false })).toBe(false);
-  });
-});
-
-describe('showsNoPasswordNudge', () => {
-  it('nudges only an open auto-mode install', () => {
-    expect(showsNoPasswordNudge({ mode: 'auto', passwordSet: false })).toBe(true);
-    expect(showsNoPasswordNudge({ mode: 'auto', passwordSet: true })).toBe(false);
-    expect(showsNoPasswordNudge({ mode: 'proxy', passwordSet: false })).toBe(false);
+describe('screen predicates', () => {
+  it('map the server state to exactly one gate screen', () => {
+    expect(needsSetup('setup')).toBe(true);
+    expect(needsSetup('login')).toBe(false);
+    expect(needsLogin('login')).toBe(true);
+    expect(needsLogin('setup')).toBe(false);
+    // authed and disabled both render the app, neither gate screen.
+    for (const s of ['authed', 'disabled'] as const) {
+      expect(needsSetup(s)).toBe(false);
+      expect(needsLogin(s)).toBe(false);
+    }
   });
 });
 
 describe('loginErrorMessage', () => {
   it('maps 401 and 429 to fixed copy and passes other messages through', () => {
-    expect(loginErrorMessage(new AuthActionError(401, 'invalid password'))).toBe('Wrong password. Try again.');
+    expect(loginErrorMessage(new AuthActionError(401, 'invalid username or password'))).toBe(
+      'Wrong username or password. Try again.',
+    );
     expect(loginErrorMessage(new AuthActionError(429, 'too many attempts, wait a minute'))).toBe(
       'Too many attempts. Wait a minute, then try again.',
     );
-    expect(loginErrorMessage(new AuthActionError(409, 'no password is set'))).toBe('no password is set');
+    expect(loginErrorMessage(new AuthActionError(409, 'a credential is already set'))).toBe('a credential is already set');
     expect(loginErrorMessage(new Error('network down'))).toBe('network down');
     expect(loginErrorMessage('weird')).toBe('Something went wrong. Try again.');
+  });
+});
+
+describe('credentialFormError', () => {
+  it('requires a non-empty username', () => {
+    expect(credentialFormError({ username: '   ', password: 'longenough', confirm: 'longenough', passwordRequired: true })).toBe(
+      'Enter a username.',
+    );
+  });
+
+  it('enforces the password rules when a password is required (setup)', () => {
+    expect(credentialFormError({ username: 'admin', password: 'short', confirm: 'short', passwordRequired: true })).toBe(
+      'Password must be at least 8 characters.',
+    );
+    expect(credentialFormError({ username: 'admin', password: 'longenough', confirm: 'different', passwordRequired: true })).toBe(
+      "Passwords don't match.",
+    );
+    expect(credentialFormError({ username: 'admin', password: 'longenough', confirm: 'longenough', passwordRequired: true })).toBeNull();
+  });
+
+  it('treats a blank password as a username-only change when not required', () => {
+    // Blank password + blank confirm: fine (keep the existing password).
+    expect(credentialFormError({ username: 'admin', password: '', confirm: '', passwordRequired: false })).toBeNull();
+    // But once either password field is touched, the rules apply again.
+    expect(credentialFormError({ username: 'admin', password: 'short', confirm: '', passwordRequired: false })).toBe(
+      'Password must be at least 8 characters.',
+    );
+    expect(credentialFormError({ username: 'admin', password: 'longenough', confirm: '', passwordRequired: false })).toBe(
+      "Passwords don't match.",
+    );
   });
 });
 
@@ -89,34 +116,38 @@ describe('api request plumbing', () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT fire the unauthorized handler for a wrong login password', async () => {
-    // A login 401 is the form's answer ("wrong password"), not a
-    // session-level bounce -- redirecting would eat the error message.
-    const mock = vi.fn(async () => jsonResponse(401, { error: 'invalid password' }));
+  it('does NOT fire the unauthorized handler for a wrong login', async () => {
+    // A login 401 is the form's answer ("wrong username or password"), not
+    // a session-level bounce -- redirecting would eat the error message.
+    const mock = vi.fn(async () => jsonResponse(401, { error: 'invalid username or password' }));
     global.fetch = mock as unknown as typeof fetch;
     const onUnauthorized = vi.fn();
     setUnauthorizedHandler(onUnauthorized);
 
-    await expect(postLogin('nope')).rejects.toMatchObject({ status: 401, message: 'invalid password' });
+    await expect(postLogin('admin', 'nope')).rejects.toMatchObject({ status: 401, message: 'invalid username or password' });
     expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
-  it('postAuthPassword and postAuthDisable surface status-carrying errors inline too', async () => {
+  it('postAuthSetup and postAuthCredential surface status-carrying errors inline too', async () => {
     const onUnauthorized = vi.fn();
     setUnauthorizedHandler(onUnauthorized);
 
-    global.fetch = vi.fn(async () => jsonResponse(429, { error: 'too many attempts, wait a minute' })) as unknown as typeof fetch;
-    await expect(postAuthPassword('cur', 'next-password')).rejects.toMatchObject({ status: 429 });
+    global.fetch = vi.fn(async () => jsonResponse(409, { error: 'a credential is already set' })) as unknown as typeof fetch;
+    await expect(postAuthSetup('admin', 'a-decent-password')).rejects.toMatchObject({ status: 409 });
 
-    global.fetch = vi.fn(async () => jsonResponse(401, { error: 'invalid password' })) as unknown as typeof fetch;
-    await expect(postAuthDisable('wrong')).rejects.toMatchObject({ status: 401 });
+    global.fetch = vi.fn(async () => jsonResponse(429, { error: 'too many attempts, wait a minute' })) as unknown as typeof fetch;
+    await expect(postAuthCredential('cur', 'admin', 'next-password')).rejects.toMatchObject({ status: 429 });
+
+    global.fetch = vi.fn(async () => jsonResponse(401, { error: 'invalid username or password' })) as unknown as typeof fetch;
+    await expect(postAuthCredential('wrong', 'admin', '')).rejects.toMatchObject({ status: 401 });
 
     expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
-  it('postLogin resolves on ok and postLogout tolerates 204', async () => {
+  it('postAuthSetup, postLogin resolve on ok and postLogout tolerates 204', async () => {
     global.fetch = vi.fn(async () => jsonResponse(200, { ok: true })) as unknown as typeof fetch;
-    await expect(postLogin('right-password')).resolves.toBeUndefined();
+    await expect(postAuthSetup('admin', 'a-decent-password')).resolves.toBeUndefined();
+    await expect(postLogin('admin', 'right-password')).resolves.toBeUndefined();
 
     global.fetch = vi.fn(async () => ({ ok: false, status: 204, statusText: 'No Content', json: async () => ({}) })) as unknown as typeof fetch;
     await expect(postLogout()).resolves.toBeUndefined();

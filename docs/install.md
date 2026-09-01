@@ -97,6 +97,17 @@ trade or set a password. Two ways to set one:
   the browser that set it signed in; changing it later requires the
   current password and signs out every other session.
 
+One more thing before you set it: `POST /api/auth/password` itself has
+to work without a session while the box is open -- there's nothing yet
+to require one from. That's not a real gap: anyone already on your LAN
+can view and manage the whole open dashboard in that window regardless,
+and a browser page trying to call it invisibly still needs the same
+custom header every mutating route requires, so a drive-by webpage is
+still shut out. Set a password promptly if you're on a network you
+don't fully trust. If you ever need to force a reset with no session
+and no current password on hand, `GANTRY_PASSWORD` rewrites the stored
+hash at the next restart -- see above.
+
 One deliberate asymmetry to know about: **removing `GANTRY_PASSWORD`
 from the template does NOT turn the password off.** The stored password
 stays until you turn it off in Settings → Access (current password
@@ -120,9 +131,12 @@ What the lock actually does:
 - Login is rate-limited (5/minute per address, 20/minute overall) and
   audited: `auth.login_ok` / `auth.login_failed` events show up in the
   Events view, failures coalesced per address so a guessing run can't
-  flood the feed. There is deliberately no hard lockout -- on a LAN,
-  a lockout is a lever anything on the network could pull against you;
-  the refilling limit bounds guessing just as well and recovers alone.
+  flood the feed. The 20/minute ceiling is shared across every
+  address, so a flood of guesses can temporarily block your own login
+  too while it's happening. There is deliberately no hard lockout --
+  on a LAN, a lockout is a lever anything on the network could pull
+  against you; the refilling limit bounds guessing just as well and
+  recovers alone.
 - The SPA and any script calling the API must send a custom header on
   mutating requests (this is enforced with or without a password --
   it is what makes cross-site request forgery a dead end):

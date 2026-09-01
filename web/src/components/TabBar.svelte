@@ -10,6 +10,7 @@
 -->
 <script>
   import { route, routes } from '../lib/router';
+  import { live } from '../lib/sse.svelte';
 
   const primaryNames = new Set(['overview', 'containers', 'top', 'storage', 'alerts']);
   const primaryRoutes = routes.filter((item) => primaryNames.has(item.name));
@@ -18,13 +19,22 @@
 
   let moreOpen = $state(false);
   let moreActive = $derived(moreRoutes.some((item) => item.name === $route.name));
+
+  // serverName: Sidebar's own brand-block addition (issue #39) has no
+  // mobile equivalent -- Sidebar itself is desktop-only (hidden md:flex)
+  // -- so the More panel's head carries it here instead, same
+  // conditional-middot-prefix idiom as Sidebar's version/Changelog line.
+  let serverName = $derived(live.frame?.server_name ?? '');
 </script>
 
 <nav class="tab-bar flex md:hidden" aria-label="Primary">
   {#if moreOpen}
     <div class="tab-bar__more-menu" role="menu" aria-label="More destinations">
       <div class="tab-bar__more-head">
-        <span>More</span>
+        <span class="tab-bar__more-title">
+          {#if serverName}<span class="tab-bar__more-server">{serverName}</span><span aria-hidden="true">&middot;</span>{/if}
+          <span>More</span>
+        </span>
         <button type="button" onclick={() => (moreOpen = false)} aria-label="Close more menu">&times;</button>
       </div>
       <div class="tab-bar__more-grid">
@@ -151,6 +161,18 @@
     font-size: 0.63rem;
     text-transform: uppercase;
     letter-spacing: 0.1em;
+  }
+  .tab-bar__more-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .tab-bar__more-server {
+    color: var(--sidebar-ink);
+    font-family: var(--font-sans);
+    font-weight: 700;
+    text-transform: none;
+    letter-spacing: normal;
   }
   .tab-bar__more-head button {
     width: 32px;

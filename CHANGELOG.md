@@ -8,6 +8,36 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.2] - 2026-09-01
+
+### Fixed
+
+- **The container no longer fails to start on a stock Unraid install.**
+  Under `--cap-drop=ALL` the process couldn't write into the `/config`
+  appdata folder Unraid creates for it -- that folder is owned by the
+  array (`nobody:users`), not root -- so it couldn't create its SQLite
+  database and exited at startup with `open store: unable to open
+  database file (14)`. The Community Applications template and the
+  documented `docker run` now add `--cap-add=DAC_OVERRIDE` alongside the
+  existing flags; that's the one capability the write needs, and a fresh
+  install works with no edits. (#37)
+- **The GPU collector no longer floods the log when `nvidia-smi` can't
+  run.** On an Nvidia box with `--runtime=nvidia`, `nvidia-smi` is mounted
+  into the image but can't execute against Gantry's minimal `scratch`
+  base, which ships no dynamic loader -- the kernel returns a misleading
+  `no such file or directory` for the missing ELF interpreter. Gantry now
+  detects that case once at startup and shows the GPU source as a quiet,
+  still-visible "unavailable" hint, instead of logging a failed poll every
+  cycle. Working GPU monitoring and CPU-only boxes are unaffected.
+  Actually running `nvidia-smi` from the image is a separate change still
+  in progress. (#38)
+
+### Changed
+
+- If Gantry still can't open its database at startup, the error now names
+  the config directory and points at the `--cap-add=DAC_OVERRIDE` fix,
+  instead of printing a bare SQLite code.
+
 ## [0.1.1] - 2026-08-31
 
 ### Changed

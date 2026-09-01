@@ -8,6 +8,26 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.3] - 2026-09-01
+
+### Changed
+
+- **The image is now built on a minimal
+  [distroless](https://github.com/GoogleContainerTools/distroless) base**
+  (`gcr.io/distroless/base-debian12`) instead of `scratch`, so Nvidia GPU
+  monitoring actually works. The `nvidia-smi` the Nvidia container runtime
+  injects (`--runtime=nvidia`) is a glibc, dynamically-linked binary, and
+  `scratch` had no dynamic loader to exec it -- the gap 0.1.2 papered over
+  by degrading the GPU source to a quiet "unavailable" hint (#38). The
+  distroless base carries a glibc loader, so `nvidia-smi` now runs and
+  Gantry reports per-container Nvidia VRAM. It stays one image for every
+  GPU vendor -- Intel and AMD (DRM `fdinfo`, read in-process) and CPU-only
+  boxes are unaffected -- and keeps the same single static binary and the
+  same hardened surface: no shell, no package manager, nothing to log
+  into. The image grows from roughly 14 MB to roughly 35 MB. Nvidia setup
+  is unchanged (`--runtime=nvidia` plus `NVIDIA_VISIBLE_DEVICES=all`, no
+  special tag); see [docs/nvidia.md](docs/nvidia.md). (#38)
+
 ## [0.1.2] - 2026-09-01
 
 ### Fixed

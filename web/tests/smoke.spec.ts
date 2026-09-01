@@ -1012,10 +1012,24 @@ test('top consumers: CPU rows read as a host-share percentage with a quiet cores
   const rows = page.locator('.top-bar-list__row');
   await expect(rows.first()).toBeVisible();
 
-  // fake.go's fleet never uses more than one full core (fakeHostCores'
-  // own doc), so every row must read comfortably under 100% -- nothing
-  // pegged at the old per-core ceiling.
-  const values = await rows.locator('.top-bar-list__value').allTextContents();
+  // Bound only the CONTAINER rows, not the pinned "Unattributed (host)"
+  // summary row. fake.go's fleet never uses more than one full core
+  // (fakeHostCores' own doc), so every container reads comfortably under
+  // 100% -- nothing pegged at the old per-core ceiling, the regression
+  // this guards. The unattributed row is NOT a container: it renders
+  // hostTotal - attributed, and hostTotal reads the host's OWN cpu.total.
+  // On a Linux CI runner the REAL host collector (host.New, /proc) runs
+  // alongside fake mode and writes that same cpu.total key with the
+  // runner's actual, test-pegged CPU -- 74-85% observed live in CI -- so
+  // the host-derived unattributed row legitimately reads far above 20
+  // there while every genuine fake container stays a fraction of a
+  // percent under it. Locally there is no /proc, the real host collector
+  // is unavailable, and only fake writes cpu.total (~16-21%), which is
+  // why the un-scoped bound only ever flaked on CI. Container rows render
+  // their name as a link (<a>); the unattributed row a plain <span>
+  // (TopBarRow, linkable:false) -- filter on that.
+  const containerRows = rows.filter({ has: page.locator('a.top-bar-list__name') });
+  const values = await containerRows.locator('.top-bar-list__value').allTextContents();
   expect(values.length).toBeGreaterThan(0);
   for (const text of values) {
     const value = Number(text.replace('%', ''));

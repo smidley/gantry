@@ -58,7 +58,7 @@
       </span>
       <div class="login__brand-copy">
         <strong>Gantry</strong>
-        <small>Server observability</small>
+        <small>Container observability</small>
       </div>
     </div>
 

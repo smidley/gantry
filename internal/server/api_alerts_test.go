@@ -168,6 +168,7 @@ func doAlertsRequest(t *testing.T, method, url, body string) *http.Response {
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	req.Header.Set(requestedWithHeader, requestedWithValue) // gate.go's cross-site check, satisfied the way the SPA does
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	return resp

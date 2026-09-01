@@ -53,7 +53,11 @@ func postAck(t *testing.T, url string, body any) *http.Response {
 	t.Helper()
 	raw, err := json.Marshal(body)
 	require.NoError(t, err)
-	resp, err := http.Post(url+"/api/acks", "application/json", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, url+"/api/acks", bytes.NewReader(raw))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(requestedWithHeader, requestedWithValue) // gate.go's cross-site check, satisfied the way the SPA does
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	return resp
 }
@@ -160,6 +164,7 @@ func TestAcksDelete(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/acks/%d", ts.URL, 7), nil)
 	require.NoError(t, err)
+	req.Header.Set(requestedWithHeader, requestedWithValue)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
@@ -168,6 +173,7 @@ func TestAcksDelete(t *testing.T) {
 
 	badReq, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/acks/not-a-number", nil)
 	require.NoError(t, err)
+	badReq.Header.Set(requestedWithHeader, requestedWithValue)
 	badResp, err := http.DefaultClient.Do(badReq)
 	require.NoError(t, err)
 	defer func() { _ = badResp.Body.Close() }()

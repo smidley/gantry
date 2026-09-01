@@ -257,7 +257,7 @@ export type AlertRulesPutError = Error;
 // own doc for why a partial submission can't work (an omitted builtin
 // reads as an attempted deletion and 400s).
 export async function putAlertRules(rules: AlertRuleDTO[]): Promise<AlertRulesResponse> {
-  const res = await fetch('/api/alerts/rules', {
+  const res = await apiFetch('/api/alerts/rules', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ rules }),
@@ -293,7 +293,7 @@ export async function createSilence(body: {
   reason?: string;
   scope?: 'all';
 }): Promise<SilenceDTO> {
-  const res = await fetch('/api/alerts/silences', {
+  const res = await apiFetch('/api/alerts/silences', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ rule_id: body.rule_id ?? '', entity: body.entity ?? '', hours: body.hours, reason: body.reason ?? '', scope: body.scope ?? '' }),
@@ -309,7 +309,7 @@ export async function createSilence(body: {
 // 204 whether or not the id still existed, so this never throws for an
 // already-expired/already-lifted silence.
 export async function deleteSilence(id: number): Promise<void> {
-  const res = await fetch(`/api/alerts/silences/${id}`, { method: 'DELETE' });
+  const res = await apiFetch(`/api/alerts/silences/${id}`, { method: 'DELETE' });
   if (!res.ok && res.status !== 204) {
     throw new Error(`DELETE /api/alerts/silences/${id}: ${res.status} ${res.statusText}`);
   }
@@ -343,7 +343,7 @@ export function fetchAcks(signal?: AbortSignal): Promise<AcksGetResponse> {
 // an empty entity -- there is deliberately no global ack shape at all
 // (unlike silences' explicit scope:"all" gesture).
 export async function createAck(body: { kind: string; entity: string; hours: number }): Promise<OverviewAckDTO> {
-  const res = await fetch('/api/acks', {
+  const res = await apiFetch('/api/acks', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -358,7 +358,7 @@ export async function createAck(body: { kind: string; entity: string; hours: num
 // deleteAck lifts an ack early -- 204 whether or not the id still
 // existed, the deleteSilence convention exactly.
 export async function deleteAck(id: number): Promise<void> {
-  const res = await fetch(`/api/acks/${id}`, { method: 'DELETE' });
+  const res = await apiFetch(`/api/acks/${id}`, { method: 'DELETE' });
   if (!res.ok && res.status !== 204) {
     throw new Error(`DELETE /api/acks/${id}: ${res.status} ${res.statusText}`);
   }
@@ -374,7 +374,7 @@ export function fetchWebhookTargets(): Promise<WebhooksGetResponse> {
 // targets configure an outbound side-effect capability; rules/silences
 // don't -- see handleAlertsWebhooksPut's own doc for the asymmetry).
 export async function putWebhookTargets(targets: WebhookTargetInput[]): Promise<WebhooksGetResponse> {
-  const res = await fetch('/api/alerts/webhooks', {
+  const res = await apiFetch('/api/alerts/webhooks', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ targets }),
@@ -543,7 +543,7 @@ export function fetchInsightRules(signal?: AbortSignal): Promise<InsightRulesRes
 // side -- the insights side has no builtin/user split to worry about,
 // every rule here is always compiled-in).
 export async function putInsightRules(rules: InsightRuleInput[]): Promise<InsightRulesResponse> {
-  const res = await fetch('/api/insights/rules', {
+  const res = await apiFetch('/api/insights/rules', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ rules }),
@@ -560,7 +560,7 @@ export async function putInsightRules(rules: InsightRuleInput[]): Promise<Insigh
 // fresh (now resolved) state, so the caller can move it straight into
 // History without a full refetch.
 export async function dismissInsight(id: number, days: number): Promise<InsightDTO> {
-  const res = await fetch(`/api/insights/${id}/dismiss`, {
+  const res = await apiFetch(`/api/insights/${id}/dismiss`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ days }),
@@ -675,6 +675,118 @@ export type TopResource = 'cpu' | 'mem' | 'net' | 'io' | 'gpu';
 export type TopWindow = 'now' | '1h' | '24h' | '7d';
 export type TopAgg = 'avg' | 'peak';
 
+// --- request plumbing --------------------------------------------------------
+// Every mutating request carries `X-Requested-With: gantry` -- the
+// server's mux-wide cross-site check (internal/server/gate.go) rejects
+// any POST/PUT/DELETE without a custom header, because SameSite=Lax
+// cookies are port-blind on a one-IP-many-containers Unraid box and a
+// text/plain form can smuggle JSON with no preflight. GETs don't need
+// it (nothing mutates), so they stay preflight-free.
+//
+// Every response is also watched for 401: when the password gate is on
+// and the session is missing/expired, ANY api call answers 401, and the
+// registered handler (lib/auth.svelte.ts) flips the app to the login
+// screen -- the "401 redirects to login" contract, centralized here so
+// no view ever handles it itself. postLogin and the password endpoints
+// opt out: there a 401 means "wrong password", which the calling form
+// surfaces inline instead of bouncing the user.
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH']);
+
+let unauthorizedHandler: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  unauthorizedHandler = fn;
+}
+
+interface ApiFetchInit extends RequestInit {
+  // suppress the 401 -> login redirect for endpoints where 401 is a
+  // form-level answer, not a session-level one.
+  skipUnauthorizedHandler?: boolean;
+}
+
+async function apiFetch(url: string, init: ApiFetchInit = {}): Promise<Response> {
+  const { skipUnauthorizedHandler, ...rest } = init;
+  const method = (rest.method ?? 'GET').toUpperCase();
+  const headers = new Headers(rest.headers);
+  if (MUTATING_METHODS.has(method)) headers.set('X-Requested-With', 'gantry');
+  const res = await fetch(url, { ...rest, headers });
+  if (res.status === 401 && !skipUnauthorizedHandler) unauthorizedHandler?.();
+  return res;
+}
+
+// --- auth --------------------------------------------------------------------
+
+// AuthStatus mirrors server.authStatusResponse. mode "proxy" means a
+// reverse proxy owns authentication (GANTRY_AUTH=proxy): the built-in
+// gate is off and Settings suppresses the no-password nudge.
+// env_managed means the password came from the GANTRY_PASSWORD template
+// variable at boot -- in-app changes hold only until the next restart
+// re-applies it.
+export interface AuthStatus {
+  mode: 'auto' | 'proxy';
+  password_set: boolean;
+  env_managed: boolean;
+  authenticated: boolean;
+}
+
+export function fetchAuthStatus(): Promise<AuthStatus> {
+  return getJSON<AuthStatus>('/api/auth/status');
+}
+
+// AuthActionError carries the HTTP status so the login form can tell a
+// wrong password (401) from the brute-force limiter (429) and show the
+// right message for each.
+export class AuthActionError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'AuthActionError';
+    this.status = status;
+  }
+}
+
+async function postAuth(url: string, body: unknown): Promise<void> {
+  const res = await apiFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    skipUnauthorizedHandler: true,
+  });
+  if (res.status === 204) return;
+  let message = `${res.status} ${res.statusText}`;
+  try {
+    const parsed = (await res.json()) as { error?: string };
+    if (parsed?.error) message = parsed.error;
+  } catch {
+    // a bodyless/non-JSON error keeps the status-line message
+  }
+  if (!res.ok) throw new AuthActionError(res.status, message);
+}
+
+export function postLogin(password: string): Promise<void> {
+  return postAuth('/api/auth/login', { password });
+}
+
+// postLogout goes through the normal (non-skipping) path deliberately:
+// it can't 401 (the route is exempt), and there's nothing form-level
+// about it.
+export async function postLogout(): Promise<void> {
+  const res = await apiFetch('/api/auth/logout', { method: 'POST' });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`POST /api/auth/logout: ${res.status} ${res.statusText}`);
+  }
+}
+
+// postAuthPassword sets (current empty while none is configured) or
+// changes the password. The server wipes every other session and hands
+// this browser a fresh cookie in the same response.
+export function postAuthPassword(currentPassword: string, newPassword: string): Promise<void> {
+  return postAuth('/api/auth/password', { current_password: currentPassword, new_password: newPassword });
+}
+
+export function postAuthDisable(currentPassword: string): Promise<void> {
+  return postAuth('/api/auth/disable', { current_password: currentPassword });
+}
+
 // signal (threaded through every helper below that a view might call
 // repeatedly on a fast-changing selection -- range/resource/window/agg
 // tabs) lets a caller cancel a request it no longer cares about. Passing
@@ -685,7 +797,7 @@ export type TopAgg = 'avg' | 'peak';
 // real failure via `err?.name === 'AbortError'` and simply ignore it,
 // since a newer request has already superseded it.
 async function getJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(url, { signal });
+  const res = await apiFetch(url, { signal });
   if (!res.ok) {
     throw new Error(`GET ${url}: ${res.status} ${res.statusText}`);
   }
@@ -805,7 +917,7 @@ export interface SettingsPutError extends Error {
 // fails, rather than a generic status-code message -- the settings
 // editor needs that detail to point at the right field.
 export async function putSettings(retention: RetentionSettings): Promise<SettingsResponse> {
-  const res = await fetch('/api/settings', {
+  const res = await apiFetch('/api/settings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ retention }),
@@ -845,7 +957,7 @@ export function fetchGroups(): Promise<GroupsResponse> {
 // combined message, not a field map), so there's nothing extra to
 // preserve on the thrown error.
 export async function putGroups(groups: Group[]): Promise<GroupsResponse> {
-  const res = await fetch('/api/groups', {
+  const res = await apiFetch('/api/groups', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ groups }),
@@ -917,7 +1029,7 @@ export interface ImagePruneResult {
 // own "surface the server's own message" convention, just without their
 // extra structured fields (none of these routes attach any).
 async function postConfirmed<T>(url: string, confirmValue: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Gantry-Confirm': confirmValue },
     body: JSON.stringify(body),
@@ -1007,7 +1119,7 @@ export function pruneContainersMaintenance(
 // one flag shared by every mutating route on both resources, never
 // scoped per-resource, so one probe answers for both Maintenance cards.
 export async function probeReadOnly(signal?: AbortSignal): Promise<boolean> {
-  const res = await fetch('/api/images/prune', {
+  const res = await apiFetch('/api/images/prune', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Gantry-Confirm': 'images' },
     body: JSON.stringify({ mode: '__gantry_probe__' }),
@@ -1042,7 +1154,7 @@ export async function* streamLogs(
   if (opts.tail !== undefined) q.set('tail', String(opts.tail));
   const qs = q.toString();
 
-  const res = await fetch(`/api/containers/${encodeURIComponent(name)}/logs${qs ? `?${qs}` : ''}`, {
+  const res = await apiFetch(`/api/containers/${encodeURIComponent(name)}/logs${qs ? `?${qs}` : ''}`, {
     signal: opts.signal,
   });
   if (!res.ok || !res.body) {

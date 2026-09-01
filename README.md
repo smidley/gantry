@@ -17,7 +17,41 @@ Most self-hosted monitors are a hub plus a per-host agent you deploy and pair �
 
 Gantry monitors read-only — it reads your containers, disks and array and never changes your array configuration. The one thing it can change, only when you ask, is Docker housekeeping from the Maintenance view (clearing stopped containers and unused images), behind a confirmation and disabled entirely by a single switch.
 
-> Gantry is pre-release and under active development. The Community Applications listing is on its way; the `docker run` below works today. Screenshots are being refreshed for the current UI.
+> Gantry is pre-release and under active development. The Community Applications listing is on its way; the `docker run` below works today.
+
+<div align="center">
+<img src="https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/overview-light.png" alt="Gantry overview: containers, storage and cross-container insights at a glance" width="100%">
+</div>
+
+<details>
+<summary><b>More screenshots</b></summary>
+<br>
+
+**Insights** — the interaction map names which container is slowing another, with the evidence behind it.
+
+<img src="https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/insights-light.png" alt="Insights: the interaction map and a cross-container finding" width="100%">
+
+**Metrics** — per-resource leaderboards over a multi-line chart of every container against the host total.
+
+<img src="https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/metrics-light.png" alt="Metrics: per-resource leaderboards and the multi-line chart" width="100%">
+
+**Storage** — the array and pools with parity status, and every drive as a card with usage, temperature and errors.
+
+<img src="https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/storage-light.png" alt="Storage: array, pools and per-drive cards" width="100%">
+
+**Containers** — the sortable, filterable fleet with per-container CPU, memory, network, disk IO and GPU.
+
+<img src="https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/containers-light.png" alt="Containers: the sortable, filterable fleet table" width="100%">
+
+**Maintenance** — reclaim space from unused images and clear stopped containers, every deletion behind a confirmation.
+
+<img src="https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/maintenance-light.png" alt="Maintenance: image and container cleanup" width="100%">
+
+**Mobile** — the overview as cards, with a bottom nav, on a phone.
+
+<img src="https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/overview-mobile-dark.png" alt="Gantry overview on mobile" width="320">
+
+</details>
 
 
 ## Features

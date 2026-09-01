@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/smidley/gantry/internal/alert"
+	"github.com/smidley/gantry/internal/auth"
 	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/collect/gpu"
 	"github.com/smidley/gantry/internal/collect/host"
@@ -43,6 +44,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 		"GANTRY_PORT":      fmt.Sprint(port),
 		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
 		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_AUTH":      "none", // non-auth feature test: run on an open box
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -360,6 +362,7 @@ func TestRunReadOnlyModeBlocksImageMutationsButNotGet(t *testing.T) {
 		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
 		"GANTRY_FAKE_DATA": "1",
 		"GANTRY_READ_ONLY": "1",
+		"GANTRY_AUTH":      "none", // read-only is orthogonal to auth; test it on an open box
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -413,6 +416,7 @@ func TestRunWiresContainerMaintenanceThroughFakeDataEndToEnd(t *testing.T) {
 		"GANTRY_PORT":      fmt.Sprint(port),
 		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
 		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_AUTH":      "none", // non-auth feature test: run on an open box
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -475,6 +479,7 @@ func TestRunReadOnlyModeBlocksContainerMaintenanceMutationsButNotGet(t *testing.
 		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
 		"GANTRY_FAKE_DATA": "1",
 		"GANTRY_READ_ONLY": "1",
+		"GANTRY_AUTH":      "none", // read-only is orthogonal to auth; test it on an open box
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -1492,6 +1497,7 @@ func TestRunSeedsDefaultAlertRulesAtBoot(t *testing.T) {
 	env := map[string]string{
 		"GANTRY_PORT":    fmt.Sprint(port),
 		"GANTRY_DB_PATH": dbPath,
+		"GANTRY_AUTH":    "none", // boot-seed test on an open box
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -1551,6 +1557,7 @@ func TestRunSeedsInsightRuleConfigsAndResolvesStaleActiveInsightsAtBoot(t *testi
 	env := map[string]string{
 		"GANTRY_PORT":    fmt.Sprint(port),
 		"GANTRY_DB_PATH": dbPath,
+		"GANTRY_AUTH":    "none", // boot-seed test on an open box
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -1971,6 +1978,7 @@ func TestRunSeedsWebhookTargetFromEnvAtBoot(t *testing.T) {
 		"GANTRY_PORT":        fmt.Sprint(port),
 		"GANTRY_DB_PATH":     dbPath,
 		"GANTRY_WEBHOOK_URL": "https://example.com/gantry-hook",
+		"GANTRY_AUTH":        "none", // webhook wiring test on an open box
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -2019,6 +2027,7 @@ func TestRunWiresAlertsAndWebhooksAPIEndToEnd(t *testing.T) {
 		"GANTRY_PORT":        fmt.Sprint(port),
 		"GANTRY_DB_PATH":     dbPath,
 		"GANTRY_WEBHOOK_URL": "https://example.com/gantry-hook",
+		"GANTRY_AUTH":        "none", // webhook wiring test on an open box
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -2176,6 +2185,7 @@ func TestRunFakeModeSeedsFastRulesAndDemoWebhookTargets(t *testing.T) {
 		"GANTRY_PORT":      fmt.Sprint(port),
 		"GANTRY_DB_PATH":   dbPath,
 		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_AUTH":      "none", // fake-mode seeding test on an open box
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -2262,6 +2272,7 @@ func TestRunRealBootAfterFakeBootRestoresRealAlertWindows(t *testing.T) {
 			"GANTRY_PORT":      fmt.Sprint(port),
 			"GANTRY_DB_PATH":   dbPath,
 			"GANTRY_FAKE_DATA": fakeData,
+			"GANTRY_AUTH":      "none", // real-vs-fake rule-window test on an open box
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
@@ -2481,17 +2492,19 @@ func authTestRequest(t *testing.T, method, url, body, cookie string) *http.Respo
 	return resp
 }
 
-// TestRunAuthLoginLogoutRoundTrip drives the whole password gate
+// TestRunAuthLoginLogoutRoundTrip drives the whole preseeded login
 // against the real binary wiring (run(), real store, real argon2, real
 // cookie): locked healthz answers the minimal body, data routes 401, a
-// wrong password 401s, the right one yields a session cookie that opens
-// everything (reads AND a mutating write), and logout kills it.
+// wrong password 401s, the right username+password yields a session
+// cookie (no Max-Age) that opens everything (reads AND a mutating
+// write), and logout kills it.
 func TestRunAuthLoginLogoutRoundTrip(t *testing.T) {
 	port := freePort(t)
 	env := map[string]string{
 		"GANTRY_PORT":      fmt.Sprint(port),
 		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
 		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_USERNAME":  "round-trip-user",
 		"GANTRY_PASSWORD":  "round-trip-password",
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2520,14 +2533,14 @@ func TestRunAuthLoginLogoutRoundTrip(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "the shell must load to render the login screen")
 
 	// Wrong password: 401, no cookie.
-	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"password":"not-it"}`, "")
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"username":"round-trip-user","password":"not-it"}`, "")
 	drainAndClose(resp)
 	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	require.Empty(t, resp.Cookies())
 
-	// Right password: cookie out, and it opens reads, the full healthz,
-	// and a mutating write end to end.
-	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"password":"round-trip-password"}`, "")
+	// Right username+password: cookie out, and it opens reads, the full
+	// healthz, and a mutating write end to end.
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"username":"round-trip-user","password":"round-trip-password"}`, "")
 	drainAndClose(resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var token string
@@ -2535,6 +2548,8 @@ func TestRunAuthLoginLogoutRoundTrip(t *testing.T) {
 		if c.Name == "gantry_session" {
 			token = c.Value
 			require.True(t, c.HttpOnly)
+			require.Zero(t, c.MaxAge, "the real binary must emit a session cookie -- no Max-Age (until browser closes)")
+			require.True(t, c.Expires.IsZero(), "a session cookie carries no Expires either")
 		}
 	}
 	require.NotEmpty(t, token)
@@ -2596,6 +2611,7 @@ func TestRunAuthProxyModeDisablesGate(t *testing.T) {
 		"GANTRY_PORT":      fmt.Sprint(port),
 		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
 		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_USERNAME":  "proxy-user",
 		"GANTRY_PASSWORD":  "proxy-mode-password",
 		"GANTRY_AUTH":      "proxy",
 	}
@@ -2611,17 +2627,17 @@ func TestRunAuthProxyModeDisablesGate(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "proxy mode must not gate")
 
 	var st struct {
-		Mode        string `json:"mode"`
-		PasswordSet bool   `json:"password_set"`
+		Mode  string `json:"mode"`
+		State string `json:"state"`
 	}
 	resp, err = http.Get(base + "/api/auth/status")
 	require.NoError(t, err)
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&st))
 	drainAndClose(resp)
 	require.Equal(t, "proxy", st.Mode)
-	require.True(t, st.PasswordSet)
+	require.Equal(t, "disabled", st.State, "proxy mode reports the disabled state to the SPA")
 
-	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"password":"proxy-mode-password"}`, "")
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"username":"proxy-user","password":"proxy-mode-password"}`, "")
 	drainAndClose(resp)
 	require.Equal(t, http.StatusConflict, resp.StatusCode, "built-in login must refuse while the proxy owns auth")
 
@@ -2635,36 +2651,186 @@ func TestRunAuthProxyModeDisablesGate(t *testing.T) {
 	}
 }
 
-// TestRunAuthEnvPasswordPolicyRejectionLeavesBoxOpen pins the loud-
-// ignore path: a GANTRY_PASSWORD under the 8-char policy minimum is
-// rejected (uniformly with the API path -- env is not a policy bypass)
-// and the box boots open rather than half-locked behind a password the
-// owner thinks is weak-but-working.
-func TestRunAuthEnvPasswordPolicyRejectionLeavesBoxOpen(t *testing.T) {
+// authStatusState fetches /api/auth/status and returns its "state" field.
+func authStatusState(t *testing.T, base string) string {
+	t.Helper()
+	var st struct {
+		State string `json:"state"`
+	}
+	resp, err := http.Get(base + "/api/auth/status")
+	require.NoError(t, err)
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&st))
+	drainAndClose(resp)
+	return st.State
+}
+
+// runGantry starts run() with env in a goroutine and returns the base URL
+// plus a stop func that cancels and waits for a clean shutdown.
+func runGantry(t *testing.T, env map[string]string) (string, func()) {
+	t.Helper()
 	port := freePort(t)
-	env := map[string]string{
-		"GANTRY_PORT":      fmt.Sprint(port),
-		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
-		"GANTRY_FAKE_DATA": "1",
-		"GANTRY_PASSWORD":  "short",
+	env["GANTRY_PORT"] = fmt.Sprint(port)
+	if env["GANTRY_FAKE_DATA"] == "" {
+		env["GANTRY_FAKE_DATA"] = "1"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
 	waitHealthz(t, port)
-	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	stop := func() {
+		http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("run did not shut down")
+		}
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port), stop
+}
+
+// TestRunAuthFirstRunSetup pins the mandatory default end to end: a box
+// with no auth env and no stored credential boots into setup-pending
+// (data routes 401, status "setup"), the one-shot /api/auth/setup creates
+// the credential and hands back a session cookie (no Max-Age), a second
+// setup 409s, and logout returns to the locked state.
+func TestRunAuthFirstRunSetup(t *testing.T) {
+	base, stop := runGantry(t, map[string]string{
+		"GANTRY_DB_PATH": filepath.Join(t.TempDir(), "g.db"),
+	})
+	defer stop()
+
+	// Setup-pending: gated, and the SPA is told so.
+	require.Equal(t, "setup", authStatusState(t, base))
+	resp, err := http.Get(base + "/api/live/snapshot")
+	require.NoError(t, err)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode, "everything but setup is 401 before first-run setup")
+
+	// Create the credential.
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/setup", `{"username":"admin","password":"first-run-password"}`, "")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var token string
+	for _, c := range resp.Cookies() {
+		if c.Name == "gantry_session" {
+			token = c.Value
+			require.Zero(t, c.MaxAge, "the setup cookie is a session cookie -- no Max-Age")
+		}
+	}
+	drainAndClose(resp)
+	require.NotEmpty(t, token, "setup must leave the caller logged in")
+
+	// The session opens the app; status now reports authed with the
+	// username.
+	resp = authTestRequest(t, http.MethodGet, base+"/api/live/snapshot", "", token)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var st struct {
+		State    string `json:"state"`
+		Username string `json:"username"`
+	}
+	resp = authTestRequest(t, http.MethodGet, base+"/api/auth/status", "", token)
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&st))
+	drainAndClose(resp)
+	require.Equal(t, "authed", st.State)
+	require.Equal(t, "admin", st.Username)
+
+	// One-shot: a second setup is refused now that a credential exists.
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/setup", `{"username":"mallory","password":"another-password"}`, "")
+	drainAndClose(resp)
+	require.Equal(t, http.StatusConflict, resp.StatusCode, "setup must 409 once a credential exists")
+
+	// Logout returns to the locked (login) state.
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/logout", "", token)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, "login", authStatusState(t, base))
+}
+
+// TestRunAuthPreseedSkipsSetup pins the headless/CA path: both
+// GANTRY_USERNAME and GANTRY_PASSWORD set seed the credential at boot, so
+// the box comes up in the login state (not setup), setup 409s, and the
+// preseeded username+password log in.
+func TestRunAuthPreseedSkipsSetup(t *testing.T) {
+	base, stop := runGantry(t, map[string]string{
+		"GANTRY_DB_PATH":  filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_USERNAME": "ci-admin",
+		"GANTRY_PASSWORD": "preseeded-password",
+	})
+	defer stop()
+
+	require.Equal(t, "login", authStatusState(t, base), "a preseeded credential skips the setup screen")
+
+	resp := authTestRequest(t, http.MethodPost, base+"/api/auth/setup", `{"username":"x","password":"y-1234567"}`, "")
+	drainAndClose(resp)
+	require.Equal(t, http.StatusConflict, resp.StatusCode, "setup must 409 when a credential was preseeded")
+
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"username":"ci-admin","password":"preseeded-password"}`, "")
+	drainAndClose(resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the preseeded credential must log in")
+}
+
+// TestRunAuthEnvIncompleteOrRejectedFallsToSetup pins that the env
+// preseed is all-or-nothing and not a policy bypass: only one of the two
+// variables (incomplete), or both-but-a-too-short password (rejected),
+// each leave the box in mandatory setup-pending -- gated, never open.
+func TestRunAuthEnvIncompleteOrRejectedFallsToSetup(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"only-username":  {"GANTRY_USERNAME": "admin"},
+		"only-password":  {"GANTRY_PASSWORD": "lonely-password"},
+		"short-password": {"GANTRY_USERNAME": "admin", "GANTRY_PASSWORD": "short"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env["GANTRY_DB_PATH"] = filepath.Join(t.TempDir(), "g.db")
+			base, stop := runGantry(t, env)
+			defer stop()
+			require.Equal(t, "setup", authStatusState(t, base), "an incomplete/rejected env preseed must fall to setup, not open the box")
+			resp, err := http.Get(base + "/api/live/snapshot")
+			require.NoError(t, err)
+			drainAndClose(resp)
+			require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		})
+	}
+}
+
+// TestRunAuthNoneModeOpensBox pins the explicit opt-out: GANTRY_AUTH=none
+// is the ONLY way to run with no authentication -- data routes answer 200
+// with no credential and the SPA is told the gate is disabled.
+func TestRunAuthNoneModeOpensBox(t *testing.T) {
+	base, stop := runGantry(t, map[string]string{
+		"GANTRY_DB_PATH": filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_AUTH":    "none",
+	})
+	defer stop()
 
 	resp, err := http.Get(base + "/api/live/snapshot")
 	require.NoError(t, err)
 	drainAndClose(resp)
-	require.Equal(t, http.StatusOK, resp.StatusCode, "a rejected env password must leave the gate off, not half-configured")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GANTRY_AUTH=none must open the box")
+	require.Equal(t, "disabled", authStatusState(t, base))
+}
 
-	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
-	cancel()
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("run did not shut down")
-	}
+// TestRunAuthMigratesPasswordOnlyInstall pins the 0.1.0 -> 0.1.1 upgrade
+// through the real boot wiring: a database carrying a password hash with
+// no username row (how 0.1.0 stored it) must migrate to username "admin"
+// at boot, so the owner can still log in rather than being locked out.
+func TestRunAuthMigratesPasswordOnlyInstall(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "g.db")
+	seedSt, err := store.Open(dbPath, nil)
+	require.NoError(t, err)
+	phc, err := auth.HashPassword("legacy-password")
+	require.NoError(t, err)
+	require.NoError(t, seedSt.SettingSet("auth.password_hash", phc)) // no auth.username, like 0.1.0
+	require.NoError(t, seedSt.Close())
+
+	base, stop := runGantry(t, map[string]string{"GANTRY_DB_PATH": dbPath})
+	defer stop()
+
+	// The migrated install is in the login state (credential present), and
+	// "admin" + the old password log in.
+	require.Equal(t, "login", authStatusState(t, base))
+	resp := authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"username":"admin","password":"legacy-password"}`, "")
+	drainAndClose(resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the migrated admin credential must log in after upgrade")
 }

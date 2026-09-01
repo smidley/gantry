@@ -151,20 +151,26 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// while it's set, GET unaffected -- see server.Options.ReadOnly.
 	readOnly := cfg.Bool("read_only", false)
 
-	// Auth. The mode is env-ONLY (envOnly, deliberately NOT cfg's
-	// env>settings>default resolver): the password hash already lives in
-	// the settings table, and a mode row landing next to it must never
-	// be able to switch the gate off -- disabling auth goes through
-	// Manager.Disable (current password required) and nothing else. An
-	// unrecognized GANTRY_AUTH value logs and runs in auto: an auth typo
-	// fails closed, never open. GANTRY_PASSWORD, when set, applies at
-	// every boot (verify-then-write, so an unchanged value never churns
-	// sessions); removing it later changes nothing, by design -- see
-	// auth.Manager.EnsureEnvPassword and docs/install.md. Neither the
-	// password nor its hash is ever logged.
+	// Auth. Mandatory by default: with no credential stored the box boots
+	// into first-run setup (not open), and only GANTRY_AUTH=proxy (a
+	// reverse proxy authenticates in front) or GANTRY_AUTH=none (explicit
+	// open) stand the built-in gate down. The mode is env-ONLY (envOnly,
+	// deliberately NOT cfg's env>settings>default resolver): the
+	// credential already lives in the settings table, and a mode row
+	// landing next to it must never be able to switch the gate off. An
+	// unrecognized GANTRY_AUTH value logs and runs mandatory -- an auth
+	// typo fails closed, never open.
+	//
+	// GANTRY_USERNAME + GANTRY_PASSWORD preseed the credential at boot,
+	// but ONLY when both are set (verify-then-write, so an unchanged pair
+	// never churns sessions); one without the other is incomplete and is
+	// ignored with a warning, leaving the box on the setup screen.
+	// Removing the variables later changes nothing -- auth stays
+	// mandatory and the stored credential persists. Neither the password
+	// nor its hash is ever logged.
 	authMode, err := auth.ParseMode(getenv("GANTRY_AUTH"))
 	if err != nil {
-		log.Printf("auth: %v -- running with the password-controlled gate", err)
+		log.Printf("auth: %v -- running with the mandatory gate", err)
 	}
 	authMgr, err := auth.New(auth.Options{
 		Sessions:    st,
@@ -175,15 +181,22 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	if err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
-	if pw := getenv("GANTRY_PASSWORD"); pw != "" {
-		if err := authMgr.EnsureEnvPassword(pw); err != nil {
-			log.Printf("auth: GANTRY_PASSWORD ignored: %v", err)
+	envUser, envPass := getenv("GANTRY_USERNAME"), getenv("GANTRY_PASSWORD")
+	switch {
+	case envUser != "" && envPass != "":
+		if err := authMgr.EnsureEnvCredential(envUser, envPass); err != nil {
+			log.Printf("auth: GANTRY_USERNAME/GANTRY_PASSWORD ignored: %v", err)
 		} else {
-			log.Println("auth: password applied from GANTRY_PASSWORD")
+			log.Println("auth: credential applied from GANTRY_USERNAME/GANTRY_PASSWORD")
 		}
+	case envUser != "" || envPass != "":
+		log.Println("auth: set BOTH GANTRY_USERNAME and GANTRY_PASSWORD to preseed a credential; the incomplete pair is ignored -- first-run setup applies")
 	}
-	if authMode == auth.ModeProxy {
+	switch authMode {
+	case auth.ModeProxy:
 		log.Println("auth: GANTRY_AUTH=proxy -- built-in gate off, expecting the reverse proxy to authenticate")
+	case auth.ModeNone:
+		log.Println("auth: GANTRY_AUTH=none -- authentication is OFF, the dashboard is open to anyone who can reach it")
 	}
 
 	var wg sync.WaitGroup

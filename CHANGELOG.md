@@ -8,6 +8,43 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.1] - 2026-08-31
+
+### Changed
+
+- **Authentication is now required** -- a behavior change from 0.1.0's
+  optional, off-by-default password gate. On first launch with no stored
+  credential, Gantry shows a one-time setup screen to create a username
+  and password; every later visit is a normal login. To run without
+  authentication -- a fully trusted network, or a box already behind an
+  authenticating reverse proxy -- set `GANTRY_AUTH=none` (explicitly
+  open) or `GANTRY_AUTH=proxy` (the proxy authenticates). An unknown
+  `GANTRY_AUTH` value fails safe to required.
+- **Sessions now end when you close your browser.** The session cookie
+  carries no fixed lifetime, replacing 0.1.0's 7-day sliding / 30-day
+  maximum window. Server-side backstops still expire an idle session
+  after 8 hours and any session after 24 hours, so a never-closed kiosk
+  browser can't stay signed in forever.
+- Login now takes a username as well as a password. A wrong username
+  costs the same as a wrong password, so neither can be probed by timing.
+
+### Added
+
+- `GANTRY_USERNAME`, alongside the existing `GANTRY_PASSWORD`, to preseed
+  the credential at boot for headless or Community Applications installs.
+  Both must be set; an incomplete pair is ignored (with a logged warning)
+  and the first-run setup screen applies. Changing either variable
+  behaves like a credential change and signs out all sessions; removing
+  them never turns authentication off.
+- Settings → Access now changes the username as well as the password.
+
+### Migration
+
+- A 0.1.0 install that had set a password keeps working: on first boot
+  under 0.1.1 its password-only credential is migrated to the username
+  `admin` (change it in Settings → Access). Nobody is locked out and no
+  action is required.
+
 ## [0.1.0] - 2026-08-31
 
 ### Added

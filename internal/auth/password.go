@@ -1,7 +1,9 @@
-// Package auth implements Gantry's optional single-user password gate:
-// argon2id password storage, cookie-session lifecycle, and login
-// brute-force limiting. It owns all policy; internal/store persists,
-// internal/server enforces per-route.
+// Package auth implements Gantry's mandatory single-user login:
+// argon2id password storage alongside a plaintext username, cookie-
+// session lifecycle, and login brute-force limiting. Auth is always on
+// (a first-run setup creates the credential); GANTRY_AUTH=proxy or =none
+// are the only ways to stand the built-in gate down. It owns all policy;
+// internal/store persists, internal/server enforces per-route.
 package auth
 
 import (

@@ -4,7 +4,6 @@ import (
 	"net"
 	"net/http"
 	"path"
-	"time"
 
 	"github.com/smidley/gantry/internal/auth"
 )
@@ -76,11 +75,15 @@ func crossSiteHeaderPresent(r *http.Request) bool {
 // whenever the request arrived over TLS -- Gantry itself serves plain
 // HTTP, so TLS means a terminating proxy, detected via r.TLS or the
 // proxy's own X-Forwarded-Proto. A client spoofing that header only
-// makes its OWN cookie stricter, so trusting it here is safe. Max-Age
-// is the ABSOLUTE cap, not the sliding window: the server-side session
-// row is the source of truth for validity, the cookie just has to
-// outlive it -- a cookie that expired client-side before the row did
-// would log the user out early for no reason.
+// makes its OWN cookie stricter, so trusting it here is safe.
+//
+// It is a SESSION cookie -- deliberately NO Max-Age and NO Expires, so
+// the browser drops it when it closes ("until browser closes", the
+// owner's chosen session length). The server-side session row remains
+// the source of truth for validity and enforces the idle and absolute
+// backstops; the cookie merely rides along for the life of the browser.
+// A browser that never closes is bounded by those server-side backstops,
+// not by the cookie.
 const sessionCookieName = "gantry_session"
 
 // authExemptPaths are reachable without a session even while the gate
@@ -90,10 +93,15 @@ const sessionCookieName = "gantry_session"
 //     {"status":"ok"} (handleHealthz's split) so nothing sensitive --
 //     version, uptime, the sources map's filesystem hint text -- leaks
 //     to an unauthenticated LAN scanner.
+//   - /api/auth/setup: the first-run bootstrap. It is reachable only
+//     while NO credential exists (the manager 409s once one is set), and
+//     during that window everything else is 401'd, which is exactly what
+//     forces the SPA to render the setup screen.
 //   - /api/auth/login: the door itself.
-//   - /api/auth/status: the SPA must know whether to render the login
-//     screen before it can possibly log in. It reveals only that a
-//     password gate exists -- which the login screen reveals anyway.
+//   - /api/auth/status: the SPA must know whether to render the setup or
+//     login screen before it can possibly authenticate. It reveals only
+//     the gate's shape (setup vs login vs disabled) -- which those
+//     screens reveal anyway -- never the username or any secret.
 //   - /api/auth/logout: needs only the cookie it's deleting; letting an
 //     expired session "log out" is an idempotent no-op, and gating it
 //     would turn logout-after-expiry into a confusing 401.
@@ -101,21 +109,28 @@ const sessionCookieName = "gantry_session"
 // Everything else under /api -- including paths that don't exist --
 // requires a session while the gate is on: the mux's own 404 for an
 // unknown API path is only reachable authenticated. The SPA shell and
-// static assets are never gated: the app must load to show the login
-// screen.
+// static assets are never gated: the app must load to show the setup or
+// login screen.
 var authExemptPaths = map[string]bool{
 	"/api/healthz":     true,
+	"/api/auth/setup":  true,
 	"/api/auth/login":  true,
 	"/api/auth/status": true,
 	"/api/auth/logout": true,
 }
 
-// gateActive reports whether requests must carry a valid session:
-// there's an Auth manager, it isn't delegating to a reverse proxy, and
-// a password is actually set. Nil Auth (tests that don't wire one) and
-// fresh zero-config installs are open -- that IS the product default.
+// gateActive reports whether requests must carry a valid session. Auth
+// is mandatory, so the gate is active whenever Gantry owns
+// authentication -- ModeAuto -- regardless of whether a credential has
+// been set yet: with none set, every non-exempt route 401s and only the
+// first-run setup path answers, which is what drives the SPA to the
+// setup screen. It stands down only when a reverse proxy owns auth
+// (ModeProxy) or the operator explicitly opted the box open
+// (ModeNone). Nil Auth means no manager was wired -- a test-only
+// convenience that leaves those tests' routes open; the real binary
+// always wires one.
 func (s *Server) gateActive() bool {
-	return s.opts.Auth != nil && s.opts.Auth.Mode() != auth.ModeProxy && s.opts.Auth.PasswordSet()
+	return s.opts.Auth != nil && s.opts.Auth.Mode() == auth.ModeAuto
 }
 
 func sessionTokenFrom(r *http.Request) string {
@@ -147,6 +162,9 @@ func requestIsTLS(r *http.Request) bool {
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	// No MaxAge and no Expires: net/http writes neither attribute, which
+	// is precisely a session cookie -- the browser discards it on close.
+	// The server-side row (idle + absolute backstops) is the real clock.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
@@ -154,7 +172,6 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   requestIsTLS(r),
-		MaxAge:   int(auth.SessionAbsoluteCap / time.Second),
 	})
 }
 

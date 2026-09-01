@@ -4,16 +4,16 @@
 
 # Gantry
 
-**A Docker and server monitor built for Unraid. One container. Zero configuration.**
+**A Docker and server monitor built for Unraid. One container. Set a username and password the first time you open it.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f7fe0)](LICENSE)
 [![Container image](https://img.shields.io/badge/image-ghcr.io%2Fsmidley%2Fgantry-475569?logo=docker&logoColor=white)](https://github.com/smidley/gantry/pkgs/container/gantry)
 
 </div>
 
-Install it, open the web UI, and the dashboard is already live: every container's CPU, memory, network, disk IO and GPU; your array and pools; and cross-container insights that explain, in plain language, when one container is slowing another or the array.
+Install it, open the web UI, set a username and password the first time, and the dashboard is live: every container's CPU, memory, network, disk IO and GPU; your array and pools; and cross-container insights that explain, in plain language, when one container is slowing another or the array.
 
-Most self-hosted monitors are a hub plus a per-host agent you deploy and pair — Beszel, for example. Gantry is a single container. Nothing to pair, no agent to install, no account to create, no external database. It reads your Docker socket, `/sys`, and the same Unraid state files the webGUI reads, and keeps its own small history in SQLite.
+Most self-hosted monitors are a hub plus a per-host agent you deploy and pair — Beszel, for example. Gantry is a single container. Nothing to pair, no agent to install, no cloud account, no external database. The one login is a single local account stored on your own box. It reads your Docker socket, `/sys`, and the same Unraid state files the webGUI reads, and keeps its own small history in SQLite.
 
 Gantry monitors read-only — it reads your containers, disks and array and never changes your array configuration. The one thing it can change, only when you ask, is Docker housekeeping from the Maintenance view (clearing stopped containers and unused images), behind a confirmation and disabled entirely by a single switch.
 
@@ -31,7 +31,7 @@ Gantry monitors read-only — it reads your containers, disks and array and neve
 - **Alerts.** Threshold and event rules with real hysteresis — separate trip and clear thresholds, and separate sustain and clear windows — delivered to Unraid's own notification center and/or outbound webhooks, with dedup, re-notify, silencing and flap-guard. A firing alert quotes the matching insight when one exists.
 - **Maintenance.** See which images have an update available (with changelog links; Unraid's own tooling does the actual update), reclaim space from unused and dangling images, and remove stopped containers — every deletion behind a confirmation dialog that itemizes exactly what will go. `GANTRY_READ_ONLY=1` turns all of it off.
 - **Compare.** Select any set of containers and chart them together — synced multi-line charts per metric, always-live group totals, and groups you can save.
-- **The rest.** A command palette, an always-on connection-health indicator, acknowledge / silence / dismiss with preset durations, optional password login, light and dark themes, a reduced-motion preference, and Gantry graphing its own CPU and memory so you can see exactly what it costs.
+- **The rest.** A command palette, an always-on connection-health indicator, acknowledge / silence / dismiss with preset durations, a first-run username and password login, light and dark themes, a reduced-motion preference, and Gantry graphing its own CPU and memory so you can see exactly what it costs.
 
 ## Install
 
@@ -61,7 +61,7 @@ docker run -d \
   ghcr.io/smidley/gantry:latest
 ```
 
-Then open `http://<your-unraid-ip>:8380/`.
+Then open `http://<your-unraid-ip>:8380/`. The first time, you'll set a username and password.
 
 ### What each mount is for
 
@@ -81,22 +81,27 @@ The `update-status` line is the one mount you can drop if that file doesn't exis
 
 See **[docs/install.md](docs/install.md)** for the line-by-line reference.
 
+## Sign in
+
+Gantry requires a login. The first time you open it, a one-time setup screen asks you to create a username and password; every visit after that is a normal login. It's a single local account stored on your own box (the password is argon2id-hashed, never stored in the clear) — no cloud, no external service. Signing in lasts until you close your browser. See [docs/install.md](docs/install.md#authentication) for the full reference.
+
+- **Preseed it (headless / Community Applications).** Set both `GANTRY_USERNAME` and `GANTRY_PASSWORD` (the password masked in the CA form) to create the login at first boot and skip the setup screen. Minimum 8 characters. Changing either later changes the login and signs out every session; removing them never turns authentication off.
+- **Run it open.** `GANTRY_AUTH=none` turns authentication off entirely — only for a fully trusted network. `GANTRY_AUTH=proxy` turns Gantry's own login off for installs already behind an authenticating reverse proxy (authelia, SWAG, nginx `auth_request`). Any other value keeps the login required.
+
 ## Optional setup
 
 All optional — Gantry works with none of them.
 
-- **Password.** Set `GANTRY_PASSWORD` (minimum 8 characters) or set one in **Settings → Access**. Off by default; see [docs/install.md](docs/install.md#optional-password-protection) for how sessions, resets and the deliberate "removing the variable doesn't unlock the box" behavior work.
 - **PSI.** Add `psi=1` to your flash boot device's syslinux append line and reboot. Optional; it sharpens the Insights engine with kernel-measured stall data. See **[docs/psi.md](docs/psi.md)**.
 - **Nvidia GPU.** Add `--runtime=nvidia` to Extra Parameters and set `NVIDIA_VISIBLE_DEVICES=all`. Without both, the GPU panel simply shows an enable hint — never an error. (Intel and AMD need nothing extra.)
 - **`GANTRY_READ_ONLY=1`.** Makes every write-capable path — the Maintenance cleanups and webhook-target configuration — refuse to run, for a strictly look-don't-touch monitor.
-- **`GANTRY_AUTH=proxy`.** For installs where a reverse proxy (authelia, SWAG, nginx `auth_request`) already authenticates every request: Gantry's own login switches off. Any other value is treated as the default.
 
 ## Security
 
 - **Read-only for monitoring.** Gantry reads container stats, logs and container/disk state, and never touches your array configuration.
 - **Maintenance is the only exception, and it's opt-in.** The only writes Gantry can make are the cleanup you trigger from the Maintenance view: removing dangling and unused images, and stopped containers. Every deletion is behind a confirmation dialog, never force-removes, never touches a running container, and never removes volumes. Setting `GANTRY_READ_ONLY=1` disables all of it.
 - **Least privilege.** Gantry never runs `--privileged`, never uses host networking, and drops every Linux capability except `SYS_PTRACE`.
-- **Optional auth for untrusted networks.** A password gate (or `GANTRY_AUTH=proxy`) protects the whole UI and live stream; every mutating request additionally requires a custom header, so a drive-by web page can't reach the write paths even on an open box. Gantry serves plain HTTP — put a TLS-terminating proxy in front if you expose it beyond a trusted LAN.
+- **Required login.** A username and password — set on first run — protect the whole UI and live stream; sessions are argon2id-backed and end when you close your browser. Every mutating request additionally requires a custom header, so a drive-by web page can't reach the write paths even when authentication is turned off. Run open only on a trusted network with `GANTRY_AUTH=none`, or delegate auth to a reverse proxy with `GANTRY_AUTH=proxy`. Gantry serves plain HTTP — put a TLS-terminating proxy in front if you expose it beyond a trusted LAN.
 
 ## How it's built
 
@@ -104,7 +109,7 @@ Gantry is a single static Go binary in a `scratch` image — no base OS, no shel
 
 ## Documentation
 
-- **[docs/install.md](docs/install.md)** — the full install reference: every mount and flag, password protection, PSI, Nvidia, read-only and proxy-auth modes.
+- **[docs/install.md](docs/install.md)** — the full install reference: every mount and flag, the required login and first-run setup, PSI, Nvidia, read-only, and the proxy/none auth modes.
 - **[docs/psi.md](docs/psi.md)** — what Pressure Stall Information is, what Gantry uses it for, and how to enable it on Unraid.
 - **[CHANGELOG.md](CHANGELOG.md)** — what shipped in each release.
 

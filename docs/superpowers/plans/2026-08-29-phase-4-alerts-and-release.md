@@ -583,7 +583,7 @@ export function setBands(rules: AlertRuleDTO[]): void
 
 ### Task 15: CA template XML + icon
 
-**Track:** full. **Files:** Create `template/gantry.xml`, `template/gantry-icon.png` (256×256), `docs/install.md`.
+**Track:** full. **Files:** Create `templates/gantry.xml`, `template/gantry-icon.png` (256×256), `docs/install.md`.
 
 **Contract** — every mount/flag pre-filled so a stock install boots to a live dashboard with zero edits (spec §2 success criterion):
 
@@ -613,7 +613,7 @@ Plus: `<Overview>` copy, `<Support>` (forum thread) and `<Project>` (repo) URLs,
 
 ### Task 16: Container hardening decision — the honest non-root analysis
 
-**Track:** full (analysis + decision; the code change is conditional on the findings). **Files:** Modify `Dockerfile` and `template/gantry.xml` **only if** the verification below passes; always create `docs/security.md`.
+**Track:** full (analysis + decision; the code change is conditional on the findings). **Files:** Modify `Dockerfile` and `templates/gantry.xml` **only if** the verification below passes; always create `docs/security.md`.
 
 The carry-in asks for a non-root `USER`. Analysed honestly, **it is not free for this application**, and shipping it blind would silently break the product's headline feature. Three concrete blockers, each with a one-command on-box check (Task 18 runs them):
 
@@ -655,7 +655,7 @@ The carry-in asks for a non-root `USER`. Analysed honestly, **it is not free for
 - [ ] **Carry-in: share case-collision.** `share2` and `Share2` both slug to `share2` through `collect.SlugSegment`, so **two real shares on Scott's own box currently collapse into one `share.share2.used_bytes` series** (`fixtures.md` anonymization note). `hwmon.go` already solved exactly this with a deterministic `_2`/`_3` suffix; `shares.go` never got it. Fix with the same mechanism (suffix by sorted section order so the assignment is stable across restarts), TDD against `shares_real.ini`, and note in the validation doc that pre-fix history for the losing share is unrecoverable.
 - [ ] **Carry-in: long soak.** ≥ 24 hours unattended with the alert engine running and a browser tab connected (Phase 3 managed 10h without alerts). Record: footprint (budget ≤ 2% of a core, ≤ 100MB RSS), SSE stability, log-line count, engine tick duration, `alert_instances`/`alert_deliveries` row growth, DB size delta. Watch specifically for the known API-fallback degradation (N sequential stats calls under the 10s deadline can report "failing" on a slow daemon — correct signal, but note if it now also trips an alert).
 - [ ] **Hardening checks (Task 16):** run the three `stat` commands, record the actual modes, then the 10-minute `--user 99:0` side-by-side diff of sources + GPU attribution. Decide and record; flip the default only on an empty diff.
-- [ ] **CA template dry run:** install `template/gantry.xml` from a local path, confirm zero edits needed, confirm the update-status mount resolves (`ls -l /var/lib/docker/unraid-update-status.json` first — the path is dockerMan's convention and must be confirmed, not assumed), confirm the notify mount is rw.
+- [ ] **CA template dry run:** install `templates/gantry.xml` from a local path, confirm zero edits needed, confirm the update-status mount resolves (`ls -l /var/lib/docker/unraid-update-status.json` first — the path is dockerMan's convention and must be confirmed, not assumed), confirm the notify mount is rw.
 - [ ] **Release dry run:** tag `v0.1.0-rc1`, confirm the workflow publishes the rc tags and does **not** move `latest`, pull the published image on the box and run it.
 - [ ] Record verdicts + numbers; fix-loop anything found (TDD); commit.
 
@@ -706,7 +706,7 @@ Four worktrees, per the standing parallel-agent split (disjoint files, isolated 
 - `alert.fired`/`alert.resolved` visible in the Events feed and on container charts, with no parallel history feed.
 - Every Phase 3 carry-in in the "Phase 4 pre-release checklist" section closed or explicitly recorded as still-unvalidated with a reason (nvidia will be the latter).
 - A `v*` tag publishes multi-tag GHCR images through a workflow that re-ran the full gate first; `latest` moves only on a non-prerelease tag.
-- `template/gantry.xml` installs with zero edits on the real box, notify spool rw, update-status mount resolving.
+- `templates/gantry.xml` installs with zero edits on the real box, notify spool rw, update-status mount resolving.
 - ≥ 24h soak inside budget (≤ 2% core, ≤ 100MB RSS) with the engine running and a client connected.
 - README, `docs/security.md`, `docs/alerts.md`, `docs/install.md`, and refreshed screenshots ready for a CA listing and a forum support thread.
 

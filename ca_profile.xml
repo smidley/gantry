@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<CommunityApplications>
+  <Profile>
+Gantry is a single-container, zero-configuration Docker and server monitor built for Unraid.
+
+Install it, open the web UI, and the dashboard is already live -- a realtime view of every container's CPU, memory, network, disk IO and per-container GPU usage, your array and pool disks with capacity and temperature, and cross-container insights that explain when one container is slowing another or the array. It is read-only and safe: it never issues docker commands and never touches your array configuration.
+
+**Support:** open an issue at https://github.com/smidley/gantry/issues
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/smidley/gantry/main/template/gantry-icon.png</Icon>
+  <WebPage>https://github.com/smidley/gantry</WebPage>
+</CommunityApplications>

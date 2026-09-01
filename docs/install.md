@@ -1,7 +1,7 @@
 # Installing Gantry
 
 Gantry ships as a single container with no external dependencies. The
-Community Applications template (`template/gantry.xml`) pre-fills every
+Community Applications template (`templates/gantry.xml`) pre-fills every
 mount and flag below so a stock install needs zero edits. This page exists
 so you can read exactly what the template does, line by line, before you
 trust it with your Docker socket.
@@ -188,7 +188,7 @@ look-don't-touch monitor.
 
 - **Support URL is a placeholder.** `<Support>` currently points at the
   GitHub issue tracker because no Unraid forum support thread exists yet.
-  Create the thread and update `<Support>` in `template/gantry.xml` before
+  Create the thread and update `<Support>` in `templates/gantry.xml` before
   CA registration (see the design spec's packaging section).
 - **Not yet dry-run installed on a real box.** This template has not been
   installed from a local path and confirmed to need zero edits -- that

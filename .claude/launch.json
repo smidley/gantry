@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gantry-fake",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "GANTRY_FAKE_DATA=1 GANTRY_DB_PATH=$(mktemp -d)/g.db GANTRY_PORT=8392 ./gantry"],
+      "port": 8392
+    }
+  ]
+}

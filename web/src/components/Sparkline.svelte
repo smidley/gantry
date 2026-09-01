@@ -307,8 +307,24 @@
     scrubBus.publish(tsAtFraction(fraction, min, max), sourceId);
   }
 
+  // entered brackets this sparkline's real pointer occupancy for the bus's
+  // page-global "is anyone pointing" count (see scrubBus.enter/leave):
+  // TimeChart relies on that count to release reliably, and Compare mounts
+  // both kinds on one page, so sparklines must keep it balanced too.
+  let entered = false;
+
+  function handleEnter() {
+    if (entered) return;
+    entered = true;
+    scrubBus.enter();
+  }
+
   function clearScrub() {
     lastClientX = null;
+    if (entered) {
+      entered = false;
+      scrubBus.leave();
+    }
     scrubBus.clear(sourceId);
   }
 
@@ -343,6 +359,7 @@
     // whatever this one last published, with no way back to live.
     // clearScrubIfOwner's own guard (see lib/scrub.ts) makes this a
     // harmless no-op when this instance isn't the current owner anyway.
+    if (entered) scrubBus.leave();
     scrubBus.clear(sourceId);
   });
 </script>
@@ -352,6 +369,7 @@
   class="sparkline"
   role="presentation"
   style="height: {height}px"
+  onpointerenter={handleEnter}
   onpointermove={handlePointerMove}
   onpointerleave={clearScrub}
   onpointercancel={clearScrub}

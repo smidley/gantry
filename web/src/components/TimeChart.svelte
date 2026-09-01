@@ -128,6 +128,7 @@
   let ro = null;
   const scrubSourceId = {};
   let applyingBusCursor = false;
+  let pointerInside = false;
 
   // prevShape is the last-built chart's structural shape (see
   // lib/chartRebuild.ts) -- compared against the current one on every
@@ -390,7 +391,7 @@
               .sort((a, b) => (b.raw ?? -Infinity) - (a.raw ?? -Infinity)),
           };
 
-    if (localPointer && !applyingBusCursor && tooltip?.ts != null) {
+    if (pointerInside && !applyingBusCursor && tooltip?.ts != null) {
       scrubBus.publish(tooltip.ts, scrubSourceId);
     }
 
@@ -403,6 +404,29 @@
         break;
       }
     }
+  }
+
+  // A uPlot TimeChart can't release the scrub from handleCursor's own
+  // cursor-leave alone (see scrubBus.enter/leave): its crosshair is
+  // syncKey-synced and re-fired by a live setData every frame, so the
+  // owner's clear can lose that race. Bracket real pointer occupancy on
+  // the container instead. enter marks this chart as the genuine pointer
+  // source, so a live-tick re-fire of handleCursor can't re-publish a
+  // stale cursor once the pointer is gone; leave hands the slot back and
+  // the bus forces itself to live when the last surface leaves. The
+  // guards keep enter/leave balanced against repeat or crossed events.
+  function handleEnter() {
+    if (pointerInside) return;
+    pointerInside = true;
+    scrubBus.enter();
+  }
+
+  function handleLeave() {
+    if (!pointerInside) return;
+    pointerInside = false;
+    scrubBus.leave();
+    tooltip = null;
+    hoverMarker = null;
   }
 
   function build() {
@@ -641,6 +665,7 @@
   });
 
   onDestroy(() => {
+    if (pointerInside) scrubBus.leave();
     scrubBus.clear(scrubSourceId);
     ro?.disconnect();
     if (fillFadeRaf !== null) cancelAnimationFrame(fillFadeRaf);
@@ -648,7 +673,13 @@
   });
 </script>
 
-<div class="time-chart" bind:this={container}>
+<div
+  class="time-chart"
+  bind:this={container}
+  onpointerenter={handleEnter}
+  onpointerleave={handleLeave}
+  onpointercancel={handleLeave}
+>
   <div bind:this={plotEl}></div>
   {#if tooltip}
     <div class="time-chart__tooltip" style="left: {tooltip.x}px; top: {tooltip.y}px">

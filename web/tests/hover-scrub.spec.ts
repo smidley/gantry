@@ -203,3 +203,48 @@ test('overview: scrubbing a two-value tile pins its secondary value too, not jus
   await expect.poll(() => heroNumber.textContent(), { timeout: 6_000 }).not.toBe(pinnedHero);
   await expect.poll(() => secondaryValue.textContent(), { timeout: 6_000 }).not.toBe(pinnedSecondary);
 });
+
+// Container-detail uses the big TimeCharts, which drive uPlot's cursor
+// rather than a sparkline hairline. The bug this guards (Scott, on his
+// own box): after the pointer left a chart, the live-tick setData kept
+// re-firing the cursor and re-publishing the stale instant, so the
+// "N AGO" hover readout reappeared and stuck on EVERY synced chart even
+// with the mouse well away. Real page.mouse.move so uPlot's own overlay
+// leave AND TimeChart's pointerleave both fire, exactly as a real mouse
+// does -- a synthetic dispatch can't reproduce it because it leaves
+// uPlot's internal cursor valid.
+test('container detail: leaving a TimeChart clears its hover readout and it does not reappear on live ticks', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+
+  await page.goto('#/containers/jellyfin');
+
+  const chart = page.locator('.time-chart').first();
+  await expect(chart).toBeVisible();
+  const tooltips = page.locator('.time-chart__tooltip');
+
+  // A few real ticks so the chart has data to render a crosshair over.
+  await page.waitForTimeout(6_000);
+
+  await chart.scrollIntoViewIfNeeded();
+  const box = await chart.boundingBox();
+  if (!box) throw new Error('time-chart has no bounding box');
+
+  // Hover the middle of the chart: the crosshair readout appears.
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(tooltips.first()).toBeVisible();
+
+  // Leave every chart (top-left viewport corner, off all cards). This
+  // fires the real boundary events -- uPlot clears its cursor and
+  // TimeChart's pointerleave clears the bus.
+  await page.mouse.move(2, 2);
+
+  // Clears immediately, and STAYS clear across >=4 live frames (2s
+  // cadence): before the fix, the tooltip came back within a tick or two.
+  await expect(tooltips).toHaveCount(0);
+  for (let i = 0; i < 4; i++) {
+    await page.waitForTimeout(1_000);
+    await expect(tooltips).toHaveCount(0);
+  }
+});

@@ -24,6 +24,7 @@ func postContainers(t *testing.T, url, body, confirm string) *http.Response {
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBufferString(body))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(requestedWithHeader, requestedWithValue) // gate.go's cross-site check -- so confirm="" still reaches the route's own 428
 	if confirm != "" {
 		req.Header.Set("X-Gantry-Confirm", confirm)
 	}

@@ -32,6 +32,19 @@ the GitHub Release body, so a section lands here under its own `##
 - Container and image maintenance: remove stopped containers, prune
   dangling images, guarded by an explicit confirm header and
   `GANTRY_READ_ONLY`.
+- Optional single-password login: off by default (zero-config stays
+  zero-config, with a quiet Settings reminder), first-class when on --
+  argon2id-hashed password set via Settings or the masked
+  `GANTRY_PASSWORD` template variable, digest-stored sliding sessions
+  (7d, 30d cap), rate-limited and event-audited login, a minimal
+  unauthenticated `healthz`, and `GANTRY_AUTH=proxy` for setups whose
+  reverse proxy already authenticates. Removing the template variable
+  never reopens the box; only Settings (current password required)
+  turns the gate off.
+- Cross-site request protection on every mutating API route: a custom
+  header (`X-Requested-With: gantry`, or the maintenance routes'
+  existing confirm header) is required whether or not a password is
+  set -- scripts add one header; forms and drive-by pages can't.
 - `GANTRY_FAKE_DATA=1` exercises every feature above, including the full
   alert lifecycle, with no Docker socket or Unraid box required.
 - Single `scratch`-based image published to `ghcr.io/smidley/gantry` on

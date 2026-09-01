@@ -41,7 +41,7 @@ func TestOpenDBIsIdempotent(t *testing.T) {
 
 	var v int
 	require.NoError(t, db2.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&v))
-	require.Equal(t, 5, v)
+	require.Equal(t, 6, v)
 }
 
 func TestMigrationVersionsComeFromFilenamePrefix(t *testing.T) {
@@ -58,7 +58,7 @@ func TestMigrationVersionsComeFromFilenamePrefix(t *testing.T) {
 		require.NoError(t, rows.Scan(&v))
 		versions = append(versions, v)
 	}
-	require.Equal(t, []int{1, 2, 3, 4, 5}, versions) // 001_core.sql, 002_ts_indexes.sql, 003_alerts.sql, 004_insights.sql, 005_overview_acks.sql
+	require.Equal(t, []int{1, 2, 3, 4, 5, 6}, versions) // 001_core.sql .. 006_sessions.sql, one version per numbered file
 
 	var n int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_samples_1m_ts'`).Scan(&n))
@@ -120,7 +120,7 @@ func TestUpgradeFromOnlyCoreAndIndexesAppliesAlertsMigrationCleanly(t *testing.T
 
 	var version int
 	require.NoError(t, db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version))
-	require.Equal(t, 5, version)
+	require.Equal(t, 6, version)
 
 	var kind string
 	require.NoError(t, db.QueryRow(`SELECT kind FROM events WHERE id = 50`).Scan(&kind))

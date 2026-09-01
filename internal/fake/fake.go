@@ -432,6 +432,16 @@ type Generator struct {
 	// container events, the rare disk error) is relative to it, not
 	// wall-clock time, so a test driving Tick with arbitrary injected
 	// `now` values sees the same schedule a real 2s-interval Run would.
+	//
+	// bootMu guards both fields: Tick (Run's single goroutine) writes
+	// them exactly once, but Metas -- called concurrently by HTTP
+	// handlers via buildSnapshot, same as imagesMu/containersMu's own
+	// callers below -- reads boot for each container's Created, and the
+	// race detector caught the two overlapping on the first tick (the
+	// line-587 comment's "only Tick's own single goroutine ever reads
+	// or writes it" stopped being true when Task 11 wired Metas into
+	// the snapshot path).
+	bootMu   sync.Mutex
 	haveBoot bool
 	boot     time.Time
 
@@ -521,11 +531,14 @@ func (g *Generator) appendEvent(ts int64, e store.Event) {
 
 // Tick emits one sample per series for the instant `now`.
 func (g *Generator) Tick(now time.Time) {
+	g.bootMu.Lock()
 	if !g.haveBoot {
 		g.haveBoot = true
 		g.boot = now
 	}
-	elapsed := now.Sub(g.boot)
+	boot := g.boot
+	g.bootMu.Unlock()
+	elapsed := now.Sub(boot)
 
 	ts := now.Unix()
 	phase := float64(ts) / 300.0 // slow 5-minute swells
@@ -584,8 +597,8 @@ func (g *Generator) Tick(now time.Time) {
 		// float64-only), so both flow through as ordinary per-container
 		// metrics that land in ContainerDTO.Metrics via buildSnapshot's
 		// existing generic per-sample grouping, no DTO/main.go change
-		// needed. started_at uses g.boot (safe: only Tick's own
-		// single goroutine ever reads or writes it) minus a fixed,
+		// needed. started_at uses boot (Tick's own bootMu-copied
+		// snapshot of g.boot, taken at the top) minus a fixed,
 		// index-derived offset -- deterministic and STABLE across ticks
 		// (never rejittered), so uptime reads as a plausible, varied,
 		// steadily-climbing figure per container rather than either an
@@ -596,7 +609,7 @@ func (g *Generator) Tick(now time.Time) {
 		// emitContainerEvents' lastRestartBoundary (that field belongs to
 		// the periodic-event schedule, not container identity, and Metas
 		// is called from other goroutines, so reading it here would race).
-		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "meta.started_at"}, ts, float64(fakeContainerStartedAt(g.boot, i).Unix()))
+		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "meta.started_at"}, ts, float64(fakeContainerStartedAt(boot, i).Unix()))
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "meta.restart_count"}, ts, 0)
 
 		// live:io.<dev>.read_bps/write_bps mirror cgroupv2.go's
@@ -974,6 +987,9 @@ func fakeContainerMounts(name string) []docker.MountInfo {
 // container being KNOWN, not which state it's in, so the stopped/created
 // members flow through those two unchanged.
 func (g *Generator) Metas() []docker.Meta {
+	g.bootMu.Lock()
+	boot := g.boot
+	g.bootMu.Unlock()
 	out := make([]docker.Meta, len(fleet))
 	for i, a := range fleet {
 		state, health := "running", "healthy"
@@ -987,7 +1003,7 @@ func (g *Generator) Metas() []docker.Meta {
 		}
 		m := docker.Meta{
 			Name: a.name, State: state, Health: health, Image: "demo/" + a.name + ":latest",
-			Created:        fakeContainerStartedAt(g.boot, i),
+			Created:        fakeContainerStartedAt(boot, i),
 			ComposeProject: a.composeProject, HostNet: a.hostNet,
 			Mounts: fakeContainerMounts(a.name), ExitCode: a.exitCode,
 			UpdateStatus: a.updateStatus, ChangelogURL: a.changelogURL, ProjectURL: a.projectURL,

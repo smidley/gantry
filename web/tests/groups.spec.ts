@@ -95,6 +95,7 @@ test('groups: saved groups survive a server restart (persisted, not just in-memo
   // fresh page load, well after the save, still sees it via a plain
   // GET -- no client-side cache path involved.
   const putResp = await request.put(`${baseURL}/api/groups`, {
+    headers: { 'X-Requested-With': 'gantry' },
     data: { groups: [{ name: groupName, members: ['jellyfin'] }] },
   });
   expect(putResp.ok()).toBe(true);
@@ -111,6 +112,7 @@ test('groups: saved groups survive a server restart (persisted, not just in-memo
   // suffix) is never clobbered by a bare {"groups":[]} overwrite.
   const current = (await (await request.get(`${baseURL}/api/groups`)).json()).groups as { name: string; members: string[] }[];
   await request.put(`${baseURL}/api/groups`, {
+    headers: { 'X-Requested-With': 'gantry' },
     data: { groups: current.filter((g) => g.name !== groupName) },
   });
 });

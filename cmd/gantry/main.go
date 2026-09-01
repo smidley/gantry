@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/smidley/gantry/internal/alert"
+	"github.com/smidley/gantry/internal/auth"
 	"github.com/smidley/gantry/internal/collect"
 	"github.com/smidley/gantry/internal/collect/docker"
 	"github.com/smidley/gantry/internal/collect/gpu"
@@ -149,6 +150,41 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// other cfg.Bool call uses): every /api/images mutating route 403s
 	// while it's set, GET unaffected -- see server.Options.ReadOnly.
 	readOnly := cfg.Bool("read_only", false)
+
+	// Auth. The mode is env-ONLY (envOnly, deliberately NOT cfg's
+	// env>settings>default resolver): the password hash already lives in
+	// the settings table, and a mode row landing next to it must never
+	// be able to switch the gate off -- disabling auth goes through
+	// Manager.Disable (current password required) and nothing else. An
+	// unrecognized GANTRY_AUTH value logs and runs in auto: an auth typo
+	// fails closed, never open. GANTRY_PASSWORD, when set, applies at
+	// every boot (verify-then-write, so an unchanged value never churns
+	// sessions); removing it later changes nothing, by design -- see
+	// auth.Manager.EnsureEnvPassword and docs/install.md. Neither the
+	// password nor its hash is ever logged.
+	authMode, err := auth.ParseMode(getenv("GANTRY_AUTH"))
+	if err != nil {
+		log.Printf("auth: %v -- running with the password-controlled gate", err)
+	}
+	authMgr, err := auth.New(auth.Options{
+		Sessions:    st,
+		Settings:    st,
+		AppendEvent: st.AppendEvent,
+		Mode:        authMode,
+	})
+	if err != nil {
+		return fmt.Errorf("auth: %w", err)
+	}
+	if pw := getenv("GANTRY_PASSWORD"); pw != "" {
+		if err := authMgr.EnsureEnvPassword(pw); err != nil {
+			log.Printf("auth: GANTRY_PASSWORD ignored: %v", err)
+		} else {
+			log.Println("auth: password applied from GANTRY_PASSWORD")
+		}
+	}
+	if authMode == auth.ModeProxy {
+		log.Println("auth: GANTRY_AUTH=proxy -- built-in gate off, expecting the reverse proxy to authenticate")
+	}
 
 	var wg sync.WaitGroup
 
@@ -421,6 +457,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Webhooks: webhooksAdapter{st: st, envLocked: webhookURLEnv != ""},
 		Insights: insightsAdapter{st: st, engine: insightEngine, pressureTier: pr.Tier},
 		Acks:     acksAdapter{st: st},
+		Auth:     authMgr,
 
 		ReadOnly:    readOnly,
 		AppendEvent: st.AppendEvent,

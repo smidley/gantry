@@ -47,7 +47,7 @@ func TestAlertsMigrationCreatesSchema(t *testing.T) {
 
 	var version int
 	require.NoError(t, db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&version))
-	require.Equal(t, 5, version)
+	require.Equal(t, 6, version)
 
 	var n int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_alert_active'`).Scan(&n))

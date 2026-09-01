@@ -1,6 +1,7 @@
 <!--
-  Settings: Sources status, the retention editor (Task 10's four fields),
-  Gantry's own footprint receipt, the theme control, and an About card.
+  Settings: Sources status, the Access (password) card, the retention
+  editor (Task 10's four fields), Gantry's own footprint receipt, the
+  theme control, and an About card.
   Retention is the one piece with real server round-trips (GET on
   mount, PUT on save) -- everything else reads straight off the live
   frame or the theme store.
@@ -12,7 +13,9 @@
   import { motion } from '../lib/motion.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
-  import { fetchSeries, fetchSettings, fetchVersion, putSettings, fetchWebhookTargets, putWebhookTargets } from '../lib/api';
+  import { fetchSeries, fetchSettings, fetchVersion, putSettings, fetchWebhookTargets, putWebhookTargets, postAuthPassword, postAuthDisable } from '../lib/api';
+  import { auth } from '../lib/auth.svelte';
+  import { loginErrorMessage } from '../lib/auth';
   import { fmtBytes, fmtPct } from '../lib/format';
   import { SOURCE_NOT_APPLICABLE } from '../lib/sourceStatus';
   import HealthDot from '../components/HealthDot.svelte';
@@ -280,11 +283,84 @@
     }
   }
 
+  // --- Access (optional password gate) ----------------------------------
+  // The card runs off the auth store (refreshed on mount so it reflects
+  // reality, not the boot snapshot). Set/change/disable all round-trip
+  // through /api/auth; a change signs out every other session (the
+  // server's own contract) and this browser keeps a fresh cookie from
+  // the same response, so nothing here ever logs the user out of the
+  // tab they're standing in. Passwords live in these fields only for
+  // the duration of the request and are never echoed anywhere.
+  let pwCurrent = $state('');
+  let pwNew = $state('');
+  let pwConfirm = $state('');
+  let pwSaving = $state(false);
+  let pwError = $state(null);
+  let pwSuccess = $state(null);
+
+  let disableArmed = $state(false);
+  let disableCurrent = $state('');
+  let disableBusy = $state(false);
+  let disableError = $state(null);
+
+  async function submitPassword(e) {
+    e.preventDefault();
+    pwError = null;
+    pwSuccess = null;
+    if (pwNew.length < 8) {
+      pwError = 'Password must be at least 8 characters.';
+      return;
+    }
+    if (pwNew !== pwConfirm) {
+      pwError = "Passwords don't match.";
+      return;
+    }
+    const firstSet = !auth.passwordSet;
+    pwSaving = true;
+    try {
+      await postAuthPassword(pwCurrent, pwNew);
+      pwSuccess = firstSet
+        ? 'Password set. This browser stays signed in.'
+        : 'Password changed. Every other session was signed out.';
+      pwCurrent = '';
+      pwNew = '';
+      pwConfirm = '';
+      await auth.refresh();
+    } catch (err) {
+      pwError = loginErrorMessage(err);
+    } finally {
+      pwSaving = false;
+    }
+  }
+
+  async function submitDisable(e) {
+    e.preventDefault();
+    disableError = null;
+    disableBusy = true;
+    try {
+      await postAuthDisable(disableCurrent);
+      disableArmed = false;
+      disableCurrent = '';
+      await auth.refresh();
+    } catch (err) {
+      disableError = loginErrorMessage(err);
+    } finally {
+      disableBusy = false;
+    }
+  }
+
+  function logout() {
+    // App's own gate effect tears down the SSE connection and swaps to
+    // the login screen the moment authenticated flips.
+    auth.logout();
+  }
+
   // --- About -----------------------------------------------------------
   let version = $state(null);
   onMount(() => {
     loadSettings();
     loadWebhookTargets();
+    auth.refresh();
     fetchVersion()
       .then((v) => {
         version = v.version;
@@ -325,6 +401,99 @@
         </li>
       {/each}
     </ul>
+  </div>
+
+  <div class="card settings-access">
+    <span class="microlabel">Access</span>
+    {#if auth.mode === 'proxy'}
+      <p class="settings-access__note">
+        Authentication is handled by your reverse proxy (GANTRY_AUTH=proxy). Gantry's built-in password gate is off,
+        and password settings are managed at the proxy, not here.
+      </p>
+    {:else}
+      {#if auth.showsNudge}
+        <p class="settings-access__nudge">
+          No password set — anyone on your network can view and manage this server.
+        </p>
+      {:else}
+        <p class="settings-access__note">Password protection is on. Signing in lasts 7 days per visit, 30 days at most.</p>
+        {#if auth.envManaged}
+          <p class="settings-access__note settings-access__note--env">
+            The password comes from the GANTRY_PASSWORD container variable at every start — a change made here lasts
+            only until the next restart re-applies it. Update the variable in the container template to make a change
+            stick. Removing the variable does <em>not</em> turn the password off; only “Turn off password” below does.
+          </p>
+        {/if}
+      {/if}
+
+      <form class="settings-access__form" onsubmit={submitPassword} novalidate>
+        {#if auth.passwordSet}
+          <label class="settings-access__field">
+            <span class="microlabel">Current password</span>
+            <input type="password" bind:value={pwCurrent} autocomplete="current-password" disabled={pwSaving} />
+          </label>
+        {/if}
+        <label class="settings-access__field">
+          <span class="microlabel">New password</span>
+          <input type="password" bind:value={pwNew} autocomplete="new-password" disabled={pwSaving} />
+        </label>
+        <label class="settings-access__field">
+          <span class="microlabel">Confirm new password</span>
+          <input type="password" bind:value={pwConfirm} autocomplete="new-password" disabled={pwSaving} />
+        </label>
+        <div class="settings-access__actions">
+          <button type="submit" class="settings-access__save" disabled={pwSaving}>
+            {pwSaving ? 'Saving…' : auth.passwordSet ? 'Change password' : 'Set password'}
+          </button>
+          {#if auth.passwordSet}
+            <span class="microlabel">Changing the password signs out every other session.</span>
+          {/if}
+        </div>
+        {#if pwError}<p class="microlabel settings-access__error" role="alert">{pwError}</p>{/if}
+        {#if pwSuccess}<p class="microlabel settings-access__success">{pwSuccess}</p>{/if}
+      </form>
+
+      {#if auth.passwordSet}
+        <div class="settings-access__session-row">
+          <button type="button" class="settings-access__secondary" onclick={logout}>Log out</button>
+          {#if !disableArmed}
+            <button type="button" class="settings-access__secondary" onclick={() => (disableArmed = true)}>
+              Turn off password…
+            </button>
+          {/if}
+        </div>
+        {#if disableArmed}
+          <form class="settings-access__disable" onsubmit={submitDisable} novalidate>
+            <p class="settings-access__note">
+              Turning the password off reopens this dashboard to anyone on your network and signs out every session.
+              Enter the current password to confirm.
+            </p>
+            <div class="settings-access__actions">
+              <label class="settings-access__field">
+                <span class="microlabel">Current password</span>
+                <input type="password" bind:value={disableCurrent} autocomplete="current-password" disabled={disableBusy} />
+              </label>
+              <button type="submit" class="settings-access__danger" disabled={disableBusy}>
+                {disableBusy ? 'Turning off…' : 'Turn off password'}
+              </button>
+              <button
+                type="button"
+                class="settings-access__secondary"
+                onclick={() => {
+                  disableArmed = false;
+                  disableCurrent = '';
+                  disableError = null;
+                }}
+                disabled={disableBusy}
+              >
+                Cancel
+              </button>
+            </div>
+            {#if disableError}<p class="microlabel settings-access__error" role="alert">{disableError}</p>{/if}
+          </form>
+        {/if}
+      {/if}
+    {/if}
   </div>
 
   <!-- novalidate: min/max stay as real DOM attributes (a11y + the
@@ -685,6 +854,109 @@
   }
   .settings-retention__save-error {
     color: var(--status-warning);
+  }
+
+  .settings-access {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .settings-access__nudge {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--status-warning);
+  }
+  .settings-access__note {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--ink-2);
+  }
+  .settings-access__note--env {
+    padding: 0.5rem 0.6rem;
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--status-warning) 10%, transparent);
+    color: var(--ink);
+  }
+  .settings-access__form,
+  .settings-access__disable {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .settings-access__field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    max-width: 18rem;
+  }
+  .settings-access__field input {
+    min-height: 40px;
+    padding: 0 0.75rem;
+    border-radius: 6px;
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 0.9rem;
+  }
+  .settings-access__field input:disabled {
+    opacity: 0.6;
+  }
+  .settings-access__actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .settings-access__save {
+    min-height: 40px;
+    padding: 0 1.25rem;
+    border-radius: 6px;
+    border: 1px solid var(--series-1);
+    background: color-mix(in oklab, var(--series-1) 15%, transparent);
+    color: var(--series-1);
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .settings-access__secondary {
+    min-height: 40px;
+    padding: 0 0.9rem;
+    border-radius: 6px;
+    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
+    background: transparent;
+    color: var(--ink);
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .settings-access__danger {
+    min-height: 40px;
+    padding: 0 1rem;
+    border-radius: 6px;
+    border: 1px solid var(--status-warning);
+    background: color-mix(in oklab, var(--status-warning) 12%, transparent);
+    color: var(--status-warning);
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .settings-access__save:disabled,
+  .settings-access__secondary:disabled,
+  .settings-access__danger:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .settings-access__session-row {
+    display: flex;
+    gap: 0.6rem;
+  }
+  .settings-access__error {
+    color: var(--status-warning);
+    margin: 0;
+  }
+  .settings-access__success {
+    color: var(--status-good);
+    margin: 0;
   }
 
   .settings-webhooks {

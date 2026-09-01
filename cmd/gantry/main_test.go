@@ -180,6 +180,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	putReq, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%d/api/settings", port),
 		strings.NewReader(`{"retention":{"r1_hours":72,"r2_days":30,"r3_days":390,"size_cap_mb":512}}`))
 	require.NoError(t, err)
+	putReq.Header.Set("X-Requested-With", "gantry") // the cross-site header every mutating route requires
 	putResp, err := http.DefaultClient.Do(putReq)
 	require.NoError(t, err)
 	drainAndClose(putResp)
@@ -218,6 +219,7 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	groupsPutReq, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%d/api/groups", port),
 		strings.NewReader(`{"groups":[{"name":"media","members":["jellyfin","sonarr"]}]}`))
 	require.NoError(t, err)
+	groupsPutReq.Header.Set("X-Requested-With", "gantry") // see the settings PUT above
 	groupsPutResp, err := http.DefaultClient.Do(groupsPutReq)
 	require.NoError(t, err)
 	drainAndClose(groupsPutResp)
@@ -269,9 +271,12 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	pruneResp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), "application/json", strings.NewReader(`{"mode":"unused"}`))
 	require.NoError(t, err)
 	drainAndClose(pruneResp)
-	// No X-Gantry-Confirm header on this request: must 428, proving the
-	// guardrail is really wired into the live route, not bypassed.
-	require.Equal(t, http.StatusPreconditionRequired, pruneResp.StatusCode)
+	// No custom header at all on this request: the mux-wide cross-site
+	// check (server/gate.go) rejects it before the route's own confirm
+	// guardrail even runs, proving the wrapper is wired into the live
+	// server -- the per-route 428 for a wrong confirm VALUE is pinned in
+	// the server package's own tests.
+	require.Equal(t, http.StatusForbidden, pruneResp.StatusCode)
 
 	pruneReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), strings.NewReader(`{"mode":"unused"}`))
 	require.NoError(t, err)
@@ -2437,4 +2442,229 @@ func TestFakeModeAlertDemoFiresThenResolves(t *testing.T) {
 		}
 		return false
 	}, 2*time.Second, 20*time.Millisecond, "the resolved notification must also reach the notify spool")
+}
+
+// waitHealthz blocks until run()'s server answers /api/healthz 200 --
+// shared by every auth test below, the same Eventually loop the older
+// tests inline.
+func waitHealthz(t *testing.T, port int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/healthz", port))
+		if err != nil {
+			return false
+		}
+		drainAndClose(resp)
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 50*time.Millisecond)
+}
+
+// authTestRequest issues one request with the SPA's cross-site header,
+// an optional JSON body, and an optional session cookie.
+func authTestRequest(t *testing.T, method, url, body, cookie string) *http.Response {
+	t.Helper()
+	var rd io.Reader
+	if body != "" {
+		rd = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, rd)
+	require.NoError(t, err)
+	req.Header.Set("X-Requested-With", "gantry")
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if cookie != "" {
+		req.AddCookie(&http.Cookie{Name: "gantry_session", Value: cookie})
+	}
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
+// TestRunAuthLoginLogoutRoundTrip drives the whole password gate
+// against the real binary wiring (run(), real store, real argon2, real
+// cookie): locked healthz answers the minimal body, data routes 401, a
+// wrong password 401s, the right one yields a session cookie that opens
+// everything (reads AND a mutating write), and logout kills it.
+func TestRunAuthLoginLogoutRoundTrip(t *testing.T) {
+	port := freePort(t)
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_PASSWORD":  "round-trip-password",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+	waitHealthz(t, port)
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	// Locked + anonymous: healthz carries the status string ONLY -- no
+	// version, no uptime, no sources hint text.
+	resp, err := http.Get(base + "/api/healthz")
+	require.NoError(t, err)
+	var minimal map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&minimal))
+	drainAndClose(resp)
+	require.Equal(t, map[string]any{"status": "ok"}, minimal)
+
+	// Data routes are gated; the SPA shell is not.
+	resp, err = http.Get(base + "/api/live/snapshot")
+	require.NoError(t, err)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	resp, err = http.Get(base + "/")
+	require.NoError(t, err)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the shell must load to render the login screen")
+
+	// Wrong password: 401, no cookie.
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"password":"not-it"}`, "")
+	drainAndClose(resp)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	require.Empty(t, resp.Cookies())
+
+	// Right password: cookie out, and it opens reads, the full healthz,
+	// and a mutating write end to end.
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"password":"round-trip-password"}`, "")
+	drainAndClose(resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var token string
+	for _, c := range resp.Cookies() {
+		if c.Name == "gantry_session" {
+			token = c.Value
+			require.True(t, c.HttpOnly)
+		}
+	}
+	require.NotEmpty(t, token)
+
+	resp = authTestRequest(t, http.MethodGet, base+"/api/live/snapshot", "", token)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp = authTestRequest(t, http.MethodGet, base+"/api/healthz", "", token)
+	var full map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&full))
+	drainAndClose(resp)
+	require.Contains(t, full, "version")
+	require.Contains(t, full, "sources")
+
+	resp = authTestRequest(t, http.MethodPut, base+"/api/settings",
+		`{"retention":{"r1_hours":72,"r2_days":30,"r3_days":390,"size_cap_mb":512}}`, token)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "a mutating route must work through cookie+header end to end")
+
+	// The gate's own audit trail is queryable through the (now
+	// authenticated) events API.
+	resp = authTestRequest(t, http.MethodGet, base+"/api/events?kinds=auth.login_failed,auth.login_ok", "", token)
+	var evs []struct{ Kind string }
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&evs))
+	drainAndClose(resp)
+	kinds := map[string]int{}
+	for _, e := range evs {
+		kinds[e.Kind]++
+	}
+	require.Equal(t, 1, kinds["auth.login_failed"], "the wrong attempt must be audited")
+	require.Equal(t, 1, kinds["auth.login_ok"], "the successful login must be audited")
+
+	// Logout: 204, and the token is dead immediately.
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/logout", "", token)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	resp = authTestRequest(t, http.MethodGet, base+"/api/live/snapshot", "", token)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+}
+
+// TestRunAuthProxyModeDisablesGate pins GANTRY_AUTH=proxy end to end:
+// a password IS set, yet nothing is gated (the reverse proxy in front
+// is trusted to have authenticated), and the built-in login refuses so
+// nobody mistakes the inert gate for a working one.
+func TestRunAuthProxyModeDisablesGate(t *testing.T) {
+	port := freePort(t)
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_PASSWORD":  "proxy-mode-password",
+		"GANTRY_AUTH":      "proxy",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+	waitHealthz(t, port)
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	resp, err := http.Get(base + "/api/live/snapshot")
+	require.NoError(t, err)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "proxy mode must not gate")
+
+	var st struct {
+		Mode        string `json:"mode"`
+		PasswordSet bool   `json:"password_set"`
+	}
+	resp, err = http.Get(base + "/api/auth/status")
+	require.NoError(t, err)
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&st))
+	drainAndClose(resp)
+	require.Equal(t, "proxy", st.Mode)
+	require.True(t, st.PasswordSet)
+
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"password":"proxy-mode-password"}`, "")
+	drainAndClose(resp)
+	require.Equal(t, http.StatusConflict, resp.StatusCode, "built-in login must refuse while the proxy owns auth")
+
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
+}
+
+// TestRunAuthEnvPasswordPolicyRejectionLeavesBoxOpen pins the loud-
+// ignore path: a GANTRY_PASSWORD under the 8-char policy minimum is
+// rejected (uniformly with the API path -- env is not a policy bypass)
+// and the box boots open rather than half-locked behind a password the
+// owner thinks is weak-but-working.
+func TestRunAuthEnvPasswordPolicyRejectionLeavesBoxOpen(t *testing.T) {
+	port := freePort(t)
+	env := map[string]string{
+		"GANTRY_PORT":      fmt.Sprint(port),
+		"GANTRY_DB_PATH":   filepath.Join(t.TempDir(), "g.db"),
+		"GANTRY_FAKE_DATA": "1",
+		"GANTRY_PASSWORD":  "short",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) string { return env[k] }, "test-ver") }()
+	waitHealthz(t, port)
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	resp, err := http.Get(base + "/api/live/snapshot")
+	require.NoError(t, err)
+	drainAndClose(resp)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "a rejected env password must leave the gate off, not half-configured")
+
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not shut down")
+	}
 }

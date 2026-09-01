@@ -3,12 +3,15 @@ package gpu
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/smidley/gantry/internal/collect"
@@ -21,6 +24,22 @@ const (
 	// 2s that's roughly 10x the intended CPU budget on Nvidia boxes.
 	nvidiaTickInterval = 15 * time.Second
 	nvidiaEntity       = "nvidia0" // v1: single-GPU assumption, matching spec §4.4's per-container scope
+
+	// nvidiaProbeTimeout bounds the one-shot runnability exec in Probe so a
+	// wedged nvidia-smi can't hang the collector's goroutine before the
+	// framework's own per-Tick deadline ever gets a chance to.
+	nvidiaProbeTimeout = 5 * time.Second
+
+	// nvidiaNotEnabledDetail is the hint for real Nvidia hardware with no
+	// nvidia-smi on PATH at all -- the integration was simply never wired up.
+	nvidiaNotEnabledDetail = "no nvidia-smi on PATH — add --runtime=nvidia and NVIDIA_VISIBLE_DEVICES=all to the container to enable"
+
+	// nvidiaLoaderDetail is the hint for issue #38: nvidia-smi is present
+	// (the runtime injected it) but can't execute in Gantry's `scratch`
+	// image, which ships no dynamic loader for the glibc-linked binary. This
+	// is a standing limitation, not a misconfiguration the user can fix, so
+	// the copy says so and points at the tracking issue.
+	nvidiaLoaderDetail = "nvidia-smi is present but can't run in Gantry's minimal image (no dynamic loader); Intel/AMD GPUs work without it — see github.com/smidley/gantry/issues/38"
 )
 
 // NvidiaCollector polls `nvidia-smi` (present only when the container was
@@ -52,7 +71,21 @@ type NvidiaCollector struct {
 	// isn't" (see Probe's own doc).
 	SysRoot string
 
+	// run execs nvidia-smi and returns its trimmed stdout; getenv reads the
+	// process environment. Both are fields (defaulted in NewNvidia) purely so
+	// tests can inject a fake exec / environment without real hardware.
+	run    func(ctx context.Context, args ...string) (string, error)
+	getenv func(string) string
+
 	loggedHW sync.Once
+
+	// runnableOnce runs the "can nvidia-smi actually execute in this image?"
+	// check exactly once (issue #38); unrunnable caches its verdict. Whether
+	// a scratch image has a loader can't change over a process's lifetime, so
+	// one check is enough -- and it means the loader notice is logged once,
+	// not on every 60s reprobe.
+	runnableOnce sync.Once
+	unrunnable   bool
 }
 
 var _ collect.Collector = (*NvidiaCollector)(nil)
@@ -63,28 +96,97 @@ var _ collect.Collector = (*NvidiaCollector)(nil)
 // host-bucketed — v1 has no meaningful "host GPU process" series for
 // compute-apps (contrast the DRM path, which does bucket host clients).
 func NewNvidia(sink store.MetricSink, procRoot string, lookup func(string) (string, bool)) *NvidiaCollector {
-	return &NvidiaCollector{sink: sink, procRoot: procRoot, lookup: lookup, SysRoot: "/host/sys"}
+	return &NvidiaCollector{
+		sink:     sink,
+		procRoot: procRoot,
+		lookup:   lookup,
+		SysRoot:  "/host/sys",
+		run:      runNvidiaSMI,
+		getenv:   os.Getenv,
+	}
 }
 
 func (c *NvidiaCollector) Name() string            { return "nvidia" }
 func (c *NvidiaCollector) Interval() time.Duration { return nvidiaTickInterval }
 
-// Probe looks for nvidia-smi on PATH. Absence splits into two distinct
-// cases (Scott's own report: "I don't have an nvidia GPU, so this
-// shouldn't be showing up for me" -- the SourcesBanner hint was showing
-// regardless): no Nvidia GPU detected on this box at all (hasPCIVendor
-// scans sysRoot/bus/pci/devices for vendor 0x10de) is Status.
-// NotApplicable — nothing to fix, so the banner should stay silent (see
-// its own doc) — while a genuine Nvidia GPU with no working nvidia-smi
-// integration keeps today's existing, actionable Detail unchanged.
-func (c *NvidiaCollector) Probe(context.Context) collect.Status {
-	if _, err := exec.LookPath("nvidia-smi"); err != nil {
-		if !hasPCIVendor(c.SysRoot, nvidiaVendorID) {
-			return collect.Status{Available: false, NotApplicable: true, Detail: "no NVIDIA GPU detected"}
+// Probe classifies the nvidia-smi integration into three outcomes.
+//
+// nvidia-smi not on PATH (Scott's own report: "I don't have an nvidia GPU,
+// so this shouldn't be showing up for me" -- the SourcesBanner hint was
+// showing regardless): if this box has an Nvidia GPU (hasPCIVendor scans
+// sysRoot/bus/pci/devices for vendor 0x10de) OR the container explicitly
+// asked for nvidia via NVIDIA_VISIBLE_DEVICES, it's a fixable misconfig, so
+// keep the actionable enable hint. Only when neither holds -- no hardware
+// and nothing requested -- is it NotApplicable, and the banner stays silent.
+//
+// nvidia-smi on PATH: the nvidia runtime injected it, so nvidia was wanted.
+// But Gantry's `scratch` image ships no dynamic loader, so a glibc-linked
+// nvidia-smi can't actually execute (issue #38). checkRunnable finds that
+// out exactly once: if exec fails the loader way, degrade to a clear,
+// still-visible hint so Tick never runs and never spams the log every 15s;
+// otherwise (a real Nvidia box, or a future loader-bearing image) report
+// Available and let Tick collect as before.
+func (c *NvidiaCollector) Probe(ctx context.Context) collect.Status {
+	path, err := exec.LookPath("nvidia-smi")
+	if err != nil {
+		if hasPCIVendor(c.SysRoot, nvidiaVendorID) || nvidiaRequested(c.getenv) {
+			return collect.Status{Available: false, Detail: nvidiaNotEnabledDetail}
 		}
-		return collect.Status{Available: false, Detail: "no nvidia-smi on PATH — add --runtime=nvidia and NVIDIA_VISIBLE_DEVICES=all to the container to enable"}
+		return collect.Status{Available: false, NotApplicable: true, Detail: "no NVIDIA GPU detected"}
+	}
+	c.checkRunnable(ctx, path)
+	if c.unrunnable {
+		return collect.Status{Available: false, Detail: nvidiaLoaderDetail}
 	}
 	return collect.Status{Available: true}
+}
+
+// checkRunnable execs nvidia-smi once to learn whether it can run in this
+// image at all, caching the verdict in c.unrunnable. In the scratch image
+// there's no loader for a glibc-linked nvidia-smi, so exec fails with ENOENT
+// even though binPath (which LookPath just resolved) is right there on disk
+// -- the loader case (issue #38), logged exactly once here rather than on
+// every tick. A clean exec, or any non-loader error (a transient driver
+// hiccup), leaves the collector Available and lets Tick surface real query
+// failures the usual way.
+func (c *NvidiaCollector) checkRunnable(ctx context.Context, binPath string) {
+	c.runnableOnce.Do(func() {
+		cctx, cancel := context.WithTimeout(ctx, nvidiaProbeTimeout)
+		defer cancel()
+		if _, err := c.run(cctx, "--version"); isExecLoaderFailure(err, binPath) {
+			c.unrunnable = true
+			log.Printf("collector nvidia: %s", nvidiaLoaderDetail)
+		}
+	})
+}
+
+// isExecLoaderFailure reports whether err -- from exec'ing a binary that
+// LookPath already resolved to binPath -- is the "present but not runnable
+// in this image" signature. The kernel failing to load an ELF (no dynamic
+// loader in a scratch image) surfaces as ENOENT from the fork/exec syscall
+// itself; a format mismatch surfaces as ENOEXEC. A truly-missing binary is
+// ruled out by stat'ing binPath: if the file really is gone (a lookup/exec
+// race), this isn't the loader case.
+func isExecLoaderFailure(err error, binPath string) bool {
+	if err == nil {
+		return false
+	}
+	if !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ENOEXEC) {
+		return false
+	}
+	if _, statErr := os.Stat(binPath); statErr != nil {
+		return false
+	}
+	return true
+}
+
+// nvidiaRequested reports whether NVIDIA_VISIBLE_DEVICES marks this container
+// as wanting nvidia. The nvidia container runtime treats "" and "void" as
+// "no GPUs requested", so those read as not-requested; any device list
+// ("all", "0", "GPU-<uuid>", ...) reads as requested.
+func nvidiaRequested(getenv func(string) string) bool {
+	v := getenv("NVIDIA_VISIBLE_DEVICES")
+	return v != "" && v != "void"
 }
 
 // GPUMeta returns nvidiaEntity's own fixed vendor+driver -- known
@@ -103,7 +205,7 @@ func (c *NvidiaCollector) GPUMeta() map[string]EntityMeta {
 func (c *NvidiaCollector) Tick(ctx context.Context, now time.Time) error {
 	ts := now.Unix()
 
-	gpuOut, err := runNvidiaSMI(ctx, "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits")
+	gpuOut, err := c.run(ctx, "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits")
 	if err != nil {
 		return fmt.Errorf("nvidia: query-gpu: %w", err)
 	}
@@ -114,7 +216,7 @@ func (c *NvidiaCollector) Tick(ctx context.Context, now time.Time) error {
 	c.sink.Record(store.SeriesKey{Kind: "gpu", Entity: nvidiaEntity, Metric: "engine.gpu.busy_pct"}, ts, utilPct)
 	c.sink.Record(store.SeriesKey{Kind: "gpu", Entity: nvidiaEntity, Metric: "mem.used_mib"}, ts, memMiB)
 
-	if appsOut, err := runNvidiaSMI(ctx, "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"); err == nil {
+	if appsOut, err := c.run(ctx, "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"); err == nil {
 		c.recordComputeApps(parseComputeApps(appsOut), ts)
 	}
 

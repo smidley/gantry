@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -136,6 +138,72 @@ func TestSetupPolicyBounds(t *testing.T) {
 	require.ErrorIs(t, err, ErrPasswordTooLong)
 
 	require.False(t, m.CredentialSet(), "no rejected setup may leave a partial credential")
+}
+
+// TestSetupConcurrentOnlyOneCredentialWins is the TOCTOU regression guard:
+// Setup used to read CredentialSet() as its 409 guard with no lock spanning
+// the gap to storePassword/storeUsername, so N callers racing a fresh box
+// could all observe "no credential yet" and all write one -- and all walk
+// away with a live session. It reproduces reliably with no injected delay:
+// storePassword's argon2id derivation is deliberately slow and globally
+// serialized (hashMu), so on the old code every one of these goroutines
+// clears the guard long before the first finishes storing, and every one
+// of them wins. With the fix, setupMu holds the guard-through-store
+// sequence as one critical section, so exactly one goroutine ever gets
+// past it.
+func TestSetupConcurrentOnlyOneCredentialWins(t *testing.T) {
+	const n = 20
+	m, st, _ := testManager(t)
+
+	usernames := make([]string, n)
+	passwords := make([]string, n)
+	for i := range usernames {
+		usernames[i] = fmt.Sprintf("user%02d", i)
+		passwords[i] = fmt.Sprintf("password-%02d-long-enough", i)
+	}
+
+	tokens := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			tokens[i], errs[i] = m.Setup(fmt.Sprintf("10.0.0.%d", i), usernames[i], passwords[i])
+		}(i)
+	}
+	wg.Wait()
+
+	winner := -1
+	successes, conflicts := 0, 0
+	for i := 0; i < n; i++ {
+		if errs[i] == nil {
+			successes++
+			winner = i
+			require.NotEmpty(t, tokens[i], "a successful Setup must return a session token")
+			continue
+		}
+		require.ErrorIs(t, errs[i], ErrCredentialExists, "goroutine %d", i)
+		require.Empty(t, tokens[i], "a rejected Setup must not return a token")
+		conflicts++
+	}
+	require.Equal(t, 1, successes, "exactly one concurrent Setup must win")
+	require.Equal(t, n-1, conflicts, "every other concurrent Setup must see ErrCredentialExists")
+	require.GreaterOrEqual(t, winner, 0)
+
+	// Exactly one credential landed, and it is the winner's whole
+	// (username, password) pair -- not one goroutine's password paired
+	// with another's username.
+	require.True(t, m.CredentialSet())
+	require.Equal(t, usernames[winner], m.Username())
+
+	var sessionCount int
+	require.NoError(t, st.ReadDB().QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessionCount))
+	require.Equal(t, 1, sessionCount, "exactly one session must exist after the race")
+	require.True(t, m.Authenticate(tokens[winner]), "the winning Setup's session must be live")
+
+	_, err := m.Login("10.0.0.99", usernames[winner], passwords[winner])
+	require.NoError(t, err, "the winner's own username+password must still verify together")
 }
 
 func TestLoginRequiresBothUsernameAndPassword(t *testing.T) {

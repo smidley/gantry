@@ -153,6 +153,16 @@ type Manager struct {
 	cachedUsername string
 	envManaged     bool
 	failures       map[string]*failureState
+
+	// setupMu makes Setup's CredentialSet guard and its writes one
+	// critical section, so two concurrent first-run calls can't both
+	// observe "no credential yet" and both store one (see Setup). It is
+	// a separate lock from mu, held for Setup's whole body: mu itself is
+	// only ever taken for a single field read/write and released, never
+	// held across a call to another method, so CredentialSet/
+	// storePassword/storeUsername each taking mu briefly *inside* the
+	// setupMu section cannot deadlock against it.
+	setupMu sync.Mutex
 }
 
 type Options struct {
@@ -410,7 +420,19 @@ func (m *Manager) Logout(token string) {
 // and no rate limit -- there's nothing yet to verify against, exactly as
 // exposed as every other route on a box that has never been configured,
 // and the mux-wide cross-site header still shuts out drive-by pages.
+//
+// setupMu holds the guard and the writes it gates as one critical
+// section, so two callers racing a fresh box can't both pass the check
+// before either has stored anything: the second always sees the first's
+// credential already in place and gets ErrCredentialExists instead of a
+// session of its own. DeleteAllSessions before issuing one is
+// defense-in-depth alongside that lock (the same belt-and-suspenders
+// UpdateCredential uses): if anything ever let a second caller reach
+// this far anyway, only the last one to finish keeps a live session.
 func (m *Manager) Setup(ip, username, password string) (string, error) {
+	m.setupMu.Lock()
+	defer m.setupMu.Unlock()
+
 	if m.CredentialSet() {
 		return "", ErrCredentialExists
 	}
@@ -425,6 +447,9 @@ func (m *Manager) Setup(ip, username, password string) (string, error) {
 		return "", err
 	}
 	if err := m.storeUsername(u); err != nil {
+		return "", err
+	}
+	if _, err := m.sessions.DeleteAllSessions(); err != nil {
 		return "", err
 	}
 	token, err := m.createSession()

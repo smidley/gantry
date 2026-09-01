@@ -18,6 +18,7 @@ type ArrayState struct {
 	ParityProgress float64 // mdResyncPos / mdResyncSize * 100
 	ParitySpeedBps float64 // (mdResyncDb / mdResyncDt) * 1024; 0 if Dt absent or 0
 	Version        string
+	Name           string  // var.ini's own NAME field -- the box's configured server name
 	SyncErrs       float64 // sbSyncErrs: the last (or currently running) check's error count
 	SyncStart      int64   // sbSynced: unix epoch the last check started, 0 if never run
 	SyncFinish     int64   // sbSynced2: unix epoch the last check finished, 0 while running or never run
@@ -63,6 +64,7 @@ func interpretVar(kv map[string]map[string]string) ArrayState {
 		ParityProgress: progress,
 		ParitySpeedBps: speedBps,
 		Version:        v["version"],
+		Name:           v["NAME"],
 		SyncErrs:       syncErrs,
 		SyncStart:      int64(syncStart),
 		SyncFinish:     int64(syncFinish),
@@ -160,6 +162,7 @@ func (c *Collector) tickArray(now time.Time) error {
 
 	c.mu.Lock()
 	c.version = next.Version
+	c.name = next.Name
 	c.mu.Unlock()
 
 	ts := now.Unix()

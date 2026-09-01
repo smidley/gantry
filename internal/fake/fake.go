@@ -1067,6 +1067,14 @@ func (g *Generator) SharePlacements() map[string]unraid.SharePlacement {
 	return map[string]unraid.SharePlacement{"appdata": {Mode: "only", Pool: "rocket_pool"}}
 }
 
+// ServerName is the fixed identity a demo box reports in place of
+// var.ini's real NAME field (and the HOST_HOSTNAME/hostname fallbacks
+// behind it) -- so a GANTRY_FAKE_DATA=1 screenshot shows the feature
+// without ever surfacing the real box's name.
+func (g *Generator) ServerName() string {
+	return "gantry-demo"
+}
+
 // Run ticks until ctx is done. clock defaults to time.Now when nil.
 func (g *Generator) Run(ctx context.Context, interval time.Duration, clock func() time.Time) {
 	if clock == nil {

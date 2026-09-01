@@ -69,6 +69,11 @@ export interface GPUMetaDTO {
 export interface SnapshotDTO {
   ts: number;
   unraid_version: string;
+  // server_name mirrors server.SnapshotDTO's own field -- var.ini's NAME,
+  // the HOST_HOSTNAME env fallback, or this container's own hostname,
+  // first non-empty wins; "" when every source comes up empty. Backs the
+  // Sidebar brand block's server identity (Sidebar.svelte).
+  server_name: string;
   host: Record<string, number>;
   containers: Record<string, ContainerDTO>;
   disks: Record<string, Record<string, number>>;

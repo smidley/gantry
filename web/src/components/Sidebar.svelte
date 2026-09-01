@@ -7,6 +7,7 @@
   import { onMount } from 'svelte';
   import { route, routes } from '../lib/router';
   import { fetchVersion } from '../lib/api';
+  import { live } from '../lib/sse.svelte';
 
   const monitorRoutes = routes.filter((item) =>
     ['overview', 'containers', 'top', 'storage', 'gpu', 'insights'].includes(item.name),
@@ -26,6 +27,13 @@
         version = null;
       });
   });
+
+  // serverName: issue #39 -- a multi-Unraid-server user needs to tell,
+  // at a glance, which box a given dashboard is looking at. Empty until
+  // the first live frame arrives, same as every other live.frame? read
+  // elsewhere (e.g. Settings' own unraidVersion) -- the tagline fallback
+  // below covers that gap rather than showing anything empty/"unknown".
+  let serverName = $derived(live.frame?.server_name ?? '');
 </script>
 
 <nav class="sidebar hidden md:flex" aria-label="Primary">
@@ -49,7 +57,28 @@
     </span>
     <span class="sidebar__brand-copy">
       <strong>Gantry</strong>
-      <small>Container observability</small>
+      {#if serverName}
+        <span class="sidebar__server" title={serverName}>
+          <svg
+            class="sidebar__server-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.75"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="3" y="4" width="18" height="7" rx="1.5" />
+            <rect x="3" y="13" width="18" height="7" rx="1.5" />
+            <circle cx="7" cy="7.5" r="0.6" fill="currentColor" stroke="none" />
+            <circle cx="7" cy="16.5" r="0.6" fill="currentColor" stroke="none" />
+          </svg>
+          <span class="sidebar__server-name">{serverName}</span>
+        </span>
+      {:else}
+        <small>Container observability</small>
+      {/if}
     </span>
   </a>
 
@@ -137,6 +166,29 @@
     margin-top: 0.08rem;
     color: var(--sidebar-muted);
     font-size: 0.68rem;
+  }
+  .sidebar__server {
+    display: flex;
+    align-items: center;
+    gap: 0.32rem;
+    min-width: 0;
+    margin-top: 0.15rem;
+    color: var(--sidebar-ink);
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .sidebar__server-icon {
+    width: 13px;
+    height: 13px;
+    flex-shrink: 0;
+    color: var(--sidebar-muted);
+  }
+  .sidebar__server-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .sidebar__nav {
     display: flex;

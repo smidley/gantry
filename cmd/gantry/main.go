@@ -64,6 +64,25 @@ func envOnly(getenv func(string) string, key, def string) string {
 	return def
 }
 
+// resolveServerName resolves the box identity the sidebar shows, first
+// non-empty source wins: var.ini's own NAME field (ur.ServerName(),
+// authoritative once the unraid collector has ticked), then
+// HOST_HOSTNAME -- not a GANTRY_* setting, but the docker host's own
+// hostname, which Unraid's Docker manager injects into every managed
+// container -- then this container's own hostname as a last resort.
+func resolveServerName(ur *unraid.Collector, getenv func(string) string) string {
+	if n := ur.ServerName(); n != "" {
+		return n
+	}
+	if h := envOnly(getenv, "HOST_HOSTNAME", ""); h != "" {
+		return h
+	}
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return ""
+}
+
 // storeOpenError wraps a failed store.Open. A can't-open / permission
 // failure -- the container's uid can't write the database's directory --
 // gets an actionable hint that names the directory and the DAC_OVERRIDE
@@ -319,6 +338,16 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	nv.SysRoot = sysRoot
 	pr := pressure.New(st, "/proc", cgroupRoot, dc.Running)
 	ur := unraid.New(st, st, envOnly(getenv, "GANTRY_UNRAID_DIR", "/unraid"), "/proc")
+
+	// serverName: exclusive real/fake swap, same reasoning as imagesSrc
+	// above -- fake-data mode reports fk's fixed demo identity rather
+	// than resolveServerName's real chain, so a screenshot never leaks
+	// this box's actual name.
+	serverName := func() string { return resolveServerName(ur, getenv) }
+	if fk != nil {
+		serverName = fk.ServerName
+	}
+
 	du := docker.NewDiskUsage(st, dockerSock)
 	ss := selfstat.New(st, "/proc")
 	ss.HostCores = host.NumCPU
@@ -426,7 +455,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 	// snapshot (Options.Snapshot), /api/live's connect frame (Options.
 	// Current), and the publish loop below -- all three read the exact
 	// same assembly, just on different triggers (poll, connect, tick).
-	snapshotFn := buildSnapshot(st, dc, ur, gp, nv, registry.Sources, fakeMetas, fakeDiskMeta, dispatcher, insightEngine, pr.Tier)
+	snapshotFn := buildSnapshot(st, dc, ur, gp, nv, registry.Sources, fakeMetas, fakeDiskMeta, dispatcher, insightEngine, pr.Tier, serverName)
 	live := server.NewBroadcaster()
 
 	// SSE publish loop: every 2s, marshal the current snapshot and fan it
@@ -532,6 +561,15 @@ const containerFrameMaxAge = 60
 // (moved into the frame in v2 so an SSE client sees a collector degrade
 // live, not just on its next healthz poll).
 //
+// serverName mirrors sources' own optional-closure convention (nil in
+// tests that don't wire one): main wiring passes resolveServerName's
+// result in real mode, or fk's fixed demo identity in fake-data mode --
+// an exclusive swap, the same one imagesSrc/removeImagesSrc/
+// pruneImagesSrc above already use, since a fake box has no real var.
+// ini/HOST_HOSTNAME/hostname worth reporting (and reporting the box's
+// REAL name would defeat fake-data mode's whole point of a
+// screenshot-safe demo).
+//
 // fakeMetas is nil outside fake-data mode; when non-nil its entries are
 // treated exactly like dc.All()'s -- unconditionally seeded, not a mere
 // lookup fallback -- so the fake fleet survives the same filter a real
@@ -560,7 +598,7 @@ const containerFrameMaxAge = 60
 // and channel-health data GET /api/alerts serves on demand, assembled
 // fresh every tick so an SSE client sees an alert fire/resolve/channel
 // degrade live rather than on its next poll.
-func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, gp *gpu.Collector, nv *gpu.NvidiaCollector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta, dispatcher *alert.Dispatcher, insightEngine *insight.Engine, pressureTier func() string) func() server.SnapshotDTO {
+func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, gp *gpu.Collector, nv *gpu.NvidiaCollector, sources func() map[string]string, fakeMetas func() []docker.Meta, fakeDiskMeta func() map[string]unraid.DiskMeta, dispatcher *alert.Dispatcher, insightEngine *insight.Engine, pressureTier func() string, serverName func() string) func() server.SnapshotDTO {
 	return func() server.SnapshotDTO {
 		dto := server.SnapshotDTO{
 			TS:            time.Now().Unix(),
@@ -573,6 +611,9 @@ func buildSnapshot(st *store.Store, dc *docker.Collector, ur *unraid.Collector, 
 			GPU:           map[string]map[string]float64{},
 			GPUMeta:       map[string]server.GPUMetaDTO{},
 			Sources:       map[string]string{},
+		}
+		if serverName != nil {
+			dto.ServerName = serverName()
 		}
 		for pdev, m := range gp.GPUMeta() {
 			dto.GPUMeta[pdev] = server.GPUMetaDTO{Vendor: m.Vendor, Driver: m.Driver}

@@ -26,7 +26,7 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A hyphenated suffix (v0.1.0-rc1) marks a semver pre-release; used
       # below both to keep it off :latest and to mark the GitHub Release

@@ -46,7 +46,7 @@ async function waitForServerUptime(page: Page, minSeconds: number) {
 // (TimeChart has no DOM "empty state" marker) for the "reached the
 // chart" half, plus a direct assertion on the /api/series response
 // itself for the "sums all four, not just the first" half.
-test('metrics GPU hero chart sums all four engines in a fetched window, not just the first', async ({ page }) => {
+test('metrics GPU hero chart sums all four engines in a fetched window, not just the first', async ({ page, request }) => {
   test.setTimeout(240_000);
 
   await page.goto('#/top/gpu');
@@ -73,7 +73,10 @@ test('metrics GPU hero chart sums all four engines in a fetched window, not just
     ['gpu.render.busy_pct', 'gpu.video.busy_pct', 'gpu.video-enhance.busy_pct', 'gpu.copy.busy_pct'].sort(),
   );
 
-  const body = (await seriesResponse.json()) as { metric: string; points: unknown[] }[];
+  // request.get, not seriesResponse.json() -- Chromium holds sniffed page
+  // response bodies only best-effort and evicts them under CI load; see
+  // live-seed.spec.ts's first test's own doc for the full story.
+  const body = (await (await request.get(seriesResponse.url())).json()) as { metric: string; points: unknown[] }[];
   const videoEntry = body.find((r) => r.metric === 'gpu.video.busy_pct');
   // Fake mode's own only-ever-populated engine -- if this has no real
   // points either, the assertion below can't distinguish the fix from a

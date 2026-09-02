@@ -39,6 +39,28 @@
   (fallbackLetter) -- keeping this canvas fully SVG-native rather than
   reaching for <foreignObject> to host an <img>, which fake-data mode's
   own synthetic fleet never sets anyway (ContainerIcon's own doc).
+
+  Two call sites share this one component (never a second map): the
+  standalone List|Map segmented view (Insights.svelte's own `graph`,
+  live-polled every 2s) and the evidence drawer's own embedded map (a
+  ONE-TIME snapshot of whichever instant the clicked insight is anchored
+  to -- insights.ts' own drawerMapAnchor/selectOverlappingInsights/
+  buildInsightGraph doc). The drawer passes two props the standalone view
+  never needs:
+    - focusInsightId: the clicked insight's own id. Every edge (and its
+      two endpoints) belonging to that insight stays at full opacity by
+      DEFAULT, with everything else muted -- the exact same dim/opacity
+      mechanism a hover already applies, just as a static base layer
+      underneath it rather than a second visual language. null (every
+      EXISTING call site) reproduces today's behaviour exactly: nothing
+      muted until something is actually hovered.
+    - compact: caps the canvas' own rendered height with a scrollbar
+      rather than letting a large overlapping set blow out the drawer's
+      own layout -- see suggestedHeight's own doc for why that number is
+      already unbounded by design; nothing about layoutMap's spacing
+      itself changes; a tall graph simply scrolls inside its own capped
+      box, with the legend and hover-label row (both OUTSIDE that box)
+      always staying in view.
 -->
 <script>
   import { layoutMap, suggestedHeight } from '../lib/mapLayout';
@@ -46,15 +68,27 @@
   import { fallbackLetter } from '../lib/containerIcon';
   import { motion } from '../lib/motion.svelte';
 
-  // graph: InsightGraphDTO ({nodes, edges}), fetched by the parent
-  // (Insights.svelte) from GET /api/insights/graph. statementsById maps
-  // an edge's own insight_id to that finding's full rendered statement
-  // (from the SAME live.frame.insights.active list the List section
-  // already has, no second fetch) -- the hover label's actual text,
-  // not a synthesized fragment. onOpenDrawer(insightId) opens the
-  // SAME evidence drawer the List section's cards do (shared owner:
-  // Insights.svelte).
-  let { graph = { nodes: [], edges: [] }, statementsById = {}, tier = 'proxy', onOpenDrawer = () => {} } = $props();
+  // graph: InsightGraphDTO ({nodes, edges}) -- the standalone Map mode
+  // polls GET /api/insights/graph every 2s for it; the evidence drawer
+  // instead builds one snapshot client-side (insights.ts' own
+  // buildInsightGraph) and never re-polls. statementsById maps an edge's
+  // own insight_id to that finding's full rendered statement -- the
+  // hover label's actual text, not a synthesized fragment; sourced from
+  // whichever list the caller already has in hand (live.frame.insights.
+  // active for the standalone view, the drawer's own overlap set for the
+  // drawer) rather than a second fetch either way. onOpenDrawer(insightId)
+  // opens the SAME evidence drawer both the List section's cards AND
+  // (see this component's own top-of-file doc) the drawer's own embedded
+  // map use -- clicking a muted, concurrent edge inside the drawer
+  // re-targets it at THAT insight instead of closing it.
+  let {
+    graph = { nodes: [], edges: [] },
+    statementsById = {},
+    tier = 'proxy',
+    onOpenDrawer = () => {},
+    focusInsightId = null,
+    compact = false,
+  } = $props();
 
   let containerEl = $state();
   let measuredWidth = $state(680);
@@ -120,10 +154,34 @@
   let hoveredEdgeID = $state(null);
   let hoveredNodeID = $state(null);
 
-  // scope: the current highlight set -- null means "nothing hovered,
-  // draw everything at full opacity." Edge hover wins over node hover
-  // if somehow both are set (shouldn't happen: pointer/focus can only
-  // be on one element at a time), by checking it first.
+  // focusScope: focusInsightId's own static highlight set (this
+  // component's own top-of-file doc) -- every edge whose insight_id
+  // matches, plus their endpoints. No match at all (defensive: shouldn't
+  // happen given the drawer always unions the clicked insight's own row
+  // into the pool it builds this graph from, but a hand-fed graph might
+  // not carry it) degrades to null -- draw everything at full opacity,
+  // never mute the entire canvas over a lookup miss.
+  let focusScope = $derived.by(() => {
+    if (focusInsightId == null) return null;
+    const matches = layout.edges.filter((e) => e.insight_id === focusInsightId);
+    if (matches.length === 0) return null;
+    const nodeIDs = new Set();
+    for (const e of matches) {
+      nodeIDs.add(e.from);
+      nodeIDs.add(e.to);
+    }
+    return { nodeIDs, edgeIDs: new Set(matches.map((e) => e.id)) };
+  });
+
+  // scope: the current highlight set -- null means "nothing hovered and
+  // nothing focused, draw everything at full opacity." Edge hover wins
+  // over node hover if somehow both are set (shouldn't happen:
+  // pointer/focus can only be on one element at a time), by checking it
+  // first; either hover wins outright over focusScope, exactly like
+  // hovering already overrides everything else -- a hover always means
+  // "show me exactly this," focus or not. With nothing hovered, focusScope
+  // is the fallback (null on every EXISTING call site, reproducing
+  // today's behaviour exactly): the drawer's own static emphasis.
   let scope = $derived.by(() => {
     if (hoveredEdgeID) {
       const e = layout.edges.find((x) => x.id === hoveredEdgeID);
@@ -138,7 +196,7 @@
       }
       return { nodeIDs, edgeIDs: new Set(incident.map((e) => e.id)) };
     }
-    return null;
+    return focusScope;
   });
   function nodeDimmed(node) {
     return scope !== null && !scope.nodeIDs.has(node.id);
@@ -188,7 +246,7 @@
   let transitionMs = $derived(motion.reduced ? 0 : 150);
 </script>
 
-<div class="interaction-map">
+<div class="interaction-map" class:interaction-map--compact={compact}>
   {#if layout.nodes.length === 0}
     <div class="interaction-map__empty">
       <p class="interaction-map__empty-line">No container is currently contending with another.</p>
@@ -209,6 +267,7 @@
               <g
                 class="interaction-map__edge"
                 class:interaction-map__edge--dimmed={edgeDimmed(edge)}
+                data-insight-id={edge.insight_id}
                 tabindex="0"
                 role="button"
                 aria-label={edgeLabel(edge)}
@@ -284,6 +343,20 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+  }
+  /* compact (the evidence drawer's own embedded map): cap the canvas'
+     rendered height and let IT scroll rather than the drawer ballooning
+     around a large overlapping set -- layoutMap's own spacing is
+     untouched, so node/edge positions are identical either way; only the
+     visible window changes. The legend and hover-label row sit OUTSIDE
+     this box (siblings of .interaction-map__canvas below), so they never
+     scroll out of view. */
+  .interaction-map--compact .interaction-map__canvas {
+    max-height: 17.5rem;
+    overflow-y: auto;
+  }
+  .interaction-map--compact .interaction-map__empty {
+    padding: 1.25rem 1rem;
   }
   .interaction-map__empty {
     display: flex;

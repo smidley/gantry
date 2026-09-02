@@ -18,6 +18,24 @@
   Task 9's frame contract is active-findings-only) -- only while Map
   mode is actually selected, so List mode costs nothing extra.
 
+  The drawer ALSO always renders the interaction map, for either an
+  Active or a History row alike: "as of that insight's own instant"
+  (insights.ts' own drawerMapAnchor -- now for Active, the clicked row's
+  own fired_at for History), the clicked insight's own edge(s)
+  emphasized and every OTHER insight concurrent at that exact instant
+  drawn muted but present (InteractionMap's own focusInsightId). Unlike
+  the standalone Map mode above, this is a ONE-TIME snapshot built
+  client-side the moment the drawer opens (loadDrawerMap,
+  insights.ts' own selectOverlappingInsights + buildInsightGraph over
+  GET /api/insights' active rows union GET /api/insights/history?from=
+  <anchor>'s resolved ones), never re-polled -- reading a moment from an
+  hour ago should not shift under the user while the drawer is open, and
+  a snapshot also means this needs no server endpoint of its own: the
+  existing evidence-bearing GET routes already answer "what overlapped
+  this instant" once filtered by the store's own started_at/resolved_at
+  columns. Rendered `compact` (InteractionMap's own doc) so a busy moment
+  scrolls inside its own capped box rather than ballooning the drawer.
+
   D2 calm: the empty state is deliberately quiet and specific about
   which evidence tier is live (tier 1/proxy vs PSI) rather than a bare
   "nothing here" -- Scott should be able to tell AT A GLANCE whether
@@ -26,8 +44,18 @@
 <script>
   import { onMount, untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
-  import { fetchInsight, fetchInsightHistory, fetchInsightRules, putInsightRules, dismissInsight, fetchInsightGraph } from '../lib/api';
-  import { sortActiveInsights, confidenceLabel, activeDuration, describeRule, formatEvidenceNumber, EVIDENCE_LABEL } from '../lib/insights';
+  import { fetchInsight, fetchInsights, fetchInsightHistory, fetchInsightRules, putInsightRules, dismissInsight, fetchInsightGraph } from '../lib/api';
+  import {
+    sortActiveInsights,
+    confidenceLabel,
+    activeDuration,
+    describeRule,
+    formatEvidenceNumber,
+    EVIDENCE_LABEL,
+    drawerMapAnchor,
+    selectOverlappingInsights,
+    buildInsightGraph,
+  } from '../lib/insights';
   import { eventHref } from '../lib/eventHref';
   import HealthDot from '../components/HealthDot.svelte';
   import InteractionMap from '../components/InteractionMap.svelte';
@@ -36,6 +64,19 @@
 
   const HISTORY_PAGE_LIMIT = 25;
   const GRAPH_POLL_MS = 2000;
+  // OVERLAP_HISTORY_FETCH_LIMIT: the drawer's own loadDrawerMap fetches
+  // GET /api/insights/history?from=<anchor> for every resolved insight
+  // that overlaps the drawer's anchor -- capped at the endpoint's own
+  // maximum (api_insights.go's maxInsightHistoryLimit) rather than its
+  // smaller default, since this is a targeted, one-shot query (not a
+  // "load more" page a user paces out), and under-fetching here would
+  // silently under-draw the picture. A system with more than 500
+  // resolutions AFTER a clicked insight's own anchor is the one accepted
+  // edge case this can miss -- the clicked insight's own row is always
+  // unioned in separately regardless (see loadDrawerMap's own doc), so
+  // its own edge never disappears even then.
+  const OVERLAP_HISTORY_FETCH_LIMIT = 500;
+  const EMPTY_GRAPH = { nodes: [], edges: [] };
   const DISMISS_PRESETS = [
     { label: '1d', days: 1 },
     { label: '7d', days: 7 },
@@ -123,11 +164,24 @@
   let drawerLoading = $state(false);
   let drawerError = $state(false);
 
+  // drawerGraph/drawerStatementsById/drawerMapLoading: the drawer's own
+  // embedded interaction map (this view's own top-of-file doc) --
+  // populated once by loadDrawerMap below, independent of the standalone
+  // Map mode's `graph` state above (which may not even be populated yet
+  // if the drawer was opened from List mode, and live-polls on a cadence
+  // this snapshot deliberately does not follow).
+  let drawerGraph = $state(EMPTY_GRAPH);
+  let drawerStatementsById = $state({});
+  let drawerMapLoading = $state(false);
+
   async function openDrawer(id) {
     drawerID = id;
     drawerData = null;
     drawerError = false;
     drawerLoading = true;
+    drawerGraph = EMPTY_GRAPH;
+    drawerStatementsById = {};
+    drawerMapLoading = true;
     try {
       drawerData = await fetchInsight(id);
     } catch {
@@ -135,11 +189,58 @@
     } finally {
       drawerLoading = false;
     }
+    if (drawerData) {
+      loadDrawerMap(drawerData);
+    } else {
+      drawerMapLoading = false;
+    }
   }
+
+  // loadDrawerMap assembles the drawer's map data for the clicked insight
+  // `inst`: drawerMapAnchor picks the single instant (now for an Active
+  // insight, its own fired_at for a History one), then the pool tested
+  // against that anchor is `inst` itself (always present, regardless of
+  // either fetch below -- guarantees "if only the clicked insight was
+  // active, the map legitimately shows just that culprit-to-victim pair"
+  // even if a fetch below fails or truncates) union the CURRENTLY active
+  // set WITH evidence (fetchInsights, not this view's own live-frame-
+  // derived `active` above -- that trimmed copy never carries evidence,
+  // Task 9's own frame contract, and a share_pct-less edge would silently
+  // lose its own width signal) union every resolved insight whose OWN
+  // resolution is at or after the anchor (fetchInsightHistory({from:
+  // anchor}) -- see OVERLAP_HISTORY_FETCH_LIMIT's own doc for why this is
+  // a fresh targeted fetch, deliberately NOT a re-use of the History
+  // section's own paginated `history` array above, which is a "newest
+  // resolution first" prefix that can legitimately stop short of an
+  // older overlapping insight the user never scrolled/loaded down to --
+  // reusing it here would silently under-draw the picture instead of
+  // asking the API the one targeted question it can already answer
+  // directly.
+  //
+  // A snapshot, deliberately: this runs once when the drawer opens, never
+  // on a poll -- see this view's own top-of-file doc.
+  async function loadDrawerMap(inst) {
+    const anchor = drawerMapAnchor(inst, nowSec);
+    const [activeRows, historyRows] = await Promise.all([
+      fetchInsights()
+        .then((r) => r.active)
+        .catch(() => []),
+      fetchInsightHistory({ from: anchor, limit: OVERLAP_HISTORY_FETCH_LIMIT }).catch(() => []),
+    ]);
+    if (drawerID !== inst.id) return; // the drawer moved on (closed, or a different row) while this was in flight
+    const overlap = selectOverlappingInsights([inst, ...activeRows, ...historyRows], anchor);
+    drawerGraph = buildInsightGraph(overlap);
+    drawerStatementsById = Object.fromEntries(overlap.map((i) => [i.id, i.statement]));
+    drawerMapLoading = false;
+  }
+
   function closeDrawer() {
     drawerID = null;
     drawerData = null;
     drawerError = false;
+    drawerGraph = EMPTY_GRAPH;
+    drawerStatementsById = {};
+    drawerMapLoading = false;
   }
   function handleWindowKeydown(e) {
     if (e.key === 'Escape' && drawerID !== null) closeDrawer();
@@ -494,6 +595,21 @@
           <span class="microlabel">{drawerData.tier === 'psi' ? 'PSI tier' : 'tier 1 (proxy)'}</span>
           <span class="microlabel">{drawerData.state === 'active' ? `active for ${activeDuration(drawerData.started_at, nowSec)}` : `resolved (${drawerData.resolve_reason})`}</span>
         </div>
+        <div class="insights-drawer__map">
+          <span class="microlabel">Interaction map</span>
+          {#if drawerMapLoading}
+            <p class="microlabel">Loading…</p>
+          {:else}
+            <InteractionMap
+              graph={drawerGraph}
+              statementsById={drawerStatementsById}
+              tier={drawerData.tier}
+              onOpenDrawer={openDrawer}
+              focusInsightId={drawerData.id}
+              compact={true}
+            />
+          {/if}
+        </div>
         {#if evidenceRows.length > 0}
           <dl class="insights-drawer__evidence">
             {#each evidenceRows as row (row.key)}
@@ -825,6 +941,11 @@
     align-items: center;
     gap: 0.6rem;
     flex-wrap: wrap;
+  }
+  .insights-drawer__map {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
   }
   .insights-drawer__evidence {
     margin: 0;

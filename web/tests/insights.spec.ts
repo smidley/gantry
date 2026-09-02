@@ -124,6 +124,118 @@ test('evidence drawer opens from an Active or History row, shows the statement a
   await expect(drawer).not.toBeVisible();
 });
 
+// Drawer interaction map: "when there's an issue in history and it's
+// clicked on, the map view should also be provided so the user can
+// visually see what was happening" (the owner's own ask). data-insight-id
+// (InteractionMap.svelte) is the precise hook both tests below key off:
+// the clicked insight's own edge(s) must never be dimmed, and -- ONLY
+// when something else happens to be concurrent on this shared server's
+// timeline right now, never assumed -- every other edge on the same
+// canvas must be.
+test('evidence drawer for a HISTORY insight also renders the interaction map, with the clicked insight\'s own edge emphasized', async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  test.setTimeout(4 * 60_000 + 30_000);
+
+  let target: { id: number; statement: string } | null = null;
+  const deadline = Date.now() + 4 * 60_000;
+  while (Date.now() < deadline && !target) {
+    const hist = await (await request.get(`${baseURL}/api/insights/history?limit=1`)).json();
+    if (hist.length > 0) target = hist[0];
+    else await page.waitForTimeout(3000);
+  }
+  test.skip(!target, 'nothing resolved into history within the timeout on this shared server run');
+
+  await page.goto('#/insights');
+  // Map is the default mode whenever something's active -- force List,
+  // the demo-fire test's own identical doc.
+  await page.locator('.segmented__btn', { hasText: 'List' }).click();
+  const row = page.locator('.insights-view__row--history', { hasText: target!.statement.slice(0, 30) }).first();
+  await expect(row).toBeVisible();
+  await row.locator('.insights-view__statement-btn').click();
+
+  const drawer = page.locator('.insights-drawer');
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator('.insights-drawer__statement')).not.toBeEmpty();
+
+  // The clicked insight always contributes at least its own culprit edge
+  // (insights.ts' own selectOverlappingInsights/buildInsightGraph doc:
+  // the clicked row is unioned into the pool unconditionally) -- assert
+  // the real canvas directly, not the empty state, since an empty map
+  // here would itself be the bug.
+  await expect(drawer.locator('.interaction-map__canvas svg')).toBeVisible();
+
+  // expect.poll on COUNT, never toBeVisible() on an individual edge <g>:
+  // a perfectly horizontal edge (both endpoints landing on the same rank
+  // -- a real, correct, reachable layout, not a rendering bug) reports a
+  // ZERO-HEIGHT getBoundingClientRect() for its own <path> geometry, which
+  // Playwright reads as "hidden" even though the stroke is genuinely
+  // painted and the element is genuinely clickable/focusable -- reproduced
+  // directly against the running binary (a memory-squeeze culprit edge
+  // with d="M 61 104 C ... 104, ... 104, 219 104"). map.spec.ts's own
+  // edge checks avoid toBeVisible() on a single edge for the identical
+  // reason (count()/class checks only); polling the COUNT still gives the
+  // drawer's own async loadDrawerMap fetch room to land, without hitting
+  // that bbox trap. toHaveClass reads the class list regardless of the
+  // same bbox quirk, so the dim-state checks below are unaffected either
+  // way.
+  const focusedEdges = drawer.locator(`.interaction-map__edge[data-insight-id="${target!.id}"]`);
+  await expect.poll(() => focusedEdges.count(), { timeout: 10_000 }).toBeGreaterThan(0);
+  const focusedCount = await focusedEdges.count();
+  for (let i = 0; i < focusedCount; i++) {
+    await expect(focusedEdges.nth(i)).not.toHaveClass(/interaction-map__edge--dimmed/);
+  }
+
+  // Only asserted when there IS something else on the canvas -- the demo
+  // schedule may or may not have produced a second, concurrent finding
+  // by the time this test runs (this file's own doc, top), and a lone
+  // culprit-to-victim pair with nothing dimmed is just as correct a
+  // rendering as one with a muted neighbor.
+  const otherEdges = drawer.locator(`.interaction-map__edge:not([data-insight-id="${target!.id}"])`);
+  const otherCount = await otherEdges.count();
+  for (let i = 0; i < otherCount; i++) {
+    await expect(otherEdges.nth(i)).toHaveClass(/interaction-map__edge--dimmed/);
+  }
+});
+
+test('evidence drawer for an ACTIVE insight also renders the interaction map (its "moment" is now, the same code path as History)', async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  test.setTimeout(4 * 60_000 + 30_000);
+
+  let target: { id: number; statement: string } | null = null;
+  const deadline = Date.now() + 4 * 60_000;
+  while (Date.now() < deadline && !target) {
+    const active = await (await request.get(`${baseURL}/api/insights`)).json();
+    if (active.active?.length > 0) target = active.active[0];
+    else await page.waitForTimeout(3000);
+  }
+  test.skip(!target, 'no finding became active within the timeout on this shared server run');
+
+  await page.goto('#/insights');
+  await page.locator('.segmented__btn', { hasText: 'List' }).click();
+  const row = page.locator('.insights-view__row:not(.insights-view__row--history)', { hasText: target!.statement.slice(0, 30) });
+  await expect(row).toBeVisible();
+  await row.locator('.insights-view__statement-btn').click();
+
+  const drawer = page.locator('.insights-drawer');
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator('.interaction-map__canvas svg')).toBeVisible();
+
+  // See the History test above for why this polls COUNT rather than
+  // calling toBeVisible() on an individual edge.
+  const focusedEdges = drawer.locator(`.interaction-map__edge[data-insight-id="${target!.id}"]`);
+  await expect.poll(() => focusedEdges.count(), { timeout: 10_000 }).toBeGreaterThan(0);
+  const focusedCount = await focusedEdges.count();
+  for (let i = 0; i < focusedCount; i++) {
+    await expect(focusedEdges.nth(i)).not.toHaveClass(/interaction-map__edge--dimmed/);
+  }
+});
+
 // Dismiss round-trip: the one MUTATING test in this file. Targets a
 // SPECIFIC finding by its own statement text throughout (never a raw
 // "active count"), so it stays correct regardless of whatever else is

@@ -3,6 +3,7 @@
 // kept DOM-free and vitest-tested, the exact split alerts.ts's own doc
 // names as this app's standing convention.
 import { fmtDuration, fmtPct } from './format';
+import type { GraphEdgeDTO, GraphNodeDTO, InsightDTO, InsightGraphDTO } from './api';
 
 // --- confidence -----------------------------------------------------------
 
@@ -218,4 +219,139 @@ const RULE_DESCRIPTIONS: Record<string, (t: Record<string, number>) => string> =
 export function describeRule(ruleID: string, thresholds: Record<string, number>, title: string): string {
   const template = RULE_DESCRIPTIONS[ruleID];
   return template ? template(thresholds) : title;
+}
+
+// --- drawer interaction map (the evidence drawer's own "as of that
+// insight's active window" map -- clicking a History OR Active row
+// shows the interaction map for the single instant the clicked insight
+// is anchored to, not just its own culprit/victim pair in isolation) ---
+
+// drawerMapAnchor picks that single instant. store.InsightInstance
+// always carries BOTH started_at and fired_at, stamped to the identical
+// tick today (insight/engine.go's own Tick doc: there is no earlier
+// "pending" moment this engine currently observes, so the two columns
+// have never yet diverged) -- fired_at is picked as the semantically
+// correct one of the pair regardless: it names the instant the engine
+// actually ASSERTED the finding, where started_at is carried forward
+// across a supersession (upsertFinding's own doc) and so is really about
+// the tuple's own age, not "when did this become true". A future engine
+// revision that finally does separate the two keeps this anchor pointed
+// at the right one with no call-site change.
+//
+// An ACTIVE insight's own anchor is nowSec, NOT its own fired_at,
+// deliberately: "what's happening right now" should read as the full
+// CURRENTLY active set -- the exact set the standalone Map mode already
+// shows -- not a narrower snapshot of who else was active back when this
+// one first fired, which may have been minutes ago and would omit
+// anything that has started contending since.
+export function drawerMapAnchor(inst: { state: string; fired_at: number }, nowSec: number): number {
+  return inst.state === 'active' ? nowSec : inst.fired_at;
+}
+
+// OverlapWindowLike is the minimal shape selectOverlappingInsights needs
+// -- deliberately narrower than InsightDTO, the exact InsightCulpritLike/
+// SortableInsight precedent above, so a hand-built test fixture never
+// has to carry every InsightDTO field just to exercise the window-
+// overlap predicate.
+export interface OverlapWindowLike {
+  id: number;
+  started_at: number;
+  resolved_at: number;
+}
+
+// selectOverlappingInsights answers "what else was under pressure at
+// this one instant": every instance (deduped by id -- the drawer's own
+// pool is unioned from more than one source, and the clicked insight's
+// own row is always included separately from whatever the live/history
+// fetches also happen to carry) whose own [started_at, resolved_at]
+// window contains anchorSec. An open window (resolved_at === 0) reads as
+// "still going" -- contains every anchor from started_at forward,
+// including one in the past, which is exactly right for a still-active
+// insight that began before a historical anchor it's being compared
+// against. Both bounds are inclusive: an insight that started or
+// resolved AT exactly this instant did overlap it. Pure and total: an
+// empty pool, or a pool with nothing overlapping, both simply return
+// [] -- never a special case the caller has to detect first (design
+// note: "if only the clicked insight was active, the map legitimately
+// shows just that culprit-to-victim pair" falls out of this for free, as
+// long as the caller always unions the clicked insight's own row into
+// the pool it passes in). Sorted by id ascending on the way out, the
+// exact determinism buildInsightGraph's own Go-side sort gives its own
+// nodes/edges, so two calls over an identically-shuffled pool never
+// disagree on order.
+export function selectOverlappingInsights<T extends OverlapWindowLike>(pool: T[], anchorSec: number): T[] {
+  const byID = new Map<number, T>();
+  for (const inst of pool) byID.set(inst.id, inst);
+  return [...byID.values()]
+    .filter((inst) => inst.started_at <= anchorSec && (inst.resolved_at === 0 || inst.resolved_at >= anchorSec))
+    .sort((a, b) => a.id - b.id);
+}
+
+// RESOURCE_NODE_PREFIX mirrors api_insights.go's own resourceNodePrefix
+// exactly -- same constant, same reason: Docker's own naming rule
+// disallows ':' in a container name, so a container can never collide
+// with a "resource:<name>" node id.
+const RESOURCE_NODE_PREFIX = 'resource:';
+
+// buildInsightGraph is the client-side mirror of api_insights.go's own
+// buildInsightGraph -- see that function's doc for the hub-and-spoke
+// edge shape (every insight contributes a culprit->resource edge and,
+// only for a named victim CONTAINER, a resource->victim edge too) and
+// the gpu-engine-contention VictimKind exception this shares verbatim.
+// The Go original only ever runs over the live active set (GET
+// /api/insights/graph, polled by the standalone Map mode); this one runs
+// over an ARBITRARY instance set -- the evidence drawer's own
+// selectOverlappingInsights result, above -- entirely client-side, so a
+// historical moment's map needs no server endpoint of its own: GET
+// /api/insights (evidence-bearing active rows) and GET /api/insights/
+// history?from=... (evidence-bearing resolved rows, already filterable
+// by resolved_at) already hand over everything this needs. Kept in
+// lockstep with the Go tests by insights.test.ts's own cases, the exact
+// culpritNames precedent above.
+export function buildInsightGraph(instances: InsightDTO[]): InsightGraphDTO {
+  const nodes = new Map<string, GraphNodeDTO>();
+  const edges: GraphEdgeDTO[] = [];
+  const ensureNode = (id: string, kind: GraphNodeDTO['kind'], label: string) => {
+    if (!nodes.has(id)) nodes.set(id, { id, kind, label });
+  };
+
+  for (const inst of instances) {
+    const resID = RESOURCE_NODE_PREFIX + inst.resource;
+    ensureNode(resID, 'resource', inst.resource);
+
+    culpritNames(inst).forEach((name, i) => {
+      ensureNode(name, 'container', name);
+      edges.push({
+        id: `${inst.id}:culprit:${i}`,
+        from: name,
+        to: resID,
+        kind: 'culprit',
+        insight_id: inst.id,
+        rule_id: inst.rule_id,
+        confidence: inst.confidence,
+        severity: inst.severity,
+        share_pct: inst.evidence?.culprit_share_pct ?? 0,
+      });
+    });
+
+    if (inst.victim_kind === 'container' && inst.victim !== '') {
+      ensureNode(inst.victim, 'container', inst.victim);
+      edges.push({
+        id: `${inst.id}:victim`,
+        from: resID,
+        to: inst.victim,
+        kind: 'victim',
+        insight_id: inst.id,
+        rule_id: inst.rule_id,
+        confidence: inst.confidence,
+        severity: inst.severity,
+        share_pct: inst.evidence?.victim_stall_pct ?? 0,
+      });
+    }
+  }
+
+  return {
+    nodes: [...nodes.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    edges: [...edges].sort((a, b) => a.id.localeCompare(b.id)),
+  };
 }

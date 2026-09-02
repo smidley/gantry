@@ -14,6 +14,8 @@
   import { fetchContainers, fetchSeries } from '../lib/api';
   import { buildCompareHash } from '../lib/compareRoute';
   import { composeGroups } from '../lib/composeGroups';
+  import { activityInputFor, fleetActivity } from '../lib/fleetActivity';
+  import { resourceScaleMax } from '../lib/topFromFrame';
   import { groups } from '../lib/groups.svelte';
   import ContainerIcon from '../components/ContainerIcon.svelte';
   import HealthDot from '../components/HealthDot.svelte';
@@ -279,16 +281,28 @@
     return `Sort by ${name}, currently sorted ${sortDir === 'asc' ? 'ascending' : 'descending'}`;
   }
 
+  // hostMemBytes backs the "Active now" filter's memory reading for a
+  // container with no limit of its own -- the frame carries the host
+  // total only implicitly (see resourceScaleMax).
+  let hostMemBytes = $derived(resourceScaleMax('mem', live.frame));
+
   // filteredNames re-derives every frame (it reads live.frame for each
   // name's current image/state) but never reorders anything -- it only
   // narrows sortedNames' already-stable order down to what the filter
   // box and running/stopped split allow through.
+  //
+  // "Active now" is lib/fleetActivity.ts's own rule, not a local cpu.pct
+  // test: the fleet strip's glowing blocks link HERE, so the count in
+  // its summary line and the list this filter produces have to be the
+  // same containers. That rule is CPU plus memory, network, disk IO and
+  // GPU now (the any-metric glow pass), so a container saturating a disk
+  // while idling its CPU shows up in both or neither.
   let filteredNames = $derived(
     sortedNames.filter((name) => {
       const c = live.frame?.containers?.[name];
       if (!c || !matchesContainerFilter(name, c.image ?? '', filterText)) return false;
       if (stateFilter === 'running') return c.state === 'running';
-      if (stateFilter === 'active') return c.state === 'running' && Number.isFinite(c.metrics['cpu.pct']) && c.metrics['cpu.pct'] > 1;
+      if (stateFilter === 'active') return c.state === 'running' && fleetActivity(activityInputFor(c.metrics, hostMemBytes)).active;
       if (stateFilter === 'stopped') return c.state !== 'running';
       if (stateFilter === 'attention') return c.state === 'running' && containerHealthStatus(c.state, c.health) !== 'good';
       return true;

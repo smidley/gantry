@@ -4,12 +4,15 @@ import { test, expect } from '@playwright/test';
 // the real fake-mode binary (playwright.config.ts's webServer) through
 // Playwright's request fixture (baseURL comes from the config).
 //
-// The API round trip stays pinned at this level even now that Overview
-// renders CalloutRow: the wire contract (shapes, bounds, idempotent
-// DELETE) is the server's own promise, independent of any one consumer.
-// The UI half (acking a "Needs a look" row hides it) is the last spec
-// below; the derivation/expiry logic behind it is unit-tested in
-// src/lib/overviewStatus.test.ts and src/components/CalloutRow.test.ts.
+// The API round trip stays pinned at this level whatever Overview
+// renders: the wire contract (shapes, bounds, idempotent DELETE) is the
+// server's own promise, independent of any one consumer. The UI half
+// moved to tests/overview-attention.spec.ts's own last spec -- the
+// counts pass replaced Overview's per-item rows (and their Ack control)
+// with count chips, so what an ack visibly does now is drop the COUNT,
+// which is what that spec asserts. The derivation/expiry logic behind
+// it is unit-tested in src/lib/overviewStatus.test.ts and
+// src/components/CalloutRow.test.ts.
 //
 // The round-trip test cleans up after itself (reuseExistingServer means
 // a local dev server outlives any one run), and its probe entity names a
@@ -73,33 +76,3 @@ test('POST /api/acks rejects every shape that must not exist', async ({ request 
   expect(listed.acks.some((a: { entity: string }) => a.entity === 'sonarr')).toBe(false);
 });
 
-// The UI half, live now that Overview renders CalloutRow and hands the
-// acks store to deriveOverviewStatus: acking the fake fleet's one
-// deterministic frame anomaly (grafana, unhealthy from boot) hides its
-// row. Expiry-brings-it-back stays at the unit layer (overviewStatus.
-// test.ts's compressed-expiry round trip) -- a real 1h wait has no
-// place in an e2e suite. The finally-block DELETE matters on a reused
-// local server (reuseExistingServer): a leftover ack would hide the
-// grafana row from every later run inside the hour, including this
-// spec's own toBeVisible. Note the ack quiets the FRAME row only --
-// the container-unhealthy alert, no longer folded into it by the
-// dedup, may surface its own "Container unhealthy" row instead; that
-// row is a different concern ("the rule fired") and never matches this
-// locator's own frame-derived sentence.
-test('acking a Needs-a-look row hides it for the chosen window', async ({ page, request }) => {
-  await page.goto('#/');
-  const row = page.locator('.callout-row', { hasText: 'grafana is unhealthy' });
-  await expect(row).toBeVisible({ timeout: 20_000 });
-  try {
-    await row.getByRole('button', { name: /^Acknowledge:/ }).click();
-    await row.getByRole('button', { name: /Acknowledge for 1h/ }).click();
-    await expect(row).toHaveCount(0);
-  } finally {
-    const listed = await (await request.get('/api/acks')).json();
-    for (const a of listed.acks as { id: number; kind: string; entity: string }[]) {
-      if (a.kind === 'unhealthy' && a.entity === 'grafana') {
-        await request.delete(`/api/acks/${a.id}`, { headers: { 'X-Requested-With': 'gantry' } });
-      }
-    }
-  }
-});

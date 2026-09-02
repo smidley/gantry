@@ -1,22 +1,24 @@
 // FleetStrip structural tests via svelte/server (SSR string render, the
 // CalloutRow.test.ts convention) -- pins the render contract the
-// region-sizing pass restyled around: one unit per container, each a
-// real link with a real accessible name, status classes on the flagged
-// ones. The grid layout itself (fixed-pitch columns, whole units per
-// row) is computed style, not markup -- tests/overview-layout.spec.ts
-// asserts it in a real browser.
+// auto-sizing pass restyled around: one unit per container, each a real
+// link with a real accessible name, status classes on the flagged ones,
+// and the glow driven by whichever metric is actually elevated. The
+// GRID itself (computed cell size, columns, whether it scrolls) is
+// measurement-driven and has no meaning in an SSR string -- the sizing
+// rule is unit-tested pure in src/lib/fleetGrid.test.ts and asserted in
+// a real browser in tests/overview-layout.spec.ts.
 import { describe, expect, it } from 'vitest';
 import { render } from 'svelte/server';
 import FleetStrip from './FleetStrip.svelte';
 
 const CONTAINERS = [
-  { name: 'jellyfin', state: 'running', health: 'healthy', cpuPct: 12, memBytes: 4e9 },
-  { name: 'sonarr', state: 'running', health: 'unhealthy' },
-  { name: 'prowlarr', state: 'exited', health: '' },
+  { name: 'jellyfin', state: 'running', health: 'healthy', metrics: { 'cpu.pct': 12, 'mem.bytes': 4e9 } },
+  { name: 'sonarr', state: 'running', health: 'unhealthy', metrics: {} },
+  { name: 'prowlarr', state: 'exited', health: '', metrics: {} },
 ];
 
-function renderStrip(containers: object[]): string {
-  return render(FleetStrip, { props: { containers } }).body;
+function renderStrip(containers: object[], hostMemBytes?: number): string {
+  return render(FleetStrip, { props: { containers, hostMemBytes } }).body;
 }
 
 describe('FleetStrip', () => {
@@ -27,17 +29,24 @@ describe('FleetStrip', () => {
     expect(body).toContain('1 stopped');
     expect(body).toContain('1 needs attention');
     expect(body).toContain('aria-label="Container fleet, 3 total"');
-    expect(body).toContain('aria-label="Running containers, 2"');
-    expect(body).toContain('aria-label="Stopped containers, 1"');
     expect(body.match(/class="fleet-unit/g)).toHaveLength(3);
     expect(body).toContain('href="#/containers/jellyfin"');
     expect(body).toContain('href="#/containers/sonarr"');
     expect(body).toContain('href="#/containers/prowlarr"');
   });
 
-  it('carries each unit\'s state (and meaningful health) in its own aria-label', () => {
+  // The running/stopped split is order plus fill now, not two separately
+  // headed sub-grids -- one field of blocks is what lets a single cell
+  // size span the whole fleet. Every count and link the old group heads
+  // carried is still in the summary line above.
+  it('orders running units before stopped ones in a single field', () => {
+    const names = [...renderStrip(CONTAINERS).matchAll(/href="#\/containers\/([^"]+)"/g)].map((m) => m[1]);
+    expect(names).toEqual(['jellyfin', 'sonarr', 'prowlarr']);
+  });
+
+  it("carries each unit's state (and meaningful health) in its own aria-label", () => {
     const body = renderStrip(CONTAINERS);
-    expect(body).toContain('aria-label="jellyfin: running, 12.0% CPU"');
+    expect(body).toContain('aria-label="jellyfin: running, CPU 12.0%"');
     expect(body).toContain('aria-label="sonarr: running, unhealthy"');
     expect(body).toContain('aria-label="prowlarr: exited"');
   });
@@ -48,18 +57,20 @@ describe('FleetStrip', () => {
     expect(body).toContain('fleet-unit--stopped'); // prowlarr: exited
   });
 
-  // Active means cpu.pct > 1 -- one percent of the WHOLE HOST
-  // (host-share, not docker-stats per-core), the same bar the Containers
-  // view's "Active now" filter uses. Busy is the >= 10 tier on top.
+  // Active is the max elevation across cpu/mem/net/io/gpu now
+  // (lib/fleetActivity.ts). CPU's own floors are unchanged -- >1% of the
+  // whole host to glow, 10% for the busy tier -- so a CPU-driven fleet
+  // reads exactly as it did before the other four could drive it.
   it('marks a unit active only above 1% host-share CPU, and busy at 10%', () => {
     const body = renderStrip([
-      { name: 'idle', state: 'running', health: 'healthy', cpuPct: 0.6 },
-      { name: 'working', state: 'running', health: 'healthy', cpuPct: 2.4 },
-      { name: 'churning', state: 'running', health: 'healthy', cpuPct: 12 },
+      { name: 'idle', state: 'running', health: 'healthy', metrics: { 'cpu.pct': 0.6 } },
+      { name: 'working', state: 'running', health: 'healthy', metrics: { 'cpu.pct': 2.4 } },
+      { name: 'churning', state: 'running', health: 'healthy', metrics: { 'cpu.pct': 12 } },
     ]);
-    const unitClasses = [...body.matchAll(/class="(fleet-unit[^"]*)" href="#\/containers\/([^"]+)"/g)].map(
-      (m) => [m[2], m[1]],
-    );
+    const unitClasses = [...body.matchAll(/class="(fleet-unit[^"]*)"[^>]*href="#\/containers\/([^"]+)"/g)].map((m) => [
+      m[2],
+      m[1],
+    ]);
     const byName = Object.fromEntries(unitClasses);
     expect(byName['idle']).not.toContain('fleet-unit--active');
     expect(byName['working']).toContain('fleet-unit--active');
@@ -68,10 +79,36 @@ describe('FleetStrip', () => {
     expect(body).toContain('2 active now');
   });
 
+  it('glows on a non-CPU metric and names the one that is driving it', () => {
+    const body = renderStrip([
+      { name: 'seeder', state: 'running', health: 'healthy', metrics: { 'cpu.pct': 0.2, 'io.read_bps': 84e6 } },
+      { name: 'chatty', state: 'running', health: 'healthy', metrics: { 'cpu.pct': 0.1, 'net.rx_bps': 30e6 } },
+      { name: 'transcoder', state: 'running', health: 'healthy', metrics: { 'gpu.video.busy_pct': 47 } },
+      { name: 'cramped', state: 'running', health: 'healthy', metrics: { 'mem.limit_pct': 92 } },
+    ]);
+    expect(body).toContain('aria-label="seeder: running, disk IO 84.0 MB/s"');
+    expect(body).toContain('aria-label="chatty: running, network 30.0 MB/s"');
+    expect(body).toContain('aria-label="transcoder: running, GPU 47.0%"');
+    expect(body).toContain('aria-label="cramped: running, memory 92.0% of limit"');
+    expect(body).toContain('4 active now');
+    expect(body.match(/fleet-unit--active/g)).toHaveLength(4);
+  });
+
+  it('never glows a stopped container, whatever its last samples said', () => {
+    const body = renderStrip([{ name: 'gone', state: 'exited', health: '', metrics: { 'cpu.pct': 40, 'io.read_bps': 9e8 } }]);
+    expect(body).not.toContain('fleet-unit--active');
+    expect(body).not.toContain('active now');
+    expect(body).toContain('aria-label="gone: exited"');
+  });
+
+  it('uses the host memory total for a container with no limit of its own', () => {
+    const body = renderStrip([{ name: 'hog', state: 'running', health: 'healthy', metrics: { 'mem.bytes': 15e9 } }], 16e9);
+    expect(body).toContain('aria-label="hog: running, memory 93.8% of host"');
+  });
+
   it('renders an empty fleet as an empty (but labeled) list, not an error', () => {
     const body = renderStrip([]);
     expect(body).toContain('aria-label="Container fleet, 0 total"');
-    expect(body).toContain('aria-label="Running containers, 0"');
     expect(body).not.toContain('fleet-unit');
   });
 });

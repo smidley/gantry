@@ -8,6 +8,23 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.6] - 2026-09-01
+
+Test-suite reliability only -- nothing about the shipped app changes.
+
+### Fixed
+
+- **The Playwright suite no longer flakes under full-suite parallel
+  load.** Two one-shot reads were hardened: the metrics-gpu-sum spec
+  re-requests its captured `/api/series` body through Playwright's own
+  HTTP client instead of trusting Chromium's best-effort CDP body cache
+  (the same eviction mode #46 hardened the live-seed specs against in
+  0.1.5), and the CPU core-budget ribbon spec retries its width
+  measurement via `toPass` instead of sampling once mid-glide, where a
+  re-ranked segment lands at full width while its neighbors are still
+  easing toward their new sizes. Both still fail hard on a real
+  regression.
+
 ## [0.1.5] - 2026-09-01
 
 ### Fixed

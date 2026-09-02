@@ -85,6 +85,42 @@
   modules band and GPU strip up the page by roughly the dead column's
   height. With callouts present the attention layout above stays
   exactly as it was.
+
+  Customize pass (the ask: let a user rearrange the Overview): the
+  modules band -- and ONLY the modules band -- became rearrangeable. Its
+  cards are no longer written out in a fixed order; each is one entry in
+  a keyed {#each} over lib/overviewLayout.ts's ordered id lists, which
+  are persisted server-side (GET/PUT /api/layout/overview, the
+  /api/groups whole-document precedent) so an arrangement follows the
+  owner across browsers rather than living in one browser's localStorage
+  the way topResource/theme/motion do.
+
+  What is deliberately NOT rearrangeable: the status band (headline,
+  attention callouts, fleet strip, bay schematic) and the all-clear band
+  above it, plus the GPU strip below. The "needs you" surface must not be
+  buryable -- a layout gesture that can hide the reason you opened the
+  page is a bug with a UI, not a feature.
+
+  Two rules the rest of this file leans on:
+
+  1. KEYED, POSITION-ONLY MOTION. Modules are keyed by module id and
+     animate with `animate:flip` alone. There are deliberately no
+     in:/out: transitions on the module list: an interrupted outro
+     strands DOM nodes, and these particular nodes own live uPlot
+     canvases (the rail's four sparklines, TopBarList's own rows). A
+     keyed move RELOCATES the existing element rather than destroying
+     and recreating it, so those charts keep streaming straight through
+     a reorder -- which is the whole reason the drag is hand-rolled
+     against Svelte's own keyed each instead of handed to a library that
+     wants to own the DOM.
+
+  2. VISIBILITY, NOT POSITION, drives the adaptive expansion. The
+     all-clear band already grew the fleet strip to full width whenever
+     the bay schematic had nothing to draw; the modules band now follows
+     the same principle -- a lane with no visible modules is not
+     rendered at all in normal mode, so the surviving lane takes the
+     whole band. Nothing anywhere keys off "the rail is the second
+     column" or "events sits under Top Consumers".
 -->
 <script>
   import { onMount, untrack } from 'svelte';
@@ -113,6 +149,9 @@
   import { acks } from '../lib/acks.svelte';
   import { calloutTextBySlot, deriveOverviewStatus, worstSeverity } from '../lib/overviewStatus';
   import { band } from '../lib/thresholds';
+  import { isDefaultOverviewLayout, overviewModuleLabel } from '../lib/overviewLayout';
+  import { overviewLayout } from '../lib/overviewLayout.svelte';
+  import { dropTargetAt } from '../lib/dragReorder';
 
   import CalloutRow from '../components/CalloutRow.svelte';
   import StatTile from '../components/StatTile.svelte';
@@ -487,6 +526,207 @@
       window.removeEventListener('focus', loadEvents);
     };
   });
+
+  // --- Customize: the modules band's own edit mode ------------------------
+
+  // DRAG_MOTION_MS: the flip duration for a committed move -- the same
+  // register as FEED_MOTION_MS above, long enough to read as a move and
+  // short enough not to sit between the user and their next gesture. 0
+  // under the app's own Animations setting / OS reduced motion, like
+  // every other animated surface here (motion.svelte.ts).
+  const DRAG_MOTION_MS = 200;
+  // CUSTOMIZE_MEDIA is the same 48rem desktop/mobile split every other
+  // breakpoint in this view uses. Editing is desktop-only for v1: a
+  // two-lane pointer drag has no good touch story yet, and inventing one
+  // badly is worse than not offering it. The SAVED arrangement still
+  // applies on mobile -- the lanes just stack, wide then narrow, each in
+  // its saved order (the band's own flex-direction rule below).
+  const CUSTOMIZE_MEDIA = '(min-width: 48rem)';
+
+  let editing = $state(false);
+  // canCustomize starts true so a server-rendered/first paint doesn't
+  // flash the affordance in and out; onMount replaces it with the real
+  // match immediately.
+  let canCustomize = $state(true);
+
+  let layoutDoc = $derived(overviewLayout.doc);
+  let wideIds = $derived(layoutDoc.wide);
+  let narrowIds = $derived(layoutDoc.narrow);
+  let hiddenIds = $derived(layoutDoc.hidden);
+  let layoutIsDefault = $derived(isDefaultOverviewLayout(layoutDoc));
+  let dragMotionMs = $derived(motion.reduced ? 0 : DRAG_MOTION_MS);
+
+  // Rule 2 in the top-of-file doc: an empty lane isn't a lane. In edit
+  // mode both always render (an emptied lane still has to be a drop
+  // target, or the last module dragged out of it could never go back);
+  // in normal mode the empty one is simply absent, and the survivor --
+  // the only flex child left -- takes the whole band on its own.
+  let showWideLane = $derived(editing || wideIds.length > 0);
+  let showNarrowLane = $derived(editing || narrowIds.length > 0);
+
+  onMount(() => {
+    overviewLayout.ensureLoaded();
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia(CUSTOMIZE_MEDIA);
+    canCustomize = mq.matches;
+    const onChange = (e) => {
+      canCustomize = e.matches;
+      // A window narrowed mid-edit would otherwise strand the page in
+      // edit mode: the Done button hides behind the same media query
+      // that hid Customize, leaving dashed outlines and no way out.
+      if (!e.matches) exitEditing();
+    };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  });
+
+  function toggleEditing() {
+    if (editing) exitEditing();
+    else editing = true;
+  }
+
+  // exitEditing only leaves edit mode -- there is no unsaved state to
+  // commit or discard. Every gesture (drop, hide, show, reset) already
+  // persisted itself through the store's own debounced PUT.
+  function exitEditing() {
+    endDrag();
+    editing = false;
+  }
+
+  // --- Drag ---------------------------------------------------------------
+  //
+  // Hand-rolled on pointer events, no dependency: two vertical lists of
+  // card-height targets is a midpoint comparison (lib/dragReorder.ts) and
+  // a pointer capture. The pure geometry lives in that module; what's
+  // here is the plumbing around it.
+  //
+  // dragId/dragDelta/dropTarget are reactive -- they drive the lifted
+  // card's transform and the drop indicator. Everything below them is a
+  // plain snapshot the template never reads, so it deliberately isn't
+  // $state.
+  let dragId = $state(null);
+  let dragDelta = $state({ x: 0, y: 0 });
+  let dropTarget = $state(null);
+
+  let lanesEl;
+  let dragGeometry = [];
+  let dragOrigin = null;
+  let dragScrollY = 0;
+  let dragPointerId = null;
+  let dragHandle = null;
+
+  // captureGeometry snapshots both lanes and the vertical midpoint of
+  // every card EXCEPT the one being dragged, once, at pointerdown --
+  // deliberately never re-measured mid-drag. Nothing in the band
+  // actually reflows during a drag (the lifted card moves by transform
+  // and stays in flow; the drop indicator is absolutely positioned), so
+  // a frozen snapshot is exactly as true as a live measurement would be,
+  // while removing any chance of the indicator's own arrival shifting
+  // the very targets it was computed from.
+  //
+  // Excluding the dragged card is what makes dropTargetAt's index
+  // directly usable as a splice position -- see moveOverviewModule's own
+  // doc. slotTops are LANE-LOCAL (the indicator is positioned inside the
+  // lane) and there is always one more of them than there are midpoints:
+  // above the first card, one per gap, and below the last.
+  function captureGeometry(draggedId) {
+    const columns = [];
+    if (!lanesEl) return columns;
+    for (const lane of lanesEl.querySelectorAll('[data-lane]')) {
+      const laneRect = lane.getBoundingClientRect();
+      const cards = [...lane.querySelectorAll(':scope > .overview__module')]
+        .filter((el) => el.dataset.module !== draggedId)
+        .map((el) => el.getBoundingClientRect());
+      const slotTops = [cards.length > 0 ? cards[0].top - laneRect.top : 0];
+      for (let i = 1; i < cards.length; i++) {
+        slotTops.push((cards[i - 1].bottom + cards[i].top) / 2 - laneRect.top);
+      }
+      if (cards.length > 0) slotTops.push(cards[cards.length - 1].bottom - laneRect.top);
+      columns.push({
+        column: lane.dataset.lane,
+        left: laneRect.left,
+        right: laneRect.right,
+        midpoints: cards.map((r) => r.top + r.height / 2),
+        slotTops,
+      });
+    }
+    return columns;
+  }
+
+  let dropIndicatorTop = $derived.by(() => {
+    if (!dropTarget) return 0;
+    const col = dragGeometry.find((c) => c.column === dropTarget.column);
+    if (!col || col.slotTops.length === 0) return 0;
+    return col.slotTops[Math.min(dropTarget.index, col.slotTops.length - 1)];
+  });
+
+  function startDrag(event, id) {
+    // Primary contact only: a right- or middle-click on the handle is
+    // not a drag. (Touch and pen both report button 0.)
+    if (!editing || dragId !== null || event.button !== 0) return;
+    event.preventDefault(); // no text selection, no native image drag
+    dragGeometry = captureGeometry(id);
+    dragOrigin = { x: event.clientX, y: event.clientY };
+    dragScrollY = window.scrollY;
+    dragPointerId = event.pointerId;
+    dragHandle = event.currentTarget;
+    dragHandle.setPointerCapture(event.pointerId);
+    dragDelta = { x: 0, y: 0 };
+    dropTarget = null;
+    dragId = id;
+  }
+
+  function dragMove(event) {
+    if (dragId === null || event.pointerId !== dragPointerId) return;
+    // The page can scroll under a held pointer. clientY is
+    // viewport-relative and the captured geometry is frozen in the
+    // viewport coordinates of pointerdown, so every comparison happens
+    // in THAT frame: add back however far the page has scrolled since.
+    const scrolled = window.scrollY - dragScrollY;
+    dragDelta = { x: event.clientX - dragOrigin.x, y: event.clientY - dragOrigin.y + scrolled };
+    dropTarget = dropTargetAt(event.clientX, event.clientY + scrolled, dragGeometry);
+  }
+
+  function dragUp(event) {
+    if (dragId === null || event.pointerId !== dragPointerId) return;
+    const id = dragId;
+    const target = dropTarget;
+    // Clear the gesture BEFORE committing, in the same synchronous
+    // block: both are state changes in one flush, so animate:flip
+    // measures the card where the user actually released it (transform
+    // still applied on the old render) and glides it into its new slot
+    // instead of jumping there.
+    endDrag();
+    if (target) overviewLayout.move(id, target.column, target.index);
+  }
+
+  // endDrag clears the gesture without committing -- the shared path for
+  // a cancelled pointer, an Escape, leaving edit mode, and (once it has
+  // read what it needs) a successful drop.
+  function endDrag() {
+    if (dragHandle && dragPointerId !== null && dragHandle.hasPointerCapture?.(dragPointerId)) {
+      dragHandle.releasePointerCapture(dragPointerId);
+    }
+    dragId = null;
+    dropTarget = null;
+    dragDelta = { x: 0, y: 0 };
+    dragGeometry = [];
+    dragOrigin = null;
+    dragPointerId = null;
+    dragHandle = null;
+  }
+
+  // Escape cancels an in-flight drag, the universal "never mind" for a
+  // gesture already under way. Bound only while one is actually running
+  // so the page has no stray global key handler the rest of the time.
+  $effect(() => {
+    if (dragId === null) return;
+    const onKeydown = (e) => {
+      if (e.key === 'Escape') endDrag();
+    };
+    window.addEventListener('keydown', onKeydown);
+    return () => window.removeEventListener('keydown', onKeydown);
+  });
 </script>
 
 <!-- statusVisuals: the fleet strip + bay schematic pair, rendered in
@@ -507,6 +747,188 @@
         summary={closingLine}
         stateLine={arrayStateSentence}
         warmestLine={hottestSentence}
+      />
+    </div>
+  {/if}
+{/snippet}
+
+<!-- eyeIcon: the hide/show toggle's own glyph, drawn rather than
+  imported (this app ships no icon set) -- open for "this is visible,
+  click to hide", struck through for "hidden, click to bring it back". -->
+{#snippet eyeIcon(struck)}
+  <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+    <path d="M1.5 10S4.6 4.5 10 4.5 18.5 10 18.5 10 15.4 15.5 10 15.5 1.5 10 1.5 10Z" />
+    <circle cx="10" cy="10" r="2.6" />
+    {#if struck}<path d="M3 17 17 3" />{/if}
+  </svg>
+{/snippet}
+
+<!-- moduleLane renders one of the modules band's two lanes from its own
+  ordered id list.
+
+  The {#each} is keyed by module id and carries animate:flip and NOTHING
+  else -- no in:/out: (see rule 1 in the top-of-file doc). Its body is a
+  single element, which animate: requires and which the drop indicator
+  below therefore sits OUTSIDE the each block to respect.
+
+  The indicator is absolutely positioned rather than being a real
+  placeholder element spliced into the list: a spliced-in gap reflows
+  every card below it mid-drag, which moves the very targets the pointer
+  is being compared against. This draws the same information -- here is
+  the slot you are about to land in -- with the band's geometry
+  completely still. -->
+{#snippet moduleLane(column, ids)}
+  <div class="overview__modules-lane overview__modules-{column}" data-lane={column}>
+    {#each ids as id (id)}
+      <div
+        class="overview__module"
+        class:overview__module--editing={editing}
+        class:overview__module--dragging={dragId === id}
+        data-module={id}
+        style={dragId === id ? `transform: translate3d(${dragDelta.x}px, ${dragDelta.y}px, 0)` : ''}
+        animate:flip={{ duration: editing ? dragMotionMs : 0 }}
+      >
+        {#if editing}
+          <div class="overview__module-tools">
+            <button
+              type="button"
+              class="overview__module-btn overview__module-grip"
+              aria-label={`Move ${overviewModuleLabel(id)}`}
+              onpointerdown={(e) => startDrag(e, id)}
+              onpointermove={dragMove}
+              onpointerup={dragUp}
+              onpointercancel={endDrag}
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+                <circle cx="6" cy="3" r="1.4" /><circle cx="10" cy="3" r="1.4" />
+                <circle cx="6" cy="8" r="1.4" /><circle cx="10" cy="8" r="1.4" />
+                <circle cx="6" cy="13" r="1.4" /><circle cx="10" cy="13" r="1.4" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              class="overview__module-btn"
+              aria-label={`Hide ${overviewModuleLabel(id)}`}
+              onclick={() => overviewLayout.hide(id)}
+            >
+              {@render eyeIcon(false)}
+            </button>
+          </div>
+        {/if}
+        {@render moduleCard(id)}
+      </div>
+    {/each}
+
+    {#if editing && ids.length === 0}
+      <p class="microlabel overview__lane-empty">Empty lane &mdash; drop a module here</p>
+    {/if}
+    {#if dragId !== null && dropTarget?.column === column}
+      <div class="overview__drop-indicator" style={`top:${dropIndicatorTop}px`} aria-hidden="true"></div>
+    {/if}
+  </div>
+{/snippet}
+
+<!-- moduleCard is the one place each rearrangeable module's actual
+  content lives. Everything a module reads is ordinary component scope,
+  so moving a card between lanes changes nothing about what it renders --
+  only where. -->
+{#snippet moduleCard(id)}
+  {#if id === 'top-consumers'}
+    <div class="card overview__top">
+      <div class="overview__top-head">
+        <span class="microlabel">Top consumers</span>
+        <a href={`#/top/${topResource}`} class="overview__top-link">View all &rarr;</a>
+      </div>
+      <div class="overview__top-switcher" role="tablist" aria-label="Top consumers metric">
+        {#each TOP_RESOURCES as r (r.key)}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={topResource === r.key}
+            class="overview__top-switch"
+            class:overview__top-switch--active={topResource === r.key}
+            onclick={() => selectTopResource(r.key)}
+          >
+            {r.shortLabel}
+          </button>
+        {/each}
+      </div>
+      {#if topScaleCeilingLabel}
+        <p class="microlabel overview__top-scale">{topScaleCeilingLabel}</p>
+      {/if}
+      <TopBarList
+        rows={topRows}
+        formatValue={TOP_FORMATTERS[topResource]}
+        formatSecondary={TOP_SECONDARY_FORMATTERS[topResource]}
+        live={true}
+        scaleMax={topScaleMax}
+        metricKey={topResource}
+      />
+    </div>
+  {:else if id === 'events'}
+    <div class="card overview__events">
+      <span class="microlabel">Recent events</span>
+      {#if eventsSeedPending}
+        <!-- first loadEvents() call hasn't settled yet -- see eventsSeedPending's own doc -->
+      {:else if events.length === 0}
+        <p class="microlabel overview__events-empty">No events yet.</p>
+      {:else}
+        <div class="overview__events-list">
+          {#each events as event (event.ID)}
+            <div
+              animate:flip={{ duration: feedMotionMs }}
+              in:fly={{ y: -12, duration: feedMotionMs }}
+              out:fade={{ duration: feedMotionMs }}
+            >
+              <EventFeedItem {event} />
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {:else if id === 'metrics-rail'}
+    <div class="card overview__metrics-rail">
+      <StatTile
+        bare
+        href="#/top/cpu"
+        label="CPU"
+        liveValue={host['cpu.total'] ?? 0}
+        formatValue={fmtPct}
+        sparklinePoints={cpuRing.points}
+        bandFor={(v) => band('host.cpu', v)}
+      />
+      <StatTile
+        bare
+        href="#/top/mem"
+        label="Memory"
+        liveValue={host['mem.used_pct'] ?? 0}
+        formatValue={fmtPct}
+        sparklinePoints={memRing.points}
+        bandFor={(v) => band('host.mem', v)}
+      />
+      <StatTile
+        bare
+        href="#/top/net"
+        label="Network"
+        liveValue={netRx}
+        formatValue={(v) => `↓ ${fmtRate(v)}`}
+        sparklinePoints={netRxRing.points}
+        liveValue2={netTx}
+        value2Points={netTxRing.points}
+        formatValue2={fmtRate}
+        label2="↑"
+      />
+      <StatTile
+        bare
+        href="#/top/io"
+        label="Disk IO"
+        liveValue={ioRead}
+        formatValue={(v) => `r ${fmtRate(v)}`}
+        sparklinePoints={ioReadRing.points}
+        liveValue2={ioWrite}
+        value2Points={ioWriteRing.points}
+        formatValue2={fmtRate}
+        label2="w"
       />
     </div>
   {/if}
@@ -549,108 +971,65 @@
     </div>
   {/if}
 
-  <div class="overview__modules-band">
-    <div class="overview__modules-wide">
-      <div class="card overview__top">
-        <div class="overview__top-head">
-          <span class="microlabel">Top consumers</span>
-          <a href={`#/top/${topResource}`} class="overview__top-link">View all &rarr;</a>
-        </div>
-        <div class="overview__top-switcher" role="tablist" aria-label="Top consumers metric">
-          {#each TOP_RESOURCES as r (r.key)}
-            <button
-              type="button"
-              role="tab"
-              aria-selected={topResource === r.key}
-              class="overview__top-switch"
-              class:overview__top-switch--active={topResource === r.key}
-              onclick={() => selectTopResource(r.key)}
-            >
-              {r.shortLabel}
-            </button>
-          {/each}
-        </div>
-        {#if topScaleCeilingLabel}
-          <p class="microlabel overview__top-scale">{topScaleCeilingLabel}</p>
+  <div class="overview__modules-band" class:overview__modules-band--editing={editing}>
+    {#if canCustomize}
+      <div class="overview__modules-bar">
+        {#if editing}
+          <span class="microlabel overview__customize-hint">Drag a handle to move a module · the eye hides one</span>
+          <button
+            type="button"
+            class="overview__customize-btn"
+            disabled={layoutIsDefault}
+            onclick={() => overviewLayout.reset()}
+          >
+            Reset layout
+          </button>
         {/if}
-        <TopBarList
-          rows={topRows}
-          formatValue={TOP_FORMATTERS[topResource]}
-          formatSecondary={TOP_SECONDARY_FORMATTERS[topResource]}
-          live={true}
-          scaleMax={topScaleMax}
-          metricKey={topResource}
-        />
+        <button
+          type="button"
+          class="overview__customize-btn"
+          class:overview__customize-btn--active={editing}
+          aria-pressed={editing}
+          onclick={toggleEditing}
+        >
+          {editing ? 'Done' : 'Customize'}
+        </button>
       </div>
+    {/if}
 
-      <div class="card overview__events">
-        <span class="microlabel">Recent events</span>
-        {#if eventsSeedPending}
-          <!-- first loadEvents() call hasn't settled yet -- see eventsSeedPending's own doc -->
-        {:else if events.length === 0}
-          <p class="microlabel overview__events-empty">No events yet.</p>
+    <div class="overview__modules-lanes" bind:this={lanesEl}>
+      {#if showWideLane}
+        {@render moduleLane('wide', wideIds)}
+      {/if}
+      {#if showNarrowLane}
+        {@render moduleLane('narrow', narrowIds)}
+      {/if}
+    </div>
+
+    {#if editing}
+      <div class="overview__hidden-tray">
+        <span class="microlabel">Hidden</span>
+        {#if hiddenIds.length === 0}
+          <p class="microlabel overview__hidden-empty">Nothing hidden.</p>
         {:else}
-          <div class="overview__events-list">
-            {#each events as event (event.ID)}
-              <div
-                animate:flip={{ duration: feedMotionMs }}
-                in:fly={{ y: -12, duration: feedMotionMs }}
-                out:fade={{ duration: feedMotionMs }}
-              >
-                <EventFeedItem {event} />
+          <div class="overview__hidden-list">
+            {#each hiddenIds as id (id)}
+              <div class="overview__ghost" data-hidden-module={id}>
+                <span class="overview__ghost-name">{overviewModuleLabel(id)}</span>
+                <button
+                  type="button"
+                  class="overview__module-btn"
+                  aria-label={`Show ${overviewModuleLabel(id)}`}
+                  onclick={() => overviewLayout.show(id)}
+                >
+                  {@render eyeIcon(true)}
+                </button>
               </div>
             {/each}
           </div>
         {/if}
       </div>
-    </div>
-
-    <div class="overview__modules-narrow">
-      <div class="card overview__metrics-rail">
-        <StatTile
-          bare
-          href="#/top/cpu"
-          label="CPU"
-          liveValue={host['cpu.total'] ?? 0}
-          formatValue={fmtPct}
-          sparklinePoints={cpuRing.points}
-          bandFor={(v) => band('host.cpu', v)}
-        />
-        <StatTile
-          bare
-          href="#/top/mem"
-          label="Memory"
-          liveValue={host['mem.used_pct'] ?? 0}
-          formatValue={fmtPct}
-          sparklinePoints={memRing.points}
-          bandFor={(v) => band('host.mem', v)}
-        />
-        <StatTile
-          bare
-          href="#/top/net"
-          label="Network"
-          liveValue={netRx}
-          formatValue={(v) => `↓ ${fmtRate(v)}`}
-          sparklinePoints={netRxRing.points}
-          liveValue2={netTx}
-          value2Points={netTxRing.points}
-          formatValue2={fmtRate}
-          label2="↑"
-        />
-        <StatTile
-          bare
-          href="#/top/io"
-          label="Disk IO"
-          liveValue={ioRead}
-          formatValue={(v) => `r ${fmtRate(v)}`}
-          sparklinePoints={ioReadRing.points}
-          liveValue2={ioWrite}
-          value2Points={ioWriteRing.points}
-          formatValue2={fmtRate}
-          label2="w"
-        />
-      </div>
-    </div>
+    {/if}
   </div>
 
   <GPUStrip gpu={live.frame?.gpu ?? {}} gpuMeta={live.frame?.gpu_meta ?? {}} />
@@ -673,29 +1052,244 @@
      the other's height): modules-wide (Top Consumers + Events, ~490px
      combined) and modules-narrow (the rail, ~660px, four fixed-height
      sparklines) are never going to match, and don't need to. -------- */
+  /* The band itself is now a vertical stack -- the Customize bar, the
+     lanes row, and (in edit mode) the hidden tray -- so the two-column
+     split moved down one level onto __modules-lanes, which is otherwise
+     the exact flex row the band used to be. */
   .overview__modules-band {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+  .overview__modules-lanes {
     display: flex;
     align-items: flex-start;
     gap: 1rem;
   }
-  .overview__modules-wide {
+  .overview__modules-lane {
+    position: relative; /* the drop indicator is absolutely placed in here */
     display: flex;
     flex-direction: column;
     gap: 1rem;
-    flex: 1.6 1 0;
     min-width: 0;
   }
+  .overview__modules-wide {
+    flex: 1.6 1 0;
+  }
   .overview__modules-narrow {
+    flex: 1 1 0;
+  }
+  /* One module per lane row: the wrapper carries the edit-mode chrome
+     and the drag transform, and stretches so the card inside keeps the
+     full lane width it had when it was the lane's direct child. */
+  .overview__module {
+    position: relative;
     display: flex;
     flex-direction: column;
-    flex: 1 1 0;
     min-width: 0;
   }
   @media (max-width: 47.9375rem) {
-    .overview__modules-band {
+    .overview__modules-lanes {
       flex-direction: column;
       gap: 1.5rem;
     }
+    /* Mobile stacks the lanes, so the saved arrangement still applies
+       here -- wide lane first, then narrow, each in its own saved order.
+       Only EDITING is desktop-only (see CUSTOMIZE_MEDIA). */
+    .overview__modules-lane {
+      width: 100%;
+      flex: none;
+    }
+  }
+
+  /* --- Customize bar: quiet by default, in the same mono/uppercase
+     register as the Top Consumers switcher right below it, and pushed
+     to the band's top-right corner where it stays out of the way until
+     it's wanted. ------------------------------------------------- */
+  .overview__modules-bar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    min-height: 26px;
+  }
+  .overview__customize-hint {
+    margin-right: auto;
+    text-transform: none;
+    letter-spacing: 0.01em;
+  }
+  .overview__customize-btn {
+    min-height: 26px;
+    padding: 0 0.6rem;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-2);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+  }
+  .overview__customize-btn:hover:not(:disabled) {
+    border-color: var(--border);
+    color: var(--ink);
+  }
+  .overview__customize-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .overview__customize-btn--active {
+    border-color: color-mix(in oklab, var(--accent) 45%, var(--border));
+    background: var(--surface-soft);
+    color: var(--accent-strong);
+    font-weight: 600;
+  }
+
+  /* --- Edit mode: enough decoration to say "these move", not enough to
+     restyle the page. The dashed ring is drawn OUTSIDE each card
+     (outline, not border) so no module changes size on entering edit
+     mode and nothing below it shifts. ---------------------------- */
+  .overview__modules-band--editing {
+    user-select: none;
+  }
+  .overview__module--editing {
+    outline: 1px dashed color-mix(in oklab, var(--accent) 42%, transparent);
+    outline-offset: 3px;
+    border-radius: 14px;
+  }
+  .overview__module--dragging {
+    position: relative;
+    z-index: 5;
+    opacity: 0.9;
+    outline-color: var(--accent);
+    filter: drop-shadow(0 10px 22px color-mix(in oklab, var(--ink) 26%, transparent));
+    cursor: grabbing;
+  }
+  /* Only the CARD goes inert while lifted -- no stray hover states or
+     accidental "View all" clicks under a dragging pointer. The tools bar
+     above it deliberately stays live: the grip is the pointer-capture
+     target, and taking its events away mid-gesture would cut the drag
+     off at the knees. */
+  .overview__module--dragging .card {
+    pointer-events: none;
+  }
+
+  /* The tools STRADDLE each card's top edge rather than sitting inside
+     its top-right corner, because every card in this band already uses
+     that corner for something live: Top Consumers' "View all" link, and
+     -- the one that forced this -- the rail's first tile, whose CPU
+     percentage a toolbar parked there covers outright. Floating them
+     into the gap above costs only that gap getting a little taller in
+     edit mode (the two rules below), and covers nothing at all. */
+  .overview__modules-band--editing {
+    gap: 1.5rem;
+  }
+  .overview__modules-band--editing .overview__modules-lane {
+    gap: 1.6rem;
+  }
+  .overview__module-tools {
+    position: absolute;
+    top: -14px;
+    right: 10px;
+    z-index: 2;
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-sm);
+  }
+  .overview__module-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+  .overview__module-btn:hover {
+    background: var(--surface-soft);
+    color: var(--ink);
+  }
+  .overview__module-grip {
+    cursor: grab;
+    /* Without this a touch drag scrolls the page instead of moving the
+       card -- pointer capture alone doesn't stop the browser's own
+       panning gesture. */
+    touch-action: none;
+  }
+  .overview__module-grip:active {
+    cursor: grabbing;
+  }
+
+  /* The drop indicator: a slot-shaped marker in the gap the card would
+     land in. Centred on its boundary, so it reads as "between these
+     two" rather than "on top of this one". */
+  .overview__drop-indicator {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 3.1rem;
+    transform: translateY(-50%);
+    border: 1px dashed var(--accent);
+    border-radius: 12px;
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+    pointer-events: none;
+  }
+  .overview__lane-empty {
+    margin: 0;
+    padding: 1.6rem 1rem;
+    border: 1px dashed var(--border);
+    border-radius: 12px;
+    text-align: center;
+    text-transform: none;
+    letter-spacing: 0.01em;
+  }
+
+  /* --- Hidden tray: hidden modules keep no position (the saved
+     document lists an id in exactly one place), so their ghosts live
+     here rather than pretending to hold a slot they no longer have.
+     Bringing one back puts it at the end of its own default lane --
+     the same rule a module added by a future release gets. --------- */
+  .overview__hidden-tray {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+    padding: 0.6rem 0.85rem;
+    border: 1px dashed var(--border);
+    border-radius: 12px;
+    background: var(--surface-muted);
+  }
+  .overview__hidden-empty,
+  .overview__hidden-list {
+    margin: 0;
+  }
+  .overview__hidden-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .overview__ghost {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0.3rem 0.2rem 0.65rem;
+    border: 1px dashed color-mix(in oklab, var(--ink-2) 45%, transparent);
+    border-radius: 9px;
+    background: color-mix(in oklab, var(--surface) 60%, transparent);
+    color: var(--ink-2);
+  }
+  .overview__ghost-name {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
   }
 
   .overview__headline-zone {

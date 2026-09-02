@@ -104,6 +104,18 @@ type Options struct {
 	// answers 404, same as Settings' own PUT.
 	Groups GroupsIface
 
+	// Layout backs GET/PUT /api/layout/overview -- the Overview's own
+	// "Customize" edit mode, persisted server-side so an arrangement
+	// follows the owner across browsers (main wiring points this at a
+	// small adapter over *store.Store, JSON-blob-encoded into the same
+	// generic settings table Settings and Groups already share — see
+	// api_layout.go). Nil in tests that don't wire one: GET then reports
+	// the DEFAULT layout (a meaningful "empty" here, exactly as a
+	// never-written store would), and PUT — no meaningful no-op success
+	// for a write with nowhere to write to — answers 404, same as
+	// Groups' own PUT.
+	Layout LayoutIface
+
 	// Images lists every image plus a usage-classification summary for
 	// GET /api/images (main wiring: a small adapter over
 	// docker.Collector.Images in real mode, fake.Generator.Images in
@@ -269,6 +281,8 @@ func New(o Options) *Server {
 	s.mux.Handle("PUT /api/settings", withGzip(http.HandlerFunc(s.handleSettingsPut)))
 	s.mux.Handle("GET /api/groups", withGzip(http.HandlerFunc(s.handleGroupsGet)))
 	s.mux.Handle("PUT /api/groups", withGzip(http.HandlerFunc(s.handleGroupsPut)))
+	s.mux.Handle("GET /api/layout/overview", withGzip(http.HandlerFunc(s.handleOverviewLayoutGet)))
+	s.mux.Handle("PUT /api/layout/overview", withGzip(http.HandlerFunc(s.handleOverviewLayoutPut)))
 	s.mux.Handle("GET /api/images", withGzip(http.HandlerFunc(s.handleImagesList)))
 	s.mux.Handle("POST /api/images/remove", withGzip(http.HandlerFunc(s.handleImagesRemove)))
 	s.mux.Handle("POST /api/images/prune", withGzip(http.HandlerFunc(s.handleImagesPrune)))

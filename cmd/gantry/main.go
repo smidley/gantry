@@ -500,6 +500,7 @@ func run(ctx context.Context, getenv func(string) string, ver string) error {
 		Storage:    buildContainerStorage(dc, ur, st, fakeMetas, fakeDiskMeta, fakeDeviceLabels, fakeSharePlacement, sysRoot),
 		Settings:   settingsAdapter{st: st, cfg: cfg},
 		Groups:     groupsAdapter{st: st},
+		Layout:     layoutAdapter{st: st},
 
 		Images:       buildImages(imagesSrc),
 		RemoveImages: buildRemoveImages(removeImagesSrc),
@@ -1673,6 +1674,48 @@ func (a groupsAdapter) Set(groups []server.Group) error {
 		return err
 	}
 	return a.st.SettingSet(groupsSettingsKey, string(raw))
+}
+
+// overviewLayoutSettingsKey is the one settings-table row the saved
+// Overview arrangement lives under -- a single JSON-encoded document,
+// the same one-blob-one-key shape groupsSettingsKey above uses and for
+// the same reason (no env-override precedence to resolve per field).
+const overviewLayoutSettingsKey = "overview_layout"
+
+// layoutAdapter implements server.LayoutIface over *store.Store,
+// groupsAdapter's exact shape: straight SettingGet/SettingSet with no
+// *config.Config in between (a layout is plain user data, not a tunable
+// with an env var equivalent), and the JSON marshal/unmarshal kept here
+// in main so the server package stays store-shape-agnostic.
+//
+// A row that has never been written returns the ZERO document rather
+// than an error -- server.mergeOverviewLayout turns that into the
+// default layout, so "never customized" needs no separate signal.
+type layoutAdapter struct {
+	st *store.Store
+}
+
+func (a layoutAdapter) Get() (server.OverviewLayout, error) {
+	raw, ok, err := a.st.SettingGet(overviewLayoutSettingsKey)
+	if err != nil {
+		return server.OverviewLayout{}, err
+	}
+	if !ok {
+		return server.OverviewLayout{}, nil
+	}
+	var layout server.OverviewLayout
+	if err := json.Unmarshal([]byte(raw), &layout); err != nil {
+		return server.OverviewLayout{}, err
+	}
+	return layout, nil
+}
+
+func (a layoutAdapter) Set(layout server.OverviewLayout) error {
+	raw, err := json.Marshal(layout)
+	if err != nil {
+		return err
+	}
+	return a.st.SettingSet(overviewLayoutSettingsKey, string(raw))
 }
 
 // alertsAdapter implements server.AlertsIface (Task 8) over *store.Store

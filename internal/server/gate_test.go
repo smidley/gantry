@@ -46,6 +46,7 @@ var csrfMutatingRoutes = []struct {
 }{
 	{http.MethodPut, "/api/settings"},
 	{http.MethodPut, "/api/groups"},
+	{http.MethodPut, "/api/layout/overview"},
 	{http.MethodPost, "/api/images/remove"},
 	{http.MethodPost, "/api/images/prune"},
 	{http.MethodPost, "/api/containers/maintenance/remove"},
@@ -182,6 +183,8 @@ var gateMatrixRoutes = []struct {
 	{http.MethodPut, "/api/settings", false},
 	{http.MethodGet, "/api/groups", false},
 	{http.MethodPut, "/api/groups", false},
+	{http.MethodGet, "/api/layout/overview", false},
+	{http.MethodPut, "/api/layout/overview", false},
 	{http.MethodGet, "/api/images", false},
 	{http.MethodPost, "/api/images/remove", false},
 	{http.MethodPost, "/api/images/prune", false},

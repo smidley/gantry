@@ -676,6 +676,21 @@ export interface GroupsResponse {
   groups: Group[];
 }
 
+// OverviewLayoutDTO mirrors server.OverviewLayout -- the Overview's
+// saved module arrangement, one whole document: the two lanes' ordered
+// module-id lists plus the ids the owner switched off. Every id appears
+// at most once across all three lists. `version` is the document's own
+// schema number (see api_layout.go's overviewLayoutVersion); the SPA
+// echoes back whatever it was handed rather than hardcoding it at the
+// call site. lib/overviewLayout.ts owns every rule about the CONTENT of
+// these lists.
+export interface OverviewLayoutDTO {
+  version: number;
+  wide: string[];
+  narrow: string[];
+  hidden: string[];
+}
+
 export type TopResource = 'cpu' | 'mem' | 'net' | 'io' | 'gpu';
 export type TopWindow = 'now' | '1h' | '24h' | '7d';
 export type TopAgg = 'avg' | 'peak';
@@ -990,6 +1005,40 @@ export async function putGroups(groups: Group[]): Promise<GroupsResponse> {
   const body = (await res.json()) as GroupsResponse & { error?: string };
   if (!res.ok) {
     throw new Error(body.error ?? `PUT /api/groups: ${res.status} ${res.statusText}`);
+  }
+  return body;
+}
+
+// fetchOverviewLayout returns the layout the server has already MERGED
+// against the module set the running binary knows about (unknown ids
+// dropped, missing ones placed at their defaults -- see api_layout.go's
+// mergeOverviewLayout). The SPA merges again on receipt anyway, since
+// the two builds can differ across an upgrade where the browser holds a
+// cached bundle.
+export function fetchOverviewLayout(signal?: AbortSignal): Promise<OverviewLayoutDTO> {
+  return getJSON<OverviewLayoutDTO>('/api/layout/overview', signal);
+}
+
+// putOverviewLayout replaces the entire saved arrangement -- no
+// per-module move/hide route, matching LayoutIface.Set's own
+// whole-document-replace contract server-side, the putGroups convention
+// exactly. Throws a plain Error carrying the server's own message (e.g.
+// `unknown overview module "x"`) on a non-2xx; like groups, the server
+// attaches no per-field detail, so there is nothing extra to preserve.
+//
+// NOT read-only gated server-side, and no confirm header: a saved layout
+// is config-shaped preference data, the same posture /api/groups and
+// /api/settings take. The cross-site header every mutating call carries
+// (apiFetch) still applies.
+export async function putOverviewLayout(layout: OverviewLayoutDTO): Promise<OverviewLayoutDTO> {
+  const res = await apiFetch('/api/layout/overview', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(layout),
+  });
+  const body = (await res.json()) as OverviewLayoutDTO & { error?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `PUT /api/layout/overview: ${res.status} ${res.statusText}`);
   }
   return body;
 }

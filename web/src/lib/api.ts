@@ -678,17 +678,25 @@ export interface GroupsResponse {
 
 // OverviewLayoutDTO mirrors server.OverviewLayout -- the Overview's
 // saved module arrangement, one whole document: the two lanes' ordered
-// module-id lists plus the ids the owner switched off. Every id appears
-// at most once across all three lists. `version` is the document's own
-// schema number (see api_layout.go's overviewLayoutVersion); the SPA
-// echoes back whatever it was handed rather than hardcoding it at the
-// call site. lib/overviewLayout.ts owns every rule about the CONTENT of
-// these lists.
+// module-id lists, the ids the owner switched off, the wide lane's share
+// of the band's width, and each resized module's height step. Every id
+// appears at most once across the three lists. `version` is the
+// document's own schema number (see api_layout.go's
+// overviewLayoutVersion); the SPA echoes back whatever it was handed
+// rather than hardcoding it at the call site.
+//
+// `ratio` 0 and an absent `sizes` are exactly what a v1 document looks
+// like, and both are legal input -- the server migrates them to the
+// default split with every module at normal. `sizes` only ever carries
+// the NON-default steps, since normal is expressed by absence.
+// lib/overviewLayout.ts owns every rule about the CONTENT of all five.
 export interface OverviewLayoutDTO {
   version: number;
   wide: string[];
   narrow: string[];
   hidden: string[];
+  ratio: number;
+  sizes: Record<string, string>;
 }
 
 export type TopResource = 'cpu' | 'mem' | 'net' | 'io' | 'gpu';

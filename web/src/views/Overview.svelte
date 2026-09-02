@@ -101,6 +101,44 @@
   buryable -- a layout gesture that can hide the reason you opened the
   page is a bug with a UI, not a feature.
 
+  Constrained-resize pass (the follow-up ask: let a user size what they
+  rearranged): two controls, both deliberately CONSTRAINED rather than
+  freeform -- this is still a designed page with two lanes, not a canvas.
+
+  1. The COLUMN SPLIT. A hairline divider on the lanes' own boundary,
+     drawn only in edit mode, sets how the wide and narrow lanes share
+     the band. One saved number, clamped 0.60-0.75, defaulting to the
+     1.6:1 the band shipped with. Same hand-rolled pointer shape as the
+     module drag (capture, snapshot at pointerdown, Escape cancels), plus
+     arrow keys, because a drag-only control would have been this page's
+     first pointer-only affordance. The drag previews locally and commits
+     ONCE on release, so crossing the band costs one PUT, not sixty.
+     Mobile ignores the ratio outright -- stacked lanes have no split.
+
+  2. HEIGHT STEPS. compact/normal/tall on the two modules with a
+     genuinely elastic body: Top Consumers (3/5/8 leaderboard rows) and
+     Recent events (4/8/14 feed rows). A step is a ROW BUDGET, not a
+     pixel box -- both modules render a list at a fixed row pitch, so a
+     step lands on the page's existing rhythm by construction and `tall`
+     buys real content rather than padding. The rail gets no control at
+     all: four fixed label+value+sparkline tiles have no list to lengthen
+     and nothing that reads better taller, so a taller rail would be the
+     same four tiles with more air between them -- the dead space this
+     file's own layout passes have spent three rounds deleting.
+
+  Interplay with everything ADAPTIVE on this page (rule 2 below, and the
+  all-clear band reclaiming the status band's vertical space): a user-set
+  size WINS. A module left at 'normal' renders exactly the budget this
+  page shipped with and keeps its content-driven height -- it is the only
+  thing the surrounding layout can grow into; a module set to compact or
+  tall renders the owner's budget and no adaptive rule overrules it.
+  Every module at 'normal' -- the default document -- is today's page
+  exactly, in the all-clear state and out of it. The same priority holds
+  on the width side: a ratio only ever divides a band that HAS two lanes,
+  and a lone lane still spans the whole band (flex-basis 0 -- see
+  overviewLaneFlex), so hiding a lane's last module still expands the
+  survivor across the full width whatever ratio is saved.
+
   Two rules the rest of this file leans on:
 
   1. KEYED, POSITION-ONLY MOTION. Modules are keyed by module id and
@@ -149,7 +187,21 @@
   import { acks } from '../lib/acks.svelte';
   import { calloutTextBySlot, deriveOverviewStatus, worstSeverity } from '../lib/overviewStatus';
   import { band } from '../lib/thresholds';
-  import { isDefaultOverviewLayout, overviewModuleLabel } from '../lib/overviewLayout';
+  import {
+    OVERVIEW_RATIO_MAX,
+    OVERVIEW_RATIO_MIN,
+    OVERVIEW_SIZES,
+    isAdaptivelySized,
+    isDefaultOverviewLayout,
+    isResizableOverviewModule,
+    nudgeOverviewRatio,
+    overviewLaneFlex,
+    overviewModuleLabel,
+    overviewModuleMaxRows,
+    overviewModuleRows,
+    overviewModuleSize,
+    overviewRatioFromDrag,
+  } from '../lib/overviewLayout';
   import { overviewLayout } from '../lib/overviewLayout.svelte';
   import { dropTargetAt } from '../lib/dragReorder';
 
@@ -256,6 +308,33 @@
 
   let feedMotionMs = $derived(motion.reduced ? 0 : FEED_MOTION_MS);
 
+  // --- Saved layout ------------------------------------------------------
+  //
+  // The saved document drives three things that live far apart in this
+  // file: the modules band's arrangement (the Customize section near the
+  // bottom, where the rest of its deriveds are) and the two ROW BUDGETS
+  // just below, which the leaderboard and the events feed need long
+  // before that section is reached. It is read once, here, above its
+  // first use.
+  //
+  // A row budget IS the height step: every resizable module here renders
+  // a list at a fixed row pitch, so "compact/normal/tall" is 3/5/8 or
+  // 4/8/14 rows rather than a pixel box -- integer multiples of the
+  // page's existing rhythm, and a `tall` card that bought actual content
+  // (more of the leaderboard, more events to read) instead of padding.
+  // See OVERVIEW_MODULES' own doc for the numbers and why.
+  //
+  // The interplay with everything adaptive on this page (the all-clear
+  // band reclaiming the status band's vertical space, an emptied lane
+  // handing its width to the survivor): a user-set step WINS. A module
+  // left at 'normal' renders exactly the budget this page shipped with
+  // and keeps its content-driven height, which is what the surrounding
+  // layout is free to grow into; a module set to compact or tall renders
+  // the owner's budget and no adaptive rule overrules it. With nothing
+  // resized -- the default document -- every budget below resolves to
+  // today's number, so the band renders exactly as it always has.
+  let layoutDoc = $derived(overviewLayout.doc);
+
   let host = $derived(live.frame?.host ?? {});
   let netRx = $derived(sumMetricsByPattern(host, 'net', '.rx_bps'));
   let netTx = $derived(sumMetricsByPattern(host, 'net', '.tx_bps'));
@@ -287,21 +366,30 @@
   );
 
   // TOP_MODULE_LIMIT: this module's own top-N cut, per the D2 compact-
-  // module brief. ALL_PRESENT_LIMIT feeds topFromFrame instead -- rank
-  // stability (rankStability.ts) needs every present container's own
-  // instant value to compute a correct rolling average and to let a real
-  // challenger be seen climbing BEFORE it's already inside the naive
-  // top-5, not just TOP_MODULE_LIMIT's own cut re-applied one metric
-  // late; stableTopN does the actual top-N cut itself, after averaging.
+  // module brief -- now the 'normal' step's own budget rather than a
+  // fixed number (see topRowLimit below), and the fallback for a module
+  // the size table somehow can't answer for. ALL_PRESENT_LIMIT feeds
+  // topFromFrame instead -- rank stability (rankStability.ts) needs every
+  // present container's own instant value to compute a correct rolling
+  // average and to let a real challenger be seen climbing BEFORE it's
+  // already inside the naive top-5, not just TOP_MODULE_LIMIT's own cut
+  // re-applied one metric late; stableTopN does the actual top-N cut
+  // itself, after averaging.
   const TOP_MODULE_LIMIT = 5;
   const ALL_PRESENT_LIMIT = 500;
   const topRankState = createRankStabilityState();
+  // The cut is handed to stableTopN rather than applied to its result:
+  // the hysteresis and re-sort cadence that keep this leaderboard from
+  // flickering are defined AT a membership size, so they have to be told
+  // the real one. stableTopN obeys a shrinking limit on its very next
+  // call (see its own doc) so a step change reads as instant.
+  let topRowLimit = $derived(overviewModuleRows('top-consumers', overviewModuleSize(layoutDoc, 'top-consumers')) ?? TOP_MODULE_LIMIT);
   let topRows = $derived(
     stableTopN(
       topFromFrame(live.frame, topResource, ALL_PRESENT_LIMIT),
       topRankState,
       topResource,
-      TOP_MODULE_LIMIT,
+      topRowLimit,
       live.frame?.ts ?? 0,
     ),
   );
@@ -502,9 +590,18 @@
   // finding zero events is a real "No events yet.", not a pending state.
   let eventsSeedPending = $state(true);
 
+  // EVENTS_FETCH_LIMIT is the WIDEST step's budget, not the current
+  // one: the feed is fetched on a 30s poll and on focus, and a height
+  // step is a rendering choice, so switching one has to re-render out of
+  // what is already held rather than wait on a request. The cost is a
+  // handful of extra rows on a fetch that was already tiny.
+  const EVENTS_FETCH_LIMIT = overviewModuleMaxRows('events') ?? 8;
+  let eventsRowLimit = $derived(overviewModuleRows('events', overviewModuleSize(layoutDoc, 'events')) ?? 8);
+  let visibleEvents = $derived(events.slice(0, eventsRowLimit));
+
   async function loadEvents() {
     try {
-      events = await fetchEvents({ limit: 8 });
+      events = await fetchEvents({ limit: EVENTS_FETCH_LIMIT });
     } catch {
       // A transient fetch failure leaves the last-good feed showing
       // rather than blanking it -- the next poll or focus tries again.
@@ -543,13 +640,19 @@
   // its saved order (the band's own flex-direction rule below).
   const CUSTOMIZE_MEDIA = '(min-width: 48rem)';
 
+  // SIZE_GLYPHS: the height switcher's own labels. One letter each, in
+  // the same tiny mono/uppercase register as the Top Consumers switcher
+  // this control is modeled on -- the toolbar floats over the gap above
+  // a card and has no room for three spelled-out words, and every button
+  // carries the real word in its accessible name and its tooltip.
+  const SIZE_GLYPHS = { compact: 'S', normal: 'M', tall: 'L' };
+
   let editing = $state(false);
   // canCustomize starts true so a server-rendered/first paint doesn't
   // flash the affordance in and out; onMount replaces it with the real
   // match immediately.
   let canCustomize = $state(true);
 
-  let layoutDoc = $derived(overviewLayout.doc);
   let wideIds = $derived(layoutDoc.wide);
   let narrowIds = $derived(layoutDoc.narrow);
   let hiddenIds = $derived(layoutDoc.hidden);
@@ -563,6 +666,31 @@
   // the only flex child left -- takes the whole band on its own.
   let showWideLane = $derived(editing || wideIds.length > 0);
   let showNarrowLane = $derived(editing || narrowIds.length > 0);
+
+  // --- Column split -------------------------------------------------------
+  //
+  // ONE saved number: the wide lane's share of the two lanes' combined
+  // flex space. dividerRatio is the LIVE PREVIEW while a divider drag is
+  // in flight and null the rest of the time -- the drag never touches the
+  // store, so a drag across the whole band costs exactly one PUT (on
+  // release) rather than relying on the store's debounce to swallow
+  // sixty.
+  //
+  // laneFlex feeds two custom properties on the lanes row rather than a
+  // width per lane: `flex-basis: 0` plus a grow factor is what makes a
+  // LONE lane still take the whole band (the visibility-driven expansion,
+  // rule 2 in the top-of-file doc) without a special case -- see
+  // overviewLaneFlex's own doc. Mobile ignores both properties outright
+  // (the lanes stack, `flex: none`).
+  let dividerRatio = $state(null);
+  let laneRatio = $derived(dividerRatio ?? layoutDoc.ratio);
+  let laneFlex = $derived(overviewLaneFlex(laneRatio));
+  let laneRatioPct = $derived(Math.round(laneRatio * 100));
+  // The divider only exists while BOTH lanes do: there is no split to
+  // adjust when one lane has the band to itself, and leaving a handle
+  // floating over the middle of a single-lane band would suggest
+  // otherwise.
+  let showDivider = $derived(editing && showWideLane && showNarrowLane);
 
   onMount(() => {
     overviewLayout.ensureLoaded();
@@ -586,10 +714,13 @@
   }
 
   // exitEditing only leaves edit mode -- there is no unsaved state to
-  // commit or discard. Every gesture (drop, hide, show, reset) already
-  // persisted itself through the store's own debounced PUT.
+  // commit or discard. Every gesture (drop, hide, show, resize, reset)
+  // already persisted itself through the store's own debounced PUT; an
+  // in-flight divider drag is the one exception, and abandoning it is
+  // the same "never mind" Escape gives.
   function exitEditing() {
     endDrag();
+    endDividerDrag();
     editing = false;
   }
 
@@ -716,13 +847,106 @@
     dragHandle = null;
   }
 
-  // Escape cancels an in-flight drag, the universal "never mind" for a
-  // gesture already under way. Bound only while one is actually running
-  // so the page has no stray global key handler the rest of the time.
+  // --- Divider drag -------------------------------------------------------
+  //
+  // The same hand-rolled pointer shape as the module drag above -- pointer
+  // capture, a context snapshot taken once at pointerdown, Escape cancels
+  // -- with one difference: this gesture's live feedback is a REAL layout
+  // change (the two lanes actually resize as you drag), not a transform on
+  // a lifted card. That is the point of it, and it is cheap: the ratio
+  // lands on two custom properties, so a move re-runs flex, not Svelte's
+  // renderer, and the rail's four uPlot sparklines take their existing
+  // ResizeObserver -> setSize path -- a resize, never a rebuild (their
+  // needsRebuild shape only turns on colors and theme).
+  //
+  // dividerSpan is snapshotted rather than re-measured per move for the
+  // same reason captureGeometry is: the very thing being measured is what
+  // the gesture is changing, so a live measurement would feed the
+  // divider's own effect back into its input.
+  let dividerOrigin = null;
+  let dividerPointerId = null;
+  let dividerHandle = null;
+
+  // laneSpanPx is the width the two lanes actually divide -- their own
+  // two rects added, so the flex gap and the divider sitting between them
+  // (which belong to neither) are excluded. See overviewRatioFromDrag.
+  function laneSpanPx() {
+    if (!lanesEl) return 0;
+    let span = 0;
+    for (const lane of lanesEl.querySelectorAll('[data-lane]')) span += lane.getBoundingClientRect().width;
+    return span;
+  }
+
+  function startDividerDrag(event) {
+    if (!editing || dividerOrigin !== null || event.button !== 0) return;
+    event.preventDefault(); // no text selection, no native drag
+    dividerOrigin = { x: event.clientX, ratio: laneRatio, span: laneSpanPx() };
+    dividerPointerId = event.pointerId;
+    dividerHandle = event.currentTarget;
+    dividerHandle.setPointerCapture(event.pointerId);
+    dividerRatio = dividerOrigin.ratio;
+  }
+
+  function dividerMove(event) {
+    if (dividerOrigin === null || event.pointerId !== dividerPointerId) return;
+    dividerRatio = overviewRatioFromDrag(dividerOrigin.ratio, event.clientX - dividerOrigin.x, dividerOrigin.span);
+  }
+
+  function dividerUp(event) {
+    if (dividerOrigin === null || event.pointerId !== dividerPointerId) return;
+    const ratio = dividerRatio;
+    endDividerDrag();
+    overviewLayout.setRatio(ratio);
+  }
+
+  // endDividerDrag drops the preview without committing -- the shared
+  // path for a cancelled pointer, an Escape, leaving edit mode, and (once
+  // it has read the ratio) a completed drag. Clearing dividerRatio hands
+  // the lanes straight back to the saved value, so a cancel snaps to
+  // where the split actually is rather than leaving the preview showing.
+  function endDividerDrag() {
+    if (dividerHandle && dividerPointerId !== null && dividerHandle.hasPointerCapture?.(dividerPointerId)) {
+      dividerHandle.releasePointerCapture(dividerPointerId);
+    }
+    dividerRatio = null;
+    dividerOrigin = null;
+    dividerPointerId = null;
+    dividerHandle = null;
+  }
+
+  // Keyboard: the divider is the page's only pointer-only affordance if
+  // it isn't given one, so it takes the standard window-splitter keys --
+  // arrows nudge a point at a time (Shift for five), Home/End go straight
+  // to the clamps. Each press commits immediately; the store's own
+  // debounce is what coalesces a held key into a single PUT.
+  function dividerKeydown(event) {
+    if (event.key === 'Escape') {
+      endDividerDrag();
+      return;
+    }
+    let next = null;
+    if (event.key === 'ArrowLeft') next = nudgeOverviewRatio(laneRatio, event.shiftKey ? -5 : -1);
+    else if (event.key === 'ArrowRight') next = nudgeOverviewRatio(laneRatio, event.shiftKey ? 5 : 1);
+    else if (event.key === 'Home') next = OVERVIEW_RATIO_MIN;
+    else if (event.key === 'End') next = OVERVIEW_RATIO_MAX;
+    if (next === null) return;
+    event.preventDefault();
+    overviewLayout.setRatio(next);
+  }
+
+  // Escape cancels an in-flight gesture, the universal "never mind" for
+  // one already under way -- a lifted module or a divider being dragged.
+  // Bound only while one is actually running so the page has no stray
+  // global key handler the rest of the time. It has to be a WINDOW
+  // listener for the divider too: a pointerdown that preventDefault()s
+  // never moves focus, so there is no focused element for the key to
+  // reach (dividerKeydown above serves the keyboard-only path instead).
   $effect(() => {
-    if (dragId === null) return;
+    if (dragId === null && dividerRatio === null) return;
     const onKeydown = (e) => {
-      if (e.key === 'Escape') endDrag();
+      if (e.key !== 'Escape') return;
+      endDrag();
+      endDividerDrag();
     };
     window.addEventListener('keydown', onKeydown);
     return () => window.removeEventListener('keydown', onKeydown);
@@ -785,11 +1009,30 @@
         class:overview__module--editing={editing}
         class:overview__module--dragging={dragId === id}
         data-module={id}
+        data-size={overviewModuleSize(layoutDoc, id)}
+        data-adaptive={isAdaptivelySized(layoutDoc, id)}
         style={dragId === id ? `transform: translate3d(${dragDelta.x}px, ${dragDelta.y}px, 0)` : ''}
         animate:flip={{ duration: editing ? dragMotionMs : 0 }}
       >
         {#if editing}
           <div class="overview__module-tools">
+            {#if isResizableOverviewModule(id)}
+              <div class="overview__size-switcher" role="group" aria-label={`${overviewModuleLabel(id)} height`}>
+                {#each OVERVIEW_SIZES as size (size)}
+                  <button
+                    type="button"
+                    class="overview__size-btn"
+                    class:overview__size-btn--active={overviewModuleSize(layoutDoc, id) === size}
+                    aria-pressed={overviewModuleSize(layoutDoc, id) === size}
+                    aria-label={`Set ${overviewModuleLabel(id)} to ${size}`}
+                    title={`${size} — ${overviewModuleRows(id, size)} rows`}
+                    onclick={() => overviewLayout.setSize(id, size)}
+                  >
+                    {SIZE_GLYPHS[size]}
+                  </button>
+                {/each}
+              </div>
+            {/if}
             <button
               type="button"
               class="overview__module-btn overview__module-grip"
@@ -874,7 +1117,7 @@
         <p class="microlabel overview__events-empty">No events yet.</p>
       {:else}
         <div class="overview__events-list">
-          {#each events as event (event.ID)}
+          {#each visibleEvents as event (event.ID)}
             <div
               animate:flip={{ duration: feedMotionMs }}
               in:fly={{ y: -12, duration: feedMotionMs }}
@@ -975,7 +1218,10 @@
     {#if canCustomize}
       <div class="overview__modules-bar">
         {#if editing}
-          <span class="microlabel overview__customize-hint">Drag a handle to move a module · the eye hides one</span>
+          <span class="microlabel overview__customize-hint">
+            Drag a handle to move a module · S/M/L sets its height · the eye hides one · drag the divider to split the
+            columns
+          </span>
           <button
             type="button"
             class="overview__customize-btn"
@@ -997,9 +1243,49 @@
       </div>
     {/if}
 
-    <div class="overview__modules-lanes" bind:this={lanesEl}>
+    <!-- The two lane flex factors ride as custom properties so a divider
+      drag changes one attribute rather than re-rendering the band. The
+      divider itself is absolutely positioned ON the boundary rather than
+      being a third flex child: a real child would add a second flex gap
+      that only existed in edit mode, so entering edit mode would shift
+      both lanes sideways. -->
+    <div
+      class="overview__modules-lanes"
+      style={`--lane-ratio:${laneRatio}; --lane-flex-wide:${laneFlex.wide}; --lane-flex-narrow:${laneFlex.narrow}`}
+      bind:this={lanesEl}
+    >
       {#if showWideLane}
         {@render moduleLane('wide', wideIds)}
+      {/if}
+      {#if showDivider}
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -- a
+          FOCUSABLE separator is the WAI-ARIA window-splitter widget
+          (role=separator + tabindex=0 + aria-value*), which is exactly
+          what this is; Svelte's rule only models the decorative,
+          non-focusable separator and has no way to tell the two apart.
+          Dropping to a plain interactive role would lose a real screen
+          reader the one thing it most needs to hear about this control. -->
+        <div
+          class="overview__lane-divider"
+          class:overview__lane-divider--active={dividerRatio !== null}
+          role="separator"
+          tabindex="0"
+          aria-orientation="vertical"
+          aria-label="Column split"
+          aria-valuemin={Math.round(OVERVIEW_RATIO_MIN * 100)}
+          aria-valuemax={Math.round(OVERVIEW_RATIO_MAX * 100)}
+          aria-valuenow={laneRatioPct}
+          aria-valuetext={`${laneRatioPct}% to the wide column`}
+          data-ratio={laneRatio}
+          onpointerdown={startDividerDrag}
+          onpointermove={dividerMove}
+          onpointerup={dividerUp}
+          onpointercancel={endDividerDrag}
+          onkeydown={dividerKeydown}
+        >
+          <span class="overview__lane-divider-grip" aria-hidden="true"></span>
+        </div>
       {/if}
       {#if showNarrowLane}
         {@render moduleLane('narrow', narrowIds)}
@@ -1062,9 +1348,10 @@
     gap: 0.55rem;
   }
   .overview__modules-lanes {
+    position: relative; /* the divider is absolutely placed on the boundary */
     display: flex;
     align-items: flex-start;
-    gap: 1rem;
+    gap: var(--lane-gap);
   }
   .overview__modules-lane {
     position: relative; /* the drop indicator is absolutely placed in here */
@@ -1073,11 +1360,69 @@
     gap: 1rem;
     min-width: 0;
   }
+  /* The split: two grow factors against flex-basis 0, in the band's own
+     original 1.6 : 1 notation (see overviewLaneFlex, which owns the
+     arithmetic and the reason the narrow lane is pinned at 1 rather than
+     the two summing to 1). The fallbacks ARE that original pair -- what
+     renders for the instant before the saved document lands, and if the
+     inline properties ever go missing.
+     --lane-ratio is the same split as a plain fraction, carried
+     separately because the divider is positioned by it rather than by a
+     grow factor; --lane-gap is named because that offset has to know it
+     too. */
+  .overview__modules-lanes {
+    --lane-gap: 1rem;
+  }
   .overview__modules-wide {
-    flex: 1.6 1 0;
+    flex: var(--lane-flex-wide, 1.6) 1 0;
   }
   .overview__modules-narrow {
-    flex: 1 1 0;
+    flex: var(--lane-flex-narrow, 1) 1 0;
+  }
+
+  /* --- Column divider: invisible outside edit mode (it isn't rendered
+     at all), and quiet inside it -- a hairline with a short grip, the
+     same restraint the dashed module outlines take. Centred ON the
+     boundary: the wide lane occupies its factor's share of everything
+     but the gap, so the boundary's own centre is that plus half a gap.
+     ------------------------------------------------------------- */
+  .overview__lane-divider {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: calc((100% - var(--lane-gap)) * var(--lane-ratio, 0.615) + var(--lane-gap) / 2);
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    margin-left: -9px;
+    border: none;
+    background: transparent;
+    cursor: col-resize;
+    /* Without this a touch drag pans the page instead of moving the
+       divider -- pointer capture alone doesn't stop the browser's own
+       gesture (the module grip carries the same rule for the same
+       reason). */
+    touch-action: none;
+  }
+  .overview__lane-divider-grip {
+    width: 3px;
+    height: 100%;
+    max-height: 6rem;
+    border-radius: 3px;
+    background: color-mix(in oklab, var(--accent) 35%, transparent);
+    transition: background 120ms ease;
+  }
+  .overview__lane-divider:hover .overview__lane-divider-grip,
+  .overview__lane-divider:focus-visible .overview__lane-divider-grip,
+  .overview__lane-divider--active .overview__lane-divider-grip {
+    background: var(--accent);
+  }
+  .overview__lane-divider:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 1px;
+    border-radius: 4px;
   }
   /* One module per lane row: the wrapper carries the edit-mode chrome
      and the drag transform, and stretches so the card inside keeps the
@@ -1095,10 +1440,18 @@
     }
     /* Mobile stacks the lanes, so the saved arrangement still applies
        here -- wide lane first, then narrow, each in its own saved order.
-       Only EDITING is desktop-only (see CUSTOMIZE_MEDIA). */
+       The saved SPLIT deliberately does not: two full-width stacked
+       lanes have no ratio to honour, so `flex: none` simply ignores the
+       custom properties above. Only EDITING is desktop-only (see
+       CUSTOMIZE_MEDIA), which is also why the divider can never appear
+       down here -- but it is belt-and-braces'd off anyway, since a
+       stacked band's "boundary" would be meaningless. */
     .overview__modules-lane {
       width: 100%;
       flex: none;
+    }
+    .overview__lane-divider {
+      display: none;
     }
   }
 
@@ -1218,6 +1571,43 @@
     background: var(--surface-soft);
     color: var(--ink);
   }
+  /* The height switcher: the Top Consumers metric switcher's own idiom
+     (a segmented strip of tiny mono buttons, the selected one raised out
+     of the trough) shrunk to fit the tools bar beside the grip and the
+     eye. Only the two modules with an elastic body get one -- the rail's
+     four fixed tiles have no height to choose (see OVERVIEW_MODULES). */
+  .overview__size-switcher {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    margin-right: 2px;
+    border-radius: 6px;
+    background: var(--surface-soft);
+  }
+  .overview__size-btn {
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--ink-2);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    line-height: 1;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .overview__size-btn:hover {
+    color: var(--ink);
+  }
+  .overview__size-btn--active {
+    background: var(--surface);
+    color: var(--accent-strong);
+    font-weight: 600;
+    box-shadow: 0 1px 2px color-mix(in oklab, var(--ink) 12%, transparent);
+  }
+
   .overview__module-grip {
     cursor: grab;
     /* Without this a touch drag scrolls the page instead of moving the

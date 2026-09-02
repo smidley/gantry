@@ -948,15 +948,30 @@ test('top consumers: the CPU core-budget ribbon renders segments that sum to the
   await expect(bar).toBeVisible();
   await expect(bar).toHaveAttribute('aria-label', /^CPU core budget, \d+ cores$/);
 
-  const { barWidth, partsWidth } = await bar.evaluate((el) => {
-    const barWidth = el.getBoundingClientRect().width;
-    const parts = [...el.querySelectorAll('.core-ribbon__segment, .core-ribbon__free')];
-    const partsWidth = parts.reduce((sum, p) => sum + p.getBoundingClientRect().width, 0);
-    return { barWidth, partsWidth };
-  });
-  // A point of slack absorbs sub-pixel rounding across however many
-  // segments happen to be present.
-  expect(Math.abs(barWidth - partsWidth)).toBeLessThan(2);
+  // toPass rather than a one-shot read: segments glide width changes
+  // over ~glideMs (the live tick cadence, so ~2s in fake mode --
+  // CoreBudgetRibbon.svelte). Linear easing keeps the parts summing to
+  // the bar while every segment glides, but a re-rank that adds or
+  // removes a segment (keyed {#each}) inserts/removes it at full width
+  // INSTANTLY while its neighbors glide, so the sum over/undershoots by
+  // that segment's width for up to a whole glide. Observed live: ±70px
+  // windows lasting ~2s each, and a 57.9px one-shot failure under
+  // full-suite load, where the slower first paint lands the read
+  // mid-churn instead of on the snapped (glideMs=0) first frame.
+  // Retrying re-measures -- each read stays atomic inside one evaluate
+  // -- until it lands on a settled bar; a genuine segment-math mis-sum
+  // never settles, so the retries just run out and this still fails.
+  await expect(async () => {
+    const { barWidth, partsWidth } = await bar.evaluate((el) => {
+      const barWidth = el.getBoundingClientRect().width;
+      const parts = [...el.querySelectorAll('.core-ribbon__segment, .core-ribbon__free')];
+      const partsWidth = parts.reduce((sum, p) => sum + p.getBoundingClientRect().width, 0);
+      return { barWidth, partsWidth };
+    });
+    // A point of slack absorbs sub-pixel rounding across however many
+    // segments happen to be present.
+    expect(Math.abs(barWidth - partsWidth)).toBeLessThan(2);
+  }).toPass({ timeout: 10_000 });
 
   // Hovering a segment reveals its own name+cores label; leaving it
   // hides it again.

@@ -36,6 +36,22 @@
   columns. Rendered `compact` (InteractionMap's own doc) so a busy moment
   scrolls inside its own capped box rather than ballooning the drawer.
 
+  The drawer ALSO renders the incident's own time-series chart(s) --
+  owner's own follow-up ask, "insight history should also provide a
+  graph of the incident if possible": the map answers WHO, this answers
+  HOW BAD AND WHEN. incidentChart.ts' own planIncidentCharts maps each of
+  the seven compiled-in rules to its real victim/culprit metrics (read
+  off internal/insight's own rules and collectors, not guessed -- see
+  that file's own per-rule doc), loadDrawerCharts fetches them from the
+  SAME GET /api/series every other historical chart in this app already
+  uses (TimeChart's own xDomain/non-live mode, a one-time snapshot fetch
+  exactly like the map above, never polled), and a rule whose victim and
+  culprit signal don't share a unit gets two compact charts rather than
+  one misleadingly shared y-axis (TimeChart is single-axis by design).
+  "If possible" is the operative word: a pruned or never-recorded window
+  degrades to a quiet one-line hint per chart (incidentChart.ts' own
+  hasChartableData), never a blank chart or an error.
+
   D2 calm: the empty state is deliberately quiet and specific about
   which evidence tier is live (tier 1/proxy vs PSI) rather than a bare
   "nothing here" -- Scott should be able to tell AT A GLANCE whether
@@ -44,7 +60,7 @@
 <script>
   import { onMount, untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
-  import { fetchInsight, fetchInsights, fetchInsightHistory, fetchInsightRules, putInsightRules, dismissInsight, fetchInsightGraph } from '../lib/api';
+  import { fetchInsight, fetchInsights, fetchInsightHistory, fetchInsightRules, putInsightRules, dismissInsight, fetchInsightGraph, fetchSeries } from '../lib/api';
   import {
     sortActiveInsights,
     confidenceLabel,
@@ -56,9 +72,13 @@
     selectOverlappingInsights,
     buildInsightGraph,
   } from '../lib/insights';
+  import { incidentChartWindow, incidentBand, incidentMarkers, hasChartableData, planIncidentCharts } from '../lib/incidentChart';
+  import { sumSeriesByMetric } from '../lib/metrics';
+  import { fmtPct, fmtRate } from '../lib/format';
   import { eventHref } from '../lib/eventHref';
   import HealthDot from '../components/HealthDot.svelte';
   import InteractionMap from '../components/InteractionMap.svelte';
+  import TimeChart from '../components/TimeChart.svelte';
 
   let { mode: initialMode = undefined } = $props();
 
@@ -77,6 +97,18 @@
   // its own edge never disappears even then.
   const OVERLAP_HISTORY_FETCH_LIMIT = 500;
   const EMPTY_GRAPH = { nodes: [], edges: [] };
+  // CHART_FORMATTERS maps incidentChart.ts' own plain-string
+  // ChartFormatter enum (pct/rate/plain) to the real format.ts function
+  // TimeChart's formatValue prop wants -- kept as a lookup table here,
+  // not on ChartPlan itself, so that module stays pure and trivially
+  // comparable in its own tests (no closures to compare).
+  const CHART_FORMATTERS = { pct: fmtPct, rate: fmtRate, plain: undefined };
+  // DRAWER_CHART_HEIGHT: shorter than TimeChart's own 220px default --
+  // the drawer already stacks the map above these, and up to two charts
+  // per rule (see incidentChart.ts' own doc on when a rule needs both),
+  // so a compact height here matters more than it does for
+  // ContainerDetail's own always-one-at-a-time charts.
+  const DRAWER_CHART_HEIGHT = 150;
   const DISMISS_PRESETS = [
     { label: '1d', days: 1 },
     { label: '7d', days: 7 },
@@ -174,6 +206,20 @@
   let drawerStatementsById = $state({});
   let drawerMapLoading = $state(false);
 
+  // drawerCharts/drawerChartXDomain/drawerChartMarkers/drawerChartBand/
+  // drawerChartsLoading: the drawer's own incident chart(s) (this view's
+  // own top-of-file doc) -- populated once by loadDrawerCharts below,
+  // fully independent of the map state above (a rule can chart even when
+  // its own map side has nothing concurrent to show, and vice versa).
+  // drawerCharts is ChartPlan[] with `lines` replaced by a resolved
+  // `series` (TimeChart-ready {label, colorVar, points}) plus each
+  // chart's own `hasData`.
+  let drawerCharts = $state([]);
+  let drawerChartXDomain = $state(undefined);
+  let drawerChartMarkers = $state([]);
+  let drawerChartBand = $state(undefined);
+  let drawerChartsLoading = $state(false);
+
   async function openDrawer(id) {
     drawerID = id;
     drawerData = null;
@@ -182,6 +228,8 @@
     drawerGraph = EMPTY_GRAPH;
     drawerStatementsById = {};
     drawerMapLoading = true;
+    drawerCharts = [];
+    drawerChartsLoading = true;
     try {
       drawerData = await fetchInsight(id);
     } catch {
@@ -191,8 +239,10 @@
     }
     if (drawerData) {
       loadDrawerMap(drawerData);
+      loadDrawerCharts(drawerData);
     } else {
       drawerMapLoading = false;
+      drawerChartsLoading = false;
     }
   }
 
@@ -234,6 +284,69 @@
     drawerMapLoading = false;
   }
 
+  // loadDrawerCharts assembles the drawer's incident chart(s) for the
+  // clicked insight `inst`: planIncidentCharts (incidentChart.ts) maps
+  // its own rule_id to which real metrics to chart, resolving a disk's
+  // slot to its current raw device name off the live frame's own
+  // disk_meta (Storage.svelte's own seedDiskSlot performs the identical
+  // join) and a GPU engine's victim entity off the live frame's own
+  // currently-known gpu keys -- both are CURRENT, live-frame lookups
+  // (there is no per-instance record of either on the stored row itself),
+  // so an incident whose device or GPU is no longer present degrades to
+  // simply omitting that one line, never a wrong guess.
+  //
+  // Every line across every returned chart is grouped by its own (kind,
+  // entity) pair first, so a pair more than one line needs (e.g. a
+  // shared culprit's io.read_bps+write_bps feeding just one line, or two
+  // DIFFERENT rules' lines that happened to want the same container) is
+  // still only fetched once. hasChartableData decides each chart's own
+  // real-vs-fallback rendering straight off the RAW per-pair fetch
+  // result, before sumSeriesByMetric ever folds multiple metrics into
+  // one line's own points -- see that function's own doc for why an
+  // empty result is never an error here, only a quiet "nothing to show."
+  async function loadDrawerCharts(inst) {
+    const xDomain = incidentChartWindow(inst, nowSec);
+    const plans = planIncidentCharts(inst, {
+      diskMeta: live.frame?.disk_meta ?? {},
+      gpuEntities: Object.keys(live.frame?.gpu ?? {}),
+    });
+
+    const pairs = new Map(); // "<kind>|<entity>" -> {kind, entity, metrics: Set<string>}
+    for (const plan of plans) {
+      for (const line of plan.lines) {
+        const key = `${line.kind}|${line.entity}`;
+        if (!pairs.has(key)) pairs.set(key, { kind: line.kind, entity: line.entity, metrics: new Set() });
+        for (const m of line.metrics) pairs.get(key).metrics.add(m);
+      }
+    }
+
+    const settled = await Promise.all(
+      [...pairs.entries()].map(([key, { kind, entity, metrics }]) =>
+        fetchSeries({ kind, entity, metrics: [...metrics], from: xDomain[0], to: xDomain[1] })
+          .then((results) => [key, results])
+          .catch(() => [key, []]),
+      ),
+    );
+    if (drawerID !== inst.id) return; // the drawer moved on while this was in flight
+
+    const resultsByPair = new Map(settled);
+    const hasDataByPair = new Map([...resultsByPair].map(([key, results]) => [key, hasChartableData(results)]));
+
+    drawerCharts = plans.map((plan) => ({
+      ...plan,
+      hasData: plan.lines.some((line) => hasDataByPair.get(`${line.kind}|${line.entity}`)),
+      series: plan.lines.map((line) => {
+        const results = resultsByPair.get(`${line.kind}|${line.entity}`) ?? [];
+        const byMetric = Object.fromEntries(results.map((r) => [r.metric, r.points]));
+        return { label: line.label, colorVar: line.colorVar, points: sumSeriesByMetric(byMetric, line.metrics) };
+      }),
+    }));
+    drawerChartXDomain = xDomain;
+    drawerChartMarkers = incidentMarkers(inst);
+    drawerChartBand = incidentBand(inst, nowSec);
+    drawerChartsLoading = false;
+  }
+
   function closeDrawer() {
     drawerID = null;
     drawerData = null;
@@ -241,6 +354,8 @@
     drawerGraph = EMPTY_GRAPH;
     drawerStatementsById = {};
     drawerMapLoading = false;
+    drawerCharts = [];
+    drawerChartsLoading = false;
   }
   function handleWindowKeydown(e) {
     if (e.key === 'Escape' && drawerID !== null) closeDrawer();
@@ -610,6 +725,32 @@
             />
           {/if}
         </div>
+        {#if drawerChartsLoading || drawerCharts.length > 0}
+          <div class="insights-drawer__charts">
+            <span class="microlabel">Incident timeline</span>
+            {#if drawerChartsLoading}
+              <p class="microlabel">Loading…</p>
+            {:else}
+              {#each drawerCharts as chart (chart.key)}
+                <div class="insights-drawer__chart">
+                  <span class="microlabel insights-drawer__chart-title">{chart.title}</span>
+                  {#if chart.hasData}
+                    <TimeChart
+                      series={chart.series}
+                      formatValue={CHART_FORMATTERS[chart.formatter]}
+                      markers={drawerChartMarkers}
+                      band={drawerChartBand}
+                      xDomain={drawerChartXDomain}
+                      height={DRAWER_CHART_HEIGHT}
+                    />
+                  {:else}
+                    <p class="microlabel insights-drawer__chart-empty">History for this window isn't available.</p>
+                  {/if}
+                </div>
+              {/each}
+            {/if}
+          </div>
+        {/if}
         {#if evidenceRows.length > 0}
           <dl class="insights-drawer__evidence">
             {#each evidenceRows as row (row.key)}
@@ -946,6 +1087,23 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
+  }
+  .insights-drawer__charts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .insights-drawer__chart {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .insights-drawer__chart-title {
+    color: var(--ink-2);
+  }
+  .insights-drawer__chart-empty {
+    margin: 0;
+    padding: 0.75rem 0;
   }
   .insights-drawer__evidence {
     margin: 0;

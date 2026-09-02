@@ -236,6 +236,89 @@ test('evidence drawer for an ACTIVE insight also renders the interaction map (it
   }
 });
 
+// Incident chart: "insight history should also provide a graph of the
+// incident if possible" (the owner's own follow-up ask). Dismissing
+// (rather than waiting out the full demo schedule) fast-tracks a KNOWN,
+// just-fired insight into History -- the exact "dismiss round-trip"
+// test's own mechanism just below -- so its own fired-to-resolved window
+// sits comfortably inside live-ring/1-minute-tier retention, never the
+// "history isn't available" fallback this feature also has to cover
+// (incidentChart.ts' own hasChartableData, unit-tested there).
+test('evidence drawer for a dismissed insight also renders its incident chart with real data', async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  test.setTimeout(4 * 60_000 + 30_000);
+
+  // active[length-1] (last), not [0]: the "dismiss round-trip" test
+  // below dismisses ITS OWN target via the identical mechanism and this
+  // suite runs fullyParallel -- picking the opposite end of the active
+  // list keeps the two tests aimed at DIFFERENT findings whenever more
+  // than one is concurrently active (this demo's own disk-io-
+  // contention/memory-squeeze schedule routinely produces exactly that,
+  // this file's own top-of-file doc), and the try/catch below still
+  // covers the one active finding case where they can't help but
+  // collide.
+  let target: { id: number; statement: string } | null = null;
+  const deadline = Date.now() + 4 * 60_000;
+  while (Date.now() < deadline && !target) {
+    const snap = await (await request.get(`${baseURL}/api/live/snapshot`)).json();
+    if (snap.insights?.active?.length > 0) target = snap.insights.active[snap.insights.active.length - 1];
+    else await page.waitForTimeout(3000);
+  }
+  test.skip(!target, 'no finding became active within the timeout on this shared server run');
+
+  await page.goto('#/insights');
+  await page.locator('.segmented__btn', { hasText: 'List' }).click();
+  const row = page.locator('.insights-view__row:not(.insights-view__row--history)', { hasText: target!.statement.slice(0, 30) });
+  try {
+    await expect(row).toBeVisible({ timeout: 5000 });
+  } catch {
+    test.skip(true, 'this finding was claimed (dismissed/resolved) by a concurrent test before this one could act on it');
+  }
+  await row.locator('.insights-view__dismiss-btn').click();
+  await row.locator('.insights-view__dismiss-menu .segmented__btn', { hasText: '1d' }).click();
+  await expect(row).not.toBeVisible();
+
+  const historyRow = page.locator('.insights-view__row--history', { hasText: target!.statement.slice(0, 30) }).first();
+  await expect(historyRow).toBeVisible();
+  await historyRow.locator('.insights-view__statement-btn').click();
+
+  const drawer = page.locator('.insights-drawer');
+  await expect(drawer).toBeVisible();
+
+  const chartsSection = drawer.locator('.insights-drawer__charts');
+  await expect(chartsSection).toBeVisible();
+  // A finding dismissed seconds ago must resolve to a REAL chart, never
+  // the fallback line (its own fired-to-resolved window sits
+  // comfortably inside live-ring/1-minute-tier retention) -- expect.poll
+  // gives loadDrawerCharts' own async /api/series fetch room to land.
+  // A visible <canvas> inside it is the honest signal that uPlot itself
+  // actually mounted against real data (a legend row is NOT a reliable
+  // second signal here -- disk-io-contention, this environment's own
+  // most likely fake-mode firer, splits into two SEPARATE single-line
+  // charts, and TimeChart's own legend only renders for series.length
+  // >= 2, so asserting one unconditionally would fail for exactly the
+  // rule this suite is most likely to hit).
+  const realCharts = chartsSection.locator('.time-chart');
+  await expect.poll(() => realCharts.count(), { timeout: 10_000 }).toBeGreaterThan(0);
+  await expect(realCharts.first().locator('canvas')).toBeVisible();
+
+  // Markers/band are drawn straight onto uPlot's own <canvas> (no
+  // per-marker DOM node exists to query directly, and this suite's own
+  // deflaking history -- PRs #46/#48/#49 -- is exactly why a hover-scan
+  // reproducing uPlot's internal padding/gutter math to find one isn't
+  // attempted here instead): incidentMarkers' own exact {ts, severity,
+  // label} output is pinned at the unit level (incidentChart.test.ts),
+  // and the drawing mechanism itself (drawMarkers/drawBand) is
+  // TimeChart's own pre-existing, unmodified-by-this-feature code path
+  // -- already exercised by every OTHER chart in this app that passes
+  // `markers`. This test's own job stops at proving the NEW plumbing --
+  // rule-to-series mapping, window/padding, the live fetch, the real
+  // render -- delivers actual data end to end.
+});
+
 // Dismiss round-trip: the one MUTATING test in this file. Targets a
 // SPECIFIC finding by its own statement text throughout (never a raw
 // "active count"), so it stays correct regardless of whatever else is

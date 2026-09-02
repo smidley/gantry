@@ -2,9 +2,10 @@
   TimeChart: the uPlot wrapper every metric chart (container detail,
   GPU, storage, ...) builds on. One y-axis always (series never get a
   second scale); a legend when >=2 series; a crosshair-driven tooltip;
-  vertical event-marker lines with a hover label; ResizeObserver-driven
-  width; re-creates on theme change (colors are baked into the canvas
-  as literal values, not live var() references).
+  vertical event-marker lines with a hover label; an optional shaded
+  band behind the plot (`band` prop, see its own doc below); ResizeObserver-
+  driven width; re-creates on theme change (colors are baked into the
+  canvas as literal values, not live var() references).
 
   `syncKey` is not in the plan brief's literal props list, but IS
   required by its own "synced crosshair group (uPlot sync key per
@@ -65,11 +66,21 @@
   // lib/chartRange.ts's own doc for the sparse-data bug this fixes.
   // Never set by a live caller (the sliding window below already owns
   // live mode's own x-range every tick).
+
+  // band (additive, optional -- the evidence drawer's own incident
+  // chart): [from, to] unix seconds, a shaded rect drawn behind the plot
+  // marking a span the caller wants visually set apart from its own
+  // padding context (e.g. an insight's own active window, distinct from
+  // the wider fetched xDomain around it) -- see drawBand below. A plain
+  // whisper-weight ink fill, the exact GRID_ALPHA_PCT tier this file's
+  // own gridlines already use, so it reads as "this range matters" in
+  // both themes without competing with any series' own color.
   let {
     series = [],
     unit = '',
     height = 220,
     markers = [],
+    band = undefined,
     syncKey = undefined,
     formatValue = undefined,
     live = false,
@@ -218,6 +229,25 @@
 
   function markerColor(severity) {
     return resolveToken(`var(${SEVERITY_VAR[severity] ?? SEVERITY_VAR.info})`);
+  }
+
+  // drawBand is a uPlot "draw" hook, run BEFORE drawMarkers (registered
+  // first in hooks.draw below) so a marker's own dashed line always
+  // paints on TOP of the shaded rect rather than under it. Clips to the
+  // plot's own bbox exactly like drawMarkers' own visibility check, so a
+  // band that only partly overlaps the visible x-range (the common case:
+  // the incident's own unpadded span sitting inside the wider padded
+  // xDomain around it) never draws past the axes.
+  function drawBand(u) {
+    if (!band) return;
+    const { ctx } = u;
+    const x1 = Math.max(u.bbox.left, u.valToPos(band[0], 'x', true));
+    const x2 = Math.min(u.bbox.left + u.bbox.width, u.valToPos(band[1], 'x', true));
+    if (x2 <= x1) return;
+    ctx.save();
+    ctx.fillStyle = withAlpha(resolveToken('var(--ink)'), GRID_ALPHA_PCT);
+    ctx.fillRect(x1, u.bbox.top, x2 - x1, u.bbox.height);
+    ctx.restore();
   }
 
   // drawMarkers is a uPlot "draw" hook: dashed vertical lines at each
@@ -524,7 +554,7 @@
         focus: { alpha: FOCUS_DIM_ALPHA },
         legend: { show: showLegend && series.length >= 2 },
         hooks: {
-          draw: [drawMarkers],
+          draw: [drawBand, drawMarkers],
           setCursor: [handleCursor],
         },
       },
@@ -550,17 +580,18 @@
   $effect(() => {
     // Track every input that can affect either path below: a structural
     // one (series shape, unit, formatValue, a theme flip) goes through
-    // build(), same as before; markers/xDomain are tracked here too even
-    // though they're absent from currentShape()'s shape, purely so a
-    // marker- or domain-only change still re-runs this effect at all --
-    // drawMarkers/handleCursor/xScaleRange already read the live
-    // `markers`/`series`/`xDomain` bindings fresh on every uPlot redraw,
-    // so the setData call below (which re-triggers uPlot's own x-scale
-    // auto-ranging for a non-live chart) is all either needs to actually
-    // show up.
+    // build(), same as before; markers/band/xDomain are tracked here too
+    // even though they're absent from currentShape()'s shape, purely so a
+    // marker-, band-, or domain-only change still re-runs this effect at
+    // all -- drawBand/drawMarkers/handleCursor/xScaleRange already read
+    // the live `band`/`markers`/`series`/`xDomain` bindings fresh on every
+    // uPlot redraw, so the setData call below (which re-triggers uPlot's
+    // own x-scale auto-ranging for a non-live chart) is all either needs
+    // to actually show up.
     series;
     unit;
     markers;
+    band;
     xDomain;
     formatValue;
     theme.resolved;

@@ -154,14 +154,13 @@ async function routeLiveFrame(page: import('@playwright/test').Page, frame: obje
   );
 }
 
-// Header compaction (Scott: "lots of wasted space here"): with callouts
-// present, the status band -- "Needs a look" on the left, fleet strip +
-// array schematic on the right -- is a side-by-side row at >=768px and
-// a plain vertical stack below that, same breakpoint convention as
-// every other desktop/mobile split in this app. The frame carries one
-// unhealthy container so the attention layout is guaranteed, not
-// dependent on the server's own mood.
-test('overview: with callouts, the status band is two columns at desktop width and stacked at mobile', async ({
+// Counts-and-fleet pass: the status band's own two-column split is
+// gone. "Needs a look" is two count chips now, short enough to sit
+// inline in the headline card, and the fleet strip + array schematic
+// get the same full-width row in this state that all-clear already gave
+// them. The frame carries one unhealthy container so the attention
+// layout is guaranteed, not dependent on the server's own mood.
+test('overview: with something needing you, the chips sit in the headline card and the visuals take the full width', async ({
   page,
 }) => {
   await routeLiveFrame(
@@ -173,24 +172,34 @@ test('overview: with callouts, the status band is two columns at desktop width a
 
   await expect(page.locator('.overview__headline-text')).toHaveText('1 thing needs you');
 
-  const facts = page.locator('.overview__status-facts');
-  const visuals = page.locator('.overview__status-visuals');
-  await expect(facts).toBeVisible();
-  await expect(visuals).toBeVisible();
+  // The attention section is inside the headline card, not a column of
+  // its own beside the visuals.
+  await expect(page.locator('.overview__headline-zone .overview__attention')).toHaveCount(1);
+  await expect(page.locator('.overview__status-facts')).toHaveCount(0);
+  await expect(page.locator('.overview__status-visuals')).toHaveCount(0);
 
-  const factsBox = await facts.boundingBox();
-  const visualsBox = await visuals.boundingBox();
-  expect(factsBox).not.toBeNull();
-  expect(visualsBox).not.toBeNull();
-  // Side by side: roughly the same top, visuals strictly to the right.
-  expect(Math.abs(factsBox.y - visualsBox.y)).toBeLessThan(8);
-  expect(visualsBox.x).toBeGreaterThan(factsBox.x + factsBox.width - 8);
+  // The visuals band spans the same content width as the headline card
+  // above it, exactly as the all-clear band does.
+  const band = page.locator('.overview__status-band');
+  await expect(band).toBeVisible();
+  const zoneBox = await page.locator('.overview__headline-zone').boundingBox();
+  const bandBox = await band.boundingBox();
+  expect(Math.abs(bandBox.width - zoneBox.width)).toBeLessThan(2);
+  expect(bandBox.y).toBeGreaterThanOrEqual(zoneBox.y + zoneBox.height - 4);
 
+  // Side by side inside it, fleet first.
+  const fleetBox = await band.locator('.fleet-strip-wrap').boundingBox();
+  const schematicBox = await band.locator('.bay-schematic').boundingBox();
+  expect(Math.abs(fleetBox.y - schematicBox.y)).toBeLessThan(8);
+  expect(schematicBox.x).toBeGreaterThan(fleetBox.x + fleetBox.width - 8);
+
+  // Stacked below 64rem the fleet moves LAST: its own height is
+  // "whatever is left between here and the bottom of the viewport",
+  // which is only true with nothing of substance under it.
   await page.setViewportSize({ width: 375, height: 800 });
-  const factsBoxMobile = await facts.boundingBox();
-  const visualsBoxMobile = await visuals.boundingBox();
-  // Stacked: visuals starts at or below where facts ends, not beside it.
-  expect(visualsBoxMobile.y).toBeGreaterThanOrEqual(factsBoxMobile.y + factsBoxMobile.height - 4);
+  const fleetMobile = await band.locator('.fleet-strip-wrap').boundingBox();
+  const schematicMobile = await band.locator('.bay-schematic').boundingBox();
+  expect(fleetMobile.y).toBeGreaterThanOrEqual(schematicMobile.y + schematicMobile.height - 4);
 });
 
 // Adaptive all-clear (Scott: "When there is nothing that needs
@@ -238,23 +247,20 @@ test('overview: all-clear collapses the headline to a strip and the fleet/storag
   const topBox = await page.locator('.overview__top').boundingBox();
   expect(topBox.y).toBeLessThan(700);
 
-  // Mobile: the two cards stack.
+  // Mobile: the two cards stack, fleet last (see the counts-and-fleet
+  // pass -- the fleet sizes itself against the space beneath it, so it
+  // can only ever be the bottom card in a stack).
   await page.setViewportSize({ width: 375, height: 800 });
   const fleetMobile = await fleet.boundingBox();
   const schematicMobile = await schematic.boundingBox();
-  expect(schematicMobile.y).toBeGreaterThanOrEqual(fleetMobile.y + fleetMobile.height - 4);
+  expect(fleetMobile.y).toBeGreaterThanOrEqual(schematicMobile.y + schematicMobile.height - 4);
 });
 
-// Balance pass (Scott: "sections are arranged oddly with lots of wasted
-// space... odd sizes"): "Needs a look" used to be a separate, full-width
-// block below the whole status band, which only started once the
-// TALLER of the two columns (fleet strip + schematic) finished --
-// leaving a dead gap under the shorter facts column the entire time
-// (confirmed live: a 175px void at 1440px). It now lives INSIDE
-// overview__status-facts, right after the fact lines -- this pins that
-// nesting directly: attention's own left edge and width must match
-// facts' column, not the full band.
-test('overview: needs-a-look sits inside the facts column, not a separate full-width block', async ({ page }) => {
+// Counts pass: "Needs a look" is one short row inside the headline
+// card -- the label plus at most two chips -- not a column of rows. It
+// must stay a single line at desktop width; the moment it grows past
+// one the two-column band it replaced would have been the better shape.
+test('overview: needs-a-look is one short inline row inside the headline card', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
 
@@ -262,18 +268,28 @@ test('overview: needs-a-look sits inside the facts column, not a separate full-w
   if ((await attention.count()) === 0) {
     test.skip(true, 'fake fleet booted all-clear for this run -- nothing to check');
   }
+  await expect(attention).toBeVisible();
 
-  const facts = page.locator('.overview__status-facts');
-  const factsBox = await facts.boundingBox();
+  const zoneBox = await page.locator('.overview__headline-zone').boundingBox();
   const attentionBox = await attention.boundingBox();
-  expect(factsBox).not.toBeNull();
+  expect(zoneBox).not.toBeNull();
   expect(attentionBox).not.toBeNull();
 
-  expect(Math.abs(attentionBox.x - factsBox.x), "attention must share the facts column's own left edge").toBeLessThan(2);
-  expect(
-    attentionBox.width,
-    'attention must be contained in the facts column, not stretch across the full band',
-  ).toBeLessThanOrEqual(factsBox.width + 2);
+  // Inside the headline card, spanning it.
+  expect(attentionBox.x).toBeGreaterThanOrEqual(zoneBox.x - 1);
+  expect(attentionBox.y).toBeGreaterThan(zoneBox.y);
+  expect(attentionBox.y + attentionBox.height).toBeLessThanOrEqual(zoneBox.y + zoneBox.height + 1);
+  // One row: the chips share their label's own line.
+  expect(attentionBox.height, 'the attention row must not stack into a column').toBeLessThan(70);
+
+  const chips = attention.locator('.overview__chip');
+  const chipCount = await chips.count();
+  expect(chipCount).toBeGreaterThan(0);
+  expect(chipCount).toBeLessThanOrEqual(2);
+  for (let i = 0; i < chipCount; i++) {
+    const chipBox = await chips.nth(i).boundingBox();
+    expect(Math.abs(chipBox.y + chipBox.height / 2 - (attentionBox.y + attentionBox.height / 2))).toBeLessThan(10);
+  }
 });
 
 // Balance pass, second half: the old shared two-column BODY put Top
@@ -311,39 +327,30 @@ test('overview: Top Consumers and Recent events share one wide column, wider tha
   expect(railBox.width).toBeLessThan(topBox.width);
 });
 
-// Needs-a-look rows collapsed from a title line plus a separate detail
-// line into one inline sentence -- title and reason share a line
-// (CalloutRow's .callout-row, since the Overview integration), never
-// the old two-block stack. Geometry can only distinguish the two
-// layouts on a row whose sentence FITS one line -- the row's flex
-// wraps deliberately, so a long detail (an event alert's summary, an
-// insight "Cause:" suffix) legitimately continues below the title --
-// so this pins the one row fake mode keeps deterministically short:
-// grafana's own "unhealthy -- Failing its health check." A parallel
-// spec (acks.spec.ts's UI half) can briefly ack that row away, so its
-// absence skips rather than fails.
-test('overview: needs-a-look rows render as one line, not a title line over a detail line', async ({ page }) => {
+// The chips ARE the headline count, split two ways -- so whatever the
+// server's mood is on any given run, the numbers on them must add up to
+// the sentence right above them. (What each bucket contains, and that
+// an acked concern leaves both, is unit-tested in
+// src/lib/attentionCounts.test.ts; the navigation is in
+// tests/overview-attention.spec.ts.)
+test('overview: the attention chips always sum to the headline count', async ({ page }) => {
   await page.goto('#/');
 
-  const attention = page.locator('.overview__attention');
-  if ((await attention.count()) === 0) {
-    test.skip(true, 'fake fleet booted all-clear for this run -- nothing to check');
+  const headline = page.locator('.overview__headline-text');
+  await expect(headline).toBeVisible();
+  if ((await headline.textContent()) === 'Nothing needs you') {
+    await expect(page.locator('.overview__attention')).toHaveCount(0);
+    test.skip(true, 'fake fleet booted all-clear for this run -- nothing to count');
   }
 
-  const row = page.locator('.callout-row', { hasText: 'grafana is unhealthy' });
-  if ((await row.count()) === 0) {
-    test.skip(true, 'the canonical short row is acked/absent this run -- nothing measurable to check');
-  }
-
-  const titleBox = await row.locator('.callout-row__title').boundingBox();
-  const detailBox = await row.locator('.callout-row__detail').boundingBox();
-  expect(titleBox).not.toBeNull();
-  expect(detailBox).not.toBeNull();
-  const titleMid = titleBox.y + titleBox.height / 2;
-  const detailMid = detailBox.y + detailBox.height / 2;
-  // Sharing a baseline-aligned flex line puts the two midlines within
-  // a few px; the old stack separated them by a full line (~20px+).
-  expect(Math.abs(titleMid - detailMid), 'the row stacks its detail under its title').toBeLessThan(12);
+  await expect(async () => {
+    const text = (await headline.textContent()) ?? '';
+    const expected = Number(text.match(/^(\d+) things? needs? you$/)?.[1]);
+    expect(Number.isFinite(expected)).toBe(true);
+    const counts = await page.locator('.overview__chip-count').allTextContents();
+    expect(counts.length).toBeGreaterThan(0);
+    expect(counts.reduce((n, c) => n + Number(c), 0)).toBe(expected);
+  }).toPass({ timeout: 20_000 });
 });
 
 // Bay schematic: now always part of the status band's right column

@@ -77,14 +77,60 @@
   other things"): with zero callouts the status band's left column has
   nothing left to say -- the array facts live in BaySchematic's own
   head now (facts-relocation pass) and the attention section doesn't
-  exist -- so the whole two-column band is conditional on
+  exist -- so the whole two-column band was conditional on
   !overviewStatus.ok. All-clear instead renders the headline card as a
   compact strip (overview__headline-zone--clear) and promotes the fleet
   strip + bay schematic into overview__clear-band, a full-width row of
   their own (side by side at >=64rem, stacked below), pulling the
   modules band and GPU strip up the page by roughly the dead column's
-  height. With callouts present the attention layout above stays
-  exactly as it was.
+  height. (Superseded on the attention side by the counts-and-fleet
+  pass below, which gives BOTH states that same full-width row.)
+
+  Counts-and-fleet pass -- three asks, one shape:
+
+  1. "It doesn't create a list there, but instead has a count of items
+     that need you. The user can click on the number and then be brought
+     to a list of items that need attention. Alerts will go to the
+     events page, and any container contentions will go to the insights
+     page." The attention section no longer renders one CalloutRow per
+     anomaly; it renders at most two count chips over the SAME anomaly
+     list (lib/attentionCounts.ts owns the bucketing, the routing and
+     the wording). The headline's own count is still anomalies.length,
+     so the chips always sum to it, and an acknowledged concern is
+     missing from the count exactly the way it used to be missing from
+     the list -- deriveOverviewStatus drops it before either sees it.
+
+     What that costs, and the one open question this pass leaves: the
+     per-row Ack control went with the rows. Acknowledgement itself is
+     untouched -- the store, the API, the derivation filter and
+     CalloutRow (the component that owned the control) are all still
+     here and still tested -- but nothing on THIS page renders it any
+     more, and re-inventing one beside a count would just be a second,
+     quieter list. Its new home is a product call: the natural one is
+     the destination pages the chips already point at.
+
+  2. "Container fleet section should be sized to take up the available
+     screen space beneath it, and objects (containers) inside the
+     section should be auto-resized depending on quantity of
+     containers." That lives inside FleetStrip (see its own doc for the
+     measurement and the fit), but it is the reason for the layout
+     change here: the status band's two-column split existed to put a
+     TALL list of callouts beside the visuals, and two chips are not a
+     column. So the band collapsed -- the chips moved inline into the
+     headline card, and the fleet + schematic row that all-clear
+     already had became the layout for both states. The fleet is
+     therefore BESIDE the schematic rather than stacked above it, which
+     is what makes "the space beneath it" a real, empty thing to grow
+     into; the state the page is in is still legible in the DOM
+     (overview__status-band vs overview__clear-band, one shared rule
+     set). Where the two do stack -- below 64rem -- the fleet is
+     ordered last, for the same reason.
+
+  3. "Glowing Container activity should be triggered by any metric that
+     is above a threshold, not just CPU" -- entirely inside FleetStrip
+     and lib/fleetActivity.ts. The one thing it changed out here: the
+     fleet strip is handed each container's whole metrics bag plus the
+     host memory total, rather than a hand-picked cpu/mem pair.
 
   Customize pass (the ask: let a user rearrange the Overview): the
   modules band -- and ONLY the modules band -- became rearrangeable. Its
@@ -96,7 +142,7 @@
   the way topResource/theme/motion do.
 
   What is deliberately NOT rearrangeable: the status band (headline,
-  attention callouts, fleet strip, bay schematic) and the all-clear band
+  attention chips, fleet strip, bay schematic) and the all-clear band
   above it, plus the GPU strip below. The "needs you" surface must not be
   buryable -- a layout gesture that can hide the reason you opened the
   page is a bug with a UI, not a feature.
@@ -186,6 +232,7 @@
   import { fetchEvents, fetchSeries, fetchSnapshot } from '../lib/api';
   import { acks } from '../lib/acks.svelte';
   import { calloutTextBySlot, deriveOverviewStatus, worstSeverity } from '../lib/overviewStatus';
+  import { attentionChips } from '../lib/attentionCounts';
   import { band } from '../lib/thresholds';
   import {
     OVERVIEW_RATIO_MAX,
@@ -205,7 +252,6 @@
   import { overviewLayout } from '../lib/overviewLayout.svelte';
   import { dropTargetAt } from '../lib/dragReorder';
 
-  import CalloutRow from '../components/CalloutRow.svelte';
   import StatTile from '../components/StatTile.svelte';
   import FleetStrip from '../components/FleetStrip.svelte';
   import BaySchematic from '../components/BaySchematic.svelte';
@@ -352,6 +398,12 @@
   // containers separately (see its own partition).
   let containerEntries = $derived(Object.entries(live.frame?.containers ?? {}));
   let unhealthyNames = $derived(unhealthyContainerNames(live.frame?.containers ?? {}));
+  // The whole metrics bag rides through rather than a hand-picked pair:
+  // the strip's glow now ranks five metrics (lib/fleetActivity.ts), and
+  // a prop per metric would mean editing this map every time that set
+  // changes. hostMemBytes is the one thing the bag can't answer for
+  // itself -- the frame carries no host total directly, only
+  // resourceScaleMax's back-calculation from the used bytes/pct pair.
   let fleetContainers = $derived(
     containerEntries
       .filter(([, c]) => containerRunState(c.state) !== 'created')
@@ -360,10 +412,10 @@
         state: c.state,
         health: c.health,
         icon: c.icon,
-        cpuPct: c.metrics['cpu.pct'],
-        memBytes: c.metrics['mem.bytes'],
+        metrics: c.metrics,
       })),
   );
+  let hostMemBytes = $derived(resourceScaleMax('mem', live.frame));
 
   // TOP_MODULE_LIMIT: this module's own top-N cut, per the D2 compact-
   // module brief -- now the 'normal' step's own budget rather than a
@@ -527,6 +579,12 @@
     }),
   );
   let statusColor = $derived(`var(--status-${worstSeverity(overviewStatus.anomalies)})`);
+  // The attention section is COUNTS now, not a list (Scott: "it doesn't
+  // create a list there, but instead has a count of items that need
+  // you"). Same anomalies, same ack filter, bucketed two ways and
+  // rendered as at most two chips -- see lib/attentionCounts.ts for the
+  // split and why each chip lands where it does.
+  let chips = $derived(attentionChips(overviewStatus.anomalies));
 
   let diskAnomalies = $derived(
     overviewStatus.anomalies.filter((a) => a.kind === 'disk-usage' || a.kind === 'disk-errors'),
@@ -953,16 +1011,17 @@
   });
 </script>
 
-<!-- statusVisuals: the fleet strip + bay schematic pair, rendered in
-  exactly one of two homes -- the attention band's right column, or the
-  all-clear's own full-width band (see the adaptive all-clear pass in
-  the top-of-file doc). Each sits in its own __visual-slot so the two
-  layouts only differ in how the slots flow, and the schematic's slot
-  disappears with it (BaySchematic renders nothing for zero entries)
-  rather than holding an empty half open. -->
+<!-- statusVisuals: the fleet strip + bay schematic pair, now the same
+  full-width row in BOTH page states (see the counts-and-fleet pass in
+  the top-of-file doc) -- only its wrapper's class differs, so which
+  state the page is in stays readable in the DOM. Each sits in its own
+  __visual-slot so the schematic's slot disappears with it (BaySchematic
+  renders nothing for zero entries) rather than holding an empty half
+  open, and so the stacked breakpoint can reorder them without either
+  component knowing. -->
 {#snippet statusVisuals()}
-  <div class="overview__visual-slot">
-    <FleetStrip containers={fleetContainers} />
+  <div class="overview__visual-slot overview__visual-slot--fleet">
+    <FleetStrip containers={fleetContainers} {hostMemBytes} />
   </div>
   {#if baySchematicEntries.length > 0}
     <div class="overview__visual-slot">
@@ -1192,24 +1251,26 @@
       <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
     </div>
     {#if !overviewStatus.ok}
-      <div class="overview__status-band">
-        <div class="overview__status-facts">
-          <section class="overview__attention">
-            <span class="microlabel">Needs a look</span>
-            {#each overviewStatus.anomalies as anomaly, i (i)}
-              <CalloutRow {anomaly} />
-            {/each}
-          </section>
+      <section class="overview__attention">
+        <span class="microlabel">Needs a look</span>
+        <div class="overview__chips">
+          {#each chips as chip (chip.bucket)}
+            <a class="overview__chip" href={chip.href} aria-label={chip.ariaLabel} data-chip={chip.bucket}>
+              <span class="overview__chip-count tabular-nums" aria-hidden="true">{chip.count}</span>
+              <span class="overview__chip-noun" aria-hidden="true">{chip.noun}</span>
+            </a>
+          {/each}
         </div>
-        <div class="overview__status-visuals">
-          {@render statusVisuals()}
-        </div>
-      </div>
+      </section>
     {/if}
   </div>
 
   {#if overviewStatus.ok}
     <div class="overview__clear-band">
+      {@render statusVisuals()}
+    </div>
+  {:else}
+    <div class="overview__status-band">
       {@render statusVisuals()}
     </div>
   {/if}
@@ -1702,30 +1763,44 @@
     padding-bottom: 1rem;
   }
 
-  /* --- All-clear band: the fleet strip + bay schematic at full page
+  /* --- Visuals band: the fleet strip + bay schematic at full page
      width, side by side once there's room for two real modules
      (>=64rem -- at the app's usual 48rem split the sidebar is already
      eating ~15rem, which would squeeze each module under ~24rem),
      stacked below that. The slots flex equally; each component already
-     fills its slot (width: 100%). ---- */
-  .overview__clear-band {
+     fills its slot (width: 100%).
+
+     Two class names, one rule set: the band is now the same row in both
+     page states (the counts-and-fleet pass), and which state it is
+     rendered in stays legible in the DOM rather than being erased into
+     a single neutral name. ---- */
+  .overview__clear-band,
+  .overview__status-band {
     display: flex;
     align-items: flex-start;
     gap: 1rem;
   }
   .overview__visual-slot {
     min-width: 0;
-  }
-  .overview__clear-band .overview__visual-slot {
     flex: 1 1 0;
   }
   @media (max-width: 63.9375rem) {
-    .overview__clear-band {
+    .overview__clear-band,
+    .overview__status-band {
       flex-direction: column;
     }
-    .overview__clear-band .overview__visual-slot {
+    .overview__visual-slot {
       flex: none;
       width: 100%;
+    }
+    /* Stacked, the fleet goes LAST. Its own height is "whatever is left
+       between here and the bottom of the viewport" (FleetStrip's field
+       measurement), which is only true when nothing of substance is
+       below it -- above the schematic it would push it off the screen
+       entirely. Side by side there is nothing beneath either one, so
+       the fleet keeps its natural first position. */
+    .overview__visual-slot--fleet {
+      order: 2;
     }
   }
 
@@ -1783,41 +1858,6 @@
     }
   }
 
-  /* --- Status band: attention (left) + fleet strip/schematic (right)
-     at >=768px (unified with every other view's own mobile breakpoint,
-     dropped from the header-compaction pass's one-off 64rem), one
-     vertical stack below it. The array/warmest fact lines that used to
-     lead the left column live inside BaySchematic's own head now (the
-     facts-relocation pass -- see arrayStateSentence's doc), so the
-     column is just the "Needs a look" section, top-aligned with the
-     visuals beside it. ---- */
-  .overview__status-band {
-    display: flex;
-    flex-direction: column;
-    gap: 1.25rem;
-  }
-  @media (min-width: 48rem) {
-    .overview__status-band {
-      flex-direction: row;
-      align-items: flex-start;
-      gap: 2rem;
-    }
-    .overview__status-facts,
-    .overview__status-visuals {
-      flex: 1 1 0;
-      min-width: 0;
-    }
-  }
-  .overview__status-facts {
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
-  }
-  .overview__status-visuals {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
   .overview__metrics-rail {
     display: flex;
     flex-direction: column;
@@ -1830,18 +1870,65 @@
      own flex column, spaced by that column's own gap, same as every
      other subline above it. No frame, no brackets, no leader line: the
      one rule surviving the corrective pass is that a line either
-     separates two real regions or encodes real data. Each row is one
-     CalloutRow (title + inline reason + ack control -- its own doc);
-     this section only owns the shared container they stack in. ------ */
+     separates two real regions or encodes real data.
+
+     It is a ROW now, not a column of rows: the section holds at most
+     two count chips (the counts pass -- see lib/attentionCounts.ts), so
+     stacking them would spend a whole card's height on two numbers. The
+     label sits inline at the front, and the chips wrap under it on a
+     narrow screen. ------------------------------------------------- */
 
   .overview__attention {
     display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
-    padding: 0.9rem 1rem;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.55rem 0.9rem;
+    padding: 0.7rem 1rem;
     border-radius: 11px;
     background: color-mix(in oklab, var(--status-warning) 8%, var(--surface-muted));
     border: 1px solid color-mix(in oklab, var(--status-warning) 20%, var(--border));
+  }
+  .overview__chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  /* One chip = one number you can press. The COUNT is the affordance --
+     "click on the number and then be brought to a list of items that
+     need attention" -- so it carries the weight and the noun beside it
+     stays a quiet gloss; the whole chip is the hit target and the whole
+     sentence (including where it goes) is in its aria-label, because
+     "3 alerts" alone tells a screen reader nothing about activating it. */
+  .overview__chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    min-height: 34px;
+    padding: 0.15rem 0.75rem;
+    border: 1px solid color-mix(in oklab, var(--status-warning) 32%, var(--border));
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--ink);
+    text-decoration: none;
+    transition:
+      border-color 120ms ease,
+      background 120ms ease;
+  }
+  .overview__chip:hover,
+  .overview__chip:focus-visible {
+    border-color: var(--accent);
+    background: var(--surface-soft);
+  }
+  .overview__chip-count {
+    font-family: var(--font-display);
+    font-size: 1.35rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -0.03em;
+  }
+  .overview__chip-noun {
+    color: var(--ink-2);
+    font-size: 0.82rem;
   }
   /* --- Top Consumers / Recent events (each now stacked in its own
      column above -- see overview__body's own doc) ------------------- */

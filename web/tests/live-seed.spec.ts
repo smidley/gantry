@@ -18,7 +18,7 @@ import { test, expect } from '@playwright/test';
 // real chart canvas is showing within 1s. Between them these prove both
 // halves of the requirement: real history was fetched, and it reached
 // the chart rather than being fetched and dropped.
-test('container detail seeds its live CPU chart from server history on arrival', async ({ page }) => {
+test('container detail seeds its live CPU chart from server history on arrival', async ({ page, request }) => {
   test.setTimeout(60_000);
 
   await page.goto('#/');
@@ -49,7 +49,17 @@ test('container detail seeds its live CPU chart from server history on arrival',
   expect(to - from).toBeGreaterThan(895);
   expect(to - from).toBeLessThan(905);
 
-  const body = (await seedResponse.json()) as { metric: string; points: unknown[] }[];
+  // The payload is read by re-requesting the seed's exact URL through
+  // Playwright's own HTTP client rather than via seedResponse.json():
+  // Chromium holds a sniffed page response's body only best-effort, and
+  // on GitHub's loaded 2-core runners it evicts it before the test gets
+  // back around to reading -- the hero-chart test below failed CI twice
+  // exactly here ("Network.getResponseBody: No data found for resource",
+  // 2026-09-01, retry #1 included). The window is pinned by the URL's own
+  // absolute from/to and ring eviction sits hours out, so the refetch
+  // carries the same points the page's own 200 just did -- and the DOM
+  // assertions below still prove those points actually reached the chart.
+  const body = (await (await request.get(seedResponse.url())).json()) as { metric: string; points: unknown[] }[];
   const withPoints = body.filter((r) => r.points.length > 0);
   expect(withPoints.length).toBeGreaterThan(0);
   // At 20s+ of real server uptime and a 2s tick cadence, a genuine seed
@@ -128,7 +138,7 @@ test('container detail never flashes "no data" while its live seed is still in f
 // edge lands on the oldest timestamp ANY line has -- which, pre-fix, only
 // the host-total line actually had a value at (every container cell
 // there was a real gap, rendered as "—").
-test('metrics hero chart seeds its container lines from server history on arrival', async ({ page }) => {
+test('metrics hero chart seeds its container lines from server history on arrival', async ({ page, request }) => {
   test.setTimeout(60_000);
 
   await page.goto('#/');
@@ -153,7 +163,9 @@ test('metrics hero chart seeds its container lines from server history on arriva
   expect(to - from).toBeGreaterThan(895);
   expect(to - from).toBeLessThan(905);
 
-  const body = (await seedResponse.json()) as { metric: string; points: unknown[] }[];
+  // request.get, not seedResponse.json() -- see the first test's own doc
+  // for why (this is the test the CDP body-eviction flake actually hit).
+  const body = (await (await request.get(seedResponse.url())).json()) as { metric: string; points: unknown[] }[];
   const withPoints = body.filter((r) => r.points.length > 0);
   expect(withPoints.length).toBeGreaterThan(0);
   expect(withPoints[0].points.length).toBeGreaterThan(5);
@@ -164,14 +176,27 @@ test('metrics hero chart seeds its container lines from server history on arriva
 
   const rows = page.locator('.top-consumers__header .time-chart__tooltip-row');
   await expect.poll(() => rows.count()).toBeGreaterThan(1); // the host-total line plus at least one container
-  const texts = await rows.allTextContents();
-  const hostRow = texts.find((t) => t.includes('Host total'));
-  expect(hostRow, 'sanity check: the host reference line must already show real history at the left edge').toBeDefined();
-  expect(hostRow).not.toContain('—');
 
-  const containerRows = texts.filter((t) => !t.includes('Host total'));
-  expect(containerRows.length).toBeGreaterThan(0);
-  expect(containerRows.some((t) => !t.includes('—'))).toBe(true);
+  // toPass rather than a one-shot read: the caught response above only
+  // proves one slot's seed landed on the wire -- each of the (up to 10)
+  // slots applies its own seed when its own fetch resolves, and on a
+  // loaded 2-core runner a single allTextContents() can land in that gap
+  // (host row already seeded, every container row still "—"; observed
+  // live under CI=1 --workers=2). Each retry re-hovers so the tooltip
+  // re-derives from whatever has landed by then. A regression of the
+  // seeding itself still fails hard here: an unseeded container line
+  // never grows a value at the union's oldest index, so the retries just
+  // run out.
+  await expect(async () => {
+    await chart.hover({ position: { x: 2, y: 10 } });
+    const texts = await rows.allTextContents();
+    const hostRow = texts.find((t) => t.includes('Host total'));
+    expect(hostRow, 'sanity check: the host reference line must already show real history at the left edge').toBeDefined();
+    expect(hostRow).not.toContain('—');
+    const containerRows = texts.filter((t) => !t.includes('Host total'));
+    expect(containerRows.length).toBeGreaterThan(0);
+    expect(containerRows.some((t) => !t.includes('—'))).toBe(true);
+  }).toPass({ timeout: 10_000 });
 });
 
 // Same contract, Compare's own per-member "Now" charts (makeCompareSlot,
@@ -180,7 +205,7 @@ test('metrics hero chart seeds its container lines from server history on arriva
 // line here to sanity-check against (Compare has no such concept), so
 // this just confirms at least one member's own row has a real value at
 // the chart's oldest edge.
-test('compare view seeds its live per-member charts from server history on arrival', async ({ page }) => {
+test('compare view seeds its live per-member charts from server history on arrival', async ({ page, request }) => {
   test.setTimeout(60_000);
 
   await page.goto('#/');
@@ -200,7 +225,8 @@ test('compare view seeds its live per-member charts from server history on arriv
   expect(to - from).toBeGreaterThan(895);
   expect(to - from).toBeLessThan(905);
 
-  const body = (await seedResponse.json()) as { metric: string; points: unknown[] }[];
+  // request.get, not seedResponse.json() -- see the first test's own doc.
+  const body = (await (await request.get(seedResponse.url())).json()) as { metric: string; points: unknown[] }[];
   const cpuEntry = body.find((r) => r.metric === 'cpu.pct');
   expect(cpuEntry?.points.length ?? 0).toBeGreaterThan(5);
 
@@ -210,8 +236,13 @@ test('compare view seeds its live per-member charts from server history on arriv
 
   const rows = page.locator('.compare__chart-card', { hasText: 'CPU' }).locator('.time-chart__tooltip-row');
   await expect.poll(() => rows.count()).toBeGreaterThan(0);
-  const texts = await rows.allTextContents();
-  expect(texts.some((t) => !t.includes('—'))).toBe(true);
+  // toPass: seed application lags the wire response under load -- see the
+  // hero test's own doc above.
+  await expect(async () => {
+    await cpuChart.hover({ position: { x: 2, y: 10 } });
+    const texts = await rows.allTextContents();
+    expect(texts.some((t) => !t.includes('—'))).toBe(true);
+  }).toPass({ timeout: 10_000 });
 });
 
 // Same contract, the Storage view's own per-drive header chart (Scott's
@@ -226,7 +257,7 @@ test('compare view seeds its live per-member charts from server history on arriv
 // seeding rather than the hero chart's per-container one; asserting the
 // metrics param carries both halves proves the device join resolved
 // correctly, not just that SOME request fired.
-test('storage chart seeds its per-drive lines from server history on arrival', async ({ page }) => {
+test('storage chart seeds its per-drive lines from server history on arrival', async ({ page, request }) => {
   test.setTimeout(60_000);
 
   await page.goto('#/');
@@ -249,7 +280,8 @@ test('storage chart seeds its per-drive lines from server history on arrival', a
   expect(to - from).toBeGreaterThan(895);
   expect(to - from).toBeLessThan(905);
 
-  const body = (await seedResponse.json()) as { metric: string; points: unknown[] }[];
+  // request.get, not seedResponse.json() -- see the first test's own doc.
+  const body = (await (await request.get(seedResponse.url())).json()) as { metric: string; points: unknown[] }[];
   const withPoints = body.filter((r) => r.points.length > 0);
   expect(withPoints.length).toBeGreaterThan(0);
   expect(withPoints[0].points.length).toBeGreaterThan(5);
@@ -260,8 +292,13 @@ test('storage chart seeds its per-drive lines from server history on arrival', a
 
   const rows = page.locator('.storage-chart .time-chart__tooltip-row');
   await expect.poll(() => rows.count()).toBeGreaterThan(0);
-  const texts = await rows.allTextContents();
-  expect(texts.some((t) => !t.includes('—'))).toBe(true);
+  // toPass: seed application lags the wire response under load -- see the
+  // hero test's own doc above.
+  await expect(async () => {
+    await chart.hover({ position: { x: 2, y: 10 } });
+    const texts = await rows.allTextContents();
+    expect(texts.some((t) => !t.includes('—'))).toBe(true);
+  }).toPass({ timeout: 10_000 });
 });
 
 // Cold-start variant of the seeding test above: landing directly on
@@ -273,7 +310,7 @@ test('storage chart seeds its per-drive lines from server history on arrival', a
 // getting a reason to run again -- this is the one scenario the test
 // above can't catch, since it always visits Overview (and lets live.frame
 // warm up for 20s) before ever navigating to Storage.
-test('storage chart still seeds even when it is the very first page visited (live.frame not yet warm)', async ({ page }) => {
+test('storage chart still seeds even when it is the very first page visited (live.frame not yet warm)', async ({ page, request }) => {
   test.setTimeout(60_000);
 
   const seedResponsePromise = page.waitForResponse(
@@ -283,7 +320,8 @@ test('storage chart still seeds even when it is the very first page visited (liv
 
   const seedResponse = await seedResponsePromise;
   expect(seedResponse.status()).toBe(200);
-  const body = (await seedResponse.json()) as { metric: string; points: unknown[] }[];
+  // request.get, not seedResponse.json() -- see the first test's own doc.
+  const body = (await (await request.get(seedResponse.url())).json()) as { metric: string; points: unknown[] }[];
   const withPoints = body.filter((r) => r.points.length > 0);
   expect(withPoints.length).toBeGreaterThan(0);
 

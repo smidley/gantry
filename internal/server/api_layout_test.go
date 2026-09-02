@@ -125,18 +125,113 @@ func TestMergeOverviewLayoutPreservesUserOrder(t *testing.T) {
 		Wide:    []string{"metrics-rail", "events"},
 		Narrow:  []string{"top-consumers"},
 		Hidden:  []string{},
+		Ratio:   0.7,
+		Sizes:   map[string]string{"events": overviewSizeTall},
 	}
 	require.Equal(t, stored, mergeOverviewLayout(stored))
 }
 
 // TestMergeOverviewLayoutNeverReturnsNilSlices keeps the JSON wire shape
 // honest: a nil []string marshals to `null`, which the SPA would have to
-// guard on every read. Every list is always a real (if empty) array.
+// guard on every read. Every list is always a real (if empty) array, and
+// Sizes a real (if empty) object.
 func TestMergeOverviewLayoutNeverReturnsNilSlices(t *testing.T) {
 	merged := mergeOverviewLayout(OverviewLayout{})
 	require.NotNil(t, merged.Wide)
 	require.NotNil(t, merged.Narrow)
 	require.NotNil(t, merged.Hidden)
+	require.NotNil(t, merged.Sizes)
+}
+
+// --- v1 -> v2 migration (pure) --------------------------------------------
+//
+// The constrained-resize pass added Ratio and Sizes and bumped the
+// document to 2. Both are additive with a defined "absent", so the
+// migration is a fill-in-the-defaults -- these pin that a document
+// written by the shipped v1 build (or by a browser still holding a
+// cached v1 bundle) survives it untouched apart from those defaults.
+
+func TestMergeOverviewLayoutMigratesAV1Document(t *testing.T) {
+	// Exactly what api_layout.go@v1 stored: three lists, no ratio, no
+	// sizes, and the owner's own arrangement inside them.
+	v1 := OverviewLayout{
+		Version: 1,
+		Wide:    []string{"events", "top-consumers"},
+		Narrow:  []string{"metrics-rail"},
+		Hidden:  []string{},
+	}
+	require.Equal(t, OverviewLayout{
+		Version: overviewLayoutVersion,
+		Wide:    []string{"events", "top-consumers"},
+		Narrow:  []string{"metrics-rail"},
+		Hidden:  []string{},
+		Ratio:   overviewRatioDefault,
+		Sizes:   map[string]string{},
+	}, mergeOverviewLayout(v1), "the arrangement survives; only the new fields are filled")
+}
+
+func TestMergeOverviewLayoutRatio(t *testing.T) {
+	for name, tc := range map[string]struct {
+		stored float64
+		want   float64
+	}{
+		"absent (a v1 document, or an omitted field) takes the default": {stored: 0, want: overviewRatioDefault},
+		"an in-range ratio is kept exactly":                             {stored: 0.7, want: 0.7},
+		"the lower bound is in range":                                   {stored: overviewRatioMin, want: overviewRatioMin},
+		"the upper bound is in range":                                   {stored: overviewRatioMax, want: overviewRatioMax},
+		"too narrow a wide lane clamps up":                              {stored: 0.2, want: overviewRatioMin},
+		"too wide a wide lane clamps down":                              {stored: 0.98, want: overviewRatioMax},
+		"a nonsense negative clamps up rather than throwing":            {stored: -3, want: overviewRatioMin},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.InDelta(t, tc.want, mergeOverviewLayout(OverviewLayout{Ratio: tc.stored}).Ratio, 1e-9)
+		})
+	}
+}
+
+func TestMergeOverviewLayoutSizes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		stored map[string]string
+		want   map[string]string
+	}{
+		"absent (a v1 document) is every module at normal": {
+			stored: nil,
+			want:   map[string]string{},
+		},
+		"a real step against a resizable module is kept": {
+			stored: map[string]string{"events": overviewSizeTall, "top-consumers": overviewSizeCompact},
+			want:   map[string]string{"events": overviewSizeTall, "top-consumers": overviewSizeCompact},
+		},
+		"an explicit normal is dropped -- absence IS normal": {
+			stored: map[string]string{"events": overviewSizeNormal},
+			want:   map[string]string{},
+		},
+		"an unrecognized step normalizes to normal, i.e. is dropped": {
+			stored: map[string]string{"events": "enormous"},
+			want:   map[string]string{},
+		},
+		"an unknown module id is dropped, the same as in a lane": {
+			stored: map[string]string{"a-module-from-the-future": overviewSizeTall},
+			want:   map[string]string{},
+		},
+		"a size against a module with no elastic body is dropped": {
+			stored: map[string]string{"metrics-rail": overviewSizeTall},
+			want:   map[string]string{},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.want, mergeOverviewLayout(OverviewLayout{Sizes: tc.stored}).Sizes)
+		})
+	}
+}
+
+// TestDefaultOverviewLayoutIsUnresized pins the other half of "everything
+// at normal is exactly today's page": the default document carries the
+// band's shipped split and no sizes at all.
+func TestDefaultOverviewLayoutIsUnresized(t *testing.T) {
+	def := defaultOverviewLayout()
+	require.InDelta(t, overviewRatioDefault, def.Ratio, 1e-9)
+	require.Empty(t, def.Sizes)
 }
 
 // --- GET ------------------------------------------------------------------
@@ -235,6 +330,8 @@ func TestOverviewLayoutPutRoundtripsThroughGet(t *testing.T) {
 		Wide:    []string{"events"},
 		Narrow:  []string{"metrics-rail", "top-consumers"},
 		Hidden:  []string{},
+		Ratio:   overviewRatioDefault,
+		Sizes:   map[string]string{},
 	}, body)
 }
 
@@ -274,6 +371,8 @@ func TestOverviewLayoutPutStoresTheMergedDocument(t *testing.T) {
 		Wide:    []string{"events", "top-consumers"},
 		Narrow:  []string{"metrics-rail"},
 		Hidden:  []string{},
+		Ratio:   overviewRatioDefault,
+		Sizes:   map[string]string{},
 	}, fl.setCalls[0])
 }
 
@@ -340,7 +439,8 @@ func TestOverviewLayoutPutRejectsDuplicateID(t *testing.T) {
 
 // TestOverviewLayoutPutRejectsAFutureVersion: a document this build
 // cannot interpret must be refused outright rather than silently
-// re-encoded into whatever shape this build happens to understand.
+// re-encoded into whatever shape this build happens to understand. Only
+// NEWER is refused -- see the v1 case right below.
 func TestOverviewLayoutPutRejectsAFutureVersion(t *testing.T) {
 	fl := &fakeLayout{}
 	s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
@@ -351,6 +451,184 @@ func TestOverviewLayoutPutRejectsAFutureVersion(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	require.Empty(t, fl.setCalls)
+}
+
+// TestOverviewLayoutPutAcceptsAV1Document is the cached-bundle case seen
+// from the wire: a browser still running the v1 SPA PUTs a v1 document at
+// a v2 binary, and it must be accepted and migrated -- not 400'd, which
+// would leave that tab unable to save anything at all until it reloaded.
+func TestOverviewLayoutPutAcceptsAV1Document(t *testing.T) {
+	fl := &fakeLayout{}
+	s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := putSettings(t, ts.URL+"/api/layout/overview",
+		`{"version":1,"wide":["events","top-consumers"],"narrow":["metrics-rail"],"hidden":[]}`)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body OverviewLayout
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, overviewLayoutVersion, body.Version, "the answer is a v2 document")
+	require.Equal(t, []string{"events", "top-consumers"}, body.Wide, "the v1 arrangement survives the migration")
+	require.InDelta(t, overviewRatioDefault, body.Ratio, 1e-9)
+	require.Empty(t, body.Sizes)
+
+	require.Len(t, fl.setCalls, 1)
+	require.Equal(t, overviewLayoutVersion, fl.setCalls[0].Version, "and what got STORED is a v2 document too")
+}
+
+// TestOverviewLayoutGetMigratesAStoredV1Document is the other direction:
+// a config DB written by the shipped v1 build, read by this one.
+func TestOverviewLayoutGetMigratesAStoredV1Document(t *testing.T) {
+	fl := &fakeLayout{layout: OverviewLayout{
+		Version: 1,
+		Wide:    []string{"events", "top-consumers"},
+		Narrow:  []string{},
+		Hidden:  []string{"metrics-rail"},
+	}}
+	s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/layout/overview")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body OverviewLayout
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, overviewLayoutVersion, body.Version)
+	require.Equal(t, []string{"events", "top-consumers"}, body.Wide)
+	require.Equal(t, []string{"metrics-rail"}, body.Hidden, "a hidden module stays hidden across the migration")
+	require.InDelta(t, overviewRatioDefault, body.Ratio, 1e-9)
+	require.Empty(t, body.Sizes)
+	require.Empty(t, fl.setCalls, "a GET still never writes the migrated document back")
+}
+
+// --- ratio + sizes over the wire ------------------------------------------
+
+func TestOverviewLayoutPutRoundtripsRatioAndSizes(t *testing.T) {
+	fl := &fakeLayout{}
+	s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := putSettings(t, ts.URL+"/api/layout/overview",
+		`{"version":2,"wide":["top-consumers","events"],"narrow":["metrics-rail"],"hidden":[],`+
+			`"ratio":0.72,"sizes":{"events":"tall","top-consumers":"compact"}}`)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	getResp, err := http.Get(ts.URL + "/api/layout/overview")
+	require.NoError(t, err)
+	defer func() { _ = getResp.Body.Close() }()
+	var body OverviewLayout
+	require.NoError(t, json.NewDecoder(getResp.Body).Decode(&body))
+	require.InDelta(t, 0.72, body.Ratio, 1e-9)
+	require.Equal(t, map[string]string{"events": "tall", "top-consumers": "compact"}, body.Sizes)
+}
+
+// TestOverviewLayoutPutRejectsAnOutOfRangeRatio takes the ids' own
+// posture: a caller sending a number outside the designed range is a bug
+// worth naming, not a value worth quietly repairing (which is what the
+// merge does for a blob arriving from storage instead).
+func TestOverviewLayoutPutRejectsAnOutOfRangeRatio(t *testing.T) {
+	for name, body := range map[string]string{
+		"below the minimum": `{"version":2,"wide":[],"narrow":[],"hidden":[],"ratio":0.4}`,
+		"above the maximum": `{"version":2,"wide":[],"narrow":[],"hidden":[],"ratio":0.9}`,
+		"negative":          `{"version":2,"wide":[],"narrow":[],"hidden":[],"ratio":-1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fl := &fakeLayout{}
+			s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
+			ts := httptest.NewServer(s.Handler())
+			defer ts.Close()
+
+			resp := putSettings(t, ts.URL+"/api/layout/overview", body)
+			defer func() { _ = resp.Body.Close() }()
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			require.Empty(t, fl.setCalls)
+		})
+	}
+}
+
+// TestOverviewLayoutPutAcceptsAnOmittedRatio: 0 is absent, not
+// out-of-range -- the case a v1 client and a hand-rolled curl both hit.
+func TestOverviewLayoutPutAcceptsAnOmittedRatio(t *testing.T) {
+	fl := &fakeLayout{}
+	s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := putSettings(t, ts.URL+"/api/layout/overview", `{"version":2,"wide":[],"narrow":[],"hidden":[]}`)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Len(t, fl.setCalls, 1)
+	require.InDelta(t, overviewRatioDefault, fl.setCalls[0].Ratio, 1e-9)
+}
+
+func TestOverviewLayoutPutRejectsAnUnknownSize(t *testing.T) {
+	for name, body := range map[string]string{
+		"an unrecognized step": `{"version":2,"wide":[],"narrow":[],"hidden":[],"sizes":{"events":"enormous"}}`,
+		"an unknown module id": `{"version":2,"wide":[],"narrow":[],"hidden":[],"sizes":{"nope":"tall"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fl := &fakeLayout{}
+			s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
+			ts := httptest.NewServer(s.Handler())
+			defer ts.Close()
+
+			resp := putSettings(t, ts.URL+"/api/layout/overview", body)
+			defer func() { _ = resp.Body.Close() }()
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			require.Empty(t, fl.setCalls)
+		})
+	}
+}
+
+// TestOverviewLayoutPutDropsASizeForANonResizableModule is the one
+// deliberate asymmetry in the size validation (see validateOverviewLayout's
+// own doc): metrics-rail is a real module, so a client sending one size
+// per module isn't wrong -- the merge just has nothing to do with it.
+func TestOverviewLayoutPutDropsASizeForANonResizableModule(t *testing.T) {
+	fl := &fakeLayout{}
+	s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := putSettings(t, ts.URL+"/api/layout/overview",
+		`{"version":2,"wide":[],"narrow":[],"hidden":[],"sizes":{"metrics-rail":"tall","events":"compact"}}`)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body OverviewLayout
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, map[string]string{"events": "compact"}, body.Sizes)
+}
+
+// TestOverviewLayoutPutResetsToDefaultRatioAndSizes pins the Reset
+// control's own wire behaviour: an all-empty document is how the SPA says
+// "defaults", and that has to clear a saved ratio and every saved size,
+// not just the arrangement.
+func TestOverviewLayoutPutResetsToDefaultRatioAndSizes(t *testing.T) {
+	fl := &fakeLayout{layout: OverviewLayout{
+		Version: overviewLayoutVersion,
+		Wide:    []string{"events", "top-consumers"},
+		Narrow:  []string{"metrics-rail"},
+		Hidden:  []string{},
+		Ratio:   0.75,
+		Sizes:   map[string]string{"events": overviewSizeTall},
+	}}
+	s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := putSettings(t, ts.URL+"/api/layout/overview", `{"version":2,"wide":[],"narrow":[],"hidden":[]}`)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, defaultOverviewLayout(), fl.layout)
 }
 
 // TestOverviewLayoutPutAcceptsAnOmittedVersion keeps a hand-rolled curl
@@ -423,6 +701,11 @@ func TestOverviewLayoutPutPropagatesSetError(t *testing.T) {
 // user preference, not a destructive mutation of real containers or
 // images. Asserted side by side so the two can never silently diverge.
 
+// The v2 fields ride the same route and therefore take the same posture,
+// asserted with a document that actually carries them rather than an
+// empty one -- a resize must be exactly as writable under GANTRY_READ_ONLY
+// as a reorder is, and exactly as unwritable without the cross-site
+// header.
 func TestOverviewLayoutPutIsNotGatedByReadOnlyMatchingGroups(t *testing.T) {
 	fl := &fakeLayout{}
 	fg := &fakeGroups{}
@@ -430,7 +713,8 @@ func TestOverviewLayoutPutIsNotGatedByReadOnlyMatchingGroups(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	layoutResp := putSettings(t, ts.URL+"/api/layout/overview", `{"version":1,"wide":[],"narrow":[],"hidden":[]}`)
+	layoutResp := putSettings(t, ts.URL+"/api/layout/overview",
+		`{"version":2,"wide":[],"narrow":[],"hidden":[],"ratio":0.7,"sizes":{"events":"tall"}}`)
 	defer func() { _ = layoutResp.Body.Close() }()
 	groupsResp := putSettings(t, ts.URL+"/api/groups", `{"groups":[]}`)
 	defer func() { _ = groupsResp.Body.Close() }()
@@ -438,8 +722,13 @@ func TestOverviewLayoutPutIsNotGatedByReadOnlyMatchingGroups(t *testing.T) {
 	require.Equal(t, groupsResp.StatusCode, layoutResp.StatusCode, "layout must answer read-only exactly the way groups does")
 	require.Equal(t, http.StatusOK, layoutResp.StatusCode)
 	require.Len(t, fl.setCalls, 1, "the write really happened -- this isn't a 200 with nothing behind it")
+	require.InDelta(t, 0.7, fl.setCalls[0].Ratio, 1e-9)
+	require.Equal(t, map[string]string{"events": overviewSizeTall}, fl.setCalls[0].Sizes)
 }
 
+// The cross-site check is mux-wide (gate.go) and never looks at the body,
+// so one case covers a resize as completely as it covers a reorder --
+// there is deliberately no second, ratio-carrying twin of this.
 func TestOverviewLayoutPutRequiresTheCrossSiteHeader(t *testing.T) {
 	fl := &fakeLayout{}
 	s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})

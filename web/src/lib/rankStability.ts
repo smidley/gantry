@@ -167,6 +167,11 @@ export interface StableRow {
 // summary) never enter ranking at all -- they trail every real row,
 // unconditionally, every call, the same carve-out reorderByLastDisplayedValue
 // used to have.
+//
+// `limit` may CHANGE between calls (Overview's Top Consumers module has
+// a compact/normal/tall height step, and each step is a different row
+// budget). A shrink takes effect on the very next call -- see the clip
+// on currentDisplay below.
 export function stableTopN<T extends StableRow>(
   rows: readonly T[],
   state: RankStabilityState,
@@ -188,7 +193,18 @@ export function stableTopN<T extends StableRow>(
   withAvg.sort((a, b) => (b.avg !== a.avg ? b.avg - a.avg : a.entity.localeCompare(b.entity)));
   const rankedEntities = withAvg.map((w) => w.entity);
 
-  const currentDisplay = state.displayOrder.get(metricKey) ?? [];
+  // Clipped to `limit` before the three cases below, which is a NO-OP
+  // whenever the limit is constant -- case 1 slices to it, case 2 tops
+  // up to it, and case 3 only ever removes -- so nothing about an
+  // unchanging leaderboard changes here. It fires only when the caller
+  // asks for FEWER rows than are currently shown, and there it is the
+  // whole point: shrinking the budget is the viewer saying "show me
+  // less", not a challenger churning the membership, so the hysteresis
+  // and the re-sort cadence gate (which exist to keep an unasked-for
+  // swap from flickering) must not make it wait ~10s to be obeyed.
+  // Dropping from the END is dropping the lowest-ranked, since
+  // displayOrder is always stored in ranked order.
+  const currentDisplay = (state.displayOrder.get(metricKey) ?? []).slice(0, Math.max(0, limit));
   let members: string[];
 
   if (currentDisplay.length === 0) {

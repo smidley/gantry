@@ -6,7 +6,8 @@ import path from 'node:path';
 
 // The Overview's "Customize" edit mode, end to end against the real
 // binary: enter edit mode, drag a module to a new position with a REAL
-// mouse, hide one, reset, and prove each of those survives a reload.
+// mouse, drag the column divider with one too, set a card's height step,
+// hide a module, reset, and prove each of those survives a reload.
 //
 // This file boots its OWN gantry process (auth.spec.ts's harness, same
 // ./gantry artifact `make release` already produced) rather than sharing
@@ -56,17 +57,46 @@ test.afterAll(() => {
   proc?.kill('SIGTERM');
 });
 
+// The document's own schema number and the two v2 constants these tests
+// assert against -- kept as literals rather than imported from
+// src/lib/overviewLayout.ts on purpose: a spec that read the same
+// constant the app renders from could never catch it changing.
+const LAYOUT_VERSION = 2;
+const RATIO_DEFAULT = 0.615;
+const RATIO_MAX = 0.75;
+
+interface SavedLayout {
+  version: number;
+  wide: string[];
+  narrow: string[];
+  hidden: string[];
+  ratio: number;
+  sizes: Record<string, string>;
+}
+
+// putLayout writes a whole document straight through the API -- the
+// seeding path for a test that needs the page to START somewhere.
+async function putLayout(request: APIRequestContext, data: Record<string, unknown>): Promise<void> {
+  const res = await request.put(`${URL}/api/layout/overview`, {
+    headers: { 'X-Requested-With': 'gantry', 'Content-Type': 'application/json' },
+    data,
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 // resetLayout wipes the saved document back to the default straight
 // through the API. An all-empty document is the shortest way to say
 // "defaults": the server's own merge places every known module at its
-// default home (api_layout.go's mergeOverviewLayout), which is exactly
+// default home, restores the default column split and clears every
+// height step (api_layout.go's mergeOverviewLayout), which is exactly
 // what the Reset control produces too.
+//
+// Deliberately still declared `version: 1`: this runs before every test
+// in the file, so the v1 -> v2 migration is exercised on the real binary
+// dozens of times a run rather than in one lonely case. A v1 document is
+// exactly what a browser holding a cached pre-resize bundle sends.
 async function resetLayout(request: APIRequestContext): Promise<void> {
-  const res = await request.put(`${URL}/api/layout/overview`, {
-    headers: { 'X-Requested-With': 'gantry', 'Content-Type': 'application/json' },
-    data: { version: 1, wide: [], narrow: [], hidden: [] },
-  });
-  expect(res.ok()).toBeTruthy();
+  await putLayout(request, { version: 1, wide: [], narrow: [], hidden: [] });
 }
 
 test.beforeEach(async ({ request }) => {
@@ -86,10 +116,66 @@ function laneOrder(page: Page, lane: 'wide' | 'narrow'): Promise<string[]> {
 // never a sniffed page response -- Chromium evicts sniffed bodies under
 // load on the 2-core runners, which is what #46/#48 were about. This
 // client buffers its own bodies, so reading json() off it is safe.
-async function savedLayout(request: APIRequestContext): Promise<{ wide: string[]; narrow: string[]; hidden: string[] }> {
+async function savedLayout(request: APIRequestContext): Promise<SavedLayout> {
   const res = await request.get(`${URL}/api/layout/overview`);
   expect(res.ok()).toBeTruthy();
   return res.json();
+}
+
+// laneSplit reads the split the page is ACTUALLY rendering -- the wide
+// lane's share of the two lanes' own combined width, which is exactly
+// what the saved ratio means (the flex gap between them belongs to
+// neither, so it is excluded from both sides of the fraction).
+async function laneSplit(page: Page): Promise<number> {
+  const wide = await page.locator('.overview__modules-wide').boundingBox();
+  const narrow = await page.locator('.overview__modules-narrow').boundingBox();
+  if (!wide || !narrow) return NaN;
+  return wide.width / (wide.width + narrow.width);
+}
+
+// One deterministic all-clear SSE frame, the same route-mock the smoke
+// suite's own layout specs use: fake mode always boots one unhealthy
+// container (grafana), so the all-clear band -- the adaptive expansion
+// the height steps have to coexist with -- is not otherwise reachable
+// here. Ten running containers so the leaderboard has more rows than
+// even the tall step asks for.
+function allClearFrame() {
+  const containers: Record<string, object> = {};
+  for (let i = 0; i < 10; i++) {
+    containers[`demo-${i}`] = {
+      state: 'running',
+      health: 'healthy',
+      icon: '',
+      metrics: { 'cpu.pct': 20 - i, 'mem.bytes': (10 - i) * 1e8 },
+    };
+  }
+  return {
+    ts: Math.floor(Date.now() / 1000),
+    unraid_version: '7.0.0',
+    host: { 'cpu.total': 12.5, 'mem.used_pct': 42 },
+    containers,
+    disks: {
+      disk1: { 'fs.used_bytes': 4e12, 'fs.free_bytes': 4e12, 'temp.c': 38.2, errors: 0 },
+      cache: { 'fs.used_bytes': 2e11, 'fs.free_bytes': 3e11, 'temp.c': 41.5, errors: 0 },
+    },
+    disk_meta: { disk1: { device: 'sdb', kind: 'hdd' }, cache: { device: 'nvme0n1', kind: 'nvme' } },
+    unraid: { array: { 'array.started': 1, 'mover.running': 0 } },
+    gpu: {},
+    gpu_meta: {},
+    sources: { docker: 'ok' },
+    alerts: { firing: [], firing_count: 0, truncated: 0, channels: {} },
+    insights: { active: [], tier: 'proxy', suppressed: 0 },
+  };
+}
+
+async function routeAllClear(page: Page): Promise<void> {
+  await page.route('**/api/live', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: `retry: 300\nevent: frame\ndata: ${JSON.stringify(allClearFrame())}\n\n`,
+    }),
+  );
 }
 
 // DESKTOP is deliberately taller than a real laptop: the whole modules
@@ -340,6 +426,291 @@ test('customize: an emptied lane disappears in normal mode and the survivor take
   expect(Math.abs(wideBox!.width - lanesBox!.width)).toBeLessThan(2);
 });
 
+// --- Column split ----------------------------------------------------------
+
+// dragDivider runs the real thing, the same shape dragModuleAbove does:
+// hover (so Playwright's own actionability/stability checks land first),
+// read the box in THAT viewport frame, then press, move in several steps
+// and release. A single jump can land before the drag has begun tracking.
+async function dragDivider(page: Page, dx: number): Promise<void> {
+  const divider = page.locator('.overview__lane-divider');
+  await divider.hover();
+  const box = await divider.boundingBox();
+  expect(box, 'the divider must be on screen -- see DESKTOP').not.toBeNull();
+
+  const y = box!.y + Math.min(box!.height / 2, 240);
+  const x = box!.x + box!.width / 2;
+  await page.mouse.down();
+  await page.mouse.move(x + dx, y, { steps: 14 });
+  await page.mouse.up();
+}
+
+test('customize: dragging the divider re-splits the columns and the split survives a reload', async ({
+  page,
+  request,
+}) => {
+  await page.setViewportSize(DESKTOP);
+  await page.goto(`${URL}/#/`);
+  await settleOverview(page);
+
+  // Outside edit mode there is no affordance at all -- the split applies,
+  // the handle doesn't exist.
+  await expect(page.locator('.overview__lane-divider')).toHaveCount(0);
+  const before = await laneSplit(page);
+  expect(before).toBeCloseTo(RATIO_DEFAULT, 2);
+
+  await enterEditMode(page);
+  await expect(page.locator('.overview__lane-divider')).toBeVisible();
+
+  await dragDivider(page, 90);
+
+  // The rendered split moved, and the page agrees with what it saved.
+  await expect.poll(() => laneSplit(page)).toBeGreaterThan(before + 0.02);
+  await expect.poll(async () => (await savedLayout(request)).ratio, { timeout: 10_000 }).toBeGreaterThan(before + 0.02);
+
+  const saved = (await savedLayout(request)).ratio;
+  expect(saved, 'the drag stays inside the designed range').toBeLessThanOrEqual(RATIO_MAX);
+  expect(await laneSplit(page), 'the rendered split IS the saved number').toBeCloseTo(saved, 2);
+
+  await page.reload();
+  await settleOverview(page);
+  await expect.poll(() => laneSplit(page)).toBeCloseTo(saved, 2);
+  // And it comes back in NORMAL mode with no handle showing -- a saved
+  // split is the page, not a state of the editor.
+  await expect(page.locator('.overview__lane-divider')).toHaveCount(0);
+});
+
+// A drag past the end of the range must stop at the clamp rather than
+// running off -- and the clamp is a number, so this can assert the exact
+// one instead of "somewhere over there".
+test('customize: the divider clamps rather than letting a lane collapse', async ({ page, request }) => {
+  await page.setViewportSize(DESKTOP);
+  await page.goto(`${URL}/#/`);
+  await settleOverview(page);
+  await enterEditMode(page);
+
+  await dragDivider(page, 2000);
+
+  await expect.poll(async () => (await savedLayout(request)).ratio, { timeout: 10_000 }).toBe(RATIO_MAX);
+  expect(await laneSplit(page)).toBeCloseTo(RATIO_MAX, 2);
+  // The narrow lane is squeezed, never gone.
+  const narrow = await page.locator('.overview__modules-narrow').boundingBox();
+  expect(narrow!.width).toBeGreaterThan(100);
+});
+
+// A ratio change is a WIDTH change, and the narrow lane is the one full
+// of live uPlot canvases. They must take their existing
+// ResizeObserver -> setSize path -- resized, never destroyed and rebuilt
+// -- or a divider drag would churn four charts per frame. The same
+// canvas stamp the reorder test uses proves it: a rebuilt chart is a new
+// <canvas> element and cannot carry the mark.
+test('customize: dragging the divider resizes the live charts without rebuilding them', async ({ page }) => {
+  await page.setViewportSize(DESKTOP);
+  await page.goto(`${URL}/#/`);
+  await settleOverview(page);
+
+  await markRailCanvas(page);
+  const before = await railCanvasSignature(page);
+  const beforeWidth = Number(before.split('x')[0]);
+
+  await enterEditMode(page);
+  await dragDivider(page, 120);
+
+  // Narrowing the rail's lane really did reach the canvas...
+  await expect
+    .poll(async () => Number((await railCanvasSignature(page)).split('x')[0]))
+    .toBeLessThan(beforeWidth - 20);
+  // ...through setSize, not a teardown.
+  expect(
+    await railCanvasMark(page),
+    'a divider drag must RESIZE the sparkline canvas, never recreate it',
+  ).toBe('pre-drag');
+  // ...and it is still drawing on the far side of the gesture.
+  const after = await railCanvasSignature(page);
+  await expect.poll(() => railCanvasSignature(page), { timeout: 25_000 }).not.toBe(after);
+});
+
+// The divider would otherwise be this page's first pointer-only control.
+test('customize: the divider is focusable and adjusts with the arrow keys', async ({ page, request }) => {
+  await page.setViewportSize(DESKTOP);
+  await page.goto(`${URL}/#/`);
+  await settleOverview(page);
+  await enterEditMode(page);
+
+  const divider = page.locator('.overview__lane-divider');
+  await expect(divider).toHaveAttribute('role', 'separator');
+  await expect(divider).toHaveAttribute('aria-valuenow', String(Math.round(RATIO_DEFAULT * 100)));
+
+  await divider.focus();
+  await expect(divider).toBeFocused();
+
+  for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowRight');
+  await expect(divider).toHaveAttribute('aria-valuenow', String(Math.round(RATIO_DEFAULT * 100) + 4));
+
+  await page.keyboard.press('ArrowLeft');
+  await expect(divider).toHaveAttribute('aria-valuenow', String(Math.round(RATIO_DEFAULT * 100) + 3));
+
+  // End goes straight to the far clamp, the window-splitter convention.
+  await page.keyboard.press('End');
+  await expect(divider).toHaveAttribute('aria-valuenow', String(Math.round(RATIO_MAX * 100)));
+  await expect.poll(async () => (await savedLayout(request)).ratio, { timeout: 10_000 }).toBe(RATIO_MAX);
+  expect(await laneSplit(page)).toBeCloseTo(RATIO_MAX, 2);
+});
+
+// A drag that ends in Escape commits nothing AND leaves nothing showing:
+// the preview has to snap back to the saved split, not sit there looking
+// like it saved.
+test('customize: Escape cancels a divider drag, committing nothing', async ({ page, request }) => {
+  await page.setViewportSize(DESKTOP);
+  await page.goto(`${URL}/#/`);
+  await settleOverview(page);
+  await enterEditMode(page);
+
+  const divider = page.locator('.overview__lane-divider');
+  await divider.hover();
+  const box = await divider.boundingBox();
+  await page.mouse.down();
+  await page.mouse.move(box!.x + box!.width / 2 + 120, box!.y + Math.min(box!.height / 2, 240), { steps: 14 });
+  await expect(divider).toHaveClass(/overview__lane-divider--active/);
+
+  await page.keyboard.press('Escape');
+  await expect(divider).not.toHaveClass(/overview__lane-divider--active/);
+  await page.mouse.up();
+
+  await expect.poll(() => laneSplit(page)).toBeCloseTo(RATIO_DEFAULT, 2);
+  expect((await savedLayout(request)).ratio).toBe(RATIO_DEFAULT);
+});
+
+// --- Height steps -----------------------------------------------------------
+
+function topRowCount(page: Page): Promise<number> {
+  return page.locator('.overview__top .top-bar-list li').count();
+}
+
+// Top Consumers is the module that can be asserted to the row: the fake
+// fleet is 20 containers, so every step's budget (3/5/8) is genuinely
+// available. The events feed's own budget (4/8/14) depends on how many
+// events the generator has actually emitted, which is why the test below
+// pins its CAP rather than an exact count.
+test('customize: a height step resizes a card by whole rows and survives a reload', async ({ page, request }) => {
+  await page.setViewportSize(DESKTOP);
+  await page.goto(`${URL}/#/`);
+  await settleOverview(page);
+
+  // Default is the budget the page shipped with.
+  await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(5);
+  const normalBox = await page.locator('.overview__top').boundingBox();
+
+  await enterEditMode(page);
+  await page.getByRole('button', { name: 'Set Top consumers to tall' }).click();
+
+  await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(8);
+  const tallBox = await page.locator('.overview__top').boundingBox();
+  expect(tallBox!.height, 'tall is genuinely taller, not just relabelled').toBeGreaterThan(normalBox!.height);
+  await expect(page.locator('.overview__module[data-module="top-consumers"]')).toHaveAttribute('data-size', 'tall');
+
+  await expect.poll(async () => (await savedLayout(request)).sizes, { timeout: 10_000 }).toEqual({
+    'top-consumers': 'tall',
+  });
+
+  await page.reload();
+  await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(8);
+  expect((await page.locator('.overview__top').boundingBox())!.height).toBeGreaterThan(normalBox!.height);
+
+  // ...and compact goes the other way, immediately -- the leaderboard's
+  // own rank hysteresis must not make a shrink wait out its re-sort gate.
+  await enterEditMode(page);
+  await page.getByRole('button', { name: 'Set Top consumers to compact' }).click();
+  await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(3);
+  expect((await page.locator('.overview__top').boundingBox())!.height).toBeLessThan(normalBox!.height);
+});
+
+test('customize: the events feed takes a step too, and the rail is offered none', async ({ page, request }) => {
+  await page.setViewportSize(DESKTOP);
+  await page.goto(`${URL}/#/`);
+  await settleOverview(page);
+  await enterEditMode(page);
+
+  // The rail's four fixed tiles have no height to choose, so it gets a
+  // grip and an eye and nothing else.
+  await expect(page.getByRole('button', { name: 'Set Metrics rail to tall' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Set Recent events to tall' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Set Recent events to compact' }).click();
+  await expect(page.locator('.overview__module[data-module="events"]')).toHaveAttribute('data-size', 'compact');
+  await expect.poll(async () => (await savedLayout(request)).sizes, { timeout: 10_000 }).toEqual({
+    events: 'compact',
+  });
+
+  // The compact budget is a cap the feed cannot exceed. (An exact count
+  // would depend on how many events fake mode has emitted by now, which
+  // is a function of server uptime -- see fake.go's time-gated events.)
+  await expect.poll(() => page.locator('.overview__events-list > div').count()).toBeLessThanOrEqual(4);
+
+  await page.reload();
+  await expect(page.locator('.overview__module[data-module="events"]')).toHaveAttribute('data-size', 'compact');
+});
+
+// --- Interplay with the adaptive all-clear expansion ------------------------
+//
+// The rule: a user-set size WINS. The all-clear state is this page's own
+// adaptive expansion -- with nothing needing attention the status band
+// collapses entirely and the modules band is pulled up into the space it
+// freed. That expansion is free to grow a module still at 'normal'; it
+// may not overrule one the owner has sized, and it happens identically
+// either way.
+test('customize: the all-clear expansion fills around a card the owner has sized', async ({ page, request }) => {
+  await routeAllClear(page);
+  await putLayout(request, {
+    version: LAYOUT_VERSION,
+    wide: ['top-consumers', 'events'],
+    narrow: ['metrics-rail'],
+    hidden: [],
+    sizes: { 'top-consumers': 'compact' },
+  });
+
+  await page.setViewportSize(DESKTOP);
+  await page.goto(`${URL}/#/`);
+
+  // The expansion really is active: no status band at all, and the
+  // fleet/storage pair promoted to their own full-width row.
+  await expect(page.locator('.overview__headline-text')).toHaveText('Nothing needs you');
+  await expect(page.locator('.overview__status-band')).toHaveCount(0);
+  await expect(page.locator('.overview__clear-band')).toBeVisible();
+
+  // The sized card holds ITS budget, not one the expansion picked.
+  const sized = page.locator('.overview__module[data-module="top-consumers"]');
+  await expect(sized).toHaveAttribute('data-size', 'compact');
+  await expect(sized).toHaveAttribute('data-adaptive', 'false');
+  await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(3);
+
+  // Its neighbour, untouched, is still the thing the layout may grow.
+  await expect(page.locator('.overview__module[data-module="events"]')).toHaveAttribute('data-adaptive', 'true');
+
+  const bandTop = (await page.locator('.overview__modules-band').boundingBox())!.y;
+  const compactHeight = (await page.locator('.overview__top').boundingBox())!.height;
+
+  // Hand the same card back to the adaptive default: it grows to the
+  // shipped budget, while the expansion above it does not move an inch --
+  // the two are independent, which is the whole claim.
+  await putLayout(request, {
+    version: LAYOUT_VERSION,
+    wide: ['top-consumers', 'events'],
+    narrow: ['metrics-rail'],
+    hidden: [],
+  });
+  await page.reload();
+
+  await expect(page.locator('.overview__clear-band')).toBeVisible();
+  await expect(sized).toHaveAttribute('data-adaptive', 'true');
+  await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(5);
+  expect((await page.locator('.overview__top').boundingBox())!.height).toBeGreaterThan(compactHeight);
+  expect(
+    (await page.locator('.overview__modules-band').boundingBox())!.y,
+    'the expansion itself is unchanged -- only the card the owner sized was',
+  ).toBeCloseTo(bandTop, 0);
+});
+
 test('customize: reset restores the default arrangement', async ({ page, request }) => {
   await page.setViewportSize(DESKTOP);
   await page.goto(`${URL}/#/`);
@@ -351,8 +722,11 @@ test('customize: reset restores the default arrangement', async ({ page, request
   await expect(reset).toBeDisabled();
 
   await page.getByRole('button', { name: 'Hide Recent events' }).click();
+  await page.getByRole('button', { name: 'Set Top consumers to tall' }).click();
+  await dragDivider(page, 80);
   await dragModuleAbove(page, 'metrics-rail', '.overview__top');
   await expect.poll(() => laneOrder(page, 'wide')).toEqual(['metrics-rail', 'top-consumers']);
+  await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(8);
 
   await expect(reset).toBeEnabled();
   await reset.click();
@@ -360,11 +734,45 @@ test('customize: reset restores the default arrangement', async ({ page, request
   await expect.poll(() => laneOrder(page, 'wide')).toEqual(['top-consumers', 'events']);
   await expect.poll(() => laneOrder(page, 'narrow')).toEqual(['metrics-rail']);
   await expect(page.locator('.overview__ghost')).toHaveCount(0);
+  // Reset puts back the split and the height steps too, not just the
+  // arrangement.
+  await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(5);
+  await expect.poll(() => laneSplit(page)).toBeCloseTo(RATIO_DEFAULT, 2);
   await expect(reset).toBeDisabled();
 
-  await expect
-    .poll(async () => savedLayout(request), { timeout: 10_000 })
-    .toEqual({ version: 1, wide: ['top-consumers', 'events'], narrow: ['metrics-rail'], hidden: [] });
+  await expect.poll(async () => savedLayout(request), { timeout: 10_000 }).toEqual({
+    version: LAYOUT_VERSION,
+    wide: ['top-consumers', 'events'],
+    narrow: ['metrics-rail'],
+    hidden: [],
+    ratio: RATIO_DEFAULT,
+    sizes: {},
+  });
+});
+
+// A cached pre-resize bundle PUTs a v1 document at this binary. It has to
+// be accepted and migrated, not 400'd -- a 400 would leave that tab
+// unable to save anything at all until it reloaded. (resetLayout above
+// already sends one before every test in this file; this pins the
+// migrated RESULT, and that a v1 arrangement survives it.)
+test('customize: a v1 document from a cached bundle is accepted and migrated', async ({ page, request }) => {
+  await putLayout(request, { version: 1, wide: ['events', 'top-consumers'], narrow: ['metrics-rail'], hidden: [] });
+
+  expect(await savedLayout(request)).toEqual({
+    version: LAYOUT_VERSION,
+    wide: ['events', 'top-consumers'],
+    narrow: ['metrics-rail'],
+    hidden: [],
+    ratio: RATIO_DEFAULT,
+    sizes: {},
+  });
+
+  await page.setViewportSize(DESKTOP);
+  await page.goto(`${URL}/#/`);
+  await settleOverview(page);
+  await expect.poll(() => laneOrder(page, 'wide')).toEqual(['events', 'top-consumers']);
+  await expect.poll(() => laneSplit(page)).toBeCloseTo(RATIO_DEFAULT, 2);
+  await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(5);
 });
 
 test('customize: Escape cancels a drag in flight, committing nothing', async ({ page, request }) => {

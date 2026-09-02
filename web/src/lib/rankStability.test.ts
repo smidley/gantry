@@ -247,6 +247,39 @@ describe('stableTopN', () => {
     expect(out.map((r) => r.entity)).toEqual(['b', 'a']);
   });
 
+  // A CHANGING limit: Overview's Top Consumers module has a
+  // compact/normal/tall height step, and each step is a different row
+  // budget. Shrinking it is the viewer saying "show me less", not a
+  // challenger churning the membership -- so the hysteresis and the
+  // ~10s re-sort gate that exist to stop unasked-for swaps flickering
+  // must not make it wait to be obeyed.
+  it('obeys a shrinking limit on the very next tick, dropping the lowest-ranked', () => {
+    const state = createRankStabilityState();
+    const rows = [row('a', 50), row('b', 40), row('c', 30), row('d', 20), row('e', 10)];
+    expect(stableTopN(rows, state, 'cpu', 5, 0).map((r) => r.entity)).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(stableTopN(rows, state, 'cpu', 3, 1).map((r) => r.entity)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('fills a growing limit straight back up', () => {
+    const state = createRankStabilityState();
+    const rows = [row('a', 50), row('b', 40), row('c', 30), row('d', 20), row('e', 10)];
+    stableTopN(rows, state, 'cpu', 3, 0);
+    expect(stableTopN(rows, state, 'cpu', 5, 1).map((r) => r.entity)).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+
+  // The clip that makes the two above work is a no-op while the limit
+  // holds still, which is what keeps every existing leaderboard's own
+  // hysteresis exactly as it was: a challenger still has to earn its way
+  // in over several ticks, not merely outrank someone once.
+  it('still makes a challenger wait when the limit is not what changed', () => {
+    const state = createRankStabilityState();
+    stableTopN([row('a', 50), row('b', 40), row('c', 1)], state, 'cpu', 2, 0);
+    // 'c' now outranks 'b' on the instant sample, but the rolling
+    // average plus the exit streak keep the shown pair intact.
+    const out = stableTopN([row('a', 50), row('b', 40), row('c', 99)], state, 'cpu', 2, 1);
+    expect(out.map((r) => r.entity)).toEqual(['a', 'b']);
+  });
+
   it('exports a positive ROLLING_WINDOW_SEC for callers that want to reason about it', () => {
     expect(ROLLING_WINDOW_SEC).toBeGreaterThan(0);
   });

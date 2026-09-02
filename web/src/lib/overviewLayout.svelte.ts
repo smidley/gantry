@@ -17,9 +17,12 @@ import {
   mergeOverviewLayout,
   moveOverviewModule,
   sameOverviewLayout,
+  setOverviewModuleSize,
+  setOverviewRatio,
   showOverviewModule,
   type OverviewColumn,
   type OverviewLayoutDoc,
+  type OverviewSize,
 } from './overviewLayout';
 
 // SAVE_DEBOUNCE_MS coalesces a burst of edits into one PUT. There is no
@@ -110,6 +113,19 @@ class OverviewLayoutStore {
 
   move(id: string, column: OverviewColumn, index: number): void {
     this.#apply(moveOverviewModule(this.doc, id, column, index));
+  }
+
+  // setRatio is called ONCE per divider gesture, on release (or on an
+  // arrow press) -- never per pointermove. The live preview during a
+  // drag is the view's own local state, so a drag across the band costs
+  // exactly one PUT no matter how many frames it took, without relying
+  // on the debounce below to swallow the other sixty.
+  setRatio(ratio: number): void {
+    this.#apply(setOverviewRatio(this.doc, ratio));
+  }
+
+  setSize(id: string, size: OverviewSize): void {
+    this.#apply(setOverviewModuleSize(this.doc, id, size));
   }
 
   hide(id: string): void {

@@ -8,6 +8,32 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.5] - 2026-09-01
+
+### Fixed
+
+- **A stale copy of the install template can no longer crash Gantry at
+  first start.** The template hardened the container with
+  `--cap-drop=ALL` and re-added the one capability Gantry needs to write
+  its database into Unraid's array-owned appdata folder -- but a stale
+  Community Applications copy of the template kept the drop while losing
+  the re-add, and a fresh install with that copy exited immediately with
+  `unable to open database file (14)`. The template and docs now keep
+  Docker's default capability set (plus `SYS_PTRACE`), so there is no
+  explicit re-add left to lose. Existing installs keep working as-is;
+  the defaults trade a bit of extra hardening for an install that can't
+  break this way -- negligible next to the Docker socket the container
+  already mounts.
+- **Demo mode starts reliably again.** `GANTRY_FAKE_DATA=1` created its
+  fake notification spool in the system temp directory and treated
+  failure as fatal, so on an image with no usable temp directory the
+  container logged `build alert dispatcher: create fake notify dir` and
+  exited before ever coming up. The spool now falls back to a
+  `fake-notify` folder next to the database -- a path already proven
+  writable -- and if even that can't be created, Gantry starts anyway and
+  shows the same unwritable-spool hint a real box without a `/notify`
+  mount gets. A demo aid can no longer take down startup.
+
 ## [0.1.4] - 2026-09-01
 
 ### Fixed

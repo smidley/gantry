@@ -8,6 +8,42 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.7] - 2026-09-02
+
+### Added
+
+- **The Overview is now yours to arrange.** A Customize mode on the
+  modules band: drag the Top Consumers, Recent Events, and metric-tile
+  cards to reorder them within and between the two columns; hide the
+  ones you don't want (they wait in a tray, one click to bring back);
+  drag the divider between the columns to change the split (the keyboard
+  works too); and set the two list-shaped cards to compact, normal, or
+  tall. Everything saves on the box itself, so the layout follows you to
+  any browser, and Reset restores the shipped arrangement. A saved
+  layout keeps working when a future release adds a card -- the new card
+  simply appears in its default spot. The status headline and fleet
+  strip stay pinned: "needs you" can't be buried. Editing is desktop-
+  only for now; the saved order still applies to the stacked mobile
+  view. (#52, #55)
+- **An insight's evidence drawer now shows the incident visually.**
+  Clicking an insight -- history or active -- shows the interaction map
+  as of that insight's own moment (every insight active at the same
+  time, the clicked one emphasized, drawn from stored records, so it
+  works even for containers that no longer exist) and charts of what the
+  metrics actually did: the victim's suffering signal and the culprit's
+  driving signal across the incident window, with the active span shaded
+  and Fired/Resolved marked. A window older than what retention still
+  holds says so plainly instead of showing an empty chart. (#54, #56)
+
+### Fixed
+
+- **Following a container's logs no longer goes silent when the
+  container restarts.** Docker ends a follow stream when a container
+  exits, and Gantry never re-attached. A follow now resumes on its own --
+  across plain restarts and across updates that re-create the container
+  under the same name -- with no duplicated and no missing lines, and a
+  marker line shows where the restart happened. (#53)
+
 ## [0.1.6] - 2026-09-01
 
 Test-suite reliability only -- nothing about the shipped app changes.

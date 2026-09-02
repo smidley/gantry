@@ -1175,19 +1175,23 @@
     pointer-events: none;
   }
 
-  /* The one card with its own top-right affordance is Top Consumers,
-     and the tools bar lands exactly on it. Hidden (not removed) while
-     editing, so the head row doesn't reflow and the link is back the
-     instant Done is pressed -- a deliberate hand-off of that corner,
-     rather than a toolbar that looks like it's covering something by
-     accident. Nothing else on this band has anything up there. */
-  .overview__modules-band--editing .overview__top-link {
-    visibility: hidden;
+  /* The tools STRADDLE each card's top edge rather than sitting inside
+     its top-right corner, because every card in this band already uses
+     that corner for something live: Top Consumers' "View all" link, and
+     -- the one that forced this -- the rail's first tile, whose CPU
+     percentage a toolbar parked there covers outright. Floating them
+     into the gap above costs only that gap getting a little taller in
+     edit mode (the two rules below), and covers nothing at all. */
+  .overview__modules-band--editing {
+    gap: 1.5rem;
+  }
+  .overview__modules-band--editing .overview__modules-lane {
+    gap: 1.6rem;
   }
   .overview__module-tools {
     position: absolute;
-    top: 6px;
-    right: 8px;
+    top: -14px;
+    right: 10px;
     z-index: 2;
     display: flex;
     gap: 2px;

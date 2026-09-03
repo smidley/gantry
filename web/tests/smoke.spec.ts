@@ -154,13 +154,13 @@ async function routeLiveFrame(page: import('@playwright/test').Page, frame: obje
   );
 }
 
-// Counts-and-fleet pass: the status band's own two-column split is
-// gone. "Needs a look" is two count chips now, short enough to sit
-// inline in the headline card, and the fleet strip + array schematic
-// get the same full-width row in this state that all-clear already gave
-// them. The frame carries one unhealthy container so the attention
-// layout is guaranteed, not dependent on the server's own mood.
-test('overview: with something needing you, the chips sit in the headline card and the visuals take the full width', async ({
+// Unified-columns pass: there is ONE band under the page header, and
+// its two lanes each run top to bottom -- headline, fleet, then the
+// wide-lane modules on the left; the pinned rail, then the narrow-lane
+// modules on the right. "Needs a look" is still two count chips inline
+// in the headline card. The frame carries one unhealthy container so the
+// attention layout is guaranteed, not dependent on the server's own mood.
+test('overview: with something needing you, the chips sit in the headline card and each lane flows unbroken', async ({
   page,
 }) => {
   await routeLiveFrame(
@@ -177,45 +177,52 @@ test('overview: with something needing you, the chips sit in the headline card a
   await expect(page.locator('.overview__headline-zone .overview__attention')).toHaveCount(1);
   await expect(page.locator('.overview__status-facts')).toHaveCount(0);
   await expect(page.locator('.overview__status-visuals')).toHaveCount(0);
+  // The separate status/clear band is gone -- the page is the lanes.
+  await expect(page.locator('.overview__status-band, .overview__clear-band')).toHaveCount(0);
 
-  // The visuals band spans the same content width as the headline card
-  // above it, exactly as the all-clear band does.
-  const band = page.locator('.overview__status-band');
-  await expect(band).toBeVisible();
-  const zoneBox = await page.locator('.overview__headline-zone').boundingBox();
-  const bandBox = await band.boundingBox();
-  expect(Math.abs(bandBox.width - zoneBox.width)).toBeLessThan(2);
-  expect(bandBox.y).toBeGreaterThanOrEqual(zoneBox.y + zoneBox.height - 4);
+  const wide = page.locator('.overview__modules-wide');
+  const narrow = page.locator('.overview__modules-narrow');
+  const wideBox = await wide.boundingBox();
+  const narrowBox = await narrow.boundingBox();
+  const zoneBox = await wide.locator('.overview__headline-zone').boundingBox();
+  const fleetBox = await wide.locator('.fleet-strip-wrap').boundingBox();
+  const railBox = await narrow.locator('.overview__metrics-rail').boundingBox();
+  const topBox = await wide.locator('.overview__top').boundingBox();
 
-  // The band is the fleet alone now -- the bay schematic became a
-  // Customize module and moved down into the modules band -- so the
-  // fleet spans the whole width rather than half of it.
-  const fleetBox = await band.locator('.fleet-strip-wrap').boundingBox();
-  expect(Math.abs(fleetBox.width - bandBox.width)).toBeLessThan(2);
-  await expect(band.locator('.bay-schematic')).toHaveCount(0);
-  await expect(page.locator('.overview__modules-band .bay-schematic')).toBeVisible();
+  // Wide lane, unbroken: headline, the fleet under it, then the first
+  // module under THAT -- not under the taller lane beside it.
+  expect(Math.abs(zoneBox.y - wideBox.y)).toBeLessThan(2);
+  expect(fleetBox.y).toBeGreaterThanOrEqual(zoneBox.y + zoneBox.height - 4);
+  expect(topBox.y).toBeGreaterThanOrEqual(fleetBox.y + fleetBox.height - 4);
+  expect(topBox.y - (fleetBox.y + fleetBox.height), 'no dead block under the fleet').toBeLessThan(40);
+  for (const b of [zoneBox, fleetBox, topBox]) expect(Math.abs(b.width - wideBox.width)).toBeLessThan(2);
 
-  // And the metrics rail is pinned ABOVE the headline, which is the
-  // page order this pass exists to produce.
-  const railBox = await page.locator('.overview__metrics-rail').boundingBox();
-  expect(railBox.y + railBox.height).toBeLessThanOrEqual(zoneBox.y + 1);
-  expect(Math.abs(railBox.width - zoneBox.width)).toBeLessThan(2);
+  // Narrow lane: the rail is its head, at lane width, level with the
+  // wide lane's top, and the storage module follows under it.
+  expect(Math.abs(railBox.y - narrowBox.y)).toBeLessThan(2);
+  expect(Math.abs(railBox.width - narrowBox.width)).toBeLessThan(2);
+  expect(Math.abs(narrowBox.y - wideBox.y)).toBeLessThan(2);
+  expect(narrowBox.x).toBeGreaterThanOrEqual(wideBox.x + wideBox.width - 1);
+  const storageBox = await narrow.locator('.overview__storage').boundingBox();
+  expect(storageBox.y).toBeGreaterThanOrEqual(railBox.y + railBox.height - 4);
 });
 
-// Adaptive all-clear (Scott: "When there is nothing that needs
-// attention... the other sections should be expanded to use the
-// available space and then we won't need to scroll down so far"): zero
-// callouts collapses the headline card to a compact strip (no status
-// band at all) and gives the fleet strip a full-width band of its own.
-test('overview: all-clear collapses the headline to a strip and the fleet takes the full width', async ({ page }) => {
+// All-clear, after the unification. There is no band left to collapse
+// and no vertical space being held open to reclaim -- a continuous flow
+// never had any. What survives is the state itself: zero callouts
+// collapses the HEADLINE CARD to a strip (its own --clear modifier,
+// which is now the whole of the DOM difference), and everything under it
+// in that lane simply starts higher by the attention row's height.
+test('overview: all-clear collapses the headline card and the lanes flow on unchanged', async ({ page }) => {
   await routeLiveFrame(page, liveFrame());
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
 
   await expect(page.locator('.overview__headline-text')).toHaveText('Nothing needs you');
   await expect(page.locator('.overview__attention')).toHaveCount(0);
-  await expect(page.locator('.overview__status-band')).toHaveCount(0);
   await expect(page.locator('.overview__headline-zone')).toHaveClass(/overview__headline-zone--clear/);
+  // The two band names this state used to be told apart by are both gone.
+  await expect(page.locator('.overview__status-band, .overview__clear-band')).toHaveCount(0);
 
   // The relocated array facts render inside the storage card, not as
   // orphaned sub-lines (the facts-relocation pass).
@@ -223,40 +230,43 @@ test('overview: all-clear collapses the headline to a strip and the fleet takes 
   await expect(schematic).toContainText('Array started · mover idle');
   await expect(schematic).toContainText('cache warmest at 41.5°C');
 
-  // Full width: the band spans the same content width as the headline
-  // card above it, and the fleet -- now the band's only occupant, the
-  // schematic having become a module -- spans the band.
-  const band = page.locator('.overview__clear-band');
-  await expect(band).toBeVisible();
-  const zoneBox = await page.locator('.overview__headline-zone').boundingBox();
-  const bandBox = await band.boundingBox();
-  expect(Math.abs(bandBox.width - zoneBox.width)).toBeLessThan(2);
+  // The lanes are the same two lanes they are in the attention state --
+  // only the headline card's own height differs.
+  const wide = page.locator('.overview__modules-wide');
+  const narrow = page.locator('.overview__modules-narrow');
+  const wideBox = (await wide.boundingBox())!;
+  const zoneBox = (await wide.locator('.overview__headline-zone').boundingBox())!;
+  const fleetBox = (await wide.locator('.fleet-strip-wrap').boundingBox())!;
+  const topBox = (await wide.locator('.overview__top').boundingBox())!;
+  expect(Math.abs(fleetBox.width - zoneBox.width)).toBeLessThan(2);
+  expect(fleetBox.y).toBeGreaterThanOrEqual(zoneBox.y + zoneBox.height - 4);
+  expect(topBox.y - (fleetBox.y + fleetBox.height), 'no dead block under the fleet').toBeLessThan(40);
+  await expect(wide.locator('.bay-schematic')).toHaveCount(0);
 
-  const fleet = band.locator('.fleet-strip-wrap');
-  await expect(fleet).toBeVisible();
-  const fleetBox = await fleet.boundingBox();
-  expect(Math.abs(fleetBox.width - bandBox.width)).toBeLessThan(2);
-  await expect(band.locator('.bay-schematic')).toHaveCount(0);
+  // The rail leads the narrow lane, level with the wide lane's top.
+  const railBox = (await narrow.locator('.overview__metrics-rail').boundingBox())!;
+  expect(Math.abs(railBox.y - wideBox.y)).toBeLessThan(2);
+  expect(railBox.x).toBeGreaterThanOrEqual(wideBox.x + wideBox.width - 1);
 
-  // The all-clear expansion still does its job -- everything below the
-  // headline sits higher than it does with callouts present. It is no
-  // longer measured against a fixed pixel: the rail is pinned above the
-  // headline now (deliberately, and it costs real height), so "Top
-  // Consumers in the first viewport" is a promise this page order does
-  // not make. What it does promise is that the schematic's own module,
-  // at the head of the narrow lane, is reachable without a long scroll.
-  const storageBox = await page.locator('.overview__storage').boundingBox();
+  // Both of the page's live modules are reachable without a long
+  // scroll, which is what the all-clear state buys now: the leaderboard
+  // is in the first viewport, and the schematic is one screen in.
+  expect(topBox.y).toBeLessThan(900);
+  const storageBox = (await page.locator('.overview__storage').boundingBox())!;
   expect(storageBox.y).toBeLessThan(1100);
-  const topBox = await page.locator('.overview__top').boundingBox();
-  expect(topBox.y, 'the modules band starts right below the fleet band').toBeLessThan(
-    bandBox.y + bandBox.height + 80,
-  );
 
-  // Mobile: the modules band stacks its lanes, wide first.
+  // Mobile: one column, pinned cards first (headline, fleet, rail), then
+  // the modules in saved order -- wide lane's, then narrow lane's.
   await page.setViewportSize({ width: 375, height: 800 });
-  const topMobile = await page.locator('.overview__top').boundingBox();
-  const storageMobile = await page.locator('.overview__storage').boundingBox();
-  expect(storageMobile.y).toBeGreaterThanOrEqual(topMobile.y + topMobile.height - 4);
+  const y = async (sel: string) => (await page.locator(sel).first().boundingBox())!.y;
+  const fleetMobile = await y('.fleet-strip-wrap');
+  const railMobile = await y('.overview__metrics-rail');
+  const topMobile = await y('.overview__top');
+  const storageMobile = await y('.overview__storage');
+  expect(await y('.overview__headline-zone')).toBeLessThan(fleetMobile);
+  expect(fleetMobile).toBeLessThan(railMobile);
+  expect(railMobile).toBeLessThan(topMobile);
+  expect(topMobile).toBeLessThan(storageMobile);
 });
 
 // Counts pass: "Needs a look" is one short row inside the headline

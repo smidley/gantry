@@ -1,12 +1,15 @@
 // FleetStrip structural tests via svelte/server (SSR string render, the
-// CalloutRow.test.ts convention) -- pins the render contract the
-// auto-sizing pass restyled around: one unit per container, each a real
-// link with a real accessible name, status classes on the flagged ones,
-// and the glow driven by whichever metric is actually elevated. The
-// GRID itself (computed cell size, columns, whether it scrolls) is
-// measurement-driven and has no meaning in an SSR string -- the sizing
-// rule is unit-tested pure in src/lib/fleetGrid.test.ts and asserted in
-// a real browser in tests/overview-layout.spec.ts.
+// CalloutRow.test.ts convention) -- pins the render contract: one unit
+// per container, each a real link with a real accessible name, status
+// classes on the flagged ones, the four-entry legend's own live counts,
+// and the glow driven by whichever metric is actually elevated.
+//
+// The strip's GEOMETRY is a fixed pitch declared in CSS again (the
+// pill-restore pass -- an 8px track, 8x16 units, wrapping rows), so
+// there is no sizing rule left to unit-test: what a browser has to
+// confirm is that the declared pitch is what actually renders and that
+// it never pushes the page sideways, which tests/overview-layout.spec.ts
+// does.
 import { describe, expect, it } from 'vitest';
 import { render } from 'svelte/server';
 import FleetStrip from './FleetStrip.svelte';
@@ -35,11 +38,12 @@ describe('FleetStrip', () => {
     expect(body).toContain('href="#/containers/prowlarr"');
   });
 
-  // Two real groups again (Scott: "Keep the stopped containers in a
-  // separate section like we had before") -- the running grid, then a
-  // labelled stopped sub-section under it. They render as separate
-  // lists, in that order, and each says what it holds.
-  it('splits running and stopped into two labelled grids, running first', () => {
+  // Two labelled rows (Scott: "Keep the stopped containers in a separate
+  // section like we had before") -- Running first, Stopped under it,
+  // each with its own name and count at the left, exactly as the
+  // reference strip had them. They render as separate lists, in that
+  // order, and each says what it holds.
+  it('splits running and stopped into two labelled rows, running first', () => {
     const body = renderStrip(CONTAINERS);
     expect(body).toContain('aria-label="Running containers, 2"');
     expect(body).toContain('aria-label="Stopped containers, 1"');
@@ -49,21 +53,52 @@ describe('FleetStrip', () => {
     expect(names).toEqual(['jellyfin', 'sonarr', 'prowlarr']);
   });
 
-  it('gives the stopped section its own heading, in the legend\'s vocabulary', () => {
+  // Each row's head is name + count, and it is a real link into the same
+  // filtered Containers view the legend entry above it points at.
+  it('heads each row with its own name, count and filter link', () => {
     const body = renderStrip(CONTAINERS);
-    expect(body).toContain('fleet-strip__group-label');
-    // The heading counts the same way the legend above it does.
-    expect(body.match(/1 stopped/g)?.length).toBe(2);
+    // Svelte appends its own scope class to every class attribute, so
+    // the class names are matched as a prefix rather than exactly.
+    const heads = [
+      ...body.matchAll(
+        /fleet-strip__group-head[^"]*" href="([^"]+)"[\s\S]*?group-name[^>]*>([^<]+)<[\s\S]*?group-count[^>]*>(\d+)</g,
+      ),
+    ];
+    expect(heads.map((m) => [m[2], m[3], m[1]])).toEqual([
+      ['Running', '2', '#/containers?state=running'],
+      ['Stopped', '1', '#/containers?state=stopped'],
+    ]);
   });
 
-  it('renders no stopped section at all when nothing is stopped', () => {
+  // The legend is four entries, each with its own live count, and each a
+  // link into the Containers view filtered to exactly what it counts.
+  it('renders the four-entry legend with live counts', () => {
+    const body = renderStrip([
+      ...CONTAINERS,
+      { name: 'seeder', state: 'running', health: 'healthy', metrics: { 'io.read_bps': 84e6 } },
+    ]);
+    const legend = body.slice(body.indexOf('fleet-strip__summary'), body.indexOf('fleet-strip__link'));
+    expect(legend).toContain('3 running');
+    expect(legend).toContain('2 active now');
+    expect(legend).toContain('1 stopped');
+    expect(legend).toContain('1 needs attention');
+    expect(legend).toContain('href="#/containers?state=running"');
+    expect(legend).toContain('href="#/containers?state=active"');
+    expect(legend).toContain('href="#/containers?state=stopped"');
+    expect(legend).toContain('href="#/containers?state=attention"');
+    // Needs-attention takes the status color, not the running fill --
+    // the red pill the reference legend shows.
+    expect(legend).toContain('background:var(--status-critical)');
+  });
+
+  it('renders no stopped row at all when nothing is stopped', () => {
     const body = renderStrip([
       { name: 'jellyfin', state: 'running', health: 'healthy', metrics: { 'cpu.pct': 12 } },
       { name: 'sonarr', state: 'running', health: 'healthy', metrics: {} },
     ]);
     expect(body).toContain('aria-label="Running containers, 2"');
     expect(body).not.toContain('Stopped containers');
-    expect(body).not.toContain('fleet-strip__group-label');
+    expect(body).not.toContain('fleet-strip__group--stopped');
     expect(body).not.toContain('stopped');
   });
 

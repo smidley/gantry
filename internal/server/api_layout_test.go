@@ -329,6 +329,44 @@ func TestOverviewLayoutGetNeverSavedReturnsDefaults(t *testing.T) {
 	require.Equal(t, defaultOverviewLayout(), body)
 }
 
+// TestOverviewLayoutGetDefaultWireDocumentIsUnchanged pins the default
+// document as a literal, on the wire, rather than against
+// defaultOverviewLayout() -- which the test above already does and which
+// would happily agree with itself through any module change.
+//
+// It exists because the Overview's layout keeps moving while this
+// document is supposed to stand still. The metrics rail sits in the
+// status band's right column now rather than in a full-width row above
+// the headline (Scott: "CPU/mem/net/io should be pinned at the top
+// right"), and the fleet strip went back to its fixed-pitch pills --
+// both PINNED regions, neither a module. So the inventory is still the
+// same three modules in the same two lanes at v2, and a saved layout
+// needs no migration for either change. If this test has to be edited,
+// something that was meant to be pinned became rearrangeable (or the
+// reverse), and that is a decision with a stored document behind it.
+func TestOverviewLayoutGetDefaultWireDocumentIsUnchanged(t *testing.T) {
+	fl := &fakeLayout{} // zero value: nothing ever persisted
+	s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/layout/overview")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var got map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Equal(t, map[string]any{
+		"version": float64(2),
+		"wide":    []any{"top-consumers", "events"},
+		"narrow":  []any{"storage"},
+		"hidden":  []any{},
+		"ratio":   overviewRatioDefault,
+		"sizes":   map[string]any{},
+	}, got)
+}
+
 // TestOverviewLayoutGetMergesStoredDocument is the forward-compat rule
 // as seen from the wire: a document written by some other build comes
 // back usable, never as-is.

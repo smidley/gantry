@@ -400,26 +400,77 @@ test('customize: hiding a module drops it from normal mode and leaves a ghost th
   await expect(page.locator('.overview__events')).toBeVisible();
 });
 
-test('customize: an emptied lane disappears in normal mode and the survivor takes the whole band', async ({ page }) => {
+// A lane can no longer empty: each one leads with a PINNED head (the
+// headline + fleet on the wide side, the metrics rail on the narrow
+// one). So the rule that used to hide a moduleless lane and hand the
+// whole band to the survivor is gone, and hiding the narrow lane's last
+// module leaves the column exactly where the owner's split put it.
+test('customize: a lane with no modules left keeps its pinned head and its share of the split', async ({ page }) => {
+  await page.setViewportSize(DESKTOP);
+  await page.goto(`${URL}/#/`);
+  await settleOverview(page);
+
+  const lanes = page.locator('.overview__modules-lanes');
+  const narrow = page.locator('.overview__modules-narrow');
+  const beforeWidth = (await narrow.boundingBox())!.width;
+
+  await enterEditMode(page);
+  await page.getByRole('button', { name: 'Hide Storage array' }).click();
+  await expect(narrow.locator('.overview__module')).toHaveCount(0);
+  // Still a real drop target while editing, and it says so.
+  await expect(page.locator('.overview__lane-empty')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Done' }).click();
+  // And still a real COLUMN out of edit mode -- the rail is in it.
+  await expect(narrow).toBeVisible();
+  await expect(narrow.locator('.overview__metrics-rail')).toBeVisible();
+
+  const lanesBox = (await lanes.boundingBox())!;
+  const wideBox = (await page.locator('.overview__modules-wide').boundingBox())!;
+  const narrowBox = (await narrow.boundingBox())!;
+  expect(Math.abs(narrowBox.width - beforeWidth), 'the split is unchanged by an emptied lane').toBeLessThan(2);
+  expect(wideBox.width, 'the wide lane must NOT swallow the band').toBeLessThan(lanesBox.width - 100);
+});
+
+// The pinned heads are not drop targets and cannot be displaced: a drag
+// into the narrow lane lands UNDER the rail however high in the lane it
+// is released, and the rail stays the lane's first child.
+test('customize: a drop into the narrow lane lands below the pinned rail, never above it', async ({ page, request }) => {
   await page.setViewportSize(DESKTOP);
   await page.goto(`${URL}/#/`);
   await settleOverview(page);
   await enterEditMode(page);
 
-  // Both lanes always render while editing -- an emptied one still has
-  // to be a drop target.
-  await page.getByRole('button', { name: 'Hide Storage array' }).click();
-  await expect(page.locator('.overview__modules-narrow')).toBeVisible();
-  await expect(page.locator('.overview__lane-empty')).toBeVisible();
+  // dragModuleAbove releases 8px into the target, so aiming it at the
+  // RAIL is the most direct attempt to land above the rail there is.
+  const rail = page.locator('.overview__metrics-rail');
+  await dragModuleAbove(page, 'events', '.overview__metrics-rail');
 
-  await page.getByRole('button', { name: 'Done' }).click();
-  await expect(page.locator('.overview__modules-narrow')).toHaveCount(0);
+  await expect.poll(() => laneOrder(page, 'narrow')).toEqual(['events', 'storage']);
+  const railBox = (await rail.boundingBox())!;
+  const moved = (await page.locator('.overview__modules-narrow [data-module="events"]').boundingBox())!;
+  expect(moved.y, 'the dropped card sits below the pinned rail').toBeGreaterThanOrEqual(
+    railBox.y + railBox.height - 1,
+  );
 
-  // The adaptive-expansion rule keys off VISIBILITY: with nothing left
-  // in the narrow lane, the wide one spans the band.
-  const lanesBox = await page.locator('.overview__modules-lanes').boundingBox();
-  const wideBox = await page.locator('.overview__modules-wide').boundingBox();
-  expect(Math.abs(wideBox!.width - lanesBox!.width)).toBeLessThan(2);
+  // The rail is still the lane's own first child, and still not a module.
+  const firstChild = await page
+    .locator('.overview__modules-narrow')
+    .evaluate((el) => (el.firstElementChild as HTMLElement).dataset.pinned ?? null);
+  expect(firstChild).toBe('metrics-rail');
+  await expect(page.locator('[data-module="metrics-rail"]')).toHaveCount(0);
+
+  // The saved document holds modules only -- no pinned id leaked in.
+  // Polled, like every other saved-document assertion here: the store's
+  // PUT is debounced, so the render lands before the write does.
+  await expect.poll(async () => (await savedLayout(request)).narrow, { timeout: 10_000 }).toEqual([
+    'events',
+    'storage',
+  ]);
+  const saved = JSON.stringify(await savedLayout(request));
+  expect(saved).not.toContain('metrics-rail');
+  expect(saved).not.toContain('fleet');
+  expect(saved).not.toContain('headline');
 });
 
 // --- Column split ----------------------------------------------------------
@@ -656,15 +707,18 @@ test('customize: the events feed takes a step too, and storage is offered none',
   await expect(page.locator('.overview__module[data-module="events"]')).toHaveAttribute('data-size', 'compact');
 });
 
-// --- Interplay with the adaptive all-clear expansion ------------------------
+// --- Interplay with the all-clear state -------------------------------------
 //
-// The rule: a user-set size WINS. The all-clear state is this page's own
-// adaptive expansion -- with nothing needing attention the status band
-// collapses entirely and the modules band is pulled up into the space it
-// freed. That expansion is free to grow a module still at 'normal'; it
-// may not overrule one the owner has sized, and it happens identically
-// either way.
-test('customize: the all-clear expansion fills around a card the owner has sized', async ({ page, request }) => {
+// The rule: a user-set size WINS. All-clear is this page's own adaptive
+// change -- with nothing needing attention the headline card collapses
+// to a strip and everything under it in that lane starts higher. It is
+// free to grow a module still at 'normal'; it may not overrule one the
+// owner has sized, and it happens identically either way.
+//
+// (It used to collapse a whole status BAND. Since the unification there
+// is no band to collapse: the headline card is a pinned lane head, and
+// its own height is the only thing that changes.)
+test('customize: the all-clear state fills around a card the owner has sized', async ({ page, request }) => {
   await routeAllClear(page);
   await putLayout(request, {
     version: LAYOUT_VERSION,
@@ -677,11 +731,12 @@ test('customize: the all-clear expansion fills around a card the owner has sized
   await page.setViewportSize(DESKTOP);
   await page.goto(`${URL}/#/`);
 
-  // The expansion really is active: no status band at all, and the
-  // fleet/storage pair promoted to their own full-width row.
+  // The all-clear state really is active: the headline card is in its
+  // collapsed form, at the head of the wide lane.
   await expect(page.locator('.overview__headline-text')).toHaveText('Nothing needs you');
-  await expect(page.locator('.overview__status-band')).toHaveCount(0);
-  await expect(page.locator('.overview__clear-band')).toBeVisible();
+  await expect(page.locator('.overview__modules-wide .overview__headline-zone')).toHaveClass(
+    /overview__headline-zone--clear/,
+  );
 
   // The sized card holds ITS budget, not one the expansion picked.
   const sized = page.locator('.overview__module[data-module="top-consumers"]');
@@ -692,7 +747,12 @@ test('customize: the all-clear expansion fills around a card the owner has sized
   // Its neighbour, untouched, is still the thing the layout may grow.
   await expect(page.locator('.overview__module[data-module="events"]')).toHaveAttribute('data-adaptive', 'true');
 
-  const bandTop = (await page.locator('.overview__modules-band').boundingBox())!.y;
+  // The sized card's own TOP is what must not move: it is the second
+  // thing in the wide lane, so anything the all-clear state does above
+  // it would show up here. (This used to be measured on the modules
+  // band's own top edge, back when the band started below the status
+  // band; the lane's head is that boundary now.)
+  const sizedTop = (await sized.boundingBox())!.y;
   const compactHeight = (await page.locator('.overview__top').boundingBox())!.height;
 
   // Hand the same card back to the adaptive default: it grows to the
@@ -706,14 +766,16 @@ test('customize: the all-clear expansion fills around a card the owner has sized
   });
   await page.reload();
 
-  await expect(page.locator('.overview__clear-band')).toBeVisible();
+  await expect(page.locator('.overview__modules-wide .overview__headline-zone')).toHaveClass(
+    /overview__headline-zone--clear/,
+  );
   await expect(sized).toHaveAttribute('data-adaptive', 'true');
   await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(5);
   expect((await page.locator('.overview__top').boundingBox())!.height).toBeGreaterThan(compactHeight);
   expect(
-    (await page.locator('.overview__modules-band').boundingBox())!.y,
-    'the expansion itself is unchanged -- only the card the owner sized was',
-  ).toBeCloseTo(bandTop, 0);
+    (await sized.boundingBox())!.y,
+    'everything above the sized card is unchanged -- only the card itself was',
+  ).toBeCloseTo(sizedTop, 0);
 });
 
 test('customize: reset restores the default arrangement', async ({ page, request }) => {

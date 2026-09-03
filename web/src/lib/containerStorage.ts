@@ -158,3 +158,42 @@ export function sharePlacementText(placement: SharePlacementLike | undefined, po
 export function isUnraidOSLoopDevice(label: string): boolean {
   return label.startsWith('bz');
 }
+
+export interface ShfsMountLike {
+  storage: { kind: string; name: string; shfs?: boolean };
+}
+
+// shfsFrontedShares names the shares whose mounts reach their data
+// through Unraid's shfs FUSE layer -- StorageRefDTO.shfs, set server-side
+// for every /mnt/user0 path and every /mnt/user path whose share Unraid
+// hasn't made EXCLUSIVE. That IO is issued by the host-wide shfs daemon
+// rather than by the container, so it lands in no per-container counter
+// on the box at all: not the cgroup's io.stat (a 1.5 GB write through
+// such a mount moved it by 5 KB on a real 7.3.2 box), and not
+// /proc/<pid>/io either (its block-layer read counter never saw the read
+// back). Naming the shares is the honest thing the panel CAN do -- see
+// shfsNote for the sentence it renders, and StorageRefDTO.Shfs' own
+// backend doc for the full measurement.
+//
+// Deduped (several mounts often point into one share) and returned in
+// first-seen order, which sortMounts has already made a stable one.
+export function shfsFrontedShares(mounts: ShfsMountLike[]): string[] {
+  const seen: string[] = [];
+  for (const m of mounts) {
+    if (m.storage.shfs && !seen.includes(m.storage.name)) seen.push(m.storage.name);
+  }
+  return seen;
+}
+
+// shfsNote renders shfsFrontedShares' own output as the one muted line
+// the Live IO section shows when a container has such a mount -- so an
+// empty (or array-free) device list reads as "this IO can't be measured"
+// rather than "this container isn't touching the array". null when
+// there's nothing to explain, in which case no line renders at all.
+export function shfsNote(shares: string[]): string | null {
+  if (shares.length === 0) return null;
+  const subject =
+    shares.length === 1 ? shares[0] : `${shares.slice(0, -1).join(', ')} and ${shares[shares.length - 1]}`;
+  const verb = shares.length === 1 ? 'goes' : 'go';
+  return `${subject} ${verb} through Unraid's shfs layer, which does that disk IO on the container's behalf. None of it can be counted here or in the IO chart.`;
+}

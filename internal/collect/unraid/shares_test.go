@@ -101,6 +101,11 @@ func TestTickSharesMissingFileDegradesSilently(t *testing.T) {
 // what ResolveStoragePath's own share-name extraction returns from a
 // mount path -- unlike the used_bytes metric name above, share2/Share2
 // do NOT collide here.
+//
+// It also pins `exclusive`, which the same capture carries: share2/Share2
+// are exclusive, share1/share3 are not. That field is what decides
+// whether a container's IO through /mnt/user/<share> is visible to its
+// own cgroup at all -- see SharePlacement.Exclusive's own doc.
 func TestTickSharesPlacementFromRealCapture(t *testing.T) {
 	dir := t.TempDir()
 	copyFixture(t, "testdata/shares_real.ini", filepath.Join(dir, "shares.ini"))
@@ -110,8 +115,8 @@ func TestTickSharesPlacementFromRealCapture(t *testing.T) {
 
 	placement := c.SharePlacement()
 	require.Equal(t, SharePlacement{Mode: "no", Pool: ""}, placement["share1"])
-	require.Equal(t, SharePlacement{Mode: "only", Pool: "cache"}, placement["share2"])
-	require.Equal(t, SharePlacement{Mode: "only", Pool: "cache"}, placement["Share2"])
+	require.Equal(t, SharePlacement{Mode: "only", Pool: "cache", Exclusive: true}, placement["share2"])
+	require.Equal(t, SharePlacement{Mode: "only", Pool: "cache", Exclusive: true}, placement["Share2"])
 	require.Equal(t, SharePlacement{Mode: "only", Pool: "rocket_pool"}, placement["share3"])
 }
 
@@ -138,4 +143,24 @@ used="2097152"
 	placement := c.SharePlacement()
 	require.Equal(t, SharePlacement{Mode: "yes", Pool: "cache"}, placement["backups"])
 	require.Equal(t, SharePlacement{Mode: "prefer", Pool: "rocket_pool"}, placement["hot"])
+}
+
+// TestTickSharesExclusiveAbsentReadsAsNotExclusive locks in the degrade
+// for an Unraid old enough to predate exclusive shares entirely: no
+// field at all reads as not-exclusive, which is the correct answer there
+// -- /mnt/user was always shfs before Unraid 7.
+func TestTickSharesExclusiveAbsentReadsAsNotExclusive(t *testing.T) {
+	dir := t.TempDir()
+	ini := `["legacy"]
+name="legacy"
+useCache="no"
+cachePool=""
+used="1048576"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shares.ini"), []byte(ini), 0o644))
+	c := New(newFakeSink(), &fakeEvents{}, dir, t.TempDir())
+
+	c.tickShares(time.Unix(1000, 0))
+
+	require.Equal(t, SharePlacement{Mode: "no"}, c.SharePlacement()["legacy"])
 }

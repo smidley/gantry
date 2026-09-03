@@ -63,6 +63,19 @@ const BUCKETS: { bucket: AttentionBucket; one: string; many: string; href: strin
   { bucket: 'contentions', one: 'contention', many: 'contentions', href: '#/insights', destination: 'view insights' },
 ];
 
+// alertsBucketAnomalies answers the counts pass's own open question --
+// "its new home is a product call" -- for the alerts bucket: Events' own
+// "Needs you" strip renders exactly this list, one CalloutRow per entry,
+// the same per-item rendering Overview used to do before the chips
+// replaced it. Same list attentionChips counts, same order, filtered
+// down to the one bucket a page can actually show as rows; nothing here
+// re-applies the ack filter -- an acked anomaly is already absent from
+// the list deriveOverviewStatus handed back, the same way it's already
+// absent from the chip's own count.
+export function alertsBucketAnomalies(anomalies: OverviewAnomaly[]): OverviewAnomaly[] {
+  return anomalies.filter((a) => attentionBucketFor(a) === 'alerts');
+}
+
 // attentionChips returns only the chips that have something to say -- a
 // zero never renders, so an all-alerts page shows one chip rather than
 // one chip and an empty second one claiming nothing is contended.

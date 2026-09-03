@@ -17,6 +17,25 @@
   event fetches. See refreshFirstPage's own doc for why a background
   refresh REPLACES the whole list (discarding any extra "Load more" pages)
   rather than trying to preserve or re-fetch them.
+
+  Needs you strip (the counts pass's own open question, finally
+  answered -- Overview's alerts chip promises "click on the number and
+  then be brought to a list of items that need attention," and this is
+  that list): the SAME derivation Overview's chip reads
+  (deriveOverviewStatus), scoped down to attentionCounts.ts's alerts
+  bucket -- every kind except an insight-backed contention, which the
+  chip's OTHER half already sends to Insights instead. Wired
+  independently of Overview's own identical derivation rather than
+  sharing a hook: this view otherwise reads no live-frame state at all,
+  and the duplication is small enough that a shared module would cost
+  more than it saved for its only two call sites. One CalloutRow per
+  anomaly, the exact per-item row Overview itself rendered before the
+  counts pass -- Ack control included, same store, so acking a row here
+  drops the Overview headline's own count on the very next reactive
+  tick, no reload (acks.svelte.ts is a shared singleton). The strip
+  disappears the instant its last row is acked or the concern itself
+  clears; it never renders at all while the bucket is empty, so a
+  healthy fleet costs this page nothing.
 -->
 <script>
   import { onMount } from 'svelte';
@@ -25,7 +44,13 @@
   import { motion } from '../lib/motion.svelte';
   import { fetchEvents } from '../lib/api';
   import { debounce } from '../lib/debounce';
+  import { live } from '../lib/sse.svelte';
+  import { acks } from '../lib/acks.svelte';
+  import { deriveOverviewStatus } from '../lib/overviewStatus';
+  import { alertsBucketAnomalies } from '../lib/attentionCounts';
+  import { unhealthyContainerNames } from '../lib/containerStatus';
   import EventFeedItem from '../components/EventFeedItem.svelte';
+  import CalloutRow from '../components/CalloutRow.svelte';
 
   // FEED_MOTION_MS: modest, matching TopBarList's own flip duration --
   // long enough to read as a glide/fly, short enough not to lag behind
@@ -69,6 +94,29 @@
   ];
 
   let feedMotionMs = $derived(motion.reduced ? 0 : FEED_MOTION_MS);
+
+  // --- Needs you (this view's own top-of-file doc) ------------------------
+  //
+  // Overview's own identical derivation, re-wired here rather than
+  // shared: unhealthyNames off the live frame's containers, the rest of
+  // OverviewStatusInput straight off the frame's own matching blocks,
+  // acks.list from the same shared store CalloutRow's Ack control
+  // writes to. alertsBucketAnomalies then trims deriveOverviewStatus's
+  // full anomaly list down to the one bucket this page can show as rows
+  // -- a contention stays Insights' own to explain.
+  let unhealthyNames = $derived(unhealthyContainerNames(live.frame?.containers ?? {}));
+  let overviewStatus = $derived(
+    deriveOverviewStatus({
+      unhealthyNames,
+      arrayStarted: live.frame?.unraid?.array?.['array.started'],
+      disks: live.frame?.disks,
+      sources: live.frame?.sources,
+      alerts: live.frame?.alerts?.firing,
+      acks: acks.list,
+      insights: live.frame?.insights?.active,
+    }),
+  );
+  let needsYouAnomalies = $derived(alertsBucketAnomalies(overviewStatus.anomalies));
 
   let selectedKinds = $state(new Set());
   let entityFilter = $state('');
@@ -267,6 +315,20 @@
   }
 
   onMount(() => {
+    // Acks load once per page load (acks.svelte.ts's own contract) --
+    // ensureLoaded() is a no-op if Overview (or this view, on an earlier
+    // mount) already triggered it, so the needs-you derivation above
+    // sees every standing acknowledgement from first render either way.
+    acks.ensureLoaded();
+    // A route change alone leaves the window at whatever scrollY the
+    // PREVIOUS page had -- the hash router does no scroll management of
+    // its own (router.ts's own doc). That would defeat the one thing
+    // Overview's alerts chip promises ("click on the number and then be
+    // brought to a list of items that need attention"): landing here
+    // scrolled past the strip the chip pointed at. This view's own
+    // mount is the one place that can put a fresh arrival back at its
+    // own top, strip included.
+    window.scrollTo(0, 0);
     const interval = setInterval(refreshFirstPage, REFRESH_MS);
     window.addEventListener('focus', refreshFirstPage);
     return () => {
@@ -278,6 +340,19 @@
 
 <div class="events-view">
   <h1 class="page-title">Events</h1>
+
+  {#if needsYouAnomalies.length > 0}
+    <section class="card events-view__attention">
+      <span class="microlabel">Needs you</span>
+      <div class="events-view__attention-rows">
+        {#each needsYouAnomalies as anomaly, i (i)}
+          <div class="events-view__attention-row">
+            <CalloutRow {anomaly} />
+          </div>
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   <div class="card events-view__filters">
     <fieldset class="events-view__kinds">
@@ -342,6 +417,31 @@
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
+  }
+  /* Needs you: a .card like every other section on this page, tinted the
+     same way SourcesBanner's own .sources-panel is (a background-only
+     override -- .card's border stays the default) so this reads as
+     "pay attention here" without inventing a second bordered-box idiom.
+     Rows stack with a hairline between them (EventFeedItem's own
+     per-row convention below it), not the gap-only spacing the old
+     Overview attention band used -- this strip can hold more than a
+     couple of rows, and dividers are what keep a longer stack scannable. */
+  .events-view__attention {
+    padding: 0.85rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    background: color-mix(in oklab, var(--status-warning) 8%, var(--surface-raised));
+  }
+  .events-view__attention-rows {
+    display: flex;
+    flex-direction: column;
+  }
+  .events-view__attention-row {
+    padding: 0.45rem 0;
+  }
+  .events-view__attention-row:not(:last-child) {
+    border-bottom: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
   }
   .events-view__filters {
     padding: 1rem;

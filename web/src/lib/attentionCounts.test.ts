@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { attentionBucketFor, attentionChips } from './attentionCounts';
+import { alertsBucketAnomalies, attentionBucketFor, attentionChips } from './attentionCounts';
 import { deriveOverviewStatus } from './overviewStatus';
 import type { OverviewAnomaly } from './overviewStatus';
 
@@ -120,5 +120,62 @@ describe('attentionChips', () => {
       acks: [{ kind: 'unhealthy', entity: 'grafana', until: 500 }],
     });
     expect(attentionChips(expired.anomalies).find((c) => c.bucket === 'alerts')!.count).toBe(4);
+  });
+});
+
+// alertsBucketAnomalies backs Events' own "Needs you" strip (the counts
+// pass's own open question, resolved): the same list the alerts chip
+// counts, handed back as the actual rows for CalloutRow to render one
+// per anomaly, exactly Overview's own pre-counts rendering.
+describe('alertsBucketAnomalies', () => {
+  it('keeps only the alerts-bucket kinds, in their original order, dropping every contention', () => {
+    const selected = alertsBucketAnomalies(ONE_OF_EACH.map((c) => c.anomaly));
+    expect(selected.map((a) => a.kind)).toEqual([
+      'unhealthy',
+      'disk-usage',
+      'disk-errors',
+      'array-stopped',
+      'source-critical',
+      'alert',
+    ]);
+  });
+
+  it('is empty when every anomaly is a contention', () => {
+    const insightOnly: OverviewAnomaly[] = [
+      { kind: 'insight', statement: 'a starves b', severity: 'warning', confidence: 'likely' },
+    ];
+    expect(alertsBucketAnomalies(insightOnly)).toEqual([]);
+  });
+
+  it('is empty given an empty list', () => {
+    expect(alertsBucketAnomalies([])).toEqual([]);
+  });
+
+  // The strip must never show a row for a quieted concern -- same
+  // standing invariant attentionChips' own count rests on. This drives
+  // deriveOverviewStatus's ack filter directly rather than re-asserting
+  // it: alertsBucketAnomalies has no ack logic of its own to test, only
+  // the guarantee that it never RE-ADDS what the derivation already
+  // dropped.
+  it('excludes an acked alerts-bucket anomaly exactly the way the chip count already does', () => {
+    const input = {
+      unhealthyNames: ['grafana', 'sonarr'],
+      arrayStarted: undefined,
+      disks: {},
+      sources: {},
+      now: 1_000,
+    };
+
+    const unacked = deriveOverviewStatus(input);
+    expect(alertsBucketAnomalies(unacked.anomalies).map((a) => (a as { name: string }).name)).toEqual([
+      'grafana',
+      'sonarr',
+    ]);
+
+    const acked = deriveOverviewStatus({
+      ...input,
+      acks: [{ kind: 'unhealthy', entity: 'grafana', until: 2_000 }],
+    });
+    expect(alertsBucketAnomalies(acked.anomalies).map((a) => (a as { name: string }).name)).toEqual(['sonarr']);
   });
 });

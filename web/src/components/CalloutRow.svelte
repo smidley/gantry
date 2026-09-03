@@ -8,6 +8,15 @@
   to be able to acknowledge things... so they stop showing up for a
   period of time") offering 1h/24h/7d.
 
+  Relocation (the counts pass moved Overview's per-item rows to two
+  count chips over the same list -- lib/attentionCounts.ts -- and this
+  component's own row rendering went with them): Events' own "Needs you"
+  strip is the current renderer, one row per alerts-bucket anomaly. This
+  component still renders any OverviewAnomaly kind, insight included --
+  it stays the single renderer of a needs-you item regardless of which
+  page is asking, even though the alerts-only strip never hands it one
+  today.
+
   The ack control routes by callout kind -- one mechanism per system:
   an alert-backed callout's ack IS an alert silence (createSilence on
   its own rule_id+entity; the frame's silenced flag then drops the row
@@ -126,9 +135,9 @@
 </p>
 
 <style>
-  /* Matches Overview's own .overview__attn-line look (baseline-aligned
-     inline sentence, wrapping) so swapping the inline markup for this
-     component is visually seamless. */
+  /* A baseline-aligned inline sentence, wrapping -- self-contained (no
+     selector here reaches outside this component), so any card that
+     stacks a few of these as rows gets a consistent look for free. */
   .callout-row {
     display: flex;
     align-items: baseline;

@@ -35,13 +35,43 @@ describe('FleetStrip', () => {
     expect(body).toContain('href="#/containers/prowlarr"');
   });
 
-  // The running/stopped split is order plus fill now, not two separately
-  // headed sub-grids -- one field of blocks is what lets a single cell
-  // size span the whole fleet. Every count and link the old group heads
-  // carried is still in the summary line above.
-  it('orders running units before stopped ones in a single field', () => {
-    const names = [...renderStrip(CONTAINERS).matchAll(/href="#\/containers\/([^"]+)"/g)].map((m) => m[1]);
+  // Two real groups again (Scott: "Keep the stopped containers in a
+  // separate section like we had before") -- the running grid, then a
+  // labelled stopped sub-section under it. They render as separate
+  // lists, in that order, and each says what it holds.
+  it('splits running and stopped into two labelled grids, running first', () => {
+    const body = renderStrip(CONTAINERS);
+    expect(body).toContain('aria-label="Running containers, 2"');
+    expect(body).toContain('aria-label="Stopped containers, 1"');
+    expect(body.indexOf('Running containers')).toBeLessThan(body.indexOf('Stopped containers'));
+
+    const names = [...body.matchAll(/href="#\/containers\/([^"]+)"/g)].map((m) => m[1]);
     expect(names).toEqual(['jellyfin', 'sonarr', 'prowlarr']);
+  });
+
+  it('gives the stopped section its own heading, in the legend\'s vocabulary', () => {
+    const body = renderStrip(CONTAINERS);
+    expect(body).toContain('fleet-strip__group-label');
+    // The heading counts the same way the legend above it does.
+    expect(body.match(/1 stopped/g)?.length).toBe(2);
+  });
+
+  it('renders no stopped section at all when nothing is stopped', () => {
+    const body = renderStrip([
+      { name: 'jellyfin', state: 'running', health: 'healthy', metrics: { 'cpu.pct': 12 } },
+      { name: 'sonarr', state: 'running', health: 'healthy', metrics: {} },
+    ]);
+    expect(body).toContain('aria-label="Running containers, 2"');
+    expect(body).not.toContain('Stopped containers');
+    expect(body).not.toContain('fleet-strip__group-label');
+    expect(body).not.toContain('stopped');
+  });
+
+  it('renders only the stopped section when nothing is running', () => {
+    const body = renderStrip([{ name: 'prowlarr', state: 'exited', health: '', metrics: {} }]);
+    expect(body).toContain('aria-label="Stopped containers, 1"');
+    expect(body).not.toContain('Running containers');
+    expect(body).toContain('aria-label="Container fleet, 1 total"');
   });
 
   it("carries each unit's state (and meaningful health) in its own aria-label", () => {

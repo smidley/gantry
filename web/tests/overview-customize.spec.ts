@@ -235,36 +235,34 @@ async function dragModuleAbove(page: Page, moduleId: string, targetSelector: str
   await expect(page.locator('.overview__module--dragging')).toHaveCount(0);
 }
 
-// railCanvasSignature fingerprints what the rail's first sparkline is
-// actually DRAWING, so "still live" can be asserted as "the picture
-// changed" rather than merely "the element still exists".
-function railCanvasSignature(page: Page): Promise<string> {
-  return page
-    .locator('.overview__metrics-rail canvas')
-    .first()
-    .evaluate((el) => {
-      const c = el as HTMLCanvasElement;
-      const data = c.toDataURL();
-      let h = 0;
-      for (let i = 0; i < data.length; i++) h = (h * 31 + data.charCodeAt(i)) | 0;
-      return `${c.width}x${c.height}:${h}`;
-    });
-}
-
-async function markRailCanvas(page: Page): Promise<void> {
+// The rail -- four live uPlot instances -- used to be the module that
+// made the keyed-each contract matter, and these helpers fingerprinted
+// its canvases. It is pinned at the top of the page now and is not a
+// module at all, which leaves NO canvas anywhere in the band. The
+// contract is unchanged and still worth pinning, so it is pinned the
+// way it can be: a stamp on a real DOM node inside the module proves
+// RELOCATION (a recreated subtree cannot carry it), and the module's own
+// rendered content proves it is still live on the far side.
+async function markModuleNode(page: Page, moduleId: string): Promise<void> {
   await page
-    .locator('.overview__metrics-rail canvas')
-    .first()
-    .evaluate((c) => {
-      (c as HTMLCanvasElement & { __gantryMark?: string }).__gantryMark = 'pre-drag';
+    .locator(`.overview__module[data-module="${moduleId}"] .card`)
+    .evaluate((el) => {
+      (el as HTMLElement & { __gantryMark?: string }).__gantryMark = 'pre-drag';
     });
 }
 
-function railCanvasMark(page: Page): Promise<string | null> {
+function moduleNodeMark(page: Page, moduleId: string): Promise<string | null> {
   return page
-    .locator('.overview__metrics-rail canvas')
-    .first()
-    .evaluate((c) => (c as HTMLCanvasElement & { __gantryMark?: string }).__gantryMark ?? null);
+    .locator(`.overview__module[data-module="${moduleId}"] .card`)
+    .evaluate((el) => (el as HTMLElement & { __gantryMark?: string }).__gantryMark ?? null);
+}
+
+// topSignature is what the leaderboard is actually SHOWING -- its rows
+// and their live values -- so "still live" reads as "the numbers moved"
+// rather than "the element still exists". Fake mode re-ranks and
+// re-values every ~2s tick.
+function topSignature(page: Page): Promise<string> {
+  return page.locator('.overview__top .top-bar-list').innerText();
 }
 
 test('customize: dragging a module to a new position reorders it and the order survives a reload', async ({
@@ -296,19 +294,17 @@ test('customize: dragging a module to a new position reorders it and the order s
 });
 
 // The keyed-each contract this whole feature rests on: reordering WITHIN
-// a lane relocates the existing DOM subtree -- canvas and all -- rather
-// than tearing it down and building a new one. The rail is the module
-// that makes this matter: four live uPlot instances, each with its own
-// cursor/sync state and its own animation frame.
-test('customize: reordering within a lane relocates a module without rebuilding its live charts', async ({
-  page,
-  request,
-}) => {
-  // Both charts-carrying modules in ONE lane, so the drag below is
-  // unambiguously a within-lane reorder.
+// a lane relocates the existing DOM subtree rather than tearing it down
+// and building a new one. Top Consumers is the module that makes this
+// matter now -- a live leaderboard whose rank-stability state and row
+// identities are held per-instance, so a silent recreate would reset
+// the very hysteresis that stops it flickering.
+test('customize: reordering within a lane relocates a module without rebuilding it', async ({ page, request }) => {
+  // All three modules in ONE lane, so the drag below is unambiguously a
+  // within-lane reorder.
   const seeded = await request.put(`${URL}/api/layout/overview`, {
     headers: { 'X-Requested-With': 'gantry', 'Content-Type': 'application/json' },
-    data: { version: 1, wide: ['top-consumers', 'events', 'metrics-rail'], narrow: [], hidden: [] },
+    data: { version: 2, wide: ['top-consumers', 'events', 'storage'], narrow: [], hidden: [] },
   });
   expect(seeded.ok()).toBeTruthy();
 
@@ -316,24 +312,24 @@ test('customize: reordering within a lane relocates a module without rebuilding 
   await page.goto(`${URL}/#/`);
   await settleOverview(page);
 
-  // Stamp the rail's first sparkline canvas: a relocated node keeps the
-  // mark, a recreated one cannot.
-  await markRailCanvas(page);
-  const before = await railCanvasSignature(page);
+  // Stamp the leaderboard's own card: a relocated node keeps the mark,
+  // a recreated one cannot.
+  await markModuleNode(page, 'top-consumers');
+  const before = await topSignature(page);
 
   await enterEditMode(page);
-  await dragModuleAbove(page, 'metrics-rail', '.overview__top');
-  await expect.poll(() => laneOrder(page, 'wide')).toEqual(['metrics-rail', 'top-consumers', 'events']);
+  await dragModuleAbove(page, 'storage', '.overview__top');
+  await expect.poll(() => laneOrder(page, 'wide')).toEqual(['storage', 'top-consumers', 'events']);
 
   expect(
-    await railCanvasMark(page),
-    'a within-lane reorder must RELOCATE the sparkline canvas, never recreate it',
+    await moduleNodeMark(page, 'top-consumers'),
+    'a within-lane reorder must RELOCATE the surviving modules, never recreate them',
   ).toBe('pre-drag');
 
-  // ...and it is still drawing. Fake mode ticks every ~2s, so a generous
-  // window gives this several chances while never passing for a chart
-  // that has genuinely stopped.
-  await expect.poll(() => railCanvasSignature(page), { timeout: 25_000 }).not.toBe(before);
+  // ...and it is still live. Fake mode ticks every ~2s, so a generous
+  // window gives this several chances while never passing for a module
+  // that has genuinely stopped updating.
+  await expect.poll(() => topSignature(page), { timeout: 25_000 }).not.toBe(before);
 });
 
 // Moving a module to the OTHER lane is a different mechanism: the two
@@ -341,31 +337,31 @@ test('customize: reordering within a lane relocates a module without rebuilding 
 // its own independent-height flex column, which no single grid or flex
 // parent can produce from one child list), so Svelte necessarily unmounts
 // the module from one and mounts it in the other. Nothing is LOST when it
-// does: every live ring the rail charts (cpuRing, memRing, net/io) lives
-// in the view above the component, so a remounted Sparkline is handed the
-// full history immediately -- the same transient rebuild a theme switch
-// already performs. This test pins that outcome: charts alive and drawing
-// on the far side of a cross-lane move.
-test('customize: a module dragged into the other lane changes lanes with its charts still live', async ({
-  page,
-  request,
-}) => {
+// does: everything a module renders comes off the live frame held in the
+// view above it, so a remounted module is handed the current state
+// immediately -- the same transient rebuild a theme switch already
+// performs. This test pins that outcome: the module arrives on the far
+// side with its real content, and the page keeps updating.
+test('customize: a module dragged into the other lane arrives with its content intact', async ({ page, request }) => {
   await page.setViewportSize(DESKTOP);
   await page.goto(`${URL}/#/`);
   await settleOverview(page);
 
   await enterEditMode(page);
-  await dragModuleAbove(page, 'metrics-rail', '.overview__top');
+  await dragModuleAbove(page, 'storage', '.overview__top');
 
-  await expect.poll(() => laneOrder(page, 'wide')).toEqual(['metrics-rail', 'top-consumers', 'events']);
+  await expect.poll(() => laneOrder(page, 'wide')).toEqual(['storage', 'top-consumers', 'events']);
   await expect.poll(() => laneOrder(page, 'narrow')).toEqual([]);
   await expect.poll(async () => (await savedLayout(request)).narrow, { timeout: 10_000 }).toEqual([]);
 
-  await expect.poll(() => page.locator('.overview__metrics-rail canvas').count(), { timeout: 20_000 }).toBeGreaterThan(
-    0,
-  );
-  const after = await railCanvasSignature(page);
-  await expect.poll(() => railCanvasSignature(page), { timeout: 25_000 }).not.toBe(after);
+  // Remounted, with the array it was drawing before the move.
+  const moved = page.locator('.overview__modules-wide [data-module="storage"]');
+  await expect(moved.locator('.bay-schematic')).toBeVisible();
+  await expect.poll(() => moved.locator('.bay-schematic__bar').count(), { timeout: 20_000 }).toBeGreaterThan(0);
+
+  // And the page as a whole is still live on the far side of the move.
+  const after = await topSignature(page);
+  await expect.poll(() => topSignature(page), { timeout: 25_000 }).not.toBe(after);
 });
 
 test('customize: hiding a module drops it from normal mode and leaves a ghost that brings it back', async ({
@@ -412,7 +408,7 @@ test('customize: an emptied lane disappears in normal mode and the survivor take
 
   // Both lanes always render while editing -- an emptied one still has
   // to be a drop target.
-  await page.getByRole('button', { name: 'Hide Metrics rail' }).click();
+  await page.getByRole('button', { name: 'Hide Storage array' }).click();
   await expect(page.locator('.overview__modules-narrow')).toBeVisible();
   await expect(page.locator('.overview__lane-empty')).toBeVisible();
 
@@ -498,36 +494,44 @@ test('customize: the divider clamps rather than letting a lane collapse', async 
   expect(narrow!.width).toBeGreaterThan(100);
 });
 
-// A ratio change is a WIDTH change, and the narrow lane is the one full
-// of live uPlot canvases. They must take their existing
-// ResizeObserver -> setSize path -- resized, never destroyed and rebuilt
-// -- or a divider drag would churn four charts per frame. The same
-// canvas stamp the reorder test uses proves it: a rebuilt chart is a new
-// <canvas> element and cannot carry the mark.
-test('customize: dragging the divider resizes the live charts without rebuilding them', async ({ page }) => {
+// A ratio change is a WIDTH change: the lanes must be RESIZED, never
+// torn down and rebuilt, or a divider drag would churn every module in
+// the band once per frame. The DOM stamp proves it -- a recreated
+// subtree cannot carry the mark -- and the widths prove the drag
+// actually reached the lanes rather than being swallowed.
+//
+// This used to be asserted against the rail's four uPlot canvases,
+// which were the loudest thing a rebuild would have cost. The rail is
+// pinned outside the band now and no module left in it draws to a
+// canvas, so the same contract is pinned on the surviving evidence.
+test('customize: dragging the divider resizes the lanes without rebuilding them', async ({ page }) => {
   await page.setViewportSize(DESKTOP);
   await page.goto(`${URL}/#/`);
   await settleOverview(page);
 
-  await markRailCanvas(page);
-  const before = await railCanvasSignature(page);
-  const beforeWidth = Number(before.split('x')[0]);
+  await markModuleNode(page, 'top-consumers');
+  await markModuleNode(page, 'storage');
+  const beforeNarrow = (await page.locator('.overview__modules-narrow').boundingBox())!.width;
+  const before = await topSignature(page);
 
   await enterEditMode(page);
   await dragDivider(page, 120);
 
-  // Narrowing the rail's lane really did reach the canvas...
+  // Widening the wide lane really did narrow the other one...
   await expect
-    .poll(async () => Number((await railCanvasSignature(page)).split('x')[0]))
-    .toBeLessThan(beforeWidth - 20);
-  // ...through setSize, not a teardown.
+    .poll(async () => (await page.locator('.overview__modules-narrow').boundingBox())!.width)
+    .toBeLessThan(beforeNarrow - 20);
+  // ...without recreating either lane's modules.
   expect(
-    await railCanvasMark(page),
-    'a divider drag must RESIZE the sparkline canvas, never recreate it',
+    await moduleNodeMark(page, 'top-consumers'),
+    'a divider drag must RESIZE the wide lane, never recreate its modules',
   ).toBe('pre-drag');
-  // ...and it is still drawing on the far side of the gesture.
-  const after = await railCanvasSignature(page);
-  await expect.poll(() => railCanvasSignature(page), { timeout: 25_000 }).not.toBe(after);
+  expect(
+    await moduleNodeMark(page, 'storage'),
+    'a divider drag must RESIZE the narrow lane, never recreate its modules',
+  ).toBe('pre-drag');
+  // ...and the page is still live on the far side of the gesture.
+  await expect.poll(() => topSignature(page), { timeout: 25_000 }).not.toBe(before);
 });
 
 // The divider would otherwise be this page's first pointer-only control.
@@ -625,15 +629,16 @@ test('customize: a height step resizes a card by whole rows and survives a reloa
   expect((await page.locator('.overview__top').boundingBox())!.height).toBeLessThan(normalBox!.height);
 });
 
-test('customize: the events feed takes a step too, and the rail is offered none', async ({ page, request }) => {
+test('customize: the events feed takes a step too, and storage is offered none', async ({ page, request }) => {
   await page.setViewportSize(DESKTOP);
   await page.goto(`${URL}/#/`);
   await settleOverview(page);
   await enterEditMode(page);
 
-  // The rail's four fixed tiles have no height to choose, so it gets a
-  // grip and an eye and nothing else.
-  await expect(page.getByRole('button', { name: 'Set Metrics rail to tall' })).toHaveCount(0);
+  // The bay schematic's height is decided by how many array members
+  // exist, not by any row budget, so storage gets a grip and an eye and
+  // nothing else.
+  await expect(page.getByRole('button', { name: 'Set Storage array to tall' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Set Recent events to tall' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Set Recent events to compact' }).click();
@@ -664,7 +669,7 @@ test('customize: the all-clear expansion fills around a card the owner has sized
   await putLayout(request, {
     version: LAYOUT_VERSION,
     wide: ['top-consumers', 'events'],
-    narrow: ['metrics-rail'],
+    narrow: ['storage'],
     hidden: [],
     sizes: { 'top-consumers': 'compact' },
   });
@@ -696,7 +701,7 @@ test('customize: the all-clear expansion fills around a card the owner has sized
   await putLayout(request, {
     version: LAYOUT_VERSION,
     wide: ['top-consumers', 'events'],
-    narrow: ['metrics-rail'],
+    narrow: ['storage'],
     hidden: [],
   });
   await page.reload();
@@ -724,15 +729,15 @@ test('customize: reset restores the default arrangement', async ({ page, request
   await page.getByRole('button', { name: 'Hide Recent events' }).click();
   await page.getByRole('button', { name: 'Set Top consumers to tall' }).click();
   await dragDivider(page, 80);
-  await dragModuleAbove(page, 'metrics-rail', '.overview__top');
-  await expect.poll(() => laneOrder(page, 'wide')).toEqual(['metrics-rail', 'top-consumers']);
+  await dragModuleAbove(page, 'storage', '.overview__top');
+  await expect.poll(() => laneOrder(page, 'wide')).toEqual(['storage', 'top-consumers']);
   await expect.poll(() => topRowCount(page), { timeout: 20_000 }).toBe(8);
 
   await expect(reset).toBeEnabled();
   await reset.click();
 
   await expect.poll(() => laneOrder(page, 'wide')).toEqual(['top-consumers', 'events']);
-  await expect.poll(() => laneOrder(page, 'narrow')).toEqual(['metrics-rail']);
+  await expect.poll(() => laneOrder(page, 'narrow')).toEqual(['storage']);
   await expect(page.locator('.overview__ghost')).toHaveCount(0);
   // Reset puts back the split and the height steps too, not just the
   // arrangement.
@@ -743,7 +748,7 @@ test('customize: reset restores the default arrangement', async ({ page, request
   await expect.poll(async () => savedLayout(request), { timeout: 10_000 }).toEqual({
     version: LAYOUT_VERSION,
     wide: ['top-consumers', 'events'],
-    narrow: ['metrics-rail'],
+    narrow: ['storage'],
     hidden: [],
     ratio: RATIO_DEFAULT,
     sizes: {},
@@ -756,12 +761,12 @@ test('customize: reset restores the default arrangement', async ({ page, request
 // already sends one before every test in this file; this pins the
 // migrated RESULT, and that a v1 arrangement survives it.)
 test('customize: a v1 document from a cached bundle is accepted and migrated', async ({ page, request }) => {
-  await putLayout(request, { version: 1, wide: ['events', 'top-consumers'], narrow: ['metrics-rail'], hidden: [] });
+  await putLayout(request, { version: 1, wide: ['events', 'top-consumers'], narrow: ['storage'], hidden: [] });
 
   expect(await savedLayout(request)).toEqual({
     version: LAYOUT_VERSION,
     wide: ['events', 'top-consumers'],
-    narrow: ['metrics-rail'],
+    narrow: ['storage'],
     hidden: [],
     ratio: RATIO_DEFAULT,
     sizes: {},
@@ -805,7 +810,7 @@ test('customize: editing is desktop-only, but a saved arrangement still applies 
   // Saved on a desktop, read on a phone.
   const res = await request.put(`${URL}/api/layout/overview`, {
     headers: { 'X-Requested-With': 'gantry', 'Content-Type': 'application/json' },
-    data: { version: 1, wide: ['events', 'top-consumers'], narrow: ['metrics-rail'], hidden: [] },
+    data: { version: 1, wide: ['events', 'top-consumers'], narrow: ['storage'], hidden: [] },
   });
   expect(res.ok()).toBeTruthy();
 
@@ -820,9 +825,9 @@ test('customize: editing is desktop-only, but a saved arrangement still applies 
   await expect(page.locator('.overview__events')).toBeVisible();
   const eventsBox = await page.locator('.overview__events').boundingBox();
   const topBox = await page.locator('.overview__top').boundingBox();
-  const railBox = await page.locator('.overview__metrics-rail').boundingBox();
+  const storageBox = await page.locator('.overview__storage').boundingBox();
   expect(eventsBox!.y, 'the saved order put Recent events first').toBeLessThan(topBox!.y);
-  expect(railBox!.y, 'the narrow lane stacks below the wide one').toBeGreaterThan(topBox!.y);
+  expect(storageBox!.y, 'the narrow lane stacks below the wide one').toBeGreaterThan(topBox!.y);
 
   // And it stays honoured coming back to desktop width.
   await page.setViewportSize(DESKTOP);

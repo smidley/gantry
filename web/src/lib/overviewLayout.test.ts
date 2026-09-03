@@ -81,8 +81,8 @@ describe('module table', () => {
   });
 
   it('has no size for the rail -- four fixed tiles have no height to choose', () => {
-    expect(isResizableOverviewModule('metrics-rail')).toBe(false);
-    expect(overviewModuleSize(doc({ sizes: { 'metrics-rail': 'tall' } }), 'metrics-rail')).toBe('normal');
+    expect(isResizableOverviewModule('storage')).toBe(false);
+    expect(overviewModuleSize(doc({ sizes: { 'storage': 'tall' } }), 'storage')).toBe('normal');
   });
 
   it('labels a known id and falls back to the raw id for anything else', () => {
@@ -109,11 +109,11 @@ describe('mergeOverviewLayout', () => {
     const merged = mergeOverviewLayout({
       version: 1,
       wide: ['events', 'a-module-from-the-future', 'top-consumers'],
-      narrow: ['metrics-rail'],
+      narrow: ['storage'],
       hidden: ['another-ghost'],
     });
     expect(merged.wide).toEqual(['events', 'top-consumers']);
-    expect(merged.narrow).toEqual(['metrics-rail']);
+    expect(merged.narrow).toEqual(['storage']);
     expect(merged.hidden).toEqual([]);
   });
 
@@ -123,30 +123,69 @@ describe('mergeOverviewLayout', () => {
   it('appends a known module the document never mentions to its default column', () => {
     const merged = mergeOverviewLayout({ version: 1, wide: ['events'], narrow: [], hidden: [] });
     expect(merged.wide).toEqual(['events', 'top-consumers']);
-    expect(merged.narrow).toEqual(['metrics-rail']);
+    expect(merged.narrow).toEqual(['storage']);
     expect(merged.hidden).toEqual([]);
   });
 
   it('leaves a hidden module hidden rather than re-placing it', () => {
-    const merged = mergeOverviewLayout({ version: 1, wide: ['top-consumers'], narrow: ['metrics-rail'], hidden: ['events'] });
+    const merged = mergeOverviewLayout({ version: 1, wide: ['top-consumers'], narrow: ['storage'], hidden: ['events'] });
     expect(merged.hidden).toEqual(['events']);
     expect(merged.wide).toEqual(['top-consumers']);
+  });
+
+  // The MODULE-SET change this release actually made: 'metrics-rail'
+  // retired (the rail is pinned at the top of the page now) and
+  // 'storage' joined in the lane it vacated. A layout saved before that
+  // -- a perfectly valid v2 document from the constrained-resize
+  // release -- has to load cleanly, and the two rules above are between
+  // them the whole migration: drop the unknown id, append the
+  // unmentioned known one. The version deliberately does NOT move for
+  // this; it tracks the document's SHAPE, which is unchanged.
+  it('migrates a stored v2 document across the metrics-rail -> storage module swap', () => {
+    const storedBeforeTheSwap = {
+      version: 2,
+      wide: ['events', 'top-consumers'], // the owner's own order, reversed from default
+      narrow: ['metrics-rail'],
+      hidden: [],
+      ratio: 0.7,
+      sizes: { events: 'tall' },
+    };
+    const merged = mergeOverviewLayout(storedBeforeTheSwap as Partial<OverviewLayoutDoc>);
+
+    expect(merged.version).toBe(OVERVIEW_LAYOUT_VERSION);
+    expect(merged.wide, 'the arrangement they built survives untouched').toEqual(['events', 'top-consumers']);
+    expect(merged.narrow, 'the retired id is gone and the new module takes its lane').toEqual(['storage']);
+    expect(merged.hidden).toEqual([]);
+    expect(merged.ratio, 'their split is theirs').toBe(0.7);
+    expect(merged.sizes, 'and so is their height step').toEqual({ events: 'tall' });
+    expect(JSON.stringify(merged)).not.toContain('metrics-rail');
+  });
+
+  it('drops a retired id out of the hidden list too, and still adds the new module', () => {
+    const merged = mergeOverviewLayout({
+      version: 2,
+      wide: ['top-consumers', 'events'],
+      narrow: [],
+      hidden: ['metrics-rail'],
+    } as Partial<OverviewLayoutDoc>);
+    expect(merged.hidden).toEqual([]);
+    expect(merged.narrow).toEqual(['storage']);
   });
 
   it('deduplicates, first occurrence winning', () => {
     const merged = mergeOverviewLayout({
       version: 1,
-      wide: ['events', 'events', 'metrics-rail'],
-      narrow: ['metrics-rail', 'top-consumers'],
+      wide: ['events', 'events', 'storage'],
+      narrow: ['storage', 'top-consumers'],
       hidden: ['events'],
     });
-    expect(merged.wide).toEqual(['events', 'metrics-rail']);
+    expect(merged.wide).toEqual(['events', 'storage']);
     expect(merged.narrow).toEqual(['top-consumers']);
     expect(merged.hidden).toEqual([]);
   });
 
   it('round-trips a fully-populated document unchanged', () => {
-    const stored = doc({ wide: ['metrics-rail', 'events'], narrow: ['top-consumers'] });
+    const stored = doc({ wide: ['storage', 'events'], narrow: ['top-consumers'] });
     expect(mergeOverviewLayout(stored)).toEqual(stored);
   });
 
@@ -158,7 +197,7 @@ describe('mergeOverviewLayout', () => {
       defaultOverviewLayout(),
     );
     expect(mergeOverviewLayout({ wide: [42, 'events'] as never })).toEqual(
-      doc({ wide: ['events', 'top-consumers'], narrow: ['metrics-rail'] }),
+      doc({ wide: ['events', 'top-consumers'], narrow: ['storage'] }),
     );
   });
 
@@ -175,14 +214,14 @@ describe('mergeOverviewLayout', () => {
 
 describe('v1 -> v2 migration', () => {
   it('accepts a v1 document and fills in the new fields', () => {
-    const v1 = { version: 1, wide: ['events', 'top-consumers'], narrow: ['metrics-rail'], hidden: [] };
+    const v1 = { version: 1, wide: ['events', 'top-consumers'], narrow: ['storage'], hidden: [] };
     expect(mergeOverviewLayout(v1 as Partial<OverviewLayoutDoc>)).toEqual(
-      doc({ wide: ['events', 'top-consumers'], narrow: ['metrics-rail'] }),
+      doc({ wide: ['events', 'top-consumers'], narrow: ['storage'] }),
     );
   });
 
   it('keeps a v1 hidden module hidden across the migration', () => {
-    const v1 = { version: 1, wide: ['top-consumers'], narrow: ['metrics-rail'], hidden: ['events'] };
+    const v1 = { version: 1, wide: ['top-consumers'], narrow: ['storage'], hidden: ['events'] };
     const merged = mergeOverviewLayout(v1 as Partial<OverviewLayoutDoc>);
     expect(merged.hidden).toEqual(['events']);
     expect(merged.ratio).toBe(OVERVIEW_RATIO_DEFAULT);
@@ -194,7 +233,7 @@ describe('v1 -> v2 migration', () => {
       sizes: {
         events: 'tall',
         'top-consumers': 'normal', // absence IS normal
-        'metrics-rail': 'tall', // no elastic body
+        'storage': 'tall', // no elastic body
         'a-module-from-the-future': 'compact', // unknown id
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any,
@@ -303,7 +342,7 @@ describe('ratio clamp + drag math', () => {
 
 describe('setOverviewRatio / setOverviewModuleSize', () => {
   it('stores a clamped ratio and leaves everything else alone', () => {
-    const before = doc({ wide: ['events', 'top-consumers'], narrow: ['metrics-rail'] });
+    const before = doc({ wide: ['events', 'top-consumers'], narrow: ['storage'] });
     expect(setOverviewRatio(before, 0.72)).toEqual({ ...before, ratio: 0.72 });
     expect(setOverviewRatio(before, 5).ratio).toBe(OVERVIEW_RATIO_MAX);
   });
@@ -318,7 +357,7 @@ describe('setOverviewRatio / setOverviewModuleSize', () => {
 
   it('refuses a size for a module with no elastic body, and an unknown step', () => {
     const before = defaultOverviewLayout();
-    expect(setOverviewModuleSize(before, 'metrics-rail', 'tall')).toBe(before);
+    expect(setOverviewModuleSize(before, 'storage', 'tall')).toBe(before);
     expect(setOverviewModuleSize(before, 'nope', 'tall')).toBe(before);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(setOverviewModuleSize(before, 'events', 'enormous' as any)).toBe(before);
@@ -347,7 +386,7 @@ describe('setOverviewRatio / setOverviewModuleSize', () => {
     expect(overviewModuleSize(defaultOverviewLayout(), 'events')).toBe('normal');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(overviewModuleSize(doc({ sizes: { events: 'enormous' } as any }), 'events')).toBe('normal');
-    expect(overviewModuleSize(doc({}), 'metrics-rail')).toBe('normal');
+    expect(overviewModuleSize(doc({}), 'storage')).toBe('normal');
   });
 
   it('offers the three steps smallest-first', () => {
@@ -384,7 +423,7 @@ describe('adaptive-sizing interplay', () => {
   // A module that can never be resized is never "pinned by the owner"
   // either -- it has simply always been whatever height its content is.
   it('treats the non-resizable rail as adaptive', () => {
-    expect(isAdaptivelySized(doc({ sizes: { 'metrics-rail': 'tall' } }), 'metrics-rail')).toBe(true);
+    expect(isAdaptivelySized(doc({ sizes: { 'storage': 'tall' } }), 'storage')).toBe(true);
   });
 
   // The guarantee the whole pass rests on: nothing resized means every
@@ -406,9 +445,9 @@ describe('adaptive-sizing interplay', () => {
 
 describe('moveOverviewModule', () => {
   it('reorders within a column', () => {
-    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['metrics-rail'] });
+    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['storage'] });
     expect(moveOverviewModule(before, 'events', 'wide', 0)).toEqual(
-      doc({ wide: ['events', 'top-consumers'], narrow: ['metrics-rail'] }),
+      doc({ wide: ['events', 'top-consumers'], narrow: ['storage'] }),
     );
   });
 
@@ -416,40 +455,40 @@ describe('moveOverviewModule', () => {
   // so a same-column move to the end is index 1 of a one-element list --
   // not index 2 of the original two.
   it('treats the index as a position in the column minus the dragged module', () => {
-    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['metrics-rail'] });
+    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['storage'] });
     expect(moveOverviewModule(before, 'top-consumers', 'wide', 1).wide).toEqual(['events', 'top-consumers']);
   });
 
   it('moves between columns', () => {
-    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['metrics-rail'] });
+    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['storage'] });
     const after = moveOverviewModule(before, 'events', 'narrow', 0);
     expect(after.wide).toEqual(['top-consumers']);
-    expect(after.narrow).toEqual(['events', 'metrics-rail']);
+    expect(after.narrow).toEqual(['events', 'storage']);
   });
 
   it('un-hides a module dropped back into a column', () => {
-    const before = doc({ wide: ['top-consumers'], narrow: ['metrics-rail'], hidden: ['events'] });
+    const before = doc({ wide: ['top-consumers'], narrow: ['storage'], hidden: ['events'] });
     const after = moveOverviewModule(before, 'events', 'wide', 1);
     expect(after.hidden).toEqual([]);
     expect(after.wide).toEqual(['top-consumers', 'events']);
   });
 
   it('clamps an out-of-range index instead of throwing', () => {
-    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['metrics-rail'] });
-    expect(moveOverviewModule(before, 'metrics-rail', 'wide', 99).wide).toEqual([
+    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['storage'] });
+    expect(moveOverviewModule(before, 'storage', 'wide', 99).wide).toEqual([
       'top-consumers',
       'events',
-      'metrics-rail',
+      'storage',
     ]);
-    expect(moveOverviewModule(before, 'metrics-rail', 'wide', -5).wide).toEqual([
-      'metrics-rail',
+    expect(moveOverviewModule(before, 'storage', 'wide', -5).wide).toEqual([
+      'storage',
       'top-consumers',
       'events',
     ]);
   });
 
   it('ignores an unknown id and never mutates the input document', () => {
-    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['metrics-rail'] });
+    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['storage'] });
     const snapshot = structuredClone(before);
     expect(moveOverviewModule(before, 'nope', 'wide', 0)).toBe(before);
     moveOverviewModule(before, 'events', 'narrow', 0);
@@ -459,7 +498,7 @@ describe('moveOverviewModule', () => {
 
 describe('hide / show', () => {
   it('hides a module out of its column onto the hidden list', () => {
-    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['metrics-rail'] });
+    const before = doc({ wide: ['top-consumers', 'events'], narrow: ['storage'] });
     const after = hideOverviewModule(before, 'events');
     expect(after.wide).toEqual(['top-consumers']);
     expect(after.hidden).toEqual(['events']);
@@ -475,21 +514,21 @@ describe('hide / show', () => {
   // forward-compat append does: back to the END of its default column,
   // never to a position it no longer has.
   it('shows a hidden module back at the end of its default column', () => {
-    const hidden = doc({ wide: ['top-consumers'], narrow: ['metrics-rail'], hidden: ['events'] });
+    const hidden = doc({ wide: ['top-consumers'], narrow: ['storage'], hidden: ['events'] });
     const after = showOverviewModule(hidden, 'events');
     expect(after.hidden).toEqual([]);
     expect(after.wide).toEqual(['top-consumers', 'events']);
   });
 
   it('shows a narrow-lane module back into the narrow lane, not the wide one', () => {
-    const hidden = doc({ wide: ['top-consumers', 'events'], narrow: [], hidden: ['metrics-rail'] });
-    expect(showOverviewModule(hidden, 'metrics-rail').narrow).toEqual(['metrics-rail']);
+    const hidden = doc({ wide: ['top-consumers', 'events'], narrow: [], hidden: ['storage'] });
+    expect(showOverviewModule(hidden, 'storage').narrow).toEqual(['storage']);
   });
 
   it('can empty a whole lane', () => {
-    const after = hideOverviewModule(defaultOverviewLayout(), 'metrics-rail');
+    const after = hideOverviewModule(defaultOverviewLayout(), 'storage');
     expect(after.narrow).toEqual([]);
-    expect(after.hidden).toEqual(['metrics-rail']);
+    expect(after.hidden).toEqual(['storage']);
   });
 });
 
@@ -513,8 +552,8 @@ describe('comparison helpers', () => {
   });
 
   it('compares positionally, not as sets', () => {
-    const a = doc({ wide: ['top-consumers', 'events'], narrow: ['metrics-rail'] });
-    const b = doc({ wide: ['events', 'top-consumers'], narrow: ['metrics-rail'] });
+    const a = doc({ wide: ['top-consumers', 'events'], narrow: ['storage'] });
+    const b = doc({ wide: ['events', 'top-consumers'], narrow: ['storage'] });
     expect(sameOverviewLayout(a, a)).toBe(true);
     expect(sameOverviewLayout(a, b)).toBe(false);
   });

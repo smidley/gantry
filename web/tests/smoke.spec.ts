@@ -187,31 +187,27 @@ test('overview: with something needing you, the chips sit in the headline card a
   expect(Math.abs(bandBox.width - zoneBox.width)).toBeLessThan(2);
   expect(bandBox.y).toBeGreaterThanOrEqual(zoneBox.y + zoneBox.height - 4);
 
-  // Side by side inside it, fleet first.
+  // The band is the fleet alone now -- the bay schematic became a
+  // Customize module and moved down into the modules band -- so the
+  // fleet spans the whole width rather than half of it.
   const fleetBox = await band.locator('.fleet-strip-wrap').boundingBox();
-  const schematicBox = await band.locator('.bay-schematic').boundingBox();
-  expect(Math.abs(fleetBox.y - schematicBox.y)).toBeLessThan(8);
-  expect(schematicBox.x).toBeGreaterThan(fleetBox.x + fleetBox.width - 8);
+  expect(Math.abs(fleetBox.width - bandBox.width)).toBeLessThan(2);
+  await expect(band.locator('.bay-schematic')).toHaveCount(0);
+  await expect(page.locator('.overview__modules-band .bay-schematic')).toBeVisible();
 
-  // Stacked below 64rem the fleet moves LAST: its own height is
-  // "whatever is left between here and the bottom of the viewport",
-  // which is only true with nothing of substance under it.
-  await page.setViewportSize({ width: 375, height: 800 });
-  const fleetMobile = await band.locator('.fleet-strip-wrap').boundingBox();
-  const schematicMobile = await band.locator('.bay-schematic').boundingBox();
-  expect(fleetMobile.y).toBeGreaterThanOrEqual(schematicMobile.y + schematicMobile.height - 4);
+  // And the metrics rail is pinned ABOVE the headline, which is the
+  // page order this pass exists to produce.
+  const railBox = await page.locator('.overview__metrics-rail').boundingBox();
+  expect(railBox.y + railBox.height).toBeLessThanOrEqual(zoneBox.y + 1);
+  expect(Math.abs(railBox.width - zoneBox.width)).toBeLessThan(2);
 });
 
 // Adaptive all-clear (Scott: "When there is nothing that needs
 // attention... the other sections should be expanded to use the
 // available space and then we won't need to scroll down so far"): zero
 // callouts collapses the headline card to a compact strip (no status
-// band at all) and promotes the fleet strip + bay schematic to a
-// full-width band of their own -- side by side at >=64rem, stacked on
-// mobile -- pulling Top Consumers and everything below it up the page.
-test('overview: all-clear collapses the headline to a strip and the fleet/storage cards take the full width', async ({
-  page,
-}) => {
+// band at all) and gives the fleet strip a full-width band of its own.
+test('overview: all-clear collapses the headline to a strip and the fleet takes the full width', async ({ page }) => {
   await routeLiveFrame(page, liveFrame());
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
@@ -228,7 +224,8 @@ test('overview: all-clear collapses the headline to a strip and the fleet/storag
   await expect(schematic).toContainText('cache warmest at 41.5°C');
 
   // Full width: the band spans the same content width as the headline
-  // card above it, with the two cards side by side inside it.
+  // card above it, and the fleet -- now the band's only occupant, the
+  // schematic having become a module -- spans the band.
   const band = page.locator('.overview__clear-band');
   await expect(band).toBeVisible();
   const zoneBox = await page.locator('.overview__headline-zone').boundingBox();
@@ -238,22 +235,28 @@ test('overview: all-clear collapses the headline to a strip and the fleet/storag
   const fleet = band.locator('.fleet-strip-wrap');
   await expect(fleet).toBeVisible();
   const fleetBox = await fleet.boundingBox();
-  const schematicBox = await schematic.boundingBox();
-  expect(Math.abs(fleetBox.y - schematicBox.y)).toBeLessThan(8);
-  expect(schematicBox.x).toBeGreaterThan(fleetBox.x + fleetBox.width - 8);
+  expect(Math.abs(fleetBox.width - bandBox.width)).toBeLessThan(2);
+  await expect(band.locator('.bay-schematic')).toHaveCount(0);
 
-  // The point of the whole pass: the modules band starts high enough
-  // that Top Consumers is inside the first viewport, not below it.
+  // The all-clear expansion still does its job -- everything below the
+  // headline sits higher than it does with callouts present. It is no
+  // longer measured against a fixed pixel: the rail is pinned above the
+  // headline now (deliberately, and it costs real height), so "Top
+  // Consumers in the first viewport" is a promise this page order does
+  // not make. What it does promise is that the schematic's own module,
+  // at the head of the narrow lane, is reachable without a long scroll.
+  const storageBox = await page.locator('.overview__storage').boundingBox();
+  expect(storageBox.y).toBeLessThan(1100);
   const topBox = await page.locator('.overview__top').boundingBox();
-  expect(topBox.y).toBeLessThan(700);
+  expect(topBox.y, 'the modules band starts right below the fleet band').toBeLessThan(
+    bandBox.y + bandBox.height + 80,
+  );
 
-  // Mobile: the two cards stack, fleet last (see the counts-and-fleet
-  // pass -- the fleet sizes itself against the space beneath it, so it
-  // can only ever be the bottom card in a stack).
+  // Mobile: the modules band stacks its lanes, wide first.
   await page.setViewportSize({ width: 375, height: 800 });
-  const fleetMobile = await fleet.boundingBox();
-  const schematicMobile = await schematic.boundingBox();
-  expect(fleetMobile.y).toBeGreaterThanOrEqual(schematicMobile.y + schematicMobile.height - 4);
+  const topMobile = await page.locator('.overview__top').boundingBox();
+  const storageMobile = await page.locator('.overview__storage').boundingBox();
+  expect(storageMobile.y).toBeGreaterThanOrEqual(topMobile.y + topMobile.height - 4);
 });
 
 // Counts pass: "Needs a look" is one short row inside the headline
@@ -298,33 +301,32 @@ test('overview: needs-a-look is one short inline row inside the headline card', 
 // width-starved while the rail's column ran nearly double the other
 // column's height (confirmed live: 1287px vs 659px). Top Consumers and
 // Recent events now share one wide lane, STACKED (never side by side,
-// so they can never fight each other for width), while the rail -- the
-// one module here that's genuinely narrow by nature -- gets its own,
-// narrower lane.
-test('overview: Top Consumers and Recent events share one wide column, wider than the rail\'s own', async ({ page }) => {
+// so they can never fight each other for width), while the narrow lane
+// -- the storage module's, since the rail was pinned out of the band --
+// gets its own, narrower one.
+test('overview: Top Consumers and Recent events share one wide column, wider than the narrow lane', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
 
   const top = page.locator('.overview__top');
   const events = page.locator('.overview__events');
-  const rail = page.locator('.overview__metrics-rail');
+  const storage = page.locator('.overview__storage');
   await expect(top).toBeVisible();
   await expect(events).toBeVisible();
-  await expect(rail).toBeVisible();
+  await expect(storage).toBeVisible();
 
   const topBox = await top.boundingBox();
   const eventsBox = await events.boundingBox();
-  const railBox = await rail.boundingBox();
+  const storageBox = await storage.boundingBox();
 
   // Stacked in the same column: same left edge and width, events below top.
   expect(Math.abs(topBox.x - eventsBox.x)).toBeLessThan(2);
   expect(Math.abs(topBox.width - eventsBox.width)).toBeLessThan(2);
   expect(eventsBox.y).toBeGreaterThanOrEqual(topBox.y + topBox.height - 4);
 
-  // The rail sits in its own, narrower lane to the right -- not the
-  // roughly-half-the-body-width column it used to share with events.
-  expect(railBox.x).toBeGreaterThan(topBox.x + topBox.width - 8);
-  expect(railBox.width).toBeLessThan(topBox.width);
+  // The storage module sits in its own, narrower lane to the right.
+  expect(storageBox.x).toBeGreaterThan(topBox.x + topBox.width - 8);
+  expect(storageBox.width).toBeLessThan(topBox.width);
 });
 
 // The chips ARE the headline count, split two ways -- so whatever the

@@ -139,7 +139,7 @@ test('evidence drawer for a HISTORY insight also renders the interaction map, wi
 }) => {
   test.setTimeout(4 * 60_000 + 30_000);
 
-  let target: { id: number; statement: string } | null = null;
+  let target: { id: number; statement: string; confidence: string } | null = null;
   const deadline = Date.now() + 4 * 60_000;
   while (Date.now() < deadline && !target) {
     const hist = await (await request.get(`${baseURL}/api/insights/history?limit=1`)).json();
@@ -188,6 +188,21 @@ test('evidence drawer for a HISTORY insight also renders the interaction map, wi
     await expect(focusedEdges.nth(i)).not.toHaveClass(/interaction-map__edge--dimmed/);
   }
 
+  // VERIFIED, not assumed: confidence's own dash-vs-solid distinction
+  // (map.spec.ts' own "confidence is never colour-alone" test) renders
+  // correctly inside the DRAWER's compact map too -- nothing previously
+  // pinned this specifically for the compact variant, only the
+  // standalone canvas. Same dasharray-tolerant pattern as that test
+  // (Chrome may serialize "7 6" back as "7, 6").
+  for (let i = 0; i < focusedCount; i++) {
+    const style = await focusedEdges.nth(i).locator('.interaction-map__edge-line').getAttribute('style');
+    if (target!.confidence === 'likely') {
+      expect(style ?? '').toMatch(/dasharray:\s*7[,\s]+6/);
+    } else {
+      expect(style ?? '').toMatch(/dasharray:\s*none/);
+    }
+  }
+
   // Only asserted when there IS something else on the canvas -- the demo
   // schedule may or may not have produced a second, concurrent finding
   // by the time this test runs (this file's own doc, top), and a lone
@@ -197,6 +212,38 @@ test('evidence drawer for a HISTORY insight also renders the interaction map, wi
   const otherCount = await otherEdges.count();
   for (let i = 0; i < otherCount; i++) {
     await expect(otherEdges.nth(i)).toHaveClass(/interaction-map__edge--dimmed/);
+  }
+
+  // Legend conditionality (owner-reported: a key entry for a style
+  // nothing on screen actually uses reads as noise): read whichever
+  // dash styles are ACTUALLY on the drawer's own canvas right now --
+  // never assumed, since this shared server's own demo schedule decides
+  // whether anything concurrent (and at a different confidence) is
+  // present -- and assert the legend matches exactly. mapLayout.ts' own
+  // legendPresence/showLegend already have the full unit-level matrix;
+  // this just confirms the component actually wires them in.
+  const allEdgeLines = drawer.locator('.interaction-map__edge-line');
+  const edgeLineCount = await allEdgeLines.count();
+  let hasSolid = false;
+  let hasDashed = false;
+  for (let i = 0; i < edgeLineCount; i++) {
+    const style = (await allEdgeLines.nth(i).getAttribute('style')) ?? '';
+    if (/dasharray:\s*7[,\s]+6/.test(style)) hasDashed = true;
+    else hasSolid = true;
+  }
+  const legend = drawer.locator('.interaction-map__legend');
+  if (hasSolid && hasDashed) {
+    // Both styles present: the drawer's own compact variant still shows
+    // the legend (showLegend's own doc), with both entries.
+    await expect(legend).toBeVisible();
+    await expect(legend).toContainText('confirmed');
+    await expect(legend).toContainText('likely');
+  } else {
+    // Only one style present (the common case: a lone clicked insight
+    // with nothing concurrent, or a concurrent set that all happens to
+    // share one confidence) -- the drawer drops the legend entirely
+    // rather than listing a style with no edge on screen.
+    await expect(legend).toHaveCount(0);
   }
 });
 

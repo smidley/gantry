@@ -560,7 +560,7 @@ export async function putInsightRules(rules: InsightRuleInput[]): Promise<Insigh
   return body;
 }
 
-// dismissInsight backs the Active row's own "not useful" control
+// dismissInsight backs the Active row's own Dismiss control
 // (1d/7d/30d) -- resolves the instance server-side and returns its
 // fresh (now resolved) state, so the caller can move it straight into
 // History without a full refetch.

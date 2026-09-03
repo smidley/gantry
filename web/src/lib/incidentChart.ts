@@ -11,6 +11,25 @@
 // and already degrading a pruned or never-recorded window to an empty
 // points array rather than an error -- internal/store/query.go's own
 // QuerySeries doc) -- no server endpoint of this feature's own.
+//
+// Owner-reported bug, fixed here: "the highlighted part of the incident
+// timeline doesn't line up with the required info" -- the band used to
+// be the ADMINISTRATIVE span [started_at, resolved_at], but a sustained
+// rule only ever fires AFTER its own evaluation window has already
+// elapsed (Sustained(), window.go: "every sample in the trailing forSecs
+// seconds... crosses threshold"), so the CAUSAL spike that actually
+// produced the finding lives BEFORE started_at, not after it -- exactly
+// where the owner's own screenshot showed it sitting, over flat data.
+// incidentLookbackSecs below (verified per rule against rules.go/
+// engine.go, not guessed) is the fix: the band now covers [started_at -
+// lookback, resolved_at], and incidentChartWindow's own padding is
+// computed off THAT extended span so context still surrounds the full
+// band. The Fired/Resolved markers stay exactly where they were --
+// still real timestamps, now legible as the seam between "building up"
+// (the wider shaded look-back) and "actively firing" (the narrower
+// span between the two markers) within one uniform band, rather than a
+// second shade this file deliberately does not add (see
+// incidentLookbackSecs' own doc).
 import type { SeriesResult } from './api';
 import { culpritNames, type InsightCulpritLike } from './insights';
 import type { ChartMarker } from './eventMarkers';
@@ -32,20 +51,146 @@ export const MIN_PAD_SEC = 15 * 60;
 export const MAX_PAD_SEC = 2 * 60 * 60;
 
 // IncidentWindowLike is the minimal shape incidentChartWindow/
-// incidentMarkers/incidentBand all need -- deliberately narrower than
-// InsightDTO, the exact OverlapWindowLike/InsightCulpritLike precedent
-// (insights.ts), so a hand-built test fixture never has to carry every
-// InsightDTO field just to exercise this window math.
+// incidentBand both need for the temporal half of their own math --
+// deliberately narrower than InsightDTO, the exact OverlapWindowLike/
+// InsightCulpritLike precedent (insights.ts), so a hand-built test
+// fixture never has to carry every InsightDTO field just to exercise
+// this window math. incidentMarkers uses its own separate
+// IncidentMarkerLike, below -- markers don't need the look-back at all.
 export interface IncidentWindowLike {
   state: string;
   started_at: number;
   resolved_at: number;
 }
 
+// EVIDENCE_WINDOW_SECS mirrors internal/insight/rules.go's own
+// EvidenceWindowSecs (120s) EXACTLY -- a compiled-in, NEVER user-
+// overridable package constant (contrast sustain_secs, a per-rule,
+// per-install TUNABLE threshold the Rules editor can change), so this
+// one specific number carries no drift risk the way mirroring
+// sustain_secs would.
+//
+// Verified against the engine, not guessed: every "sustained" rule's
+// own gather step (engine.go's gather()) fetches its samples from
+// now-EvidenceWindowSecs forward, and even the two rules that fetch
+// FURTHER back for their own rolling-median BASELINE
+// (disk-io-contention's HostDiskIO, parity-slowdown's ParitySpeedBps,
+// both now-BaselineLookbackSecs=600s) still split that longer fetch at
+// now-EvidenceWindowSecs and test ONLY the recent (<=120s) half for the
+// actual sustained breach (splitWindow, evalDiskIOContention/
+// evalParitySlowdown) -- the causal spike itself is always bounded by
+// this 120s figure regardless of how much further back the baseline
+// comparison alone reaches. This is also exactly where the owner's own
+// bug report empirically landed ("the spike aligns exactly with fired
+// minus 2 minutes"): 120s is 2 minutes, and fake-mode's own sustain_secs
+// compression (Engine.FakeSustainSecs, engine.go) never touches this
+// constant at all, so the alignment holds on a throwaway fake-mode box
+// exactly as it does on a real one with real PSI.
+export const EVIDENCE_WINDOW_SECS = 120;
+
+// DISK_SPINUP_CHURN_DEFAULT_WINDOW_SECS mirrors rules.go's own
+// librarySpecs default for disk-spinup-churn's "window_minutes"
+// threshold (60) -- used only as a defensive fallback on top of a LIVE
+// read (see incidentLookbackSecs' own doc on why this one rule can read
+// its real, possibly-overridden value directly instead of leaning on a
+// compiled-in constant the way the other six do).
+export const DISK_SPINUP_CHURN_DEFAULT_WINDOW_SECS = 60 * 60;
+
+// LookbackLike is incidentLookbackSecs' own minimal shape.
+export interface LookbackLike {
+  rule_id: string;
+  victim_kind: string;
+  evidence?: { window_minutes?: number; spin_window_minutes?: number };
+}
+
+// incidentLookbackSecs answers "how far before started_at does this
+// insight's own CAUSAL evidence extend" -- verified per rule against
+// internal/insight/rules.go's own Eval functions and engine.go's gather
+// step, not guessed (this repo's own standing rule):
+//
+//   disk-io-contention, io-driven-cpu-load, cpu-starvation,
+//   parity-slowdown, gpu-engine-contention, and memory-squeeze's
+//   HOST-WIDE path: every one of these evaluates a Sustained() breach
+//   over a window bounded by EvidenceWindowSecs (see that export's own
+//   doc) -- the fixed 120s look-back applies uniformly. evidence.
+//   window_minutes is preferred over the constant WHEN the engine
+//   happens to have populated it (today: only the PSI-confirmed
+//   branches of disk-io-contention/io-driven-cpu-load/memory-squeeze,
+//   plus cpu-starvation's own shared cpuStarvationFinding constructor,
+//   which sets it for EVERY confidence tier -- a real inconsistency in
+//   the engine, surfaced while diagnosing this bug: even where
+//   populated, the field is ITSELF hardcoded to EvidenceWindowSecs/60,
+//   never the rule's own actual sustain_secs, so preferring it costs
+//   nothing today and only pays off if a future engine revision
+//   corrects that). Absent or zero (every tier-1/likely finding from
+//   the other rules, today) falls back to the verified constant.
+//
+//   memory-squeeze's CONTAINER/OOM path is a discrete EVENT (a kill
+//   either happened or didn't, at one instant -- evalMemorySqueeze's own
+//   in.OOMEvents loop, no Sustained() call at all) with no look-back to
+//   invent -- don't guess one just because every other rule has one.
+//
+//   disk-spinup-churn is a different shape entirely: it counts rising
+//   edges over its OWN rule-level "window_minutes" threshold (default
+//   60 MINUTES, SpinupLookbackSecs=3600 in rules.go), unrelated to
+//   EvidenceWindowSecs -- and unlike the other six, this one's own
+//   window is ALWAYS populated on evidence with no confidence-tier
+//   gating (evalDiskSpinupChurn's one call site sets SpinWindowMinutes
+//   unconditionally), so the LIVE, possibly-overridden value is read
+//   directly, with the compiled-in default purely as a defensive
+//   fallback should evidence somehow be missing it.
+export function incidentLookbackSecs(inst: LookbackLike): number {
+  switch (inst.rule_id) {
+    case 'disk-io-contention':
+    case 'io-driven-cpu-load':
+    case 'cpu-starvation':
+    case 'parity-slowdown':
+    case 'gpu-engine-contention': {
+      const windowMinutes = inst.evidence?.window_minutes;
+      return windowMinutes && windowMinutes > 0 ? windowMinutes * 60 : EVIDENCE_WINDOW_SECS;
+    }
+    case 'memory-squeeze': {
+      if (inst.victim_kind === 'container') return 0; // the OOM-kill path: an instant, not a sustained trend
+      const windowMinutes = inst.evidence?.window_minutes;
+      return windowMinutes && windowMinutes > 0 ? windowMinutes * 60 : EVIDENCE_WINDOW_SECS;
+    }
+    case 'disk-spinup-churn': {
+      const minutes = inst.evidence?.spin_window_minutes;
+      return minutes && minutes > 0 ? minutes * 60 : DISK_SPINUP_CHURN_DEFAULT_WINDOW_SECS;
+    }
+    default:
+      // Defensive only: the rule library is fixed and closed -- the
+      // exact posture planIncidentCharts' own switch below takes (and
+      // moot in practice, since that function already returns no charts
+      // at all for a rule id it doesn't recognize, so this value is
+      // never actually rendered against).
+      return 0;
+  }
+}
+
+// IncidentBandLike is incidentBand's (and, in turn, incidentChartWindow's)
+// own combined shape -- the temporal fields plus whatever
+// incidentLookbackSecs needs to size the look-back correctly.
+export interface IncidentBandLike extends IncidentWindowLike, LookbackLike {}
+
+// incidentBand is the UNPADDED [start, end] TimeChart's own `band` prop
+// draws (a shaded rect behind the plotted lines, see that component's
+// own doc) -- now [started_at - lookback, resolved_at] rather than just
+// [started_at, resolved_at] (this file's own top-of-file doc has the
+// full bug/fix story). Distinct from incidentChartWindow's own PADDED
+// fetch range below, which surrounds this band with context rather than
+// stopping exactly at its own edges.
+export function incidentBand(inst: IncidentBandLike, nowSec: number): [number, number] {
+  const lookback = incidentLookbackSecs(inst);
+  return [inst.started_at - lookback, inst.state === 'active' ? nowSec : inst.resolved_at];
+}
+
 // incidentChartWindow returns the padded [from, to] to request from GET
 // /api/series -- TimeChart's own xDomain prop, unit-for-unit (both are
 // [number, number] unix-second tuples), so the caller hands this straight
-// through with no reshaping.
+// through with no reshaping. Built ON TOP of incidentBand (not a second,
+// separately-computed look-back) specifically so the two can never
+// disagree about where the band's own left edge sits.
 //
 // The trailing pad is deliberately OMITTED for a still-ACTIVE insight:
 // "padded on each side" describes an incident that HAS a far side to pad
@@ -54,21 +199,12 @@ export interface IncidentWindowLike {
 // exactly nowSec for that case; the leading pad still applies either way,
 // since "what led up to this" is always real history regardless of
 // whether the incident has resolved yet.
-export function incidentChartWindow(inst: IncidentWindowLike, nowSec: number): [number, number] {
+export function incidentChartWindow(inst: IncidentBandLike, nowSec: number): [number, number] {
   const isActive = inst.state === 'active';
-  const end = isActive ? nowSec : inst.resolved_at;
-  const duration = Math.max(0, end - inst.started_at);
+  const [bandStart, bandEnd] = incidentBand(inst, nowSec);
+  const duration = Math.max(0, bandEnd - bandStart);
   const pad = Math.min(Math.max(duration, MIN_PAD_SEC), MAX_PAD_SEC);
-  return [inst.started_at - pad, isActive ? end : end + pad];
-}
-
-// incidentBand is the UNPADDED [start, end] -- the incident's own active
-// span, for TimeChart's own `band` prop (a shaded rect behind the plotted
-// lines, see that component's own doc) -- distinct from
-// incidentChartWindow's PADDED fetch range above; the band marks only the
-// span the insight actually claims, never the context padding around it.
-export function incidentBand(inst: IncidentWindowLike, nowSec: number): [number, number] {
-  return [inst.started_at, inst.state === 'active' ? nowSec : inst.resolved_at];
+  return [bandStart - pad, isActive ? bandEnd : bandEnd + pad];
 }
 
 // --- markers -----------------------------------------------------------

@@ -1,28 +1,110 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DISK_SPINUP_CHURN_DEFAULT_WINDOW_SECS,
+  EVIDENCE_WINDOW_SECS,
   MAX_PAD_SEC,
   MIN_PAD_SEC,
   hasChartableData,
   incidentBand,
   incidentChartWindow,
+  incidentLookbackSecs,
   incidentMarkers,
   planIncidentCharts,
   type PlanInput,
 } from './incidentChart';
 
+// NO_LOOKBACK_RULE: a rule/victim_kind combination incidentLookbackSecs
+// itself resolves to a 0 look-back (the memory-squeeze OOM/container
+// path -- an instant, not a sustained trend) -- used throughout the pure
+// padding-math tests below so they exercise incidentChartWindow's own
+// arithmetic in isolation from the look-back extension, which gets its
+// own dedicated tests further down.
+const NO_LOOKBACK_RULE = { rule_id: 'memory-squeeze', victim_kind: 'container' };
+
+describe('incidentLookbackSecs', () => {
+  it('the five sustained-threshold rules default to EVIDENCE_WINDOW_SECS when evidence.window_minutes is absent (every tier-1/likely finding, today)', () => {
+    for (const rule_id of ['disk-io-contention', 'io-driven-cpu-load', 'cpu-starvation', 'parity-slowdown', 'gpu-engine-contention']) {
+      expect(incidentLookbackSecs({ rule_id, victim_kind: '' })).toBe(EVIDENCE_WINDOW_SECS);
+    }
+  });
+
+  it('prefers evidence.window_minutes over the constant when the engine populated it (the PSI-confirmed branches, and cpu-starvation at any tier)', () => {
+    expect(incidentLookbackSecs({ rule_id: 'io-driven-cpu-load', victim_kind: '', evidence: { window_minutes: 5 } })).toBe(300);
+    expect(incidentLookbackSecs({ rule_id: 'cpu-starvation', victim_kind: '', evidence: { window_minutes: 2 } })).toBe(120);
+  });
+
+  it('a zero or negative evidence.window_minutes is treated as absent, not as a genuine zero-length look-back', () => {
+    expect(incidentLookbackSecs({ rule_id: 'disk-io-contention', victim_kind: '', evidence: { window_minutes: 0 } })).toBe(EVIDENCE_WINDOW_SECS);
+  });
+
+  it('memory-squeeze: the OOM/container path is event-shaped -- no look-back, ever, regardless of evidence', () => {
+    expect(incidentLookbackSecs({ rule_id: 'memory-squeeze', victim_kind: 'container', evidence: { window_minutes: 99 } })).toBe(0);
+  });
+
+  it('memory-squeeze: the host-wide threshold path shares the other five rules\' own EVIDENCE_WINDOW_SECS behavior', () => {
+    expect(incidentLookbackSecs({ rule_id: 'memory-squeeze', victim_kind: 'host' })).toBe(EVIDENCE_WINDOW_SECS);
+    expect(incidentLookbackSecs({ rule_id: 'memory-squeeze', victim_kind: 'host', evidence: { window_minutes: 2 } })).toBe(120);
+  });
+
+  it('disk-spinup-churn reads its own LIVE evidence.spin_window_minutes (reflects a real per-install override), not the compiled-in default', () => {
+    expect(incidentLookbackSecs({ rule_id: 'disk-spinup-churn', victim_kind: '', evidence: { spin_window_minutes: 30 } })).toBe(30 * 60);
+  });
+
+  it('disk-spinup-churn falls back to its own compiled-in default only when evidence is missing the field entirely', () => {
+    expect(incidentLookbackSecs({ rule_id: 'disk-spinup-churn', victim_kind: '' })).toBe(DISK_SPINUP_CHURN_DEFAULT_WINDOW_SECS);
+  });
+
+  it('an unrecognized rule id gets no look-back -- the library is fixed and closed, never a guess', () => {
+    expect(incidentLookbackSecs({ rule_id: 'made-up-rule', victim_kind: '' })).toBe(0);
+  });
+});
+
+describe('incidentBand', () => {
+  it('is [started_at, resolved_at] with no extension for an event-shaped finding (no look-back)', () => {
+    expect(incidentBand({ state: 'resolved', started_at: 100, resolved_at: 200, ...NO_LOOKBACK_RULE }, 999)).toEqual([100, 200]);
+  });
+
+  it('is [started_at, nowSec] for a still-active, event-shaped finding', () => {
+    expect(incidentBand({ state: 'active', started_at: 100, resolved_at: 0, ...NO_LOOKBACK_RULE }, 999)).toEqual([100, 999]);
+  });
+
+  // Regression: the owner's own reported bug (io-driven-cpu-load on
+  // "Optimisarr", evidence text "stalled on IO 67.6% of the last 2
+  // minutes") -- the host iowait spike peaked ~90s before started_at in
+  // his screenshot, and the OLD band ([started_at, resolved_at]) sat
+  // entirely after it, over flat data. The band's own left edge must now
+  // sit BEFORE started_at by the rule's own look-back, so the spike
+  // falls inside the shaded region instead of before it.
+  it('extends the band BEFORE started_at for a sustained-threshold rule -- the owner\'s own reported bug', () => {
+    const inst = { state: 'resolved', started_at: 1000, resolved_at: 1030, rule_id: 'io-driven-cpu-load', victim_kind: '' };
+    expect(incidentBand(inst, 999999)).toEqual([1000 - EVIDENCE_WINDOW_SECS, 1030]);
+    // The spike the owner's screenshot showed, ~90s before started_at,
+    // must now fall INSIDE the band -- the whole point of the fix.
+    const spikeTs = 1000 - 90;
+    const [bandStart, bandEnd] = incidentBand(inst, 999999);
+    expect(spikeTs).toBeGreaterThanOrEqual(bandStart);
+    expect(spikeTs).toBeLessThanOrEqual(bandEnd);
+  });
+
+  it('extends the band using disk-spinup-churn\'s own live (possibly-overridden) window, not the fixed EVIDENCE_WINDOW_SECS', () => {
+    const inst = { state: 'resolved', started_at: 10_000, resolved_at: 10_030, rule_id: 'disk-spinup-churn', victim_kind: '', evidence: { spin_window_minutes: 45 } };
+    expect(incidentBand(inst, 999999)).toEqual([10_000 - 45 * 60, 10_030]);
+  });
+});
+
 describe('incidentChartWindow', () => {
-  it('floors a brief incident\'s padding at MIN_PAD_SEC on both sides', () => {
-    const inst = { state: 'resolved', started_at: 1000, resolved_at: 1060 }; // 60s duration
+  it('floors a brief incident\'s padding at MIN_PAD_SEC on both sides (no look-back extension)', () => {
+    const inst = { state: 'resolved', started_at: 1000, resolved_at: 1060, ...NO_LOOKBACK_RULE }; // 60s duration
     expect(incidentChartWindow(inst, 999999)).toEqual([1000 - MIN_PAD_SEC, 1060 + MIN_PAD_SEC]);
   });
 
-  it('pads by roughly the incident\'s own duration when between the floor and cap', () => {
-    const inst = { state: 'resolved', started_at: 1000, resolved_at: 1000 + 1200 }; // 20 min
+  it('pads by roughly the incident\'s own duration when between the floor and cap (no look-back extension)', () => {
+    const inst = { state: 'resolved', started_at: 1000, resolved_at: 1000 + 1200, ...NO_LOOKBACK_RULE }; // 20 min
     expect(incidentChartWindow(inst, 999999)).toEqual([1000 - 1200, 2200 + 1200]);
   });
 
-  it('caps a long incident\'s padding at MAX_PAD_SEC on both sides', () => {
-    const inst = { state: 'resolved', started_at: 1000, resolved_at: 1000 + 5 * 3600 }; // 5h
+  it('caps a long incident\'s padding at MAX_PAD_SEC on both sides (no look-back extension)', () => {
+    const inst = { state: 'resolved', started_at: 1000, resolved_at: 1000 + 5 * 3600, ...NO_LOOKBACK_RULE }; // 5h
     const [from, to] = incidentChartWindow(inst, 999999);
     expect(from).toBe(1000 - MAX_PAD_SEC);
     expect(to).toBe(1000 + 5 * 3600 + MAX_PAD_SEC);
@@ -30,25 +112,39 @@ describe('incidentChartWindow', () => {
 
   it('an ACTIVE incident is padded only on the leading side -- `to` is exactly nowSec, never past it', () => {
     const nowSec = 100000;
-    const inst = { state: 'active', started_at: nowSec - 300, resolved_at: 0 }; // 5 min old, still active
+    const inst = { state: 'active', started_at: nowSec - 300, resolved_at: 0, ...NO_LOOKBACK_RULE }; // 5 min old, still active
     const [from, to] = incidentChartWindow(inst, nowSec);
     expect(to).toBe(nowSec);
     expect(from).toBe(nowSec - 300 - MIN_PAD_SEC);
   });
 
   it('a zero-duration incident (started == resolved) still gets the full floor pad, never zero', () => {
-    const inst = { state: 'resolved', started_at: 5000, resolved_at: 5000 };
+    const inst = { state: 'resolved', started_at: 5000, resolved_at: 5000, ...NO_LOOKBACK_RULE };
     expect(incidentChartWindow(inst, 999999)).toEqual([5000 - MIN_PAD_SEC, 5000 + MIN_PAD_SEC]);
   });
-});
 
-describe('incidentBand', () => {
-  it('is the unpadded [started_at, resolved_at] for a resolved incident', () => {
-    expect(incidentBand({ state: 'resolved', started_at: 100, resolved_at: 200 }, 999)).toEqual([100, 200]);
+  // The owner's own fix requirement: "incidentChartWindow's padding
+  // should then be computed off the extended span so context padding
+  // still surrounds the FULL band" -- a windowed rule's own duration
+  // (for padding purposes) must include the look-back, not just
+  // resolved_at - started_at.
+  it('pads off the EXTENDED (band) span, not the bare [started_at, resolved_at], for a sustained-threshold rule', () => {
+    const inst = { state: 'resolved', started_at: 1000, resolved_at: 1000 + 1200, rule_id: 'io-driven-cpu-load', victim_kind: '' }; // 1200s active, plus a 120s look-back
+    // Band = [1000 - 120, 2200] = [880, 2200]; extended duration = 2200 -
+    // 880 = 1320s -> pad = 1320 (between floor/cap), computed off the
+    // BAND, not off the bare 1200s active span alone (which would have
+    // padded by only 1200).
+    const [from, to] = incidentChartWindow(inst, 999999);
+    expect(from).toBe(1000 - EVIDENCE_WINDOW_SECS - 1320);
+    expect(to).toBe(2200 + 1320);
   });
 
-  it('is [started_at, nowSec] for a still-active incident', () => {
-    expect(incidentBand({ state: 'active', started_at: 100, resolved_at: 0 }, 999)).toEqual([100, 999]);
+  it('the requested window always fully contains the band it was padded around', () => {
+    const inst = { state: 'resolved', started_at: 1000, resolved_at: 1030, rule_id: 'gpu-engine-contention', victim_kind: '' };
+    const [bandStart, bandEnd] = incidentBand(inst, 999999);
+    const [from, to] = incidentChartWindow(inst, 999999);
+    expect(from).toBeLessThanOrEqual(bandStart);
+    expect(to).toBeGreaterThanOrEqual(bandEnd);
   });
 });
 

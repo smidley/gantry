@@ -15,6 +15,16 @@
   dashed) but is never colour-alone either -- severity's colour and
   confidence's dash pattern are two independent, redundant signals.
 
+  The legend below the canvas is CONDITIONAL on what's actually drawn
+  (mapLayout.ts' own legendPresence/showLegend, one shared decision for
+  both call sites -- owner-reported: "what do the confirmed and likely
+  lines correspond to? I don't see them used anywhere even though
+  they're listed in a key"): a style with no edge on screen never gets a
+  key entry, and the drawer's own compact variant drops the legend
+  entirely once only one style is present at all -- see showLegend's own
+  doc for why that's safe (the drawer's own tier badge already says as
+  much).
+
   Hover convention mirrors BaySchematic/FleetStrip exactly: a
   fixed-height label row below the canvas, always present in layout,
   opacity-toggled -- nothing shifts when a hover starts or ends -- with
@@ -63,7 +73,7 @@
       always staying in view.
 -->
 <script>
-  import { layoutMap, suggestedHeight } from '../lib/mapLayout';
+  import { layoutMap, suggestedHeight, legendPresence, showLegend } from '../lib/mapLayout';
   import { containerColor } from '../lib/containerColor';
   import { fallbackLetter } from '../lib/containerIcon';
   import { motion } from '../lib/motion.svelte';
@@ -110,6 +120,13 @@
   let viewport = $derived({ w: measuredWidth, h: suggestedHeight(graph) });
   let layout = $derived(layoutMap(graph, viewport));
   let nodeByID = $derived(new Map(layout.nodes.map((n) => [n.id, n])));
+
+  // legend: which confidence styles this SPECIFIC rendered edge set
+  // actually contains, and whether the legend renders at all for it --
+  // mapLayout.ts' own doc has the full owner-reported story and the
+  // standalone-vs-drawer rule.
+  let presence = $derived(legendPresence(layout.edges));
+  let shouldShowLegend = $derived(showLegend(presence, compact));
 
   const SEVERITY_STATUS_TOKEN = { info: '--status-good', warning: '--status-warning', alert: '--status-critical' };
   function severityToken(severity) {
@@ -322,12 +339,18 @@
       </svg>
     </div>
 
-    <div class="microlabel interaction-map__legend">
-      <span class="interaction-map__legend-swatch interaction-map__legend-swatch--solid" aria-hidden="true"></span>
-      confirmed
-      <span class="interaction-map__legend-swatch interaction-map__legend-swatch--dashed" aria-hidden="true"></span>
-      likely
-    </div>
+    {#if shouldShowLegend}
+      <div class="microlabel interaction-map__legend">
+        {#if presence.confirmed}
+          <span class="interaction-map__legend-swatch interaction-map__legend-swatch--solid" aria-hidden="true"></span>
+          confirmed
+        {/if}
+        {#if presence.likely}
+          <span class="interaction-map__legend-swatch interaction-map__legend-swatch--dashed" aria-hidden="true"></span>
+          likely
+        {/if}
+      </div>
+    {/if}
   {/if}
 
   <!-- Fixed-height label row, always present in layout (opacity-toggled,
@@ -443,7 +466,12 @@
     border-top: 2px solid var(--ink-2);
     margin-left: 0.5rem;
   }
-  .interaction-map__legend-swatch--solid:first-of-type {
+  /* :first-child, not a --solid-scoped :first-of-type: with the legend
+     now conditional per style (see mapLayout.ts' own legendPresence/
+     showLegend doc), a dashed-only legend renders the DASHED swatch
+     first, and it must lose the leading gap exactly the same way a
+     solid-first legend already does. */
+  .interaction-map__legend-swatch:first-child {
     margin-left: 0;
   }
   .interaction-map__legend-swatch--dashed {

@@ -166,3 +166,50 @@ export function layoutMap(graph: InsightGraphDTO, viewport: Viewport): Layout {
 
   return { nodes: laidOut, edges, width: viewport.w, height: viewport.h };
 }
+
+// --- legend (owner-reported: "what do the confirmed and likely lines
+// correspond to? I don't see them used anywhere even though they're
+// listed in a key") --------------------------------------------------
+
+// LegendPresence names which confidence styles a rendered edge set
+// ACTUALLY contains.
+export interface LegendPresence {
+  confirmed: boolean;
+  likely: boolean;
+}
+
+// legendPresence mirrors InteractionMap.svelte's own dash predicate
+// EXACTLY (edge.confidence === 'likely' -> dashed; anything else ->
+// solid/confirmed) -- one source of truth for "what does this canvas
+// actually draw," shared by the component's own rendering and this
+// legend-presence decision, so the two can never drift apart the way
+// the owner's own report described (a key entry for a style nothing on
+// screen uses).
+export function legendPresence(edges: GraphEdgeDTO[]): LegendPresence {
+  return {
+    confirmed: edges.some((e) => e.confidence !== 'likely'),
+    likely: edges.some((e) => e.confidence === 'likely'),
+  };
+}
+
+// showLegend decides whether the legend renders AT ALL for a given
+// presence, one function shared by both call sites (the owner's own
+// "implemented once") rather than two hand-copied conditionals:
+//
+//   - standalone (compact=false, Insights.svelte's own Map mode): shows
+//     the legend whenever at least one style is present -- "still only
+//     list present styles," never both-or-nothing.
+//   - drawer (compact=true): drops the legend ENTIRELY once only one
+//     style is present -- the drawer's own CONFIRMED/LIKELY badge
+//     directly above the map (Insights.svelte's insights-drawer__facts
+//     row) already states the clicked insight's own tier, so a
+//     single-entry legend here would repeat that, not add to it. A
+//     two-style legend (this insight's own edge plus a differently-
+//     confident concurrent one, muted but present) still earns its keep
+//     even in the drawer, since THAT distinction isn't stated anywhere
+//     else on the card.
+export function showLegend(presence: LegendPresence, compact: boolean): boolean {
+  const anyPresent = presence.confirmed || presence.likely;
+  if (!anyPresent) return false;
+  return compact ? presence.confirmed && presence.likely : true;
+}

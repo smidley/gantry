@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { GAP_Y, MARGIN_Y, MIN_MAP_HEIGHT, layoutMap, suggestedHeight } from './mapLayout';
-import type { InsightGraphDTO } from './api';
+import { GAP_Y, MARGIN_Y, MIN_MAP_HEIGHT, layoutMap, legendPresence, showLegend, suggestedHeight } from './mapLayout';
+import type { GraphEdgeDTO, InsightGraphDTO } from './api';
 
 const VIEWPORT = { w: 800, h: 400 };
 
@@ -201,5 +201,59 @@ describe('suggestedHeight', () => {
     const layout = layoutMap(g, { w: 800, h });
     const maxY = Math.max(...layout.nodes.map((n) => n.y));
     expect(maxY).toBeLessThanOrEqual(h - MARGIN_Y);
+  });
+});
+
+// edge builds a minimal GraphEdgeDTO for legendPresence/showLegend's own
+// tests -- only `confidence` ever varies across these cases, so every
+// other field is a fixed, honest placeholder.
+function edge(confidence: string): GraphEdgeDTO {
+  return { id: 'e1', from: 'a', to: 'resource:x', kind: 'culprit', insight_id: 1, rule_id: 'disk-io-contention', confidence, severity: 'warning', share_pct: 50 };
+}
+
+describe('legendPresence', () => {
+  it('reports neither style present for an empty edge set', () => {
+    expect(legendPresence([])).toEqual({ confirmed: false, likely: false });
+  });
+
+  it('reports confirmed-only when every edge is confirmed', () => {
+    expect(legendPresence([edge('confirmed')])).toEqual({ confirmed: true, likely: false });
+  });
+
+  it('reports likely-only when every edge is likely', () => {
+    expect(legendPresence([edge('likely')])).toEqual({ confirmed: false, likely: true });
+  });
+
+  it('reports both when the edge set mixes confidences', () => {
+    expect(legendPresence([edge('confirmed'), edge('likely')])).toEqual({ confirmed: true, likely: true });
+  });
+
+  it('mirrors the component\'s own dash predicate exactly: anything other than the literal "likely" string renders solid/confirmed', () => {
+    expect(legendPresence([edge('something-unexpected')])).toEqual({ confirmed: true, likely: false });
+  });
+});
+
+describe('showLegend', () => {
+  it('never shows when nothing is present, standalone or in the drawer', () => {
+    expect(showLegend({ confirmed: false, likely: false }, false)).toBe(false);
+    expect(showLegend({ confirmed: false, likely: false }, true)).toBe(false);
+  });
+
+  it('standalone (compact=false) shows the legend for exactly one style present -- "still only list present styles"', () => {
+    expect(showLegend({ confirmed: true, likely: false }, false)).toBe(true);
+    expect(showLegend({ confirmed: false, likely: true }, false)).toBe(true);
+  });
+
+  it('standalone (compact=false) shows the legend when both styles are present', () => {
+    expect(showLegend({ confirmed: true, likely: true }, false)).toBe(true);
+  });
+
+  it('the drawer (compact=true) drops the legend entirely when only ONE style is present', () => {
+    expect(showLegend({ confirmed: true, likely: false }, true)).toBe(false);
+    expect(showLegend({ confirmed: false, likely: true }, true)).toBe(false);
+  });
+
+  it('the drawer (compact=true) still shows the legend when BOTH styles are present', () => {
+    expect(showLegend({ confirmed: true, likely: true }, true)).toBe(true);
   });
 });

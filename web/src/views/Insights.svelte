@@ -586,10 +586,10 @@
                 <button
                   type="button"
                   class="insights-view__dismiss-btn"
-                  aria-label="Not useful: dismiss this insight"
+                  aria-label="Dismiss this insight"
                   onclick={() => (dismissMenuOpenID = dismissMenuOpenID === i.id ? null : i.id)}
                 >
-                  Not useful ▾
+                  Dismiss ▾
                 </button>
                 {#if dismissMenuOpenID === i.id}
                   <div class="segmented insights-view__dismiss-menu" role="group" aria-label="Dismiss duration">
@@ -763,7 +763,7 @@
           <p class="microlabel insights-drawer__other-users">Also touching this resource: {evidenceOtherUsers.join(', ')}</p>
         {/if}
         <div class="insights-drawer__dismiss">
-          <span class="microlabel">Not useful?</span>
+          <span class="microlabel">Dismiss</span>
           {#each DISMISS_PRESETS as p (p.days)}
             <button type="button" onclick={() => dismiss(drawerData.id, p.days)}>{p.label}</button>
           {/each}

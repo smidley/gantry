@@ -21,6 +21,7 @@
   import GPU from './views/GPU.svelte';
   import Events from './views/Events.svelte';
   import Insights from './views/Insights.svelte';
+  import InsightDetail from './views/InsightDetail.svelte';
   import Alerts from './views/Alerts.svelte';
   import Settings from './views/Settings.svelte';
   import Login from './views/Login.svelte';
@@ -97,6 +98,16 @@
     <Events />
   {:else if $route.name === 'insights'}
     <Insights mode={$route.params.mode} />
+  {:else if $route.name === 'insight-detail'}
+    <!-- Keyed on the id param, the container-detail precedent directly
+         above: the evidence page's own map links straight to ANOTHER
+         insight's page, and every piece of per-insight state there (the
+         fetched finding, the one-shot map snapshot, the incident
+         charts) has to reset rather than being reused with a new prop
+         value. -->
+    {#key $route.params.id}
+      <InsightDetail id={$route.params.id} />
+    {/key}
   {:else if $route.name === 'alerts'}
     <Alerts />
   {:else if $route.name === 'settings'}

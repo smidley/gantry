@@ -10,12 +10,12 @@ import path from 'node:path';
 // file boots its own gantry processes -- the same ./gantry artifact
 // `make release` already produced -- on their own ports and databases:
 //
-//   LOGIN (8441): GANTRY_USERNAME + GANTRY_PASSWORD preseeded, the
+//   LOGIN (8451): GANTRY_USERNAME + GANTRY_PASSWORD preseeded, the
 //   headless/CA path. Drives username+password login (wrong password,
 //   deep link, reload, the session cookie), logout, the 401-redirect,
 //   and the brute-force limiter's UI surface.
 //
-//   SETUP (8442): boots with NO credential -- the first-run setup screen,
+//   SETUP (8452): boots with NO credential -- the first-run setup screen,
 //   then the Settings access card's change-login flow.
 //
 // Serial: these tests share process state on purpose (the limiter's
@@ -54,7 +54,7 @@ async function waitForHealthz(port: number): Promise<void> {
 }
 
 test.describe('login gate (preseeded instance)', () => {
-  const PORT = 8441; // the suite's own block: config PORT+1 -- see playwright.config.ts
+  const PORT = 8451; // the suite's own block: config PORT+1 -- see playwright.config.ts
   const URL = `http://127.0.0.1:${PORT}`;
   let proc: ChildProcess;
 
@@ -162,7 +162,7 @@ test.describe('login gate (preseeded instance)', () => {
 });
 
 test.describe('first-run setup (unconfigured instance)', () => {
-  const PORT = 8442; // config PORT+2
+  const PORT = 8452; // config PORT+2
   const URL = `http://127.0.0.1:${PORT}`;
   let proc: ChildProcess;
 

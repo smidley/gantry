@@ -9,7 +9,7 @@
   labels wide enough to need one even after that.
 -->
 <script>
-  import { route, routes } from '../lib/router';
+  import { navActiveName, route, routes } from '../lib/router';
   import { live } from '../lib/sse.svelte';
 
   const primaryNames = new Set(['overview', 'containers', 'top', 'storage', 'alerts']);
@@ -18,7 +18,10 @@
   const MORE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/></svg>';
 
   let moreOpen = $state(false);
-  let moreActive = $derived(moreRoutes.some((item) => item.name === $route.name));
+  // activeName, not $route.name directly -- Sidebar's own identical
+  // doc: a detail page keeps its parent nav item lit.
+  let activeName = $derived(navActiveName($route.name));
+  let moreActive = $derived(moreRoutes.some((item) => item.name === activeName));
 
   // serverName: Sidebar's own brand-block addition (issue #39) has no
   // mobile equivalent -- Sidebar itself is desktop-only (hidden md:flex)
@@ -43,7 +46,7 @@
             href={item.hash}
             role="menuitem"
             class="tab-bar__more-item"
-            class:tab-bar__more-item--active={$route.name === item.name}
+            class:tab-bar__more-item--active={activeName === item.name}
             onclick={() => (moreOpen = false)}
           >
             <span class="tab-bar__more-icon">{@html item.icon}</span>
@@ -55,7 +58,7 @@
   {/if}
 
   {#each primaryRoutes as item (item.name)}
-    <a href={item.hash} class="tab-bar__item" class:tab-bar__item--active={$route.name === item.name}>
+    <a href={item.hash} class="tab-bar__item" class:tab-bar__item--active={activeName === item.name}>
       <span class="tab-bar__icon">{@html item.icon}</span>
       <span class="microlabel">{item.mobileLabel ?? item.label}</span>
     </a>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseHash } from './router';
+import { navActiveName, parseHash } from './router';
 
 describe('parseHash', () => {
   it('parses the bare/empty hash as overview', () => {
@@ -42,6 +42,18 @@ describe('parseHash', () => {
     expect(parseHash('#/insights/map')).toEqual({ name: 'insights', params: { mode: 'map' } });
   });
 
+  it('parses an insight evidence page, its numeric id captured', () => {
+    expect(parseHash('#/insights/123')).toEqual({ name: 'insight-detail', params: { id: '123' } });
+  });
+
+  it('routes a non-numeric insight id to the detail view, which renders its own not-found copy', () => {
+    // Deliberately NOT a router-level rejection -- InsightDetail's own
+    // parseInsightId decides, so a garbage id and a real-looking-but-
+    // unknown one land on the same back-linked page (router.ts' own doc
+    // on the insight-detail entry).
+    expect(parseHash('#/insights/abc')).toEqual({ name: 'insight-detail', params: { id: 'abc' } });
+  });
+
   it('parses a compare route, capturing the raw comma-joined names segment', () => {
     expect(parseHash('#/compare/jellyfin,plex')).toEqual({
       name: 'compare',
@@ -72,5 +84,17 @@ describe('parseHash', () => {
   it('falls back to not-found for unknown or over-deep paths', () => {
     expect(parseHash('#/nope')).toEqual({ name: 'not-found', params: {} });
     expect(parseHash('#/containers/x/y')).toEqual({ name: 'not-found', params: {} });
+  });
+});
+
+describe('navActiveName', () => {
+  it('is the route itself for every top-level page', () => {
+    expect(navActiveName('insights')).toBe('insights');
+    expect(navActiveName('overview')).toBe('overview');
+  });
+
+  it('lights the parent nav item for a detail page, which has no nav entry of its own', () => {
+    expect(navActiveName('insight-detail')).toBe('insights');
+    expect(navActiveName('container-detail')).toBe('containers');
   });
 });

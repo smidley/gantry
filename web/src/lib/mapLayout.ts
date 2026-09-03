@@ -199,15 +199,19 @@ export function legendPresence(edges: GraphEdgeDTO[]): LegendPresence {
 //   - standalone (compact=false, Insights.svelte's own Map mode): shows
 //     the legend whenever at least one style is present -- "still only
 //     list present styles," never both-or-nothing.
-//   - drawer (compact=true): drops the legend ENTIRELY once only one
-//     style is present -- the drawer's own CONFIRMED/LIKELY badge
-//     directly above the map (Insights.svelte's insights-drawer__facts
-//     row) already states the clicked insight's own tier, so a
-//     single-entry legend here would repeat that, not add to it. A
-//     two-style legend (this insight's own edge plus a differently-
+//   - compact (compact=true): drops the legend ENTIRELY once only one
+//     style is present -- a compact host embeds this map beneath its
+//     own CONFIRMED/LIKELY badge for the focused insight, so a
+//     single-entry legend there would repeat that, not add to it. A
+//     two-style legend (that insight's own edge plus a differently-
 //     confident concurrent one, muted but present) still earns its keep
-//     even in the drawer, since THAT distinction isn't stated anywhere
-//     else on the card.
+//     even compact, since THAT distinction isn't stated anywhere else.
+//
+// No call site passes compact=true today (the evidence drawer this rule
+// was written for became a full page, views/InsightDetail.svelte, which
+// has the room to render the map at full size) -- the variant and this
+// branch stay as the component's own documented, tested capability for
+// the next height-constrained host.
 export function showLegend(presence: LegendPresence, compact: boolean): boolean {
   const anyPresent = presence.confirmed || presence.likely;
   if (!anyPresent) return false;

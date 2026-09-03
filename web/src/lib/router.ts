@@ -18,6 +18,7 @@ export type RouteName =
   | 'gpu'
   | 'events'
   | 'insights'
+  | 'insight-detail'
   | 'alerts'
   | 'settings'
   | 'not-found';
@@ -32,6 +33,11 @@ interface RouteDef {
   // Static segments must match exactly; a segment starting with ":"
   // captures into params under that name (e.g. ":name" -> params.name).
   pattern: string[];
+  // fixedParams are merged into params on a match, letting an
+  // all-STATIC pattern still hand its view the same param a :capture
+  // would have. Only "#/insights/map" needs this so far -- see its own
+  // entry below for why that segment had to stop being a capture.
+  fixedParams?: Record<string, string>;
 }
 
 const routeDefs: RouteDef[] = [
@@ -68,14 +74,31 @@ const routeDefs: RouteDef[] = [
   // Phase 5 Task 14: the interaction map is a `.segmented` MODE inside
   // the Insights view, not a separate page (see routes[] below's own
   // doc on why it gets no second nav item) -- so "#/insights/map" is a
-  // second pattern for the SAME route name, capturing into
-  // params.mode, exactly the "top"/"top/:resource" precedent just
+  // second pattern for the SAME route name, handing params.mode to
+  // Insights.svelte, exactly the "top"/"top/:resource" precedent just
   // above (Overview's compact switcher deep-linking into a specific
-  // resource tab within TopConsumers). Insights.svelte reads
-  // params.mode itself; any value other than "map" (including absent)
-  // means "let the view's own default -- map when something's active,
-  // list otherwise -- decide."
-  { name: 'insights', pattern: ['insights', ':mode'] },
+  // resource tab within TopConsumers).
+  //
+  // "map" is a LITERAL segment here (with fixedParams supplying the
+  // same params.mode a capture used to), not a ":mode" capture, because
+  // the one-deep slot under "insights" is now shared with the evidence
+  // page below: an insight's own id is an arbitrary number, so the
+  // fixed pattern has to be tried FIRST and the capture second, the
+  // ordinary ordered-routeDefs rule this table already relies on.
+  { name: 'insights', pattern: ['insights', 'map'], fixedParams: { mode: 'map' } },
+  // One insight's own full evidence page (owner's own ask: "the
+  // evidence pop up on the insights page should just open a whole new
+  // page instead of trying to pack all of the info into the little
+  // popup") -- a route of its OWN, reached by clicking a list/history
+  // row or a map edge, never through nav, exactly the
+  // container-detail precedent above. params.id is left RAW here: a
+  // non-numeric ":id" still matches, and InsightDetail.svelte's own
+  // parseInsightId (lib/insightDetail.ts) renders the page's not-found
+  // copy for it -- one "we couldn't find that insight" state covering
+  // both a garbage id and a real-looking one the store has never
+  // heard of, rather than a bare Not Found page for one and a
+  // specific, back-linked message for the other.
+  { name: 'insight-detail', pattern: ['insights', ':id'] },
   { name: 'alerts', pattern: ['alerts'] },
   { name: 'settings', pattern: ['settings'] },
 ];
@@ -91,7 +114,7 @@ export function parseHash(hash: string): Route {
 
   for (const def of routeDefs) {
     if (def.pattern.length !== segments.length) continue;
-    const params: Record<string, string> = {};
+    const params: Record<string, string> = { ...def.fixedParams };
     let matched = true;
     for (let i = 0; i < def.pattern.length; i++) {
       const part = def.pattern[i];
@@ -232,3 +255,20 @@ export const routes: NavItem[] = [
   { name: 'alerts', hash: '#/alerts', label: 'Alerts', icon: ICON_ALERTS },
   { name: 'settings', hash: '#/settings', label: 'Settings', icon: ICON_SETTINGS },
 ];
+
+// NAV_PARENT maps a DETAIL route -- one reached by clicking a row, never
+// through nav, so it has no `routes` entry of its own -- to the nav item
+// it lives under. Without it a detail page silently un-highlights the
+// whole sidebar/tab bar, which reads as "you have left the app" rather
+// than "you are one level inside Insights."
+const NAV_PARENT: Partial<Record<RouteName, RouteName>> = {
+  'container-detail': 'containers',
+  'insight-detail': 'insights',
+};
+
+// navActiveName is the route name Sidebar/TabBar compare each nav item
+// against -- the current route itself for every top-level page, its
+// parent for a detail page (NAV_PARENT above).
+export function navActiveName(name: RouteName): RouteName {
+  return NAV_PARENT[name] ?? name;
+}

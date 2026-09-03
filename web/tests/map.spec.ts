@@ -110,7 +110,7 @@ test('hovering an edge dims the rest when more than one edge is present', async 
   await expect(edges.nth(1)).toHaveClass(/interaction-map__edge--dimmed/);
 });
 
-test('an edge is keyboard-reachable and Enter opens the same evidence drawer as a click', async ({ page, request, baseURL }) => {
+test('an edge is keyboard-reachable and Enter opens the same evidence page as a click', async ({ page, request, baseURL }) => {
   test.setTimeout(4 * 60_000 + 30_000);
   const active = await waitForAnyActiveInsight(page, request, baseURL);
   test.skip(active.length === 0, 'no finding became active within the timeout on this shared server run');
@@ -130,13 +130,18 @@ test('an edge is keyboard-reachable and Enter opens the same evidence drawer as 
   test.skip(edgeCount === 0, 'no edge is on the canvas right now (resolved, or the graph has not polled yet)');
 
   const firstEdge = page.locator('.interaction-map__edge').first();
+  const insightID = await firstEdge.getAttribute('data-insight-id');
   await firstEdge.focus();
   await expect(firstEdge).toBeFocused();
   await page.keyboard.press('Enter');
 
-  const drawer = page.locator('.insights-drawer');
-  await expect(drawer).toBeVisible();
-  await expect(drawer.locator('.insights-drawer__statement')).not.toBeEmpty();
+  // A real navigation to that finding's own page now, not a modal --
+  // the edge carries the id it opens, so this pins the exact target
+  // rather than "something opened."
+  await expect(page).toHaveURL(new RegExp(`#/insights/${insightID}$`));
+  const detail = page.locator('.insight-detail');
+  await expect(detail).toBeVisible();
+  await expect(detail.locator('h1.page-title')).not.toBeEmpty();
 });
 
 test.describe('reduced motion', () => {

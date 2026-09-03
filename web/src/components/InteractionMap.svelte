@@ -20,10 +20,9 @@
   both call sites -- owner-reported: "what do the confirmed and likely
   lines correspond to? I don't see them used anywhere even though
   they're listed in a key"): a style with no edge on screen never gets a
-  key entry, and the drawer's own compact variant drops the legend
-  entirely once only one style is present at all -- see showLegend's own
-  doc for why that's safe (the drawer's own tier badge already says as
-  much).
+  key entry, and the compact variant drops the legend entirely once only
+  one style is present at all -- see showLegend's own doc for why that's
+  safe (the compact host's own tier badge already says as much).
 
   Hover convention mirrors BaySchematic/FleetStrip exactly: a
   fixed-height label row below the canvas, always present in layout,
@@ -52,12 +51,13 @@
 
   Two call sites share this one component (never a second map): the
   standalone List|Map segmented view (Insights.svelte's own `graph`,
-  live-polled every 2s) and the evidence drawer's own embedded map (a
-  ONE-TIME snapshot of whichever instant the clicked insight is anchored
-  to -- insights.ts' own drawerMapAnchor/selectOverlappingInsights/
-  buildInsightGraph doc). The drawer passes two props the standalone view
-  never needs:
-    - focusInsightId: the clicked insight's own id. Every edge (and its
+  live-polled every 2s) and the evidence PAGE's own map (InsightDetail.
+  svelte -- a ONE-TIME snapshot of whichever instant the opened insight
+  is anchored to, insights.ts' own drawerMapAnchor/
+  selectOverlappingInsights/buildInsightGraph doc). The evidence page
+  passes one prop the standalone view never needs, and a third caller
+  could still want the second:
+    - focusInsightId: the opened insight's own id. Every edge (and its
       two endpoints) belonging to that insight stays at full opacity by
       DEFAULT, with everything else muted -- the exact same dim/opacity
       mechanism a hover already applies, just as a static base layer
@@ -65,12 +65,13 @@
       EXISTING call site) reproduces today's behaviour exactly: nothing
       muted until something is actually hovered.
     - compact: caps the canvas' own rendered height with a scrollbar
-      rather than letting a large overlapping set blow out the drawer's
-      own layout -- see suggestedHeight's own doc for why that number is
-      already unbounded by design; nothing about layoutMap's spacing
-      itself changes; a tall graph simply scrolls inside its own capped
-      box, with the legend and hover-label row (both OUTSIDE that box)
-      always staying in view.
+      rather than letting a large overlapping set blow out a height-
+      constrained host's layout -- see suggestedHeight's own doc for why
+      that number is already unbounded by design; nothing about
+      layoutMap's spacing itself changes; a tall graph simply scrolls
+      inside its own capped box, with the legend and hover-label row
+      (both OUTSIDE that box) always staying in view. The evidence page
+      leaves it off: a whole page has the room a modal did not.
 -->
 <script>
   import { layoutMap, suggestedHeight, legendPresence, showLegend } from '../lib/mapLayout';
@@ -79,23 +80,23 @@
   import { motion } from '../lib/motion.svelte';
 
   // graph: InsightGraphDTO ({nodes, edges}) -- the standalone Map mode
-  // polls GET /api/insights/graph every 2s for it; the evidence drawer
+  // polls GET /api/insights/graph every 2s for it; the evidence page
   // instead builds one snapshot client-side (insights.ts' own
   // buildInsightGraph) and never re-polls. statementsById maps an edge's
   // own insight_id to that finding's full rendered statement -- the
   // hover label's actual text, not a synthesized fragment; sourced from
   // whichever list the caller already has in hand (live.frame.insights.
-  // active for the standalone view, the drawer's own overlap set for the
-  // drawer) rather than a second fetch either way. onOpenDrawer(insightId)
-  // opens the SAME evidence drawer both the List section's cards AND
-  // (see this component's own top-of-file doc) the drawer's own embedded
-  // map use -- clicking a muted, concurrent edge inside the drawer
-  // re-targets it at THAT insight instead of closing it.
+  // active for the standalone view, the evidence page's own overlap set
+  // for that one) rather than a second fetch either way.
+  // onOpenInsight(insightId) is what an edge click/Enter does: both call
+  // sites navigate to that insight's own evidence page (#/insights/:id),
+  // so clicking a muted, concurrent edge ON that page simply browses to
+  // THAT finding.
   let {
     graph = { nodes: [], edges: [] },
     statementsById = {},
     tier = 'proxy',
-    onOpenDrawer = () => {},
+    onOpenInsight = () => {},
     focusInsightId = null,
     compact = false,
   } = $props();
@@ -124,7 +125,7 @@
   // legend: which confidence styles this SPECIFIC rendered edge set
   // actually contains, and whether the legend renders at all for it --
   // mapLayout.ts' own doc has the full owner-reported story and the
-  // standalone-vs-drawer rule.
+  // standalone-vs-compact rule.
   let presence = $derived(legendPresence(layout.edges));
   let shouldShowLegend = $derived(showLegend(presence, compact));
 
@@ -174,7 +175,7 @@
   // focusScope: focusInsightId's own static highlight set (this
   // component's own top-of-file doc) -- every edge whose insight_id
   // matches, plus their endpoints. No match at all (defensive: shouldn't
-  // happen given the drawer always unions the clicked insight's own row
+  // happen given the caller always unions the opened insight's own row
   // into the pool it builds this graph from, but a hand-fed graph might
   // not carry it) degrades to null -- draw everything at full opacity,
   // never mute the entire canvas over a lookup miss.
@@ -198,7 +199,7 @@
   // hovering already overrides everything else -- a hover always means
   // "show me exactly this," focus or not. With nothing hovered, focusScope
   // is the fallback (null on every EXISTING call site, reproducing
-  // today's behaviour exactly): the drawer's own static emphasis.
+  // today's behaviour exactly): the evidence page's own static emphasis.
   let scope = $derived.by(() => {
     if (hoveredEdgeID) {
       const e = layout.edges.find((x) => x.id === hoveredEdgeID);
@@ -250,13 +251,13 @@
     return null;
   });
 
-  function openDrawer(edge) {
-    onOpenDrawer(edge.insight_id);
+  function openInsight(edge) {
+    onOpenInsight(edge.insight_id);
   }
   function onEdgeKeydown(e, edge) {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      openDrawer(edge);
+      openInsight(edge);
     }
   }
 
@@ -292,7 +293,7 @@
                 onmouseleave={() => (hoveredEdgeID = null)}
                 onfocus={() => (hoveredEdgeID = edge.id)}
                 onblur={() => (hoveredEdgeID = null)}
-                onclick={() => openDrawer(edge)}
+                onclick={() => openInsight(edge)}
                 onkeydown={(e) => onEdgeKeydown(e, edge)}
               >
                 <path class="interaction-map__edge-hit" d={curvePath(from, to)} />
@@ -367,8 +368,8 @@
     flex-direction: column;
     gap: 0.5rem;
   }
-  /* compact (the evidence drawer's own embedded map): cap the canvas'
-     rendered height and let IT scroll rather than the drawer ballooning
+  /* compact (a height-constrained host's embedded map): cap the canvas'
+     rendered height and let IT scroll rather than the host ballooning
      around a large overlapping set -- layoutMap's own spacing is
      untouched, so node/edge positions are identical either way; only the
      visible window changes. The legend and hover-label row sit OUTSIDE

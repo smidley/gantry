@@ -24,6 +24,7 @@
     maintenance: ['Operate', 'Maintenance'],
     gpu: ['Monitor', 'GPU'],
     insights: ['Monitor', 'Insights'],
+    'insight-detail': ['Monitor', 'Insight evidence'],
     events: ['Operate', 'Events'],
     alerts: ['Operate', 'Alerts'],
     settings: ['System', 'Settings'],

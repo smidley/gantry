@@ -5,7 +5,7 @@
 -->
 <script>
   import { onMount } from 'svelte';
-  import { route, routes } from '../lib/router';
+  import { navActiveName, route, routes } from '../lib/router';
   import { fetchVersion } from '../lib/api';
   import { live } from '../lib/sse.svelte';
 
@@ -14,6 +14,11 @@
   );
   const operateRoutes = routes.filter((item) => ['maintenance', 'events', 'alerts'].includes(item.name));
   const systemRoutes = routes.filter((item) => item.name === 'settings');
+
+  // activeName, not $route.name directly: a detail page (a container's,
+  // an insight's) keeps its own parent nav item lit -- router.ts' own
+  // navActiveName/NAV_PARENT doc.
+  let activeName = $derived(navActiveName($route.name));
 
   // Same one-shot fetch the Settings About card uses; the sidebar mounts
   // once for the app's whole life, so this runs once per load.
@@ -86,10 +91,10 @@
     <div class="sidebar__group">
       <span class="sidebar__group-label">Monitor</span>
       {#each monitorRoutes as item (item.name)}
-        <a href={item.hash} class="sidebar__item" class:sidebar__item--active={$route.name === item.name}>
+        <a href={item.hash} class="sidebar__item" class:sidebar__item--active={activeName === item.name}>
           <span class="sidebar__icon">{@html item.icon}</span>
           <span class="sidebar__label">{item.label}</span>
-          {#if $route.name === item.name}<span class="sidebar__active-dot" aria-hidden="true"></span>{/if}
+          {#if activeName === item.name}<span class="sidebar__active-dot" aria-hidden="true"></span>{/if}
         </a>
       {/each}
     </div>
@@ -97,10 +102,10 @@
     <div class="sidebar__group">
       <span class="sidebar__group-label">Operate</span>
       {#each operateRoutes as item (item.name)}
-        <a href={item.hash} class="sidebar__item" class:sidebar__item--active={$route.name === item.name}>
+        <a href={item.hash} class="sidebar__item" class:sidebar__item--active={activeName === item.name}>
           <span class="sidebar__icon">{@html item.icon}</span>
           <span class="sidebar__label">{item.label}</span>
-          {#if $route.name === item.name}<span class="sidebar__active-dot" aria-hidden="true"></span>{/if}
+          {#if activeName === item.name}<span class="sidebar__active-dot" aria-hidden="true"></span>{/if}
         </a>
       {/each}
     </div>
@@ -108,10 +113,10 @@
 
   <div class="sidebar__footer">
     {#each systemRoutes as item (item.name)}
-      <a href={item.hash} class="sidebar__item" class:sidebar__item--active={$route.name === item.name}>
+      <a href={item.hash} class="sidebar__item" class:sidebar__item--active={activeName === item.name}>
         <span class="sidebar__icon">{@html item.icon}</span>
         <span class="sidebar__label">{item.label}</span>
-        {#if $route.name === item.name}<span class="sidebar__active-dot" aria-hidden="true"></span>{/if}
+        {#if activeName === item.name}<span class="sidebar__active-dot" aria-hidden="true"></span>{/if}
       </a>
     {/each}
     <span class="sidebar__version">

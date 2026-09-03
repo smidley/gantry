@@ -1,7 +1,9 @@
 import { test, expect } from '@playwright/test';
 
 // Insights view (Phase 5 Tasks 11-13): active/history/rules, the
-// evidence drawer, and the alert-annotation bridge -- driven against
+// evidence PAGE it opens (#/insights/:id, views/InsightDetail.svelte --
+// this used to be a modal drawer), and the alert-annotation bridge --
+// driven against
 // the real fake-mode binary (playwright.config.ts's webServer), the
 // same shared-server instance every other spec file in this suite
 // uses.
@@ -78,7 +80,7 @@ test('demo-fire: a real finding fires through the engine and renders in Active o
   }
 });
 
-test('evidence drawer opens from an Active or History row, shows the statement and numbers, and closes on Escape', async ({
+test('the evidence page opens from an Active or History row, shows the statement and numbers, and its back link returns to the list', async ({
   page,
   request,
   baseURL,
@@ -110,21 +112,27 @@ test('evidence drawer opens from an Active or History row, shows the statement a
   await page.locator('.segmented__btn', { hasText: 'List' }).click();
   const row = page.locator('.insights-view__row, .insights-view__row--history').first();
   await expect(row).toBeVisible();
-  await row.locator('.insights-view__statement-btn').click();
+  await row.locator('.insights-view__statement-link').click();
 
-  const drawer = page.locator('.insights-drawer');
-  await expect(drawer).toBeVisible();
-  await expect(drawer.locator('.insights-drawer__statement')).not.toBeEmpty();
-  // "show your working": at least one evidence number is rendered, or
-  // the drawer's own facts/dismiss rows are still visible even for a
+  // A real navigation now, not a modal: the row is an <a href>, so the
+  // hash IS the assertion. Any numeric id -- the row picked above is
+  // whichever happens to sort first, not necessarily the one polled for.
+  await expect(page).toHaveURL(/#\/insights\/\d+$/);
+  const detail = page.locator('.insight-detail');
+  await expect(detail).toBeVisible();
+  // The statement is the page's own <h1> now, with room for it.
+  await expect(detail.locator('h1.page-title')).not.toBeEmpty();
+  // "show your working": the fact chips are always rendered, even for a
   // finding whose bundle happens to carry only zero-valued fields.
-  await expect(drawer.locator('.insights-drawer__facts')).toBeVisible();
+  await expect(detail.locator('.insight-detail__facts')).toBeVisible();
+  await expect(detail.locator('.insight-detail__evidence-card')).toBeVisible();
 
-  await page.keyboard.press('Escape');
-  await expect(drawer).not.toBeVisible();
+  await detail.locator('.insight-detail__back').click();
+  await expect(page).toHaveURL(/#\/insights$/);
+  await expect(page.locator('h1.page-title')).toHaveText('Insights');
 });
 
-// Drawer interaction map: "when there's an issue in history and it's
+// Evidence-page interaction map: "when there's an issue in history and it's
 // clicked on, the map view should also be provided so the user can
 // visually see what was happening" (the owner's own ask). data-insight-id
 // (InteractionMap.svelte) is the precise hook both tests below key off:
@@ -132,7 +140,7 @@ test('evidence drawer opens from an Active or History row, shows the statement a
 // when something else happens to be concurrent on this shared server's
 // timeline right now, never assumed -- every other edge on the same
 // canvas must be.
-test('evidence drawer for a HISTORY insight also renders the interaction map, with the clicked insight\'s own edge emphasized', async ({
+test('the evidence page for a HISTORY insight also renders the interaction map, with the clicked insight\'s own edge emphasized', async ({
   page,
   request,
   baseURL,
@@ -154,18 +162,19 @@ test('evidence drawer for a HISTORY insight also renders the interaction map, wi
   await page.locator('.segmented__btn', { hasText: 'List' }).click();
   const row = page.locator('.insights-view__row--history', { hasText: target!.statement.slice(0, 30) }).first();
   await expect(row).toBeVisible();
-  await row.locator('.insights-view__statement-btn').click();
+  await row.locator('.insights-view__statement-link').click();
 
-  const drawer = page.locator('.insights-drawer');
-  await expect(drawer).toBeVisible();
-  await expect(drawer.locator('.insights-drawer__statement')).not.toBeEmpty();
+  await expect(page).toHaveURL(new RegExp(`#/insights/${target!.id}$`));
+  const detail = page.locator('.insight-detail');
+  await expect(detail).toBeVisible();
+  await expect(detail.locator('h1.page-title')).not.toBeEmpty();
 
   // The clicked insight always contributes at least its own culprit edge
   // (insights.ts' own selectOverlappingInsights/buildInsightGraph doc:
   // the clicked row is unioned into the pool unconditionally) -- assert
   // the real canvas directly, not the empty state, since an empty map
   // here would itself be the bug.
-  await expect(drawer.locator('.interaction-map__canvas svg')).toBeVisible();
+  await expect(detail.locator('.interaction-map__canvas svg')).toBeVisible();
 
   // expect.poll on COUNT, never toBeVisible() on an individual edge <g>:
   // a perfectly horizontal edge (both endpoints landing on the same rank
@@ -177,11 +186,11 @@ test('evidence drawer for a HISTORY insight also renders the interaction map, wi
   // with d="M 61 104 C ... 104, ... 104, 219 104"). map.spec.ts's own
   // edge checks avoid toBeVisible() on a single edge for the identical
   // reason (count()/class checks only); polling the COUNT still gives the
-  // drawer's own async loadDrawerMap fetch room to land, without hitting
+  // page's own async loadMap fetch room to land, without hitting
   // that bbox trap. toHaveClass reads the class list regardless of the
   // same bbox quirk, so the dim-state checks below are unaffected either
   // way.
-  const focusedEdges = drawer.locator(`.interaction-map__edge[data-insight-id="${target!.id}"]`);
+  const focusedEdges = detail.locator(`.interaction-map__edge[data-insight-id="${target!.id}"]`);
   await expect.poll(() => focusedEdges.count(), { timeout: 10_000 }).toBeGreaterThan(0);
   const focusedCount = await focusedEdges.count();
   for (let i = 0; i < focusedCount; i++) {
@@ -190,10 +199,9 @@ test('evidence drawer for a HISTORY insight also renders the interaction map, wi
 
   // VERIFIED, not assumed: confidence's own dash-vs-solid distinction
   // (map.spec.ts' own "confidence is never colour-alone" test) renders
-  // correctly inside the DRAWER's compact map too -- nothing previously
-  // pinned this specifically for the compact variant, only the
-  // standalone canvas. Same dasharray-tolerant pattern as that test
-  // (Chrome may serialize "7 6" back as "7, 6").
+  // correctly on the evidence page's own snapshot map too, not just the
+  // live-polled standalone canvas. Same dasharray-tolerant pattern as
+  // that test (Chrome may serialize "7 6" back as "7, 6").
   for (let i = 0; i < focusedCount; i++) {
     const style = await focusedEdges.nth(i).locator('.interaction-map__edge-line').getAttribute('style');
     if (target!.confidence === 'likely') {
@@ -208,7 +216,7 @@ test('evidence drawer for a HISTORY insight also renders the interaction map, wi
   // by the time this test runs (this file's own doc, top), and a lone
   // culprit-to-victim pair with nothing dimmed is just as correct a
   // rendering as one with a muted neighbor.
-  const otherEdges = drawer.locator(`.interaction-map__edge:not([data-insight-id="${target!.id}"])`);
+  const otherEdges = detail.locator(`.interaction-map__edge:not([data-insight-id="${target!.id}"])`);
   const otherCount = await otherEdges.count();
   for (let i = 0; i < otherCount; i++) {
     await expect(otherEdges.nth(i)).toHaveClass(/interaction-map__edge--dimmed/);
@@ -216,13 +224,13 @@ test('evidence drawer for a HISTORY insight also renders the interaction map, wi
 
   // Legend conditionality (owner-reported: a key entry for a style
   // nothing on screen actually uses reads as noise): read whichever
-  // dash styles are ACTUALLY on the drawer's own canvas right now --
+  // dash styles are ACTUALLY on this page's own canvas right now --
   // never assumed, since this shared server's own demo schedule decides
   // whether anything concurrent (and at a different confidence) is
   // present -- and assert the legend matches exactly. mapLayout.ts' own
   // legendPresence/showLegend already have the full unit-level matrix;
   // this just confirms the component actually wires them in.
-  const allEdgeLines = drawer.locator('.interaction-map__edge-line');
+  const allEdgeLines = detail.locator('.interaction-map__edge-line');
   const edgeLineCount = await allEdgeLines.count();
   let hasSolid = false;
   let hasDashed = false;
@@ -231,23 +239,20 @@ test('evidence drawer for a HISTORY insight also renders the interaction map, wi
     if (/dasharray:\s*7[,\s]+6/.test(style)) hasDashed = true;
     else hasSolid = true;
   }
-  const legend = drawer.locator('.interaction-map__legend');
-  if (hasSolid && hasDashed) {
-    // Both styles present: the drawer's own compact variant still shows
-    // the legend (showLegend's own doc), with both entries.
-    await expect(legend).toBeVisible();
-    await expect(legend).toContainText('confirmed');
-    await expect(legend).toContainText('likely');
-  } else {
-    // Only one style present (the common case: a lone clicked insight
-    // with nothing concurrent, or a concurrent set that all happens to
-    // share one confidence) -- the drawer drops the legend entirely
-    // rather than listing a style with no edge on screen.
-    await expect(legend).toHaveCount(0);
-  }
+  const legend = detail.locator('.interaction-map__legend');
+  // This map renders at FULL size (not the drawer's old `compact`
+  // variant), so showLegend's own standalone branch applies: the legend
+  // shows whenever at least one style is actually on the canvas, and
+  // lists exactly the styles present -- never a key entry for a style
+  // nothing on screen uses.
+  await expect(legend).toBeVisible();
+  if (hasSolid) await expect(legend).toContainText('confirmed');
+  else await expect(legend).not.toContainText('confirmed');
+  if (hasDashed) await expect(legend).toContainText('likely');
+  else await expect(legend).not.toContainText('likely');
 });
 
-test('evidence drawer for an ACTIVE insight also renders the interaction map (its "moment" is now, the same code path as History)', async ({
+test('the evidence page for an ACTIVE insight also renders the interaction map (its "moment" is now, the same code path as History)', async ({
   page,
   request,
   baseURL,
@@ -267,15 +272,16 @@ test('evidence drawer for an ACTIVE insight also renders the interaction map (it
   await page.locator('.segmented__btn', { hasText: 'List' }).click();
   const row = page.locator('.insights-view__row:not(.insights-view__row--history)', { hasText: target!.statement.slice(0, 30) });
   await expect(row).toBeVisible();
-  await row.locator('.insights-view__statement-btn').click();
+  await row.locator('.insights-view__statement-link').click();
 
-  const drawer = page.locator('.insights-drawer');
-  await expect(drawer).toBeVisible();
-  await expect(drawer.locator('.interaction-map__canvas svg')).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`#/insights/${target!.id}$`));
+  const detail = page.locator('.insight-detail');
+  await expect(detail).toBeVisible();
+  await expect(detail.locator('.interaction-map__canvas svg')).toBeVisible();
 
   // See the History test above for why this polls COUNT rather than
   // calling toBeVisible() on an individual edge.
-  const focusedEdges = drawer.locator(`.interaction-map__edge[data-insight-id="${target!.id}"]`);
+  const focusedEdges = detail.locator(`.interaction-map__edge[data-insight-id="${target!.id}"]`);
   await expect.poll(() => focusedEdges.count(), { timeout: 10_000 }).toBeGreaterThan(0);
   const focusedCount = await focusedEdges.count();
   for (let i = 0; i < focusedCount; i++) {
@@ -291,7 +297,7 @@ test('evidence drawer for an ACTIVE insight also renders the interaction map (it
 // sits comfortably inside live-ring/1-minute-tier retention, never the
 // "history isn't available" fallback this feature also has to cover
 // (incidentChart.ts' own hasChartableData, unit-tested there).
-test('evidence drawer for a dismissed insight also renders its incident chart with real data', async ({
+test('the evidence page for a dismissed insight also renders its incident chart with real data', async ({
   page,
   request,
   baseURL,
@@ -330,17 +336,17 @@ test('evidence drawer for a dismissed insight also renders its incident chart wi
 
   const historyRow = page.locator('.insights-view__row--history', { hasText: target!.statement.slice(0, 30) }).first();
   await expect(historyRow).toBeVisible();
-  await historyRow.locator('.insights-view__statement-btn').click();
+  await historyRow.locator('.insights-view__statement-link').click();
 
-  const drawer = page.locator('.insights-drawer');
-  await expect(drawer).toBeVisible();
+  const detail = page.locator('.insight-detail');
+  await expect(detail).toBeVisible();
 
-  const chartsSection = drawer.locator('.insights-drawer__charts');
+  const chartsSection = detail.locator('.insight-detail__charts');
   await expect(chartsSection).toBeVisible();
   // A finding dismissed seconds ago must resolve to a REAL chart, never
   // the fallback line (its own fired-to-resolved window sits
   // comfortably inside live-ring/1-minute-tier retention) -- expect.poll
-  // gives loadDrawerCharts' own async /api/series fetch room to land.
+  // gives loadCharts' own async /api/series fetch room to land.
   // A visible <canvas> inside it is the honest signal that uPlot itself
   // actually mounted against real data (a legend row is NOT a reliable
   // second signal here -- disk-io-contention, this environment's own
@@ -371,7 +377,11 @@ test('evidence drawer for a dismissed insight also renders its incident chart wi
 // "active count"), so it stays correct regardless of whatever else is
 // concurrently active or resolving on this shared server -- the same
 // reasoning alerts.spec.ts's own silence round-trip test applies.
-test('dismiss round-trip: dismissing an active card removes it and adds a history row', async ({ page, request, baseURL }) => {
+test('dismiss round-trip: dismissing from the evidence page returns to the list, the active card is gone, and a history row appears', async ({
+  page,
+  request,
+  baseURL,
+}) => {
   test.setTimeout(4 * 60_000 + 30_000);
 
   let target: { id: number; statement: string } | null = null;
@@ -384,8 +394,8 @@ test('dismiss round-trip: dismissing an active card removes it and adds a histor
   test.skip(!target, 'no finding became active within the timeout on this shared server run');
 
   await page.goto('#/insights');
-  // List mode explicitly -- the dismiss control lives on the Active
-  // card, not the map.
+  // List mode explicitly -- the Active card (and the row link into this
+  // finding's own evidence page) only exists in List.
   await page.locator('.segmented__btn', { hasText: 'List' }).click();
   // :not(--history): the shared .insights-view__row class also marks
   // a History row, and this SAME statement text can plausibly already
@@ -397,9 +407,19 @@ test('dismiss round-trip: dismissing an active card removes it and adds a histor
   const row = page.locator('.insights-view__row:not(.insights-view__row--history)', { hasText: target!.statement.slice(0, 30) });
   await expect(row).toBeVisible();
 
-  await row.locator('.insights-view__dismiss-btn').click();
-  await row.locator('.insights-view__dismiss-menu .segmented__btn', { hasText: '1d' }).click();
+  // Dismiss from the PAGE, not the list's own inline control (which the
+  // incident-chart test above still exercises): a successful dismiss
+  // there has nowhere to stay, so it navigates back to the list.
+  await row.locator('.insights-view__statement-link').click();
+  await expect(page).toHaveURL(new RegExp(`#/insights/${target!.id}$`));
+  await page.locator('.insight-detail__dismiss-row button', { hasText: '1d' }).click();
 
+  await expect(page).toHaveURL(/#\/insights$/);
+  // Back on the list, force List mode again -- Insights remounted on
+  // this navigation and defaults to Map whenever anything else is still
+  // active, in which case the Active card wouldn't be in the DOM at all
+  // and "not visible" would pass for the wrong reason.
+  await page.locator('.segmented__btn', { hasText: 'List' }).click();
   await expect(row).not.toBeVisible();
   // .first(): InsightHistory orders newest-resolution-first (store's
   // own doc), and Insights.svelte renders that order unchanged -- if
@@ -480,5 +500,22 @@ test('ContainerDetail impact panel always shows the share strip, and findings wh
     await expect(panel.locator('.impact-panel__statement').first()).not.toBeEmpty();
   } else {
     await expect(panel.locator('.impact-panel__calm')).toBeVisible();
+  }
+});
+
+// The evidence page's own dead-end states. Neither needs the demo
+// schedule: a non-numeric id is rejected by parseInsightId before any
+// request goes out, and a wildly out-of-range rowid 404s from the store
+// on any run. Both must render copy AND the back link -- a page you can
+// land on from a stale link is not allowed to be a dead end.
+test('the evidence page renders not-found copy, with its back link, for an id that is not an insight', async ({ page }) => {
+  for (const hash of ['#/insights/abc', '#/insights/99999999']) {
+    await page.goto('about:blank');
+    await page.goto(hash);
+    const detail = page.locator('.insight-detail');
+    await expect(detail).toBeVisible();
+    await expect(detail.locator('.insight-detail__state')).toContainText("doesn't exist");
+    await detail.locator('.insight-detail__back').click();
+    await expect(page).toHaveURL(/#\/insights$/);
   }
 });

@@ -154,13 +154,14 @@ async function routeLiveFrame(page: import('@playwright/test').Page, frame: obje
   );
 }
 
-// Counts-and-fleet pass: the status band's own two-column split is
-// gone. "Needs a look" is two count chips now, short enough to sit
-// inline in the headline card, and the fleet strip + array schematic
-// get the same full-width row in this state that all-clear already gave
-// them. The frame carries one unhealthy container so the attention
-// layout is guaranteed, not dependent on the server's own mood.
-test('overview: with something needing you, the chips sit in the headline card and the visuals take the full width', async ({
+// Pills-and-top-right pass: the status band is two columns again, split
+// by CONTENT this time -- headline + chips + fleet down the left, the
+// pinned CPU/Mem/Net/IO rail on the right (Scott: "CPU/mem/net/io
+// should be pinned at the top right"). "Needs a look" is still two
+// count chips inline in the headline card. The frame carries one
+// unhealthy container so the attention layout is guaranteed, not
+// dependent on the server's own mood.
+test('overview: with something needing you, the chips sit in the headline card and the rail sits top-right', async ({
   page,
 }) => {
   await routeLiveFrame(
@@ -178,36 +179,41 @@ test('overview: with something needing you, the chips sit in the headline card a
   await expect(page.locator('.overview__status-facts')).toHaveCount(0);
   await expect(page.locator('.overview__status-visuals')).toHaveCount(0);
 
-  // The visuals band spans the same content width as the headline card
-  // above it, exactly as the all-clear band does.
+  // The band holds both columns now: the headline card and the fleet
+  // beneath it on the left, the rail on the right.
   const band = page.locator('.overview__status-band');
   await expect(band).toBeVisible();
-  const zoneBox = await page.locator('.overview__headline-zone').boundingBox();
   const bandBox = await band.boundingBox();
-  expect(Math.abs(bandBox.width - zoneBox.width)).toBeLessThan(2);
-  expect(bandBox.y).toBeGreaterThanOrEqual(zoneBox.y + zoneBox.height - 4);
-
-  // The band is the fleet alone now -- the bay schematic became a
-  // Customize module and moved down into the modules band -- so the
-  // fleet spans the whole width rather than half of it.
+  const zoneBox = await band.locator('.overview__headline-zone').boundingBox();
   const fleetBox = await band.locator('.fleet-strip-wrap').boundingBox();
-  expect(Math.abs(fleetBox.width - bandBox.width)).toBeLessThan(2);
+  const railBox = await band.locator('.overview__metrics-rail').boundingBox();
+
+  // Left column: the headline card, and the fleet directly under it at
+  // the same width -- the headline's own countable evidence stays
+  // adjacent to the sentence it explains.
+  expect(Math.abs(fleetBox.width - zoneBox.width)).toBeLessThan(2);
+  expect(fleetBox.y).toBeGreaterThanOrEqual(zoneBox.y + zoneBox.height - 4);
+
+  // Right column: the rail starts to the right of both and reaches the
+  // band's own edge, and it starts at the band's top -- "top right".
+  expect(railBox.x).toBeGreaterThanOrEqual(zoneBox.x + zoneBox.width - 1);
+  expect(Math.abs(railBox.x + railBox.width - (bandBox.x + bandBox.width))).toBeLessThan(2);
+  expect(Math.abs(railBox.y - zoneBox.y)).toBeLessThan(2);
+
+  // The bay schematic is still a Customize module down in the modules
+  // band, not a second occupant of this one.
   await expect(band.locator('.bay-schematic')).toHaveCount(0);
   await expect(page.locator('.overview__modules-band .bay-schematic')).toBeVisible();
-
-  // And the metrics rail is pinned ABOVE the headline, which is the
-  // page order this pass exists to produce.
-  const railBox = await page.locator('.overview__metrics-rail').boundingBox();
-  expect(railBox.y + railBox.height).toBeLessThanOrEqual(zoneBox.y + 1);
-  expect(Math.abs(railBox.width - zoneBox.width)).toBeLessThan(2);
 });
 
 // Adaptive all-clear (Scott: "When there is nothing that needs
 // attention... the other sections should be expanded to use the
 // available space and then we won't need to scroll down so far"): zero
-// callouts collapses the headline card to a compact strip (no status
-// band at all) and gives the fleet strip a full-width band of its own.
-test('overview: all-clear collapses the headline to a strip and the fleet takes the full width', async ({ page }) => {
+// callouts collapses the headline card to a compact strip and renders
+// the band under its all-clear name (__clear-band, no __status-band at
+// all), pulling everything below it up by the attention row's height.
+// The band's own two-column shape is identical in both states.
+test('overview: all-clear collapses the headline to a strip and keeps the band two columns', async ({ page }) => {
   await routeLiveFrame(page, liveFrame());
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
@@ -223,28 +229,32 @@ test('overview: all-clear collapses the headline to a strip and the fleet takes 
   await expect(schematic).toContainText('Array started · mover idle');
   await expect(schematic).toContainText('cache warmest at 41.5°C');
 
-  // Full width: the band spans the same content width as the headline
-  // card above it, and the fleet -- now the band's only occupant, the
-  // schematic having become a module -- spans the band.
+  // The band is the same two-column row it is in the attention state --
+  // only the headline card's own height differs -- and the fleet sits
+  // under the collapsed headline in the left column.
   const band = page.locator('.overview__clear-band');
   await expect(band).toBeVisible();
-  const zoneBox = await page.locator('.overview__headline-zone').boundingBox();
+  const zoneBox = await band.locator('.overview__headline-zone').boundingBox();
   const bandBox = await band.boundingBox();
-  expect(Math.abs(bandBox.width - zoneBox.width)).toBeLessThan(2);
 
   const fleet = band.locator('.fleet-strip-wrap');
   await expect(fleet).toBeVisible();
   const fleetBox = await fleet.boundingBox();
-  expect(Math.abs(fleetBox.width - bandBox.width)).toBeLessThan(2);
+  expect(Math.abs(fleetBox.width - zoneBox.width)).toBeLessThan(2);
+  expect(fleetBox.y).toBeGreaterThanOrEqual(zoneBox.y + zoneBox.height - 4);
+  const railBox = await band.locator('.overview__metrics-rail').boundingBox();
+  expect(railBox.x).toBeGreaterThanOrEqual(zoneBox.x + zoneBox.width - 1);
+  expect(Math.abs(railBox.x + railBox.width - (bandBox.x + bandBox.width))).toBeLessThan(2);
   await expect(band.locator('.bay-schematic')).toHaveCount(0);
 
   // The all-clear expansion still does its job -- everything below the
   // headline sits higher than it does with callouts present. It is no
-  // longer measured against a fixed pixel: the rail is pinned above the
-  // headline now (deliberately, and it costs real height), so "Top
-  // Consumers in the first viewport" is a promise this page order does
-  // not make. What it does promise is that the schematic's own module,
-  // at the head of the narrow lane, is reachable without a long scroll.
+  // longer measured against a fixed pixel: the rail is pinned in the
+  // band's right column (deliberately, and the band is as tall as the
+  // taller of its two columns), so "Top Consumers in the first
+  // viewport" is a promise this page order does not make. What it does
+  // promise is that the schematic's own module, at the head of the
+  // narrow lane, is reachable without a long scroll.
   const storageBox = await page.locator('.overview__storage').boundingBox();
   expect(storageBox.y).toBeLessThan(1100);
   const topBox = await page.locator('.overview__top').boundingBox();

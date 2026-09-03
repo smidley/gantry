@@ -132,6 +132,35 @@
      fleet strip is handed each container's whole metrics bag plus the
      host memory total, rather than a hand-picked cpu/mem pair.
 
+  Pills-and-top-right pass -- two asks that turn out to be one layout:
+
+  1. "Container fleet boxes should go back to being rectangular. The
+     smaller size looked more elegant." A deliberate partial revert,
+     entirely inside FleetStrip (see its own doc): the fixed-pitch 8x16
+     pill strip is back verbatim, and the count-scaled square fit went
+     with it -- lib/fleetGrid.ts deleted, no ResizeObserver, no
+     space-beneath reserve. Out here that means the fleet card is
+     COMPACT again. It no longer claims the screen below it, so it no
+     longer needs a full-width row of its own to have something to grow
+     into, which is what frees the band's second column for:
+
+  2. "CPU/mem/net/io should be pinned at the top right. like it was on
+     the right before the last PR, but at the top right." The rail
+     un-does its one release as a full-width four-across row above the
+     headline and becomes a stacked column again -- the same four tiles
+     the modules band's narrow lane used to hold -- pinned in the status
+     band's right column. PINNED is unchanged: it is still not a
+     Customize module, still not hideable, still not reorderable, and
+     the module inventory (top-consumers, events, storage) and the saved
+     layout document are untouched, so there is no migration.
+
+     The band's two columns are now split by CONTENT rather than by
+     "text beside pictures": this machine's own state down the left
+     (headline, chips, and the fleet that is the headline's evidence),
+     the four host instruments on the right. The right column is a fixed
+     width rather than the modules band's proportional split, because
+     the rail's height cannot answer back -- see its rule's own doc.
+
   Customize pass (the ask: let a user rearrange the Overview): the
   modules band -- and ONLY the modules band -- became rearrangeable. Its
   cards are no longer written out in a fixed order; each is one entry in
@@ -1011,17 +1040,47 @@
   });
 </script>
 
-<!-- statusVisuals: the fleet strip + bay schematic pair, now the same
-  full-width row in BOTH page states (see the counts-and-fleet pass in
-  the top-of-file doc) -- only its wrapper's class differs, so which
-  state the page is in stays readable in the DOM. Each sits in its own
-  __visual-slot so the schematic's slot disappears with it (BaySchematic
-  renders nothing for zero entries) rather than holding an empty half
-  open, and so the stacked breakpoint can reorder them without either
-  component knowing. -->
-{#snippet statusVisuals()}
-  <div class="overview__visual-slot overview__visual-slot--fleet">
-    <FleetStrip containers={fleetContainers} {hostMemBytes} />
+<!-- statusColumn: the status band's LEFT column -- the headline card
+  (with its count chips when there are any) and, directly beneath it,
+  the fleet strip that is the headline's own countable evidence. The two
+  are one column rather than two page-level rows because the band's
+  other column is the pinned metrics rail, which is taller than either
+  of them; keeping the pair together is what the headline's
+  proximity-only connection to its evidence has always depended on, and
+  it is the order the stacked breakpoint inherits for free.
+
+  The fleet keeps its own __visual-slot wrapper: the band still owns the
+  fleet's width, and one flex child at `flex: 1 1 0` spans the column
+  exactly. -->
+{#snippet statusColumn()}
+  <div class="overview__status-col">
+    <div class="card overview__headline-zone" class:overview__headline-zone--clear={overviewStatus.ok}>
+      <div class="overview__headline-row">
+        <span
+          class="overview__headline-dot"
+          class:overview__headline-dot--pulse={!overviewStatus.ok}
+          style={`background:${statusColor}; color:${statusColor}`}
+          aria-hidden="true"
+        ></span>
+        <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
+      </div>
+      {#if !overviewStatus.ok}
+        <section class="overview__attention">
+          <span class="microlabel">Needs a look</span>
+          <div class="overview__chips">
+            {#each chips as chip (chip.bucket)}
+              <a class="overview__chip" href={chip.href} aria-label={chip.ariaLabel} data-chip={chip.bucket}>
+                <span class="overview__chip-count tabular-nums" aria-hidden="true">{chip.count}</span>
+                <span class="overview__chip-noun" aria-hidden="true">{chip.noun}</span>
+              </a>
+            {/each}
+          </div>
+        </section>
+      {/if}
+    </div>
+    <div class="overview__visual-slot overview__visual-slot--fleet">
+      <FleetStrip containers={fleetContainers} {hostMemBytes} />
+    </div>
   </div>
 {/snippet}
 
@@ -1200,13 +1259,20 @@
   {/if}
 {/snippet}
 
-<!-- metricsRail: the four host tiles, PINNED at the very top of the page
+<!-- metricsRail: the four host tiles, PINNED at the top of the page
   (Scott: "Move the disk storage section down so that the CPU/Mem/Net/IO
   metrics are at the top of the overview page"). It is deliberately no
   longer a Customize module -- see OVERVIEW_MODULES' own doc for the swap
-  and what it costs a saved layout. As a full-width row its four tiles
-  sit side by side rather than stacked, which is the only change to the
-  rail itself. -->
+  and what it costs a saved layout.
+
+  Top-RIGHT pass (Scott: "CPU/mem/net/io should be pinned at the top
+  right. like it was on the right before the last PR, but at the top
+  right."): it briefly spent a release as a full-width row of four
+  side-by-side tiles above the headline. It is a stacked column again --
+  exactly the four label+value+sparkline rows it rendered in the modules
+  band's narrow lane before that -- just pinned in the status band's own
+  right column rather than down the page. Pinned is unchanged: still not
+  a module, still not hideable, still not reorderable. -->
 {#snippet metricsRail()}
   <div class="card overview__metrics-rail">
     <StatTile
@@ -1258,40 +1324,25 @@
   <h1 class="page-title">Overview</h1>
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
-  {@render metricsRail()}
-
-  <div class="card overview__headline-zone" class:overview__headline-zone--clear={overviewStatus.ok}>
-    <div class="overview__headline-row">
-      <span
-        class="overview__headline-dot"
-        class:overview__headline-dot--pulse={!overviewStatus.ok}
-        style={`background:${statusColor}; color:${statusColor}`}
-        aria-hidden="true"
-      ></span>
-      <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
-    </div>
-    {#if !overviewStatus.ok}
-      <section class="overview__attention">
-        <span class="microlabel">Needs a look</span>
-        <div class="overview__chips">
-          {#each chips as chip (chip.bucket)}
-            <a class="overview__chip" href={chip.href} aria-label={chip.ariaLabel} data-chip={chip.bucket}>
-              <span class="overview__chip-count tabular-nums" aria-hidden="true">{chip.count}</span>
-              <span class="overview__chip-noun" aria-hidden="true">{chip.noun}</span>
-            </a>
-          {/each}
-        </div>
-      </section>
-    {/if}
-  </div>
-
+  <!-- The status band is two columns again, but split by CONTENT this
+    time rather than by "text beside pictures": everything about this
+    machine's own state -- the headline, its chips, and the fleet that
+    is the headline's evidence -- reads down the left, and the four host
+    instruments sit in their own pinned column on the right (Scott:
+    "CPU/mem/net/io should be pinned at the top right"). Which page
+    state the band is in stays legible in the DOM (__status-band vs
+    __clear-band, one shared rule set) exactly as before -- the
+    all-clear specs read that difference. Below 64rem both columns
+    collapse into the page's single stack, headline first. -->
   {#if overviewStatus.ok}
     <div class="overview__clear-band">
-      {@render statusVisuals()}
+      {@render statusColumn()}
+      {@render metricsRail()}
     </div>
   {:else}
     <div class="overview__status-band">
-      {@render statusVisuals()}
+      {@render statusColumn()}
+      {@render metricsRail()}
     </div>
   {/if}
 
@@ -1783,11 +1834,20 @@
     padding-bottom: 1rem;
   }
 
-  /* --- Visuals band: the fleet strip, at full page width. It was a
-     two-slot row (fleet beside the bay schematic) until the schematic
-     became a Customize module; the slot machinery stays because the
-     band is still the thing that owns the fleet's own width, and one
-     flex child at `flex: 1 1 0` spans it exactly.
+  /* --- Status band: the page's own top row -- headline + chips + fleet
+     down the left, the pinned metrics rail on the right (Scott:
+     "CPU/mem/net/io should be pinned at the top right").
+
+     The right column is a FIXED width rather than the modules band's
+     1.6 : 1 grow split, and the reason is that the rail is the one
+     region on this page whose height cannot answer back. Four
+     fixed-height label+value+sparkline tiles are ~600px tall whatever
+     width they are given, so a proportional column just stretches four
+     sparklines flatter on a wide display while the left column -- a
+     display-type headline and a fixed-pitch pill field that both
+     genuinely read better wider -- gives up the room. 23rem is what the
+     tiles were designed against (the narrow lane they came from sat in
+     the same range) and it leaves the fleet card the balance at 1440px.
 
      Two class names, one rule set: the band is the same row in both
      page states, and which state it is rendered in stays legible in the
@@ -1799,15 +1859,29 @@
     align-items: flex-start;
     gap: 1rem;
   }
+  .overview__status-col {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 0;
+    flex: 1 1 0;
+  }
   .overview__visual-slot {
     min-width: 0;
     flex: 1 1 0;
   }
+  /* Below 64rem the band is the page's ordinary single stack, and the
+     snippet order is already the one it wants: headline, then the fleet
+     that is its evidence, then the instruments. Putting the ~600px rail
+     between the headline and its own fleet strip would push the
+     countable half of the status sentence a full screen down -- the
+     proximity this page is built on, spent on scroll distance. */
   @media (max-width: 63.9375rem) {
     .overview__clear-band,
     .overview__status-band {
       flex-direction: column;
     }
+    .overview__status-col,
     .overview__visual-slot {
       flex: none;
       width: 100%;
@@ -1868,47 +1942,31 @@
     }
   }
 
-  /* --- Metrics rail: pinned at the top of the page now, so a ROW of
-     four equal tiles rather than the narrow lane's stack. Each tile
-     keeps its own label + value + sparkline; they just sit beside each
-     other. Below the app's usual mobile split the row would give each
-     tile ~90px, which its paired value+sparkline cannot use, so it
-     folds to two-up and then to the original stack. ------------- */
+  /* --- Metrics rail: a STACK of four tiles in the status band's own
+     right column (the top-RIGHT pass -- see the snippet's own doc).
+     This is StatTile's bare mode exactly as it was designed: one tile
+     per row, each separated from the next by the hairline seam the
+     component draws itself, values pushed to the right edge by its own
+     `space-between`. The brief spell as a full-width four-across row
+     needed both of those overridden -- four seams read as underlines,
+     and each tile's right-aligned VALUE landed hard against the next
+     tile's LABEL -- and a stack needs neither override back.
+
+     The column's WIDTH is the band's (see its rule above); the rail
+     just fills it, which is why there is no grid template here at all.
+     Stacked, it stays four rows at every width, including the single
+     column the band collapses to below 64rem. ------------- */
   .overview__metrics-rail {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 0.6rem 1.6rem;
+    display: flex;
+    flex-direction: column;
     min-width: 0;
-    padding: 1rem 1.2rem;
-  }
-  /* StatTile's bare mode draws a hairline UNDER each tile -- the seam
-     between rows of a stack. Side by side that reads as four
-     underlines, so the row takes the seam off and lets the column gap
-     do the separating. The tiles' own sparkline height is untouched:
-     96px is a deliberate number ("not tall enough for the graphs to
-     look good" at the previous 52), and a wider tile is no reason to
-     take it back. */
-  .overview__metrics-rail :global(.stat-tile--bare) {
-    padding: 0;
-    border-bottom: none;
-  }
-  /* And its label/value row stops pushing the two to opposite ends.
-     Across a full-width rail that put each tile's VALUE hard against
-     the next tile's LABEL -- "15.9%  MEMORY" reads as one pair and the
-     column it belongs to is anyone's guess. Grouped at the left, each
-     tile is unambiguously its own. */
-  .overview__metrics-rail :global(.stat-tile__row) {
-    justify-content: flex-start;
-    gap: 0.6rem;
+    flex: 0 0 23rem;
+    padding: 1.2rem;
   }
   @media (max-width: 63.9375rem) {
     .overview__metrics-rail {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-  @media (max-width: 30rem) {
-    .overview__metrics-rail {
-      grid-template-columns: minmax(0, 1fr);
+      flex: none;
+      width: 100%;
     }
   }
 

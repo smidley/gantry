@@ -1184,7 +1184,7 @@
       nothing at all for an array with no filesystem-bearing members,
       which in edit mode would leave a draggable card with no body -- so
       the wrapper says what it is either way. -->
-    <div class="card overview__storage">
+    <div class="card overview__storage" class:overview__storage--bare={baySchematicEntries.length > 0}>
       {#if baySchematicEntries.length > 0}
         <BaySchematic
           entries={baySchematicEntries}
@@ -1913,15 +1913,28 @@
   }
 
   /* --- Storage: the bay schematic's own module wrapper. The schematic
-     brings its whole card body (head, facts, device grid, hover label);
-     this only exists to give the module a card to be dragged by, and to
-     say what it is on an array that has nothing to draw yet. ------ */
+     brings its whole card body -- border, padding, background, head,
+     device grid, hover label -- so whenever it renders, the wrapper
+     carries NO chrome of its own: a card inside a card is two borders
+     saying one thing. It keeps the `card` class regardless, because the
+     band's drag rules and edit-mode chrome select on it.
+
+     The exception is an array with nothing to draw, where the wrapper
+     IS the card and says what the module is -- otherwise edit mode
+     would offer a grip attached to nothing. ---------------------- */
   .overview__storage {
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
     min-width: 0;
     padding: 1.2rem;
+  }
+  .overview__storage--bare {
+    padding: 0;
+    gap: 0;
+    border: none;
+    background: none;
+    box-shadow: none;
   }
   .overview__storage-empty {
     margin: 0;

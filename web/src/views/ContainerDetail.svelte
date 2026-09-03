@@ -33,6 +33,8 @@
     recentlyActiveDevices,
     recordDeviceActivity,
     sharePlacementText,
+    shfsFrontedShares,
+    shfsNote,
     sortMounts,
   } from '../lib/containerStorage';
   import { diskKind, diskUsagePct } from '../lib/disks';
@@ -52,6 +54,12 @@
   const SYNC_KEY = 'container-detail';
   const LIVE_WINDOW_SEC = 900;
   const STORAGE_POLL_MS = 2000;
+
+  // SHFS_MOUNT_TITLE: the storage-mount shfs pill's own tooltip -- the
+  // long form of the note below the device list, for a reader who
+  // hovers the mount before reading that far.
+  const SHFS_MOUNT_TITLE =
+    "Reached through Unraid's shfs layer. That disk IO is done by shfs, not by this container, so no per-container counter can attribute it.";
 
   // Storage-system badge vocabulary (StorageRefDTO's own kinds: share,
   // pool, disk, flash, other). Tints skip --series-1/4 -- this card's
@@ -336,6 +344,15 @@
   // row below deliberately sums storageData.devices, not this -- see its
   // own doc.
   let visibleDevices = $derived(storageData ? recentlyActiveDevices(storageData.devices, deviceLastActiveAt, Date.now()) : []);
+  // shfsShares/shfsNoteText: the mounts whose IO no per-container counter
+  // on the box can see at all, because Unraid's shfs daemon issues it
+  // rather than the container (see shfsFrontedShares' own doc). Without
+  // this the Live IO section reads as "this container isn't touching the
+  // array" for the most ordinary Unraid setup there is -- a media
+  // container with /mnt/user/<share> mounts -- which was Scott's own
+  // report ("Live IO section doesn't show read/write from array disks").
+  let shfsShares = $derived(storageData ? shfsFrontedShares(sortedMounts) : []);
+  let shfsNoteText = $derived(shfsNote(shfsShares));
   // diskFrame backs each pool/disk/flash mount's own capacity line
   // ("N% full · X free") -- the live frame's per-slot fs.used_bytes/
   // fs.free_bytes (unraid's disks.go, same map Storage.svelte's own
@@ -654,6 +671,9 @@
                       {STORAGE_KIND_LABEL[kind]}{mount.storage.name ? ` · ${mount.storage.name}` : ''}
                     </span>
                     {#if !mount.rw}<span class="storage-mount__ro">ro</span>{/if}
+                    {#if mount.storage.shfs}
+                      <span class="storage-mount__shfs" title={SHFS_MOUNT_TITLE}>shfs</span>
+                    {/if}
                   </span>
                   {#if placementText}
                     <span class="storage-mount__placement {placementKind ? `storage-mount__placement--${placementKind}` : ''}">
@@ -672,10 +692,18 @@
         {/if}
       </div>
 
-      {#if storageData.devices.length > 0}
+      <!-- The section also opens for a container with no device rows at
+           all when it has shfs-fronted mounts: that's the case where the
+           note below is the ONLY thing this section has to say, and the
+           one where saying nothing would read as "no array activity"
+           rather than "this activity can't be measured". -->
+      {#if storageData.devices.length > 0 || shfsNoteText}
         <div class="container-detail__storage-section">
           <span class="microlabel">Live IO</span>
-          {#if visibleDevices.length === 0}
+          {#if storageData.devices.length === 0}
+            <!-- No device rows at all, so nothing to list OR total: the
+                 shfs note below is the whole content of this section. -->
+          {:else if visibleDevices.length === 0}
             <!-- Every device this container touches has been idle for a
                  full RECENT_IO_WINDOW_MS -- e.g. bzmodules, autoloaded
                  once at container start then untouched forever (Scott:
@@ -707,6 +735,9 @@
                    whichever rows happen to be shown above it. -->
               <StorageTotalRow devices={storageData.devices} />
             </div>
+          {/if}
+          {#if shfsNoteText}
+            <p class="container-detail__storage-shfs-note">{shfsNoteText}</p>
           {/if}
         </div>
       {/if}
@@ -1076,6 +1107,30 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  /* Same muted pill as .storage-mount__ro -- a quiet fact about the
+     mount, not a warning: nothing is wrong, this IO simply isn't
+     attributable. Lowercase, unlike ro's uppercase, because "shfs" is a
+     literal process name. */
+  .storage-mount__shfs {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--ink) 7%, transparent);
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+  /* Prose, not a .microlabel: this is a sentence naming real share
+     names, and microlabel's uppercase mono would mangle both. Sized and
+     coloured like .storage-mount__placement instead -- the panel's other
+     quiet explanatory line. */
+  .container-detail__storage-shfs-note {
+    margin: 0.4rem 0 0;
+    max-width: 68ch;
+    font-size: 0.68rem;
+    line-height: 1.5;
+    color: var(--ink-2);
   }
   .storage-mount__ro {
     font-family: var(--font-mono);

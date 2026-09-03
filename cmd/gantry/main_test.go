@@ -1256,7 +1256,10 @@ func TestContainerStorageResolvesMountsAndDeviceIO(t *testing.T) {
 	require.True(t, ok)
 
 	require.Equal(t, []server.MountDTO{
-		{Source: "/mnt/user/appdata/jellyfin", Destination: "/config", RW: true, Storage: server.StorageRefDTO{Kind: "share", Name: "appdata"}},
+		// Shfs on the share mount: /mnt/user with nothing in shares.ini
+		// proving the share exclusive is shfs-fronted (see StorageRefDTO.
+		// Shfs' own doc); the pool path is a direct mount and never is.
+		{Source: "/mnt/user/appdata/jellyfin", Destination: "/config", RW: true, Storage: server.StorageRefDTO{Kind: "share", Name: "appdata", Shfs: true}},
 		{Source: "/mnt/cache/transcode", Destination: "/tmp", RW: true, Storage: server.StorageRefDTO{Kind: "pool", Name: "cache"}},
 	}, dto.Mounts)
 	require.Equal(t, []server.DeviceIODTO{{Device: "sda", Label: "sda", ReadBps: 123.5, WriteBps: 45}}, dto.Devices)
@@ -1492,7 +1495,7 @@ func TestBuildContainerStorageMergesFakeMetas(t *testing.T) {
 
 	require.True(t, ok, "a fake-mode container must resolve via fakeMetas, not 404")
 	require.Equal(t, []server.MountDTO{
-		{Source: "/mnt/user/appdata/frigate", Destination: "/config", RW: true, Storage: server.StorageRefDTO{Kind: "share", Name: "appdata"}},
+		{Source: "/mnt/user/appdata/frigate", Destination: "/config", RW: true, Storage: server.StorageRefDTO{Kind: "share", Name: "appdata", Shfs: true}},
 	}, dto.Mounts)
 }
 
@@ -2905,4 +2908,112 @@ func TestRunAuthMigratesPasswordOnlyInstall(t *testing.T) {
 	resp := authTestRequest(t, http.MethodPost, base+"/api/auth/login", `{"username":"admin","password":"legacy-password"}`, "")
 	drainAndClose(resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "the migrated admin credential must log in after upgrade")
+}
+
+// TestLabelDevicesCollapsesArrayRowsOntoTheirSlot pins the fix for the
+// array half of the storage panel. An Unraid array disk shows up in a
+// container's cgroup io.stat under its md device (major 9 -- "md7p1"),
+// while disks.ini names that slot by its physical member ("sdf"), which
+// gets a token row carrying no bytes at all. Before this, the real
+// traffic came back as an unrecognizable "md7p1" row and a SECOND row
+// labelled "disk7" sat next to it at 0 B/s -- exactly the "Live IO
+// doesn't show array disks" report. Both names are the same disk, so
+// they collapse onto one row, keyed by the physical device (the name
+// host diskio.<dev>.* series use, which is what the impact strip's own
+// share denominator joins against).
+func TestLabelDevicesCollapsesArrayRowsOntoTheirSlot(t *testing.T) {
+	diskMeta := map[string]unraid.DiskMeta{
+		"disk7":       {Device: "sdf", Kind: "hdd"},
+		"rocket_pool": {Device: "nvme0n1", Kind: "nvme"},
+	}
+	got := labelDevices([]server.DeviceIODTO{
+		{Device: "loop2", ReadBps: 5},
+		{Device: "md7p1", ReadBps: 700, WriteBps: 1200},
+		{Device: "nvme0n1", ReadBps: 3},
+		{Device: "sdf", WriteBps: 8}, // the member's own token row -- summed in, not dropped
+	}, "/unused", diskMeta, nil)
+
+	require.Equal(t, []server.DeviceIODTO{
+		{Device: "loop2", Label: "loop2", ReadBps: 5},
+		{Device: "nvme0n1", Label: "rocket_pool", Kind: "nvme", ReadBps: 3},
+		{Device: "sdf", Label: "disk7", Kind: "hdd", ReadBps: 700, WriteBps: 1208},
+	}, got)
+}
+
+// TestLabelDevicesArrayRowAloneStillKeysOnThePhysicalDevice covers the
+// ordinary case: only the md device ever reports bytes, so there is no
+// member row to merge with -- the row still has to come back keyed by
+// the physical device, or the impact strip's diskio.<dev>.* join has
+// nothing on the host side to divide by.
+func TestLabelDevicesArrayRowAloneStillKeysOnThePhysicalDevice(t *testing.T) {
+	got := labelDevices([]server.DeviceIODTO{{Device: "md1p1", ReadBps: 42}},
+		"/unused", map[string]unraid.DiskMeta{"disk1": {Device: "sdc", Kind: "hdd"}}, nil)
+
+	require.Equal(t, []server.DeviceIODTO{{Device: "sdc", Label: "disk1", Kind: "hdd", ReadBps: 42}}, got)
+}
+
+// TestLabelDevicesLeavesUnplacedAndFakeOverriddenDevicesAlone pins what
+// must NOT collapse: two devices no slot claims stay two rows (they only
+// share a Kind of ""), and a fake-mode label override -- which carries
+// no slot by construction (see fake.Generator.DeviceLabels' own doc) --
+// keeps its own device name rather than being rewritten onto a slot.
+func TestLabelDevicesLeavesUnplacedAndFakeOverriddenDevicesAlone(t *testing.T) {
+	diskMeta := map[string]unraid.DiskMeta{"disk1": {Device: "sdc", Kind: "hdd"}}
+	fakeLabels := map[string]unraid.DeviceLabel{"loop2": {Label: "docker.img"}}
+
+	got := labelDevices([]server.DeviceIODTO{
+		{Device: "loop2", ReadBps: 1},
+		{Device: "sdz", ReadBps: 2},
+		{Device: "md9p1", ReadBps: 3}, // disk9 isn't a slot on this array
+	}, "/unused", diskMeta, fakeLabels)
+
+	require.Equal(t, []server.DeviceIODTO{
+		{Device: "loop2", Label: "docker.img", ReadBps: 1},
+		{Device: "md9p1", Label: "md9p1", ReadBps: 3},
+		{Device: "sdz", Label: "sdz", ReadBps: 2},
+	}, got)
+}
+
+// TestContainerStorageMarksShfsFrontedShareMounts pins the honest half
+// of the array-IO answer: a /mnt/user mount on a NON-exclusive share
+// reaches its data through Unraid's shfs FUSE layer, and the block IO is
+// issued by the host-wide shfs daemon, so no per-container counter can
+// ever attribute it (confirmed on a live 7.3.2 box -- a 1.5 GB write
+// through such a mount moved the container's cgroup io.stat by 5 KB).
+// An EXCLUSIVE share is bind-mounted straight onto its pool and its IO
+// is fully visible, so it must not be marked. /mnt/user0 is always the
+// array-only shfs view, exclusive or not.
+func TestContainerStorageMarksShfsFrontedShareMounts(t *testing.T) {
+	lookupMeta := func(string) (docker.Meta, bool) {
+		return docker.Meta{Name: "jellyfin", Mounts: []docker.MountInfo{
+			{Source: "/mnt/user/Movies", Destination: "/movies"},
+			{Source: "/mnt/user/data", Destination: "/data"},
+			{Source: "/mnt/user0/data", Destination: "/array-only"},
+			{Source: "/mnt/user/nosuchshare", Destination: "/unknown"},
+			{Source: "/mnt/rocket_pool/appdata", Destination: "/config"},
+			{Source: "/mnt/disk1/media", Destination: "/media"},
+		}}, true
+	}
+	poolSlots := func() []string { return []string{"rocket_pool"} }
+	noDiskMeta := func() map[string]unraid.DiskMeta { return nil }
+	sharePlacement := func() map[string]unraid.SharePlacement {
+		return map[string]unraid.SharePlacement{
+			"Movies": {Mode: "no"},
+			"data":   {Mode: "only", Pool: "rocket_pool", Exclusive: true},
+		}
+	}
+
+	dto, ok := containerStorage(lookupMeta, poolSlots, noDiskMeta, nil, sharePlacement, nil, nil, "/unused", store.NewLive(8), "jellyfin", 1000)
+	require.True(t, ok)
+
+	shfs := map[string]bool{}
+	for _, m := range dto.Mounts {
+		shfs[m.Destination] = m.Storage.Shfs
+	}
+	require.True(t, shfs["/movies"], "non-exclusive share -- shfs-fronted")
+	require.False(t, shfs["/data"], "exclusive share -- bind-mounted past shfs")
+	require.True(t, shfs["/array-only"], "/mnt/user0 is shfs even for an exclusive share")
+	require.True(t, shfs["/unknown"], "a share shares.ini says nothing about is shfs unless proven otherwise")
+	require.False(t, shfs["/config"], "a pool path never goes through shfs")
+	require.False(t, shfs["/media"], "a disk path never goes through shfs")
 }

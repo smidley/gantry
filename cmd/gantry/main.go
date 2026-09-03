@@ -1354,9 +1354,19 @@ func containerStorage(
 			Storage:     server.StorageRefDTO{Kind: ref.Kind, Name: ref.Name},
 		}
 		if ref.Kind == "share" {
-			if p, ok := placements[ref.Name]; ok {
+			p, known := placements[ref.Name]
+			if known {
 				dto.Storage.Placement = &server.SharePlacementDTO{Mode: p.Mode, Pool: p.Pool}
 			}
+			// shfs (see StorageRefDTO.Shfs' own doc): /mnt/user0 is always
+			// the array-only FUSE view, and /mnt/user goes through shfs
+			// unless Unraid bind-mounted this share as EXCLUSIVE. A share
+			// shares.ini says nothing about (or hasn't been read for yet)
+			// counts as shfs: that's the default a /mnt/user path has
+			// unless something positively proves otherwise, and it's the
+			// only answer for an Unraid old enough to predate exclusive
+			// shares entirely.
+			dto.Storage.Shfs = !known || !p.Exclusive || strings.HasPrefix(m.Source, "/mnt/user0/")
 		}
 		mounts = append(mounts, dto)
 	}
@@ -1370,20 +1380,72 @@ func containerStorage(
 		}
 	}
 
-	devices := deviceIOFromSamples(live.LatestByMetricPrefix("container", name, "live:io."), now)
 	var fakeLabels map[string]unraid.DeviceLabel
 	if fakeDeviceLabels != nil {
 		fakeLabels = fakeDeviceLabels()
 	}
-	for i := range devices {
-		label := unraid.ResolveDeviceLabel(devices[i].Device, sysRoot, knownDevices)
-		if override, ok := fakeLabels[devices[i].Device]; ok {
-			label = override
-		}
-		devices[i].Label, devices[i].Kind = label.Label, label.Kind
-	}
+	devices := labelDevices(deviceIOFromSamples(live.LatestByMetricPrefix("container", name, "live:io."), now), sysRoot, knownDevices, fakeLabels)
 
 	return server.StorageDTO{Mounts: mounts, Devices: devices}, true
+}
+
+// labelDevices resolves each raw device row's friendly label
+// (unraid.ResolveDeviceLabel, with fake-data mode's own override layered
+// on top) and folds the rows that name the SAME Unraid slot into one.
+//
+// The fold exists because an array disk answers to two device names at
+// once: Unraid reaches data disk "diskN" through the md driver, so a
+// container's cgroup io.stat charges its /mnt/diskN traffic to the md
+// device ("md7p1"), while disks.ini names that slot by its physical
+// member ("sdf"), which picks up only a token row with no bytes in it.
+// Left as two rows the panel showed the real traffic under an
+// unrecognizable kernel name AND a second row labelled "disk7" sitting
+// at 0 B/s -- the "Live IO doesn't show array disks" report. Summing is
+// the right merge, not picking a winner: on a real box the two rows
+// never carry the same bytes twice (the md row carries the whole
+// transfer, the member row only a couple of superblock ios at zero
+// bytes), and the panel's Total row already sums every device, so a
+// device row has to add up the same way.
+//
+// A folded row is keyed by the slot's PHYSICAL device, not its md one:
+// that is the name /proc/diskstats gives the whole device, and so the
+// name host diskio.<dev>.* series carry -- the denominator the impact
+// strip's per-device share joins against. Rows no slot claims (loop
+// devices, anything disks.ini doesn't cover) and rows whose label came
+// from the fake-data override (no Slot, by construction -- see
+// fake.Generator.DeviceLabels' own doc) keep their own device name and
+// never merge. Output stays sorted by device name, same stable order
+// deviceIOFromSamples produces on its own.
+func labelDevices(devices []server.DeviceIODTO, sysRoot string, diskMeta map[string]unraid.DiskMeta, fakeLabels map[string]unraid.DeviceLabel) []server.DeviceIODTO {
+	byDevice := make(map[string]*server.DeviceIODTO, len(devices))
+	order := make([]string, 0, len(devices))
+	for _, d := range devices {
+		label := unraid.ResolveDeviceLabel(d.Device, sysRoot, diskMeta)
+		if override, ok := fakeLabels[d.Device]; ok {
+			label = override
+		}
+		device := d.Device
+		if label.Slot != "" {
+			if physical := diskMeta[label.Slot].Device; physical != "" {
+				device = physical
+			}
+		}
+		if existing, ok := byDevice[device]; ok {
+			existing.ReadBps += d.ReadBps
+			existing.WriteBps += d.WriteBps
+			continue
+		}
+		row := d
+		row.Device, row.Label, row.Kind = device, label.Label, label.Kind
+		byDevice[device] = &row
+		order = append(order, device)
+	}
+	sort.Strings(order)
+	out := make([]server.DeviceIODTO, 0, len(order))
+	for _, device := range order {
+		out = append(out, *byDevice[device])
+	}
+	return out
 }
 
 // deviceIOFromSamples turns store.Live's live:io.<dev>.read_bps/

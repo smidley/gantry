@@ -1,8 +1,11 @@
 // Overview acknowledgements: a shared reactive singleton (the
-// alertRules.svelte.ts / groups.svelte.ts class-store shape) so the
-// attention module's ack control and the derivation's own filter always
-// read ONE list -- CalloutRow writes here, Overview hands `acks.list`
-// into deriveOverviewStatus's `acks` input alongside the live frame.
+// alertRules.svelte.ts / groups.svelte.ts class-store shape) so the ack
+// control and the derivation's own filter always read ONE list --
+// CalloutRow writes here (Events' own "Needs you" strip, the counts
+// pass's relocated home for it), and every view that needs the
+// derivation -- Overview for its chip counts, Events for the strip
+// itself -- hands this same `acks.list` into deriveOverviewStatus's
+// `acks` input alongside its own live frame.
 //
 // Acks are deliberately NOT in the SSE frame: they change only when the
 // user acts (or when one expires), so a fetch-once-then-mutate-locally

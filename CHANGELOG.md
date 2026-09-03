@@ -8,6 +8,23 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.11] - 2026-09-03
+
+### Changed
+
+- **Insight evidence opens a full page.** Selecting an insight in the
+  Active list, the History list or on the interaction map now navigates
+  to `#/insights/<id>` instead of opening the evidence drawer. The page
+  has room for everything the drawer squeezed in: the statement as the
+  title, confidence and timing chips, the incident timeline at full
+  chart height beside a full-size interaction map, the evidence table,
+  and the dismiss presets. Rows are real links, so open-in-new-tab
+  works, and the page is shareable by URL. Edges on the page's own map
+  lead to the related insight's page. The drawer is gone. (#67)
+- **Insights stays highlighted in the navigation** while an insight's
+  page is open, and the same now holds for Containers on a container's
+  page. (#67)
+
 ## [0.1.10] - 2026-09-03
 
 ### Changed

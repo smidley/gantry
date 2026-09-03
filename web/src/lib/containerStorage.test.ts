@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   isUnraidOSLoopDevice,
+  shfsFrontedShares,
+  shfsNote,
   mountCapacitySlot,
   normalizeStorageKind,
   recentlyActiveDevices,
@@ -181,5 +183,51 @@ describe('sharePlacementText', () => {
 
   it('is null for an unrecognized mode', () => {
     expect(sharePlacementText({ mode: 'bogus' })).toBeNull();
+  });
+});
+
+describe('shfsFrontedShares', () => {
+  const mount = (kind: string, name: string, shfs?: boolean) => ({ storage: { kind, name, shfs } });
+
+  it('names every share mount the server flagged as shfs-fronted', () => {
+    expect(
+      shfsFrontedShares([mount('share', 'Movies', true), mount('share', 'TV', true), mount('pool', 'rocket_pool')]),
+    ).toEqual(['Movies', 'TV']);
+  });
+
+  it('skips a share whose IO is attributable (exclusive, so bind-mounted past shfs)', () => {
+    expect(shfsFrontedShares([mount('share', 'data', false), mount('share', 'Movies', true)])).toEqual(['Movies']);
+  });
+
+  it('lists each share once even when several mounts point into it', () => {
+    expect(shfsFrontedShares([mount('share', 'TV', true), mount('share', 'TV', true)])).toEqual(['TV']);
+  });
+
+  it('is empty when nothing is shfs-fronted', () => {
+    expect(shfsFrontedShares([mount('pool', 'cache'), mount('disk', 'disk1')])).toEqual([]);
+  });
+});
+
+describe('shfsNote', () => {
+  it('is null when no share is shfs-fronted -- nothing to explain', () => {
+    expect(shfsNote([])).toBeNull();
+  });
+
+  it('reads naturally for one share', () => {
+    expect(shfsNote(['Movies'])).toBe(
+      "Movies goes through Unraid's shfs layer, which does that disk IO on the container's behalf. None of it can be counted here or in the IO chart.",
+    );
+  });
+
+  it('joins two shares with "and"', () => {
+    expect(shfsNote(['Movies', 'TV'])).toBe(
+      "Movies and TV go through Unraid's shfs layer, which does that disk IO on the container's behalf. None of it can be counted here or in the IO chart.",
+    );
+  });
+
+  it('comma-separates three or more, with "and" before the last', () => {
+    expect(shfsNote(['Movies', 'TV', 'Web_Media'])).toBe(
+      "Movies, TV and Web_Media go through Unraid's shfs layer, which does that disk IO on the container's behalf. None of it can be counted here or in the IO chart.",
+    );
   });
 });

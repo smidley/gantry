@@ -115,3 +115,42 @@ func TestStorageEndpointEmptyMountsAndDevicesMarshalAsEmptyArrays(t *testing.T) 
 	require.NoError(t, err)
 	require.JSONEq(t, `{"mounts":[],"devices":[]}`, string(body))
 }
+
+// TestStorageEndpointCarriesArrayRowsAndTheShfsFlag pins the two array
+// additions on the wire: an array disk's Live IO row rides the same
+// DeviceIODTO shape as a pool one (a slot Label plus its Kind, keyed by
+// the slot's physical device, since that's the name host diskio.<dev>.*
+// series use), and a share mount fronted by Unraid's shfs FUSE layer
+// carries "shfs": true so the frontend can say why that mount's IO shows
+// up in no device row at all. A mount whose IO IS attributable omits the
+// key entirely rather than sending false.
+func TestStorageEndpointCarriesArrayRowsAndTheShfsFlag(t *testing.T) {
+	var calls []storageCall
+	dto := StorageDTO{
+		Mounts: []MountDTO{
+			{Source: "/mnt/user/Movies", Destination: "/movies", Storage: StorageRefDTO{
+				Kind: "share", Name: "Movies", Placement: &SharePlacementDTO{Mode: "no"}, Shfs: true}},
+			{Source: "/mnt/disk7/media", Destination: "/media", Storage: StorageRefDTO{Kind: "disk", Name: "disk7"}},
+		},
+		Devices: []DeviceIODTO{
+			{Device: "sdf", Label: "disk7", Kind: "hdd", ReadBps: 700, WriteBps: 1208},
+		},
+	}
+	s := New(Options{Version: "test-1", Started: time.Now(), Storage: handBuiltStorage(&calls, "jellyfin", dto)})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/containers/jellyfin/storage")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(body), `"shfs":true`)
+	require.NotContains(t, string(body), `"shfs":false`, "omitempty -- an attributable mount carries no flag at all")
+
+	var got StorageDTO
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, dto, got)
+}

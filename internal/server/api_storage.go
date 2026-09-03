@@ -49,6 +49,22 @@ type StorageRefDTO struct {
 	// zero-value object, so a caller can tell "unknown" apart from a real
 	// (if unlikely) empty mode string.
 	Placement *SharePlacementDTO `json:"placement,omitempty"`
+	// Shfs (additive, optional -- kind=share only) is true when this
+	// mount reaches its data through Unraid's shfs FUSE layer, which is
+	// every /mnt/user0 path and every /mnt/user path whose share Unraid
+	// has not made EXCLUSIVE. It matters because shfs, not the container,
+	// issues the resulting block IO: the bytes are charged to the
+	// host-wide shfs daemon's own cgroup, so they appear in neither this
+	// container's Devices rows nor its io.read_bps/io.write_bps chart, and
+	// no per-container counter on the box can recover them (verified on a
+	// live Unraid 7.3.2 box -- a 1.5 GB write through such a mount moved
+	// the container's cgroup io.stat by 5 KB, and /proc/<pid>/io's
+	// block-layer read counter did not see a 1.5 GB read back at all).
+	// The frontend uses it to say so outright rather than let an empty
+	// Live IO section read as "this container isn't touching the array".
+	// Omitted (never false) for a mount whose IO IS attributable, so the
+	// flag only ever appears where there's something to explain.
+	Shfs bool `json:"shfs,omitempty"`
 }
 
 // SharePlacementDTO mirrors unraid.SharePlacement: Mode is useCache's own

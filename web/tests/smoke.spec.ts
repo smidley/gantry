@@ -1384,3 +1384,67 @@ test.describe('reduced motion', () => {
     await expect.poll(() => cpuNumber.textContent(), { timeout: 6_000 }).not.toBe(initial);
   });
 });
+
+// Array IO (Scott: "Live IO section doesn't show read/write from array
+// disks"). An Unraid array disk answers to two device names at once --
+// the md device its IO is actually charged to in a container's cgroup
+// io.stat ("md1p1"), and the physical member disks.ini names the slot by
+// ("sdc") -- and only the second one used to resolve. The panel showed
+// the real traffic under a raw "md1p1" and a SECOND row labelled "disk1"
+// sitting at 0 B/s next to it. Fake mode gives jellyfin/plex the same
+// shape a real box produces (fake.go's own live:io.md1p1.* pair, emitted
+// only for the two archetypes with a /mnt/disk1/media mount).
+test('container detail: an array disk shows in Live IO under its slot name, not its md kernel device', async ({
+  page,
+}) => {
+  await page.goto('#/containers/jellyfin');
+
+  const arrayRow = page
+    .locator('.storage-device')
+    .filter({ has: page.locator('.storage-device__label', { hasText: /^\s*disk1\s*$/ }) });
+  await expect(arrayRow).toHaveCount(1, { timeout: 10_000 });
+
+  // Keyed by the PHYSICAL device, not the md one: that's the name host
+  // diskio.<dev>.* series carry, so the impact strip's per-device share
+  // has something to divide by.
+  await expect(arrayRow.locator('.storage-device__raw')).toHaveText('sdc');
+  await expect(arrayRow.locator('.storage-device__kind')).toHaveText('HDD');
+
+  // The md name never leaks into the panel, and there is no second,
+  // always-zero row for the same disk.
+  await expect(page.locator('.storage-device__label', { hasText: 'md1p1' })).toHaveCount(0);
+  await expect(page.locator('.storage-device__raw', { hasText: 'md1p1' })).toHaveCount(0);
+
+  // Non-zero, so the noise rule kept it: this row is carrying real traffic.
+  await expect(arrayRow.locator('.storage-device__value').first()).not.toHaveAttribute('aria-label', 'Read 0 B/s');
+});
+
+// The other half of the same report, and the one that hits an ordinary
+// media container hardest: a /mnt/user mount on a non-exclusive share
+// reaches its data through Unraid's shfs FUSE layer, and shfs -- not the
+// container -- issues the block IO, so it appears in NO per-container
+// counter the box has. The panel can't invent a number for it; it says
+// so instead, and marks which mounts are affected.
+test('container detail: an shfs-fronted share says its IO cannot be attributed', async ({ page }) => {
+  await page.goto('#/containers/jellyfin');
+
+  const note = page.locator('.container-detail__storage-shfs-note');
+  await expect(note).toHaveCount(1, { timeout: 10_000 });
+  await expect(note).toHaveText(
+    "appdata goes through Unraid's shfs layer, which does that disk IO on the container's behalf. None of it can be counted here or in the IO chart.",
+  );
+
+  // The mount itself is marked, so the note's share name has something
+  // to point at in the list above it.
+  const configMount = page
+    .locator('.storage-mount')
+    .filter({ has: page.locator('.storage-mount__dest', { hasText: /^\/config$/ }) });
+  await expect(configMount.locator('.storage-mount__shfs')).toHaveText('shfs');
+
+  // A direct array/flash mount is NOT marked -- its IO is fully visible,
+  // and the disk1 row above proves it.
+  const mediaMount = page
+    .locator('.storage-mount')
+    .filter({ has: page.locator('.storage-mount__dest', { hasText: /^\/media$/ }) });
+  await expect(mediaMount.locator('.storage-mount__shfs')).toHaveCount(0);
+});

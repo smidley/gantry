@@ -28,6 +28,19 @@ type SharePlacement struct {
 	// pool a PRIOR useCache="yes" left behind, not where this share's
 	// data lives now, so it's dropped rather than surfaced as if current).
 	Pool string
+	// Exclusive is shares.ini's own `exclusive` field: Unraid 7 bind-mounts
+	// an exclusive share's /mnt/user/<share> path straight onto the single
+	// pool holding it, bypassing the shfs FUSE layer. That is the one
+	// signal that decides whether a container's IO through /mnt/user is
+	// visible to its own cgroup at all — verified on a live 7.3.2 box: an
+	// exclusive share's path reports btrfs to statfs and a container
+	// writing through it has every byte charged to its cgroup io.stat,
+	// while a non-exclusive one reports fuse.shfs and the block IO is
+	// issued by the host-wide shfs daemon instead, which no per-container
+	// counter can attribute. False when the field is absent, which is also
+	// the right answer for an Unraid old enough to predate exclusive
+	// shares: /mnt/user was always shfs there.
+	Exclusive bool
 }
 
 // tickShares reads shares.ini and records each share's used space, plus
@@ -66,7 +79,7 @@ func (c *Collector) tickShares(now time.Time) {
 			if mode == "no" {
 				pool = "" // see SharePlacement.Pool's own doc — stale leftover, not current
 			}
-			placement[name] = SharePlacement{Mode: mode, Pool: pool}
+			placement[name] = SharePlacement{Mode: mode, Pool: pool, Exclusive: kv[name]["exclusive"] == "yes"}
 		}
 
 		usedKB, ok := parseFloatOK(kv[name]["used"])

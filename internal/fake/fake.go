@@ -634,6 +634,21 @@ func (g *Generator) Tick(now time.Time) {
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.loop2.read_bps"}, ts, ioRead*0.05)
 		g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.loop2.write_bps"}, ts, ioWrite*0.08)
 
+		// live:io.md1p1 is the ARRAY device, and only the two archetypes
+		// fakeContainerMounts actually gives a /mnt/disk1/media mount get
+		// it -- a container with no array mount has no array IO. Unraid
+		// reaches array data disk "diskN" through the md driver, so a real
+		// box charges that traffic to the md device ("md1p1", major 9),
+		// never to the physical member disks.ini names disk1 by ("sdc");
+		// emitting the md name here is what makes fake mode exercise
+		// unraid.ResolveDeviceLabel's own array branch (and the storage
+		// endpoint's fold of the two names onto one slot row) rather than
+		// shortcut past it. Read-heavy, write-light: a media library.
+		if e == "jellyfin" || e == "plex" {
+			g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.md1p1.read_bps"}, ts, ioRead*1.6)
+			g.sink.Record(store.SeriesKey{Kind: "container", Entity: e, Metric: "live:io.md1p1.write_bps"}, ts, ioWrite*0.2)
+		}
+
 		// The insightDemo* story's own culprit-attribution side (see
 		// insightDemoDevice's own doc): qbittorrent ramps to a dominant
 		// share of disk1's device while jellyfin/sonarr hold a small,

@@ -8,6 +8,24 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.9] - 2026-09-02
+
+### Changed
+
+- **Fleet blocks are smaller again, and stopped containers have their
+  own section.** Blocks cap at about half their 0.1.8 size: a dense fleet
+  (a few dozen containers) renders as clean, unlabeled squares with the
+  name on hover, and names appear automatically on smaller fleets with
+  room for them. Stopped containers sit in a muted "N stopped" group
+  below the running grid, at the same block size, and the group is
+  simply absent when nothing is stopped. (#62)
+- **The CPU, memory, network, and disk-IO tiles now sit at the top of
+  the Overview**, pinned as a full-width row above the status headline.
+  The disk bay schematic moves down into the Customize band as a regular
+  module -- drag it or hide it like the others (its height follows your
+  disk count, so it has no size steps). A layout saved before this change
+  loads as-is, with the schematic appearing in its default spot. (#62)
+
 ## [0.1.8] - 2026-09-02
 
 ### Added

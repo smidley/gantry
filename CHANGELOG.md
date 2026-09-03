@@ -8,6 +8,45 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.8] - 2026-09-02
+
+### Added
+
+- **The Overview's "needs you" area is now a count, not a list.** One or
+  two chips -- "N alerts" and "N contentions" -- each a link to the list
+  behind it: alerts land on the Events page, which now opens with a
+  "Needs you" strip (the entity, a plain-language reason, and the Ack
+  control with its 1h/24h/7d presets), and contentions land on Insights.
+  Acknowledged items still stay out of the counts, and a healthy box
+  shows the same all-clear as before. (#58, #59)
+- **The container fleet fills the space it has and sizes its blocks to
+  the fleet.** Three containers render large; forty render small --
+  always square, and never scrolling until blocks would drop below a
+  legible floor. Bigger blocks earn the container's name and icon. (#58)
+
+### Changed
+
+- **A fleet block now glows for any busy metric, not just CPU.** Memory,
+  disk IO, network, or GPU can light it, the hottest wins, and hovering
+  names the driver ("glowing: GPU 100%"). The floors are absolute, not
+  relative to the rest of the fleet, so an idle machine stays calm. The
+  Containers view's "Active now" filter uses the same rule, so the
+  glowing blocks and that list always agree. (#58)
+- The insight dismiss control reads **"Dismiss"** rather than "Not
+  useful". (#60)
+
+### Fixed
+
+- **An incident chart's shaded band now covers the evidence, not just
+  the aftermath.** A sustained rule only fires once its whole evaluation
+  window has crossed the threshold, so the spike that caused an insight
+  sits *before* the fired timestamp -- the band shaded fired-to-resolved
+  and missed it. It now extends back over the rule's own window; Fired
+  and Resolved stay marked so the seam is still visible. (#60)
+- **The interaction map's legend lists only the line styles actually on
+  screen.** A single-style graph in the evidence drawer shows no legend
+  at all -- the drawer's own confidence badge already says it. (#60)
+
 ## [0.1.7] - 2026-09-02
 
 ### Added

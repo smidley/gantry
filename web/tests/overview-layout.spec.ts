@@ -35,9 +35,10 @@ function frame(containers: Record<string, object>) {
   };
 }
 
-// quietFleet: n running containers, all well under every activity floor,
-// so nothing glows and the only variable is the count.
-function quietFleet(n: number, extra: Record<string, object> = {}) {
+// quietFleet: n running containers (plus `stopped` exited ones), all
+// well under every activity floor, so nothing glows and the only
+// variable is the count.
+function quietFleet(n: number, extra: Record<string, object> = {}, stopped = 0) {
   const containers: Record<string, object> = {};
   for (let i = 0; i < n; i++) {
     containers[`svc-${String(i + 1).padStart(2, '0')}`] = {
@@ -46,6 +47,9 @@ function quietFleet(n: number, extra: Record<string, object> = {}) {
       icon: '',
       metrics: { 'cpu.pct': 0.2, 'mem.bytes': 2e8 },
     };
+  }
+  for (let i = 0; i < stopped; i++) {
+    containers[`old-${String(i + 1).padStart(2, '0')}`] = { state: 'exited', health: '', icon: '', metrics: {} };
   }
   return frame({ ...containers, ...extra });
 }
@@ -61,19 +65,20 @@ async function routeLiveFrame(page: import('@playwright/test').Page, f: object) 
   );
 }
 
-// showFleet routes a frame, loads Overview and waits for the strip to
-// hold exactly the expected number of blocks AND to have been measured
-// (data-cell is written from the ResizeObserver-driven fit, so it is the
-// honest "the sizing pass has run" signal).
+// showFleet routes a frame, loads Overview and waits for the stack to
+// hold exactly the expected number of blocks AND to have been measured.
+// data-cell is written from the ResizeObserver-driven fit, so it is the
+// honest "the sizing pass has run" signal -- and it lives on the STACK,
+// which is the one element per fleet whatever its group split.
 async function showFleet(page: import('@playwright/test').Page, f: object, expectedUnits: number) {
   await routeLiveFrame(page, f);
   await page.goto('#/');
-  const strip = page.locator('.fleet-strip');
-  await expect(strip).toBeVisible();
+  const stack = page.locator('.fleet-strip__stack');
+  await expect(stack).toBeVisible();
   await expect.poll(() => page.locator('.fleet-strip .fleet-unit').count()).toBe(expectedUnits);
   let cell = 0;
   await expect(async () => {
-    cell = Number(await strip.getAttribute('data-cell'));
+    cell = Number(await stack.getAttribute('data-cell'));
     expect(cell).toBeGreaterThan(0);
   }).toPass({ timeout: 10_000 });
   return cell;
@@ -83,7 +88,7 @@ test('fleet blocks render at the computed cell size, on whole aligned columns', 
   await page.setViewportSize({ width: 1440, height: 900 });
   const cell = await showFleet(page, quietFleet(24), 24);
 
-  const strip = page.locator('.fleet-strip');
+  const strip = page.locator('.fleet-strip').first();
   expect(await strip.evaluate((el) => getComputedStyle(el).display)).toBe('grid');
 
   // Every explicit track is the SAME computed cell -- the "deliberate
@@ -111,16 +116,78 @@ test('fleet blocks render at the computed cell size, on whole aligned columns', 
 // The ask itself: "if there's only 3 containers, they will be larger,
 // and if there are 30 containers, the blocks will be smaller." Same
 // viewport, same field, only the count changes.
+//
+// The assertion is the RELATIONSHIP, never a pixel: the cell is derived
+// from a live measurement of a real layout, so its exact value moves
+// with the viewport, the font metrics and whatever else shares the page
+// -- and this test flaked once on a loaded CI runner for exactly that
+// reason. What must hold is that the fit is monotonic in the count
+// (more blocks never buys a bigger one) and that across the full range
+// the difference is real rather than everything sitting on the ceiling.
 test('fleet blocks shrink as the fleet grows, in one fixed viewport', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const three = await showFleet(page, quietFleet(3), 3);
   const thirty = await showFleet(page, quietFleet(30), 30);
   const sixty = await showFleet(page, quietFleet(60), 60);
+  const hundred = await showFleet(page, quietFleet(100), 100);
 
-  expect(three, '3 containers must render larger than 30').toBeGreaterThan(thirty);
-  expect(thirty, '30 containers must render larger than 60').toBeGreaterThan(sixty);
+  // Monotonic: a bigger fleet never renders a bigger block. Below a
+  // dozen or so blocks in a full-width band everything legitimately
+  // sits on the ceiling, so adjacent steps may tie.
+  expect(three, '30 containers must not render larger than 3').toBeGreaterThanOrEqual(thirty);
+  expect(thirty, '60 containers must not render larger than 30').toBeGreaterThanOrEqual(sixty);
+  expect(sixty, '100 containers must not render larger than 60').toBeGreaterThanOrEqual(hundred);
+
+  // And across the whole range the shrink is real, not a tie -- that is
+  // the behaviour the ask is actually about.
+  expect(hundred, '100 containers must render meaningfully smaller than 3').toBeLessThan(three);
   // Still a real, tappable block at the big end, not a speck.
-  expect(sixty).toBeGreaterThanOrEqual(12);
+  expect(hundred).toBeGreaterThanOrEqual(12);
+});
+
+// "Keep the stopped containers in a separate section like we had
+// before" -- two grids, running first, the stopped one under its own
+// heading, both at ONE pitch so they read as one fleet.
+test('stopped containers get their own labelled section at the same cell size', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await showFleet(page, quietFleet(18, {}, 5), 23);
+
+  const grids = page.locator('.fleet-strip');
+  await expect(grids).toHaveCount(2);
+  await expect(grids.nth(0)).toHaveAttribute('aria-label', 'Running containers, 18');
+  await expect(grids.nth(1)).toHaveAttribute('aria-label', 'Stopped containers, 5');
+
+  // The heading sits between them, in the legend's own vocabulary.
+  const heading = page.locator('.fleet-strip__group-label');
+  await expect(heading).toHaveText('5 stopped');
+  const runningBox = (await grids.nth(0).boundingBox())!;
+  const headingBox = (await heading.boundingBox())!;
+  const stoppedBox = (await grids.nth(1).boundingBox())!;
+  expect(headingBox.y).toBeGreaterThanOrEqual(runningBox.y + runningBox.height - 1);
+  expect(stoppedBox.y).toBeGreaterThanOrEqual(headingBox.y + headingBox.height - 1);
+
+  // ONE pitch across both: same track sizes, same block size.
+  const tracks = async (i: number) =>
+    (await grids.nth(i).evaluate((el) => getComputedStyle(el).gridTemplateColumns)).split(' ');
+  const runningTracks = await tracks(0);
+  const stoppedTracks = await tracks(1);
+  expect(stoppedTracks[0]).toBe(runningTracks[0]);
+  expect(stoppedTracks.length).toBe(runningTracks.length);
+
+  const firstRunning = (await grids.nth(0).locator('.fleet-unit').first().boundingBox())!;
+  const firstStopped = (await grids.nth(1).locator('.fleet-unit').first().boundingBox())!;
+  expect(Math.abs(firstStopped.width - firstRunning.width)).toBeLessThan(1.5);
+  expect(Math.abs(firstStopped.height - firstRunning.height)).toBeLessThan(1.5);
+  // Stopped blocks are still real links with their own state.
+  await expect(grids.nth(1).locator('.fleet-unit').first()).toHaveClass(/fleet-unit--stopped/);
+  await expect(grids.nth(1).locator('.fleet-unit').first()).toHaveAttribute('href', '#/containers/old-01');
+});
+
+test('a fleet with nothing stopped renders no stopped section at all', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await showFleet(page, quietFleet(9), 9);
+  await expect(page.locator('.fleet-strip')).toHaveCount(1);
+  await expect(page.locator('.fleet-strip__group-label')).toHaveCount(0);
 });
 
 // "Container fleet section should be sized to take up the available
@@ -179,21 +246,55 @@ test('a block glowing on disk IO names that metric in its hover label', async ({
   await expect(label).toContainText('glowing: disk IO 84.0 MB/s');
 });
 
+// The bay schematic is a Customize MODULE now, not a pinned half of the
+// status band -- it renders inside the modules band's narrow lane, where
+// the metrics rail used to sit. Everything else about it is unchanged.
+test('storage array renders as a module in the narrow lane', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('#/');
+
+  const module = page.locator('.overview__modules-narrow [data-module="storage"]');
+  await expect(module).toBeVisible({ timeout: 20_000 });
+  await expect(module.locator('.bay-schematic')).toBeVisible();
+
+  // It is genuinely in the modules band, not in the status band above it.
+  await expect(page.locator('.overview__clear-band .bay-schematic, .overview__status-band .bay-schematic')).toHaveCount(0);
+
+  // The rail is no longer a module at all -- it is pinned above the
+  // headline, which is the whole point of the swap.
+  await expect(page.locator('[data-module="metrics-rail"]')).toHaveCount(0);
+  const rail = page.locator('.overview__metrics-rail');
+  await expect(rail).toBeVisible();
+  const railBox = (await rail.boundingBox())!;
+  const headlineBox = (await page.locator('.overview__headline-zone').boundingBox())!;
+  expect(railBox.y + railBox.height).toBeLessThanOrEqual(headlineBox.y + 1);
+});
+
 test('storage array fills its module and keeps its device grid stable on hover', async ({ page }) => {
+  // Explicitly wide: the schematic lives in the modules band's NARROW
+  // lane now, which at the default 1280px viewport is under the 400px
+  // this test needs to have anything to measure -- and a test that
+  // silently skips on every run proves nothing at all.
+  await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto('#/');
   const schematic = page.locator('.bay-schematic');
   // Waits on the first live frame's disks; generous for a cold CI boot.
   await expect(schematic).toBeVisible({ timeout: 20_000 });
 
   const schematicBox = await schematic.boundingBox();
-  const parentWidth = await schematic.evaluate((el) => el.parentElement!.getBoundingClientRect().width);
+  // The module CARD has its own padding, so the space the schematic is
+  // actually offered is its parent's content box, not its border box.
+  const parentWidth = await schematic.evaluate((el) => {
+    const parent = el.parentElement!;
+    const style = getComputedStyle(parent);
+    return parent.getBoundingClientRect().width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  });
   expect(schematicBox).not.toBeNull();
 
   // Only meaningful when the surrounding region is actually wider than
-  // the fake array's handful of bars -- at the default desktop viewport
-  // it always is. If a future layout narrows the parent below that,
-  // this assertion has nothing to prove and the guard keeps it honest
-  // rather than flaky.
+  // the fake array's handful of bars. If a future layout narrows the
+  // lane below that, this assertion has nothing to prove and the guard
+  // keeps it honest rather than flaky.
   test.skip(parentWidth < 400, `schematic parent is only ${parentWidth}px wide -- nothing to measure against`);
 
   expect(schematicBox!.width).toBeGreaterThan(parentWidth - 4);

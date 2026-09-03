@@ -68,11 +68,11 @@ func TestMergeOverviewLayoutDropsUnknownIDsSilently(t *testing.T) {
 	merged := mergeOverviewLayout(OverviewLayout{
 		Version: overviewLayoutVersion,
 		Wide:    []string{"events", "a-module-from-the-future", "top-consumers"},
-		Narrow:  []string{"metrics-rail"},
+		Narrow:  []string{"storage"},
 		Hidden:  []string{"another-ghost"},
 	})
 	require.Equal(t, []string{"events", "top-consumers"}, merged.Wide)
-	require.Equal(t, []string{"metrics-rail"}, merged.Narrow)
+	require.Equal(t, []string{"storage"}, merged.Narrow)
 	require.Empty(t, merged.Hidden)
 }
 
@@ -85,7 +85,7 @@ func TestMergeOverviewLayoutDropsUnknownIDsSilently(t *testing.T) {
 func TestMergeOverviewLayoutAppendsMissingKnownIDsAtTheirDefaultColumn(t *testing.T) {
 	merged := mergeOverviewLayout(OverviewLayout{Version: overviewLayoutVersion, Wide: []string{"events"}})
 	require.Equal(t, []string{"events", "top-consumers"}, merged.Wide, "the missing wide module lands at the end of its own column")
-	require.Equal(t, []string{"metrics-rail"}, merged.Narrow, "the missing narrow module lands in the narrow column, not the wide one")
+	require.Equal(t, []string{"storage"}, merged.Narrow, "the missing narrow module lands in the narrow column, not the wide one")
 	require.Empty(t, merged.Hidden)
 }
 
@@ -96,22 +96,22 @@ func TestMergeOverviewLayoutKeepsAHiddenModuleHidden(t *testing.T) {
 	merged := mergeOverviewLayout(OverviewLayout{
 		Version: overviewLayoutVersion,
 		Wide:    []string{"top-consumers"},
-		Narrow:  []string{"metrics-rail"},
+		Narrow:  []string{"storage"},
 		Hidden:  []string{"events"},
 	})
 	require.Equal(t, []string{"top-consumers"}, merged.Wide)
-	require.Equal(t, []string{"metrics-rail"}, merged.Narrow)
+	require.Equal(t, []string{"storage"}, merged.Narrow)
 	require.Equal(t, []string{"events"}, merged.Hidden)
 }
 
 func TestMergeOverviewLayoutDeduplicatesFirstOccurrenceWins(t *testing.T) {
 	merged := mergeOverviewLayout(OverviewLayout{
 		Version: overviewLayoutVersion,
-		Wide:    []string{"events", "events", "metrics-rail"},
-		Narrow:  []string{"metrics-rail", "top-consumers"},
+		Wide:    []string{"events", "events", "storage"},
+		Narrow:  []string{"storage", "top-consumers"},
 		Hidden:  []string{"events"},
 	})
-	require.Equal(t, []string{"events", "metrics-rail"}, merged.Wide)
+	require.Equal(t, []string{"events", "storage"}, merged.Wide)
 	require.Equal(t, []string{"top-consumers"}, merged.Narrow)
 	require.Empty(t, merged.Hidden)
 }
@@ -122,7 +122,7 @@ func TestMergeOverviewLayoutDeduplicatesFirstOccurrenceWins(t *testing.T) {
 func TestMergeOverviewLayoutPreservesUserOrder(t *testing.T) {
 	stored := OverviewLayout{
 		Version: overviewLayoutVersion,
-		Wide:    []string{"metrics-rail", "events"},
+		Wide:    []string{"storage", "events"},
 		Narrow:  []string{"top-consumers"},
 		Hidden:  []string{},
 		Ratio:   0.7,
@@ -157,13 +157,13 @@ func TestMergeOverviewLayoutMigratesAV1Document(t *testing.T) {
 	v1 := OverviewLayout{
 		Version: 1,
 		Wide:    []string{"events", "top-consumers"},
-		Narrow:  []string{"metrics-rail"},
+		Narrow:  []string{"storage"},
 		Hidden:  []string{},
 	}
 	require.Equal(t, OverviewLayout{
 		Version: overviewLayoutVersion,
 		Wide:    []string{"events", "top-consumers"},
-		Narrow:  []string{"metrics-rail"},
+		Narrow:  []string{"storage"},
 		Hidden:  []string{},
 		Ratio:   overviewRatioDefault,
 		Sizes:   map[string]string{},
@@ -215,7 +215,7 @@ func TestMergeOverviewLayoutSizes(t *testing.T) {
 			want:   map[string]string{},
 		},
 		"a size against a module with no elastic body is dropped": {
-			stored: map[string]string{"metrics-rail": overviewSizeTall},
+			stored: map[string]string{"storage": overviewSizeTall},
 			want:   map[string]string{},
 		},
 	} {
@@ -232,6 +232,68 @@ func TestDefaultOverviewLayoutIsUnresized(t *testing.T) {
 	def := defaultOverviewLayout()
 	require.InDelta(t, overviewRatioDefault, def.Ratio, 1e-9)
 	require.Empty(t, def.Sizes)
+}
+
+// --- module-set migration (pure) ------------------------------------------
+//
+// overviewModules changed once more since the section above was written:
+// the metrics rail retired (pinned at the top of the page now, no longer
+// arrangeable) and storage took its place in the narrow lane (see
+// overviewModules' own doc for the why). The document version does not
+// move for this, for the same reason it never has for a module-set
+// change (see overviewLayoutVersion's own doc): the drop-unknown/append-
+// missing rule above was already the whole migration story before today,
+// because a retired id is indistinguishable from one a future build
+// invented -- this build doesn't know either, and treats both the same.
+// What is worth its own test is not a new mechanism, only this specific
+// pair of ids going through the old one: a real owner's stored v2
+// document -- Ratio and Sizes already filled in, nothing left to migrate
+// on that front -- that still names the rail.
+
+// TestMergeOverviewLayoutMigratesTheRetiredMetricsRailModule pins the
+// arranged case: the rail is gone from wherever it was named, storage
+// takes its default place in the narrow lane, and nothing else about the
+// document -- the wide lane's own order, the owner's ratio, the owner's
+// sizes, the version -- moves at all.
+func TestMergeOverviewLayoutMigratesTheRetiredMetricsRailModule(t *testing.T) {
+	stored := OverviewLayout{
+		Version: overviewLayoutVersion,               // already v2 before today -- not a field migration
+		Wide:    []string{"events", "top-consumers"}, // the owner's own order, not table order
+		Narrow:  []string{"metrics-rail"},
+		Hidden:  []string{},
+		Ratio:   0.7,
+		Sizes:   map[string]string{"events": overviewSizeTall},
+	}
+	merged := mergeOverviewLayout(stored)
+
+	require.Equal(t, overviewLayoutVersion, merged.Version, "a module-set change was never a version bump, before today or now")
+	require.Equal(t, []string{"events", "top-consumers"}, merged.Wide, "the wide lane is untouched by a narrow-lane retirement")
+	require.Equal(t, []string{"storage"}, merged.Narrow, "the retired id is dropped and storage is appended at its default")
+	require.Empty(t, merged.Hidden)
+	require.InDelta(t, 0.7, merged.Ratio, 1e-9, "the owner's ratio is untouched by a module-set change")
+	require.Equal(t, map[string]string{"events": overviewSizeTall}, merged.Sizes, "the owner's sizes are untouched by a module-set change")
+
+	for _, list := range [][]string{merged.Wide, merged.Narrow, merged.Hidden} {
+		require.NotContains(t, list, "metrics-rail", "the retired id must survive in no list at all")
+	}
+}
+
+// TestMergeOverviewLayoutMigratesARetiredHiddenModule is the same
+// migration from the other starting point: an owner who had switched the
+// rail off, rather than arranged it. It must still lose that entry --
+// Hidden is not a place a retired id gets to wait out its own removal --
+// and storage must still arrive, visible, at its default, exactly as it
+// would for an owner who had never touched the rail at all.
+func TestMergeOverviewLayoutMigratesARetiredHiddenModule(t *testing.T) {
+	merged := mergeOverviewLayout(OverviewLayout{
+		Version: overviewLayoutVersion,
+		Wide:    []string{"top-consumers", "events"},
+		Narrow:  []string{},
+		Hidden:  []string{"metrics-rail"},
+	})
+	require.Equal(t, overviewLayoutVersion, merged.Version, "a module-set change was never a version bump, before today or now")
+	require.Equal(t, []string{"storage"}, merged.Narrow, "storage is placed at its default even though the retired id was hidden, not arranged")
+	require.Empty(t, merged.Hidden, "the retired id does not linger in Hidden")
 }
 
 // --- GET ------------------------------------------------------------------
@@ -289,7 +351,7 @@ func TestOverviewLayoutGetMergesStoredDocument(t *testing.T) {
 	var body OverviewLayout
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	require.Equal(t, []string{"events", "top-consumers"}, body.Wide)
-	require.Equal(t, []string{"metrics-rail"}, body.Narrow)
+	require.Equal(t, []string{"storage"}, body.Narrow)
 	require.Empty(t, body.Hidden)
 	require.Empty(t, fl.setCalls, "a GET never writes the merged document back")
 }
@@ -315,7 +377,7 @@ func TestOverviewLayoutPutRoundtripsThroughGet(t *testing.T) {
 	defer ts.Close()
 
 	resp := putSettings(t, ts.URL+"/api/layout/overview",
-		`{"version":1,"wide":["events"],"narrow":["metrics-rail","top-consumers"],"hidden":[]}`)
+		`{"version":1,"wide":["events"],"narrow":["storage","top-consumers"],"hidden":[]}`)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Len(t, fl.setCalls, 1)
@@ -328,7 +390,7 @@ func TestOverviewLayoutPutRoundtripsThroughGet(t *testing.T) {
 	require.Equal(t, OverviewLayout{
 		Version: overviewLayoutVersion,
 		Wide:    []string{"events"},
-		Narrow:  []string{"metrics-rail", "top-consumers"},
+		Narrow:  []string{"storage", "top-consumers"},
 		Hidden:  []string{},
 		Ratio:   overviewRatioDefault,
 		Sizes:   map[string]string{},
@@ -342,7 +404,7 @@ func TestOverviewLayoutPutRoundtripsAHiddenModule(t *testing.T) {
 	defer ts.Close()
 
 	resp := putSettings(t, ts.URL+"/api/layout/overview",
-		`{"version":1,"wide":["top-consumers"],"narrow":["metrics-rail"],"hidden":["events"]}`)
+		`{"version":1,"wide":["top-consumers"],"narrow":["storage"],"hidden":["events"]}`)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -369,7 +431,7 @@ func TestOverviewLayoutPutStoresTheMergedDocument(t *testing.T) {
 	require.Equal(t, OverviewLayout{
 		Version: overviewLayoutVersion,
 		Wide:    []string{"events", "top-consumers"},
-		Narrow:  []string{"metrics-rail"},
+		Narrow:  []string{"storage"},
 		Hidden:  []string{},
 		Ratio:   overviewRatioDefault,
 		Sizes:   map[string]string{},
@@ -382,7 +444,7 @@ func TestOverviewLayoutPutStoresTheMergedDocument(t *testing.T) {
 func TestOverviewLayoutPutReplacesEntireDocument(t *testing.T) {
 	fl := &fakeLayout{layout: OverviewLayout{
 		Version: overviewLayoutVersion,
-		Wide:    []string{"metrics-rail", "events", "top-consumers"},
+		Wide:    []string{"storage", "events", "top-consumers"},
 		Narrow:  []string{},
 		Hidden:  []string{},
 	}}
@@ -464,7 +526,7 @@ func TestOverviewLayoutPutAcceptsAV1Document(t *testing.T) {
 	defer ts.Close()
 
 	resp := putSettings(t, ts.URL+"/api/layout/overview",
-		`{"version":1,"wide":["events","top-consumers"],"narrow":["metrics-rail"],"hidden":[]}`)
+		`{"version":1,"wide":["events","top-consumers"],"narrow":["storage"],"hidden":[]}`)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -486,7 +548,7 @@ func TestOverviewLayoutGetMigratesAStoredV1Document(t *testing.T) {
 		Version: 1,
 		Wide:    []string{"events", "top-consumers"},
 		Narrow:  []string{},
-		Hidden:  []string{"metrics-rail"},
+		Hidden:  []string{"storage"},
 	}}
 	s := New(Options{Version: "test-1", Started: time.Now(), Layout: fl})
 	ts := httptest.NewServer(s.Handler())
@@ -501,7 +563,7 @@ func TestOverviewLayoutGetMigratesAStoredV1Document(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	require.Equal(t, overviewLayoutVersion, body.Version)
 	require.Equal(t, []string{"events", "top-consumers"}, body.Wide)
-	require.Equal(t, []string{"metrics-rail"}, body.Hidden, "a hidden module stays hidden across the migration")
+	require.Equal(t, []string{"storage"}, body.Hidden, "a hidden module stays hidden across the migration")
 	require.InDelta(t, overviewRatioDefault, body.Ratio, 1e-9)
 	require.Empty(t, body.Sizes)
 	require.Empty(t, fl.setCalls, "a GET still never writes the migrated document back")
@@ -516,7 +578,7 @@ func TestOverviewLayoutPutRoundtripsRatioAndSizes(t *testing.T) {
 	defer ts.Close()
 
 	resp := putSettings(t, ts.URL+"/api/layout/overview",
-		`{"version":2,"wide":["top-consumers","events"],"narrow":["metrics-rail"],"hidden":[],`+
+		`{"version":2,"wide":["top-consumers","events"],"narrow":["storage"],"hidden":[],`+
 			`"ratio":0.72,"sizes":{"events":"tall","top-consumers":"compact"}}`)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -590,7 +652,7 @@ func TestOverviewLayoutPutRejectsAnUnknownSize(t *testing.T) {
 
 // TestOverviewLayoutPutDropsASizeForANonResizableModule is the one
 // deliberate asymmetry in the size validation (see validateOverviewLayout's
-// own doc): metrics-rail is a real module, so a client sending one size
+// own doc): storage is a real module, so a client sending one size
 // per module isn't wrong -- the merge just has nothing to do with it.
 func TestOverviewLayoutPutDropsASizeForANonResizableModule(t *testing.T) {
 	fl := &fakeLayout{}
@@ -599,7 +661,7 @@ func TestOverviewLayoutPutDropsASizeForANonResizableModule(t *testing.T) {
 	defer ts.Close()
 
 	resp := putSettings(t, ts.URL+"/api/layout/overview",
-		`{"version":2,"wide":[],"narrow":[],"hidden":[],"sizes":{"metrics-rail":"tall","events":"compact"}}`)
+		`{"version":2,"wide":[],"narrow":[],"hidden":[],"sizes":{"storage":"tall","events":"compact"}}`)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -616,7 +678,7 @@ func TestOverviewLayoutPutResetsToDefaultRatioAndSizes(t *testing.T) {
 	fl := &fakeLayout{layout: OverviewLayout{
 		Version: overviewLayoutVersion,
 		Wide:    []string{"events", "top-consumers"},
-		Narrow:  []string{"metrics-rail"},
+		Narrow:  []string{"storage"},
 		Hidden:  []string{},
 		Ratio:   0.75,
 		Sizes:   map[string]string{"events": overviewSizeTall},

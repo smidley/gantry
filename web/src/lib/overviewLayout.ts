@@ -82,7 +82,7 @@ export interface OverviewModule {
   // persisted.
   label: string;
   // rows: how many list rows this module renders at each step, or null
-  // for a module with no elastic body at all (see metrics-rail below).
+  // for a module with no elastic body at all (see storage below).
   // A step is a ROW BUDGET, not a pixel height -- every module here
   // renders a list at a fixed row pitch, so an integer row count lands
   // on the page's existing vertical rhythm by construction, and `tall`
@@ -96,10 +96,19 @@ export interface OverviewModule {
 // only place a module's default home is written down on this side.
 //
 // Only the modules BAND is rearrangeable. The status headline, the
-// attention callouts, the fleet strip, the bay schematic and the GPU
-// strip are all pinned and deliberately absent: burying the "needs you"
+// attention chips, the fleet strip, the metrics rail and the GPU strip
+// are all pinned and deliberately absent: burying the "needs you"
 // surface under a drag gesture is exactly the failure mode this feature
 // must not enable.
+//
+// The set CHANGED once, and the Go table's own doc carries the full
+// story: the metrics rail LEFT it (pinned at the top of the page now --
+// Scott: "Move the disk storage section down so that the CPU/Mem/Net/IO
+// metrics are at the top of the overview page") and `storage` JOINED,
+// taking the narrow lane the rail used to hold. The document version
+// does not move for a module-set change; mergeOverviewLayout below
+// already drops the retired id and appends the new one at its default,
+// which is exactly what a layout saved before this release needs.
 //
 // The row budgets:
 //
@@ -114,15 +123,16 @@ export interface OverviewModule {
 //                              to actually read a restart's own
 //                              surrounding sequence.
 //
-// metrics-rail carries null: its four tiles are a fixed label + value +
-// 28px sparkline each, with no list to lengthen and nothing that reads
-// better taller -- a taller rail is the same four tiles with more air
-// between them, which is the dead space this page's layout passes have
-// spent three rounds deleting. It gets no size control at all.
+// storage carries null: the bay schematic draws one card per array
+// member on a fixed grid, so its height is decided by how many disks
+// exist rather than by any budget a step could set -- a "tall" storage
+// module is the same twelve devices with more air between them, which is
+// the dead space this page's layout passes have spent three rounds
+// deleting. It gets no size control at all, exactly as the rail didn't.
 export const OVERVIEW_MODULES: OverviewModule[] = [
   { id: 'top-consumers', column: 'wide', label: 'Top consumers', rows: { compact: 3, normal: 5, tall: 8 } },
   { id: 'events', column: 'wide', label: 'Recent events', rows: { compact: 4, normal: 8, tall: 14 } },
-  { id: 'metrics-rail', column: 'narrow', label: 'Metrics rail', rows: null },
+  { id: 'storage', column: 'narrow', label: 'Storage array', rows: null },
 ];
 
 export function isKnownOverviewModule(id: string): boolean {
@@ -369,8 +379,8 @@ export function setOverviewModuleSize(doc: OverviewLayoutDoc, id: string, size: 
 }
 
 // overviewModuleRows is the row budget a module renders at, or null for
-// one with no elastic body (metrics-rail) -- the value the view turns
-// into an actual list length.
+// one with no elastic body (storage) -- the value the view turns into an
+// actual list length.
 export function overviewModuleRows(id: string, size: OverviewSize): number | null {
   const rows = OVERVIEW_MODULES.find((m) => m.id === id)?.rows;
   if (!rows) return null;

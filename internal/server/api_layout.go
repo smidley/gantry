@@ -52,12 +52,15 @@ const overviewLayoutVersion = 2
 // The bounds are the range over which BOTH lanes still read as
 // themselves against real content. Below 0.60 the wide lane's two
 // stacked modules (Top Consumers' name/bar/value grid, the events feed's
-// own three-column rows) start wrapping while the rail -- four bare
-// label+sparkline rows, the one module here that is genuinely narrow by
-// nature -- sits in space it has no use for. Above 0.75 the rail's own
-// tiles fall under ~270px at the app's usual desktop width (a 1440px
-// viewport less the ~15rem sidebar and the page gutters), which is where
-// its paired value+sparkline rows begin to crowd.
+// own three-column rows) start wrapping while the narrow lane sits in
+// space it has no use for. Above 0.75 the narrow lane falls under
+// ~270px at the app's usual desktop width (a 1440px viewport less the
+// ~15rem sidebar and the page gutters), which is where the storage
+// module's own device cards -- name, percentage, bar, kind and temp on
+// each -- begin to crowd. (These were originally measured against the
+// metrics rail, which held the narrow lane until the storage module
+// took its place; the numbers survived the swap because what they
+// really bound is the lane, not its occupant.)
 //
 // The default is today's split exactly: the band shipped as
 // `flex: 1.6 1 0` against `flex: 1 1 0`, i.e. 1.6/2.6 = 0.6154, rounded
@@ -123,24 +126,35 @@ type overviewModule struct {
 // out (mergeOverviewLayout). Slice order IS the default order within
 // each module's own column, so the table reads top-to-bottom exactly as
 // the default page does: Top Consumers over Recent events in the wide
-// lane, the stat-tile rail alone in the narrow one.
+// lane, the storage array alone in the narrow one.
 //
-// Granularity is one entry per top-level module -- the rail is a single
-// module, not its four tiles. Anything OUTSIDE the modules band (the
-// status headline, the attention callouts, the fleet strip, the bay
-// schematic, the all-clear band, the GPU strip) is deliberately absent:
-// those are pinned, because the "needs you" surface must not be
-// buryable and the GPU strip is its own full-width row below the band.
+// Granularity is one entry per top-level module. Anything OUTSIDE the
+// modules band (the status headline, the attention chips, the fleet
+// strip, the all-clear band, the metrics rail and the GPU strip) is
+// deliberately absent: those are pinned, because the "needs you"
+// surface must not be buryable, and the rail and GPU strip are each
+// their own full-width row.
 //
-// metrics-rail is deliberately NOT resizable: its four tiles are a fixed
-// label + value + 28px sparkline each, with nothing that reads better at
-// another height -- a taller rail is the same four tiles with more air
-// between them, which is the dead space this page's own layout passes
-// have spent three rounds deleting.
+// The set CHANGED once, and this is what that costs: the metrics rail
+// left it and "storage" joined (Scott: "Move the disk storage section
+// down so that the CPU/Mem/Net/IO metrics are at the top of the overview
+// page"). The rail is pinned at the top of the page now and is no
+// longer arrangeable at all; the bay schematic, which used to be pinned
+// beside the fleet strip, took its place in the narrow lane. The
+// document version deliberately does NOT move for this -- see
+// overviewLayoutVersion's own doc, and mergeOverviewLayout, which
+// already drops the retired id and appends the new one at its default.
+//
+// storage is NOT resizable, for the same reason the rail wasn't: the
+// bay schematic draws one card per array member on a fixed grid, so its
+// height is decided by how many disks exist rather than by any budget a
+// step could set. A "tall" storage module would be the same twelve
+// devices with more air between them, which is the dead space this
+// page's own layout passes have spent three rounds deleting.
 var overviewModules = []overviewModule{
 	{ID: "top-consumers", Column: overviewColumnWide, Resizable: true},
 	{ID: "events", Column: overviewColumnWide, Resizable: true},
-	{ID: "metrics-rail", Column: overviewColumnNarrow},
+	{ID: "storage", Column: overviewColumnNarrow},
 }
 
 // OverviewLayout is the one wire shape for GET/PUT /api/layout/overview
@@ -269,7 +283,7 @@ func defaultOverviewLayout() OverviewLayout {
 //     storage has no caller to 400 (clampOverviewRatio's own doc).
 //   - Sizes is normalized to its canonical form: an unknown module id is
 //     dropped exactly the way an unknown id in a lane is, a module with
-//     no elastic body (metrics-rail) is dropped because a size means
+//     no elastic body (storage) is dropped because a size means
 //     nothing there, an unrecognized step normalizes to "normal", and
 //     "normal" itself is dropped because absence IS normal. A v1
 //     document simply has none of these and comes out with an empty map.
@@ -350,7 +364,7 @@ func mergeOverviewLayout(stored OverviewLayout) OverviewLayout {
 // document, or a curl that only wanted to reorder), so only a NON-zero
 // out-of-range number is a caller bug. Sizes: an unknown module id and an
 // unrecognized step are both refused by name, but a size against a KNOWN
-// module that simply has no elastic body (metrics-rail) is not -- a
+// module that simply has no elastic body (storage) is not -- a
 // client sending one size per module is being reasonable, and the merge
 // drops it, which the PUT's own response then shows.
 func validateOverviewLayout(l OverviewLayout) error {

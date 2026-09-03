@@ -57,25 +57,36 @@
   1. THE FIELD takes the screen space left beneath it -- viewport height
      minus the field's own distance down the document, minus a gutter so
      the next section still peeks and invites a scroll -- but never more
-     than the blocks could usefully fill (naturalFleetHeight: every
-     block at the max clamp). "Don't waste room" is the ask; holding a
-     void open under three blocks would be the same waste in the other
+     than the fit actually uses. "Don't waste room" is the ask; holding
+     a void open under three blocks would be the same waste in the other
      direction.
 
   2. THE BLOCKS are square and sized by fitFleetCells -- the largest
-     square that still fits all N in the measured field. Three blocks
+     square that still fits them all in the measured field. Three blocks
      come out big enough to carry their own name label; forty come out
      small. Only when even the floor can't fit does the field scroll.
 
-  The running/stopped SPLIT moved out of the grid in the same pass: it
-  used to be two separately-headed sub-grids, whose heads duplicated,
-  link for link, the summary line directly above them. One field of
-  blocks (running first, then stopped, which stay muted ink and so still
-  read as their own cluster) is what makes a single shared cell size
-  meaningful at all -- two independently-packed sub-grids can't share
-  one -- and nothing was lost: every count and every link the group
-  heads carried is still in the summary line, and each unit's own state
-  is still in its own aria-label.
+  Tuning pass (Scott, on the first cut: "I liked the smaller sized
+  container blocks better. Let's not allow them to get quite so big." +
+  "Keep the stopped containers in a separate section like we had
+  before."). Two changes, and the second is the one with teeth:
+
+  - CELL_MAX came down to 64, chosen so the name tier (56px) is still
+    reachable AT the ceiling -- a block that can never carry its name
+    would have made that whole tier decorative.
+
+  - The running/stopped split is two real GRIDS again, running first and
+    a labelled stopped sub-section under it, rather than one grid with
+    the stopped units muted at its tail. They share ONE cell size and
+    ONE column count -- two independently-packed pitches would read as
+    two unrelated things rather than one fleet -- which is why the group
+    shape is an INPUT to the fit (fitFleetCells takes a count per group,
+    not a total) rather than something applied to its answer. Splitting
+    genuinely costs height: a running group that doesn't fill its last
+    row still ends it, and the stopped label between them is real space.
+    Both are budgeted before the size is chosen, so the rendered stack
+    matches what the fit promised instead of quietly overflowing it. An
+    empty stopped set renders no sub-section and costs no gap.
 -->
 <script>
   import { containerHealthStatus } from '../lib/containerStatus';
@@ -98,17 +109,34 @@
   // CELL_MIN keeps a unit individually tappable at the small end (the
   // 8px-wide floor the fixed-pitch strip already held, squared up);
   // CELL_MAX is where a block stops reading as a block and starts
-  // reading as a card. Between them the size is entirely computed, and
-  // on any fleet big enough for the area to bind (roughly a dozen up,
-  // at this page's width) the ceiling never comes into it at all.
+  // reading as a card. Between them the size is entirely computed.
+  //
+  // The ceiling came DOWN from 120 (Scott, on the first cut: "I liked
+  // the smaller sized container blocks better. Let's not allow them to
+  // get quite so big."). 64 is the size at which a block still carries
+  // its own name -- NAME_CELL_PX is 56, so the label tier stays
+  // reachable at the ceiling rather than becoming decorative -- while a
+  // 46-container fleet reads as a dense wall rather than a page of
+  // cards. It also means the ceiling binds more often: below roughly a
+  // dozen blocks in a full-width field everything simply sits at 64,
+  // and the count only starts driving the size once the area runs out.
   const CELL_GAP = 6;
   const CELL_MIN = 12;
-  const CELL_MAX = 120;
-  // NAME_CELL_PX/ICON_CELL_PX: what a block earns as it grows. Below
-  // NAME_CELL_PX the strip is pure density -- the contribution-graph
-  // reading it has always had -- and a name would be unreadable noise.
+  const CELL_MAX = 64;
+  // NAME_CELL_PX: what a block earns as it grows. Below it the strip is
+  // pure density -- the contribution-graph reading it has always had --
+  // and a name would be unreadable noise. There is deliberately no icon
+  // tier any more: it sat at 96px, which the ceiling above can no longer
+  // reach, and an icon crammed in beside a name at 64px reads as clutter
+  // rather than information. The hover label already shows the icon.
   const NAME_CELL_PX = 56;
-  const ICON_CELL_PX = 96;
+
+  // GROUP_GAP_PX: the vertical space one group boundary costs -- the
+  // stopped sub-section's own label plus its breathing room. It is an
+  // INPUT to the fit (see lib/fleetGrid.ts): the two groups share one
+  // cell size, so the space between them has to be budgeted before the
+  // size is chosen, not subtracted after.
+  const GROUP_GAP_PX = 24;
 
   // FIELD_PEEK_PX: what stays visible below the whole fleet SECTION, so
   // a full-height fleet shows the top of whatever follows rather than
@@ -149,14 +177,25 @@
     }),
   );
 
-  // Running first, then stopped -- the split the two sub-grids used to
-  // draw, kept as ORDER inside one field so a single cell size can span
-  // the whole fleet.
-  let ordered = $derived([...units.filter((u) => !u.stopped), ...units.filter((u) => u.stopped)]);
-  let hoveredUnit = $derived(ordered.find((u) => u.name === hoveredName) ?? null);
+  // Two real groups again (Scott: "Keep the stopped containers in a
+  // separate section like we had before") -- running, then a labelled
+  // stopped sub-section. They are separate GRIDS but share one cell size
+  // and one column count, because two independently-packed pitches would
+  // read as two unrelated things rather than one fleet; fitFleetCells
+  // solves both at once for exactly that reason. An empty stopped set
+  // renders no sub-section at all, not an empty one.
+  let running = $derived(units.filter((u) => !u.stopped));
+  let stopped = $derived(units.filter((u) => u.stopped));
+  let groups = $derived(
+    [
+      { key: 'running', label: null, items: running },
+      { key: 'stopped', label: 'stopped', items: stopped },
+    ].filter((g) => g.items.length > 0),
+  );
+  let hoveredUnit = $derived(units.find((u) => u.name === hoveredName) ?? null);
 
-  let runningCount = $derived(units.filter((u) => !u.stopped).length);
-  let stoppedCount = $derived(units.filter((u) => u.stopped).length);
+  let runningCount = $derived(running.length);
+  let stoppedCount = $derived(stopped.length);
   let activeCount = $derived(units.filter((u) => u.activity.active).length);
   let attentionCount = $derived(units.filter((u) => !u.stopped && u.status !== 'good').length);
   let attentionStatuses = $derived.by(() => {
@@ -228,17 +267,19 @@
   let offeredHeight = $derived(Math.max(GRID_MIN_PX, Math.min(GRID_MAX_PX, spaceBeneath)));
   let fit = $derived(
     fitFleetCells({
-      count: ordered.length,
+      counts: groups.map((g) => g.items.length),
       width: fieldWidth,
       height: offeredHeight,
       gap: CELL_GAP,
+      groupGap: GROUP_GAP_PX,
       min: CELL_MIN,
       max: CELL_MAX,
     }),
   );
-  let gridHeight = $derived(Math.max(GRID_MIN_PX, Math.min(offeredHeight, fleetGridHeight(fit, CELL_GAP))));
+  let fieldHeight = $derived(
+    Math.max(GRID_MIN_PX, Math.min(offeredHeight, fleetGridHeight(fit, CELL_GAP, GROUP_GAP_PX))),
+  );
   let showNames = $derived(fit.cell >= NAME_CELL_PX);
-  let showIcons = $derived(fit.cell >= ICON_CELL_PX);
 
   function ariaLabel(unit) {
     const meaningfulHealth = unit.health === 'unhealthy' || unit.health === 'starting';
@@ -284,49 +325,57 @@
     </div>
     <a class="fleet-strip__link" href="#/containers">View all <span aria-hidden="true">&rarr;</span></a>
   </div>
-  <!-- The grid carries the computed height and the field just wraps it
-    (see the auto-sizing pass); the grid only ever scrolls when even the
-    min cell couldn't fit, which fitFleetCells reports rather than the
-    CSS guessing at it. -->
+  <!-- The STACK carries the computed height and is the measured element
+    (see the auto-sizing pass); the field just wraps it. Both grids sit
+    inside it at one shared pitch, separated by the stopped section's own
+    label, whose height IS the group gap the fit budgeted -- so the CSS
+    and the arithmetic can't drift apart. It only ever scrolls when even
+    the min cell couldn't fit, which fitFleetCells reports rather than
+    the CSS guessing at it. -->
   <div class="fleet-strip__field">
-    <ul
-      class="fleet-strip"
-      class:fleet-strip--scroll={fit.overflow}
-      style={`--cell:${fit.cell}px; --cell-gap:${CELL_GAP}px; --cols:${Math.max(1, fit.cols)}; height:${gridHeight}px`}
-      aria-label={`Container fleet, ${ordered.length} total`}
+    <div
+      class="fleet-strip__stack"
+      class:fleet-strip__stack--scroll={fit.overflow}
+      style={`--cell:${fit.cell}px; --cell-gap:${CELL_GAP}px; --cols:${Math.max(1, fit.cols)}; --group-gap:${GROUP_GAP_PX}px; height:${fieldHeight}px`}
+      role="group"
+      aria-label={`Container fleet, ${units.length} total`}
       data-cell={fit.cell}
       bind:this={stripEl}
     >
-      {#each ordered as u, i (u.name)}
-        <li>
-          <a
-            class="fleet-unit"
-            class:fleet-unit--stopped={u.stopped}
-            class:fleet-unit--active={u.activity.active}
-            class:fleet-unit--busy={u.activity.busy}
-            class:fleet-unit--warning={!u.stopped && u.status === 'warning'}
-            class:fleet-unit--serious={!u.stopped && u.status === 'serious'}
-            class:fleet-unit--critical={!u.stopped && u.status === 'critical'}
-            class:fleet-unit--named={showNames}
-            href={`#/containers/${encodeURIComponent(u.name)}`}
-            aria-label={ariaLabel(u)}
-            data-metric={u.activity.metric ?? undefined}
-            style={u.activity.active ? `--activity-delay: -${i * 137}ms` : undefined}
-            onmouseenter={() => (hoveredName = u.name)}
-            onmouseleave={() => (hoveredName = null)}
-            onfocus={() => (hoveredName = u.name)}
-            onblur={() => (hoveredName = null)}
-          >
-            {#if showIcons}
-              <span class="fleet-unit__icon" aria-hidden="true">
-                <ContainerIcon name={u.name} icon={u.icon} size={Math.round(fit.cell * 0.34)} />
-              </span>
-            {/if}
-            {#if showNames}<span class="fleet-unit__name" aria-hidden="true">{u.name}</span>{/if}
+      {#each groups as group (group.key)}
+        {#if group.label}
+          <a class="fleet-strip__group-label" href="#/containers?state=stopped">
+            <span class="microlabel">{group.items.length} {group.label}</span>
           </a>
-        </li>
+        {/if}
+        <ul class="fleet-strip" aria-label={`${group.key === 'stopped' ? 'Stopped' : 'Running'} containers, ${group.items.length}`}>
+          {#each group.items as u, i (u.name)}
+            <li>
+              <a
+                class="fleet-unit"
+                class:fleet-unit--stopped={u.stopped}
+                class:fleet-unit--active={u.activity.active}
+                class:fleet-unit--busy={u.activity.busy}
+                class:fleet-unit--warning={!u.stopped && u.status === 'warning'}
+                class:fleet-unit--serious={!u.stopped && u.status === 'serious'}
+                class:fleet-unit--critical={!u.stopped && u.status === 'critical'}
+                class:fleet-unit--named={showNames}
+                href={`#/containers/${encodeURIComponent(u.name)}`}
+                aria-label={ariaLabel(u)}
+                data-metric={u.activity.metric ?? undefined}
+                style={u.activity.active ? `--activity-delay: -${i * 137}ms` : undefined}
+                onmouseenter={() => (hoveredName = u.name)}
+                onmouseleave={() => (hoveredName = null)}
+                onfocus={() => (hoveredName = u.name)}
+                onblur={() => (hoveredName = null)}
+              >
+                {#if showNames}<span class="fleet-unit__name" aria-hidden="true">{u.name}</span>{/if}
+              </a>
+            </li>
+          {/each}
+        </ul>
       {/each}
-    </ul>
+    </div>
   </div>
   <div class="fleet-strip__label" class:fleet-strip__label--visible={!!hoveredUnit}>
     {#if hoveredUnit}
@@ -427,8 +476,8 @@
   .fleet-strip__link:hover {
     color: var(--accent-strong);
   }
-  /* The field is only the panel around the grid -- its height comes
-     from the grid's own inline height, which is the fit's answer in
+  /* The field is only the panel around the stack -- its height comes
+     from the stack's own inline height, which is the fit's answer in
      block rows. Nothing here derives a WIDTH from content, which is
      what keeps the ResizeObserver from feeding itself. */
   .fleet-strip__field {
@@ -437,6 +486,38 @@
     border: 1px solid color-mix(in oklab, var(--border) 78%, transparent);
     border-radius: 9px;
     background: var(--surface-soft);
+  }
+  /* The stack holds both groups at one pitch. No `gap` of its own: the
+     stopped label's own height IS the group gap the fit budgeted
+     (--group-gap), so the rendered height matches fleetGridHeight
+     exactly rather than approximately. */
+  .fleet-strip__stack {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
+  /* Only when even the min cell couldn't fit -- fitFleetCells says so,
+     the CSS doesn't guess. Anywhere above that floor the blocks shrink
+     instead, so a fleet never scrolls while it still had size to give. */
+  .fleet-strip__stack--scroll {
+    overflow-y: auto;
+  }
+  /* The stopped section's own heading, sized to the exact gap the fit
+     reserved for it. It doubles as the link into the filtered Containers
+     view, the same destination the summary line's "N stopped" carries --
+     one vocabulary, two places to reach it from. */
+  .fleet-strip__group-label {
+    display: flex;
+    align-items: flex-end;
+    height: var(--group-gap, 24px);
+    padding-bottom: 0.3rem;
+    box-sizing: border-box;
+    color: inherit;
+    text-decoration: none;
+  }
+  .fleet-strip__group-label:hover .microlabel {
+    color: var(--accent-strong);
   }
   /* A plain <ul>/<li> pair -- not a <div role="list">/<a role="listitem">
      one -- carries list/listitem semantics implicitly and correctly: an
@@ -460,13 +541,6 @@
     list-style: none;
     margin: 0;
     padding: 0;
-    overflow: hidden;
-  }
-  /* Only when even the min cell couldn't fit -- fitFleetCells says so,
-     the CSS doesn't guess. Anywhere above that floor the blocks shrink
-     instead, so a fleet never scrolls while it still had size to give. */
-  .fleet-strip--scroll {
-    overflow-y: auto;
   }
   .fleet-strip li {
     display: flex;
@@ -488,22 +562,14 @@
   .fleet-unit:focus-visible {
     filter: brightness(1.3);
   }
-  /* A block only earns a name once it's genuinely big (NAME_CELL_PX),
-     and its icon at ICON_CELL_PX -- below those the strip is pure
-     density and either would be unreadable noise. */
+  /* A block only earns a name once it's genuinely big (NAME_CELL_PX) --
+     below that the strip is pure density and a name would be
+     unreadable noise. */
   .fleet-unit--named {
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: flex-end;
-    gap: 0.2rem;
-    padding: 0.3rem;
+    align-items: flex-end;
+    padding: 0.28rem;
     border-radius: 4px;
-  }
-  .fleet-unit__icon {
-    display: flex;
-    margin-bottom: auto;
-    opacity: 0.85;
   }
   .fleet-unit__name {
     width: 100%;

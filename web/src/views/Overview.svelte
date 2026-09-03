@@ -1023,16 +1023,6 @@
   <div class="overview__visual-slot overview__visual-slot--fleet">
     <FleetStrip containers={fleetContainers} {hostMemBytes} />
   </div>
-  {#if baySchematicEntries.length > 0}
-    <div class="overview__visual-slot">
-      <BaySchematic
-        entries={baySchematicEntries}
-        summary={closingLine}
-        stateLine={arrayStateSentence}
-        warmestLine={hottestSentence}
-      />
-    </div>
-  {/if}
 {/snippet}
 
 <!-- eyeIcon: the hide/show toggle's own glyph, drawn rather than
@@ -1188,57 +1178,87 @@
         </div>
       {/if}
     </div>
-  {:else if id === 'metrics-rail'}
-    <div class="card overview__metrics-rail">
-      <StatTile
-        bare
-        href="#/top/cpu"
-        label="CPU"
-        liveValue={host['cpu.total'] ?? 0}
-        formatValue={fmtPct}
-        sparklinePoints={cpuRing.points}
-        bandFor={(v) => band('host.cpu', v)}
-      />
-      <StatTile
-        bare
-        href="#/top/mem"
-        label="Memory"
-        liveValue={host['mem.used_pct'] ?? 0}
-        formatValue={fmtPct}
-        sparklinePoints={memRing.points}
-        bandFor={(v) => band('host.mem', v)}
-      />
-      <StatTile
-        bare
-        href="#/top/net"
-        label="Network"
-        liveValue={netRx}
-        formatValue={(v) => `↓ ${fmtRate(v)}`}
-        sparklinePoints={netRxRing.points}
-        liveValue2={netTx}
-        value2Points={netTxRing.points}
-        formatValue2={fmtRate}
-        label2="↑"
-      />
-      <StatTile
-        bare
-        href="#/top/io"
-        label="Disk IO"
-        liveValue={ioRead}
-        formatValue={(v) => `r ${fmtRate(v)}`}
-        sparklinePoints={ioReadRing.points}
-        liveValue2={ioWrite}
-        value2Points={ioWriteRing.points}
-        formatValue2={fmtRate}
-        label2="w"
-      />
+  {:else if id === 'storage'}
+    <!-- The bay schematic, a rearrangeable module since the rail took
+      its pinned place at the top of the page. BaySchematic renders
+      nothing at all for an array with no filesystem-bearing members,
+      which in edit mode would leave a draggable card with no body -- so
+      the wrapper says what it is either way. -->
+    <div class="card overview__storage" class:overview__storage--bare={baySchematicEntries.length > 0}>
+      {#if baySchematicEntries.length > 0}
+        <BaySchematic
+          entries={baySchematicEntries}
+          summary={closingLine}
+          stateLine={arrayStateSentence}
+          warmestLine={hottestSentence}
+        />
+      {:else}
+        <span class="microlabel">Storage array</span>
+        <p class="microlabel overview__storage-empty">No array members reporting yet.</p>
+      {/if}
     </div>
   {/if}
+{/snippet}
+
+<!-- metricsRail: the four host tiles, PINNED at the very top of the page
+  (Scott: "Move the disk storage section down so that the CPU/Mem/Net/IO
+  metrics are at the top of the overview page"). It is deliberately no
+  longer a Customize module -- see OVERVIEW_MODULES' own doc for the swap
+  and what it costs a saved layout. As a full-width row its four tiles
+  sit side by side rather than stacked, which is the only change to the
+  rail itself. -->
+{#snippet metricsRail()}
+  <div class="card overview__metrics-rail">
+    <StatTile
+      bare
+      href="#/top/cpu"
+      label="CPU"
+      liveValue={host['cpu.total'] ?? 0}
+      formatValue={fmtPct}
+      sparklinePoints={cpuRing.points}
+      bandFor={(v) => band('host.cpu', v)}
+    />
+    <StatTile
+      bare
+      href="#/top/mem"
+      label="Memory"
+      liveValue={host['mem.used_pct'] ?? 0}
+      formatValue={fmtPct}
+      sparklinePoints={memRing.points}
+      bandFor={(v) => band('host.mem', v)}
+    />
+    <StatTile
+      bare
+      href="#/top/net"
+      label="Network"
+      liveValue={netRx}
+      formatValue={(v) => `↓ ${fmtRate(v)}`}
+      sparklinePoints={netRxRing.points}
+      liveValue2={netTx}
+      value2Points={netTxRing.points}
+      formatValue2={fmtRate}
+      label2="↑"
+    />
+    <StatTile
+      bare
+      href="#/top/io"
+      label="Disk IO"
+      liveValue={ioRead}
+      formatValue={(v) => `r ${fmtRate(v)}`}
+      sparklinePoints={ioReadRing.points}
+      liveValue2={ioWrite}
+      value2Points={ioWriteRing.points}
+      formatValue2={fmtRate}
+      label2="w"
+    />
+  </div>
 {/snippet}
 
 <div class="overview">
   <h1 class="page-title">Overview</h1>
   <SourcesBanner sources={live.frame?.sources ?? {}} />
+
+  {@render metricsRail()}
 
   <div class="card overview__headline-zone" class:overview__headline-zone--clear={overviewStatus.ok}>
     <div class="overview__headline-row">
@@ -1763,17 +1783,16 @@
     padding-bottom: 1rem;
   }
 
-  /* --- Visuals band: the fleet strip + bay schematic at full page
-     width, side by side once there's room for two real modules
-     (>=64rem -- at the app's usual 48rem split the sidebar is already
-     eating ~15rem, which would squeeze each module under ~24rem),
-     stacked below that. The slots flex equally; each component already
-     fills its slot (width: 100%).
+  /* --- Visuals band: the fleet strip, at full page width. It was a
+     two-slot row (fleet beside the bay schematic) until the schematic
+     became a Customize module; the slot machinery stays because the
+     band is still the thing that owns the fleet's own width, and one
+     flex child at `flex: 1 1 0` spans it exactly.
 
-     Two class names, one rule set: the band is now the same row in both
-     page states (the counts-and-fleet pass), and which state it is
-     rendered in stays legible in the DOM rather than being erased into
-     a single neutral name. ---- */
+     Two class names, one rule set: the band is the same row in both
+     page states, and which state it is rendered in stays legible in the
+     DOM rather than being erased into a single neutral name -- the
+     all-clear specs read exactly that difference. ---- */
   .overview__clear-band,
   .overview__status-band {
     display: flex;
@@ -1792,15 +1811,6 @@
     .overview__visual-slot {
       flex: none;
       width: 100%;
-    }
-    /* Stacked, the fleet goes LAST. Its own height is "whatever is left
-       between here and the bottom of the viewport" (FleetStrip's field
-       measurement), which is only true when nothing of substance is
-       below it -- above the schematic it would push it off the screen
-       entirely. Side by side there is nothing beneath either one, so
-       the fleet keeps its natural first position. */
-    .overview__visual-slot--fleet {
-      order: 2;
     }
   }
 
@@ -1858,11 +1868,76 @@
     }
   }
 
+  /* --- Metrics rail: pinned at the top of the page now, so a ROW of
+     four equal tiles rather than the narrow lane's stack. Each tile
+     keeps its own label + value + sparkline; they just sit beside each
+     other. Below the app's usual mobile split the row would give each
+     tile ~90px, which its paired value+sparkline cannot use, so it
+     folds to two-up and then to the original stack. ------------- */
   .overview__metrics-rail {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.6rem 1.6rem;
+    min-width: 0;
+    padding: 1rem 1.2rem;
+  }
+  /* StatTile's bare mode draws a hairline UNDER each tile -- the seam
+     between rows of a stack. Side by side that reads as four
+     underlines, so the row takes the seam off and lets the column gap
+     do the separating. The tiles' own sparkline height is untouched:
+     96px is a deliberate number ("not tall enough for the graphs to
+     look good" at the previous 52), and a wider tile is no reason to
+     take it back. */
+  .overview__metrics-rail :global(.stat-tile--bare) {
+    padding: 0;
+    border-bottom: none;
+  }
+  /* And its label/value row stops pushing the two to opposite ends.
+     Across a full-width rail that put each tile's VALUE hard against
+     the next tile's LABEL -- "15.9%  MEMORY" reads as one pair and the
+     column it belongs to is anyone's guess. Grouped at the left, each
+     tile is unambiguously its own. */
+  .overview__metrics-rail :global(.stat-tile__row) {
+    justify-content: flex-start;
+    gap: 0.6rem;
+  }
+  @media (max-width: 63.9375rem) {
+    .overview__metrics-rail {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 30rem) {
+    .overview__metrics-rail {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  /* --- Storage: the bay schematic's own module wrapper. The schematic
+     brings its whole card body -- border, padding, background, head,
+     device grid, hover label -- so whenever it renders, the wrapper
+     carries NO chrome of its own: a card inside a card is two borders
+     saying one thing. It keeps the `card` class regardless, because the
+     band's drag rules and edit-mode chrome select on it.
+
+     The exception is an array with nothing to draw, where the wrapper
+     IS the card and says what the module is -- otherwise edit mode
+     would offer a grip attached to nothing. ---------------------- */
+  .overview__storage {
     display: flex;
     flex-direction: column;
+    gap: 0.6rem;
     min-width: 0;
     padding: 1.2rem;
+  }
+  .overview__storage--bare {
+    padding: 0;
+    gap: 0;
+    border: none;
+    background: none;
+    box-shadow: none;
+  }
+  .overview__storage-empty {
+    margin: 0;
   }
 
   /* --- Attention: plain content, connected to the headline by

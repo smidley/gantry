@@ -46,7 +46,7 @@
   import { debounce } from '../lib/debounce';
   import { live } from '../lib/sse.svelte';
   import { acks } from '../lib/acks.svelte';
-  import { deriveOverviewStatus } from '../lib/overviewStatus';
+  import { deriveOverviewStatus, ackKeyFor } from '../lib/overviewStatus';
   import { alertsBucketAnomalies } from '../lib/attentionCounts';
   import { unhealthyContainerNames } from '../lib/containerStatus';
   import EventFeedItem from '../components/EventFeedItem.svelte';
@@ -117,6 +117,18 @@
     }),
   );
   let needsYouAnomalies = $derived(alertsBucketAnomalies(overviewStatus.anomalies));
+
+  // anomalyRowKey: a stable identity for the strip's keyed each -- the
+  // ack identity when one exists, else the alert's own rule+entity pair
+  // (ackKeyFor is deliberately null for 'alert': silences, not acks, are
+  // that system's quiet mechanism). Index keys would let a row's own
+  // component state (an open Ack-preset menu) migrate onto whichever
+  // anomaly slides into that position when an earlier row is acked away.
+  function anomalyRowKey(a) {
+    const k = ackKeyFor(a);
+    if (k) return `${k.kind}:${k.entity}`;
+    return a.kind === 'alert' ? `alert:${a.ruleId}:${a.entity}` : a.kind;
+  }
 
   let selectedKinds = $state(new Set());
   let entityFilter = $state('');
@@ -345,7 +357,7 @@
     <section class="card events-view__attention">
       <span class="microlabel">Needs you</span>
       <div class="events-view__attention-rows">
-        {#each needsYouAnomalies as anomaly, i (i)}
+        {#each needsYouAnomalies as anomaly (anomalyRowKey(anomaly))}
           <div class="events-view__attention-row">
             <CalloutRow {anomaly} />
           </div>

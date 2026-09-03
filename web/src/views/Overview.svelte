@@ -132,6 +132,38 @@
      fleet strip is handed each container's whole metrics bag plus the
      host memory total, rather than a hand-picked cpu/mem pair.
 
+  Unified-columns pass (Scott, on the dead block the pass below left
+  under the fleet): the status band and the modules band are ONE band
+  now. Everything under the page header is a single two-lane flow --
+  each lane a continuous column, top to bottom:
+
+    WIDE lane:   headline+chips (pinned) / fleet (pinned) / the
+                 wide-lane modules in saved order
+    NARROW lane: metrics rail (pinned)   / the narrow-lane modules in
+                 saved order
+
+  The gap is gone by construction rather than by measurement: the wide
+  lane's first module starts under the FLEET, not under whichever of
+  the two columns happened to be taller. Nothing waits on the rail any
+  more, so its height stops being a layout input at all.
+
+  What the pinned heads are and are not: they are ordinary lane children
+  wrapped in `overview__pinned`, they are absent from the layout
+  document, they carry no grip, eye or size switcher, and captureGeometry
+  cannot see them (it collects `:scope > .overview__module` only) -- so a
+  drag can neither move them nor land above them, and a cross-lane drop
+  lands under the rail / under the fleet. What they DO now share with
+  the modules is width: the saved column split governs the whole page,
+  the rail included.
+
+  Two rules this retires. There is no "status band" or "clear band" in
+  the DOM any more (the all-clear state is the headline CARD's own
+  modifier, which it always was), and there is no adaptive band collapse
+  to reclaim vertical space -- a continuous flow has none to reclaim,
+  because nothing was being held open. And an emptied lane no longer
+  disappears: every lane has a pinned head, so none can empty, and the
+  split holds wherever the owner left it.
+
   Pills-and-top-right pass -- two asks that turn out to be one layout:
 
   1. "Container fleet boxes should go back to being rectangular. The
@@ -746,13 +778,14 @@
   let layoutIsDefault = $derived(isDefaultOverviewLayout(layoutDoc));
   let dragMotionMs = $derived(motion.reduced ? 0 : DRAG_MOTION_MS);
 
-  // Rule 2 in the top-of-file doc: an empty lane isn't a lane. In edit
-  // mode both always render (an emptied lane still has to be a drop
-  // target, or the last module dragged out of it could never go back);
-  // in normal mode the empty one is simply absent, and the survivor --
-  // the only flex child left -- takes the whole band on its own.
-  let showWideLane = $derived(editing || wideIds.length > 0);
-  let showNarrowLane = $derived(editing || narrowIds.length > 0);
+  // Both lanes always render now, and there is no longer a rule that
+  // could hide one. Each lane owns a PINNED head (laneHead: the headline
+  // + fleet on the wide side, the metrics rail on the narrow one), so a
+  // lane with zero modules in it is still a real column with real
+  // content -- "an empty lane isn't a lane" described a band that could
+  // genuinely empty, and this one cannot. Dragging the last module out
+  // of a lane therefore leaves the split exactly where it was rather
+  // than handing the whole width to the survivor.
 
   // --- Column split -------------------------------------------------------
   //
@@ -764,20 +797,23 @@
   // sixty.
   //
   // laneFlex feeds two custom properties on the lanes row rather than a
-  // width per lane: `flex-basis: 0` plus a grow factor is what makes a
-  // LONE lane still take the whole band (the visibility-driven expansion,
-  // rule 2 in the top-of-file doc) without a special case -- see
-  // overviewLaneFlex's own doc. Mobile ignores both properties outright
-  // (the lanes stack, `flex: none`).
+  // width per lane -- see overviewLaneFlex's own doc. Mobile ignores both
+  // properties outright (the lanes stack, `flex: none`).
+  //
+  // The split now governs the WHOLE page below the header, pinned heads
+  // included: the metrics rail is the narrow lane's own head, so its
+  // width is the narrow lane's width and moving the divider resizes it
+  // along with everything under it. That is deliberate -- the rail was
+  // briefly a fixed 23rem column of its own, which meant the one control
+  // this page offers over its columns silently did not apply to a third
+  // of what was on screen.
   let dividerRatio = $state(null);
   let laneRatio = $derived(dividerRatio ?? layoutDoc.ratio);
   let laneFlex = $derived(overviewLaneFlex(laneRatio));
   let laneRatioPct = $derived(Math.round(laneRatio * 100));
-  // The divider only exists while BOTH lanes do: there is no split to
-  // adjust when one lane has the band to itself, and leaving a handle
-  // floating over the middle of a single-lane band would suggest
-  // otherwise.
-  let showDivider = $derived(editing && showWideLane && showNarrowLane);
+  // Both lanes always exist now (each has a pinned head), so the divider
+  // is gated on edit mode alone.
+  let showDivider = $derived(editing);
 
   onMount(() => {
     overviewLayout.ensureLoaded();
@@ -847,15 +883,29 @@
   // doc. slotTops are LANE-LOCAL (the indicator is positioned inside the
   // lane) and there is always one more of them than there are midpoints:
   // above the first card, one per gap, and below the last.
+  //
+  // The PINNED heads are excluded by construction: the query only ever
+  // collects `:scope > .overview__module`, and a pinned card is an
+  // `overview__pinned` sibling. So they contribute no midpoint (a drop
+  // can never index above them) and no slot. The one case that needed
+  // saying out loud is a lane holding ONLY its head -- with no cards
+  // there is no first card to hang slotTops[0] off, and a bare 0 would
+  // draw the indicator across the head itself, promising a landing spot
+  // the drop cannot honour. headFloor is that lane's real floor: the
+  // bottom of its last pinned card, plus the lane's own gap.
   function captureGeometry(draggedId) {
     const columns = [];
     if (!lanesEl) return columns;
     for (const lane of lanesEl.querySelectorAll('[data-lane]')) {
       const laneRect = lane.getBoundingClientRect();
+      const pinned = [...lane.querySelectorAll(':scope > .overview__pinned')];
+      const laneGap = parseFloat(getComputedStyle(lane).rowGap) || 0;
+      const headFloor =
+        pinned.length > 0 ? pinned[pinned.length - 1].getBoundingClientRect().bottom - laneRect.top + laneGap : 0;
       const cards = [...lane.querySelectorAll(':scope > .overview__module')]
         .filter((el) => el.dataset.module !== draggedId)
         .map((el) => el.getBoundingClientRect());
-      const slotTops = [cards.length > 0 ? cards[0].top - laneRect.top : 0];
+      const slotTops = [cards.length > 0 ? cards[0].top - laneRect.top : headFloor];
       for (let i = 1; i < cards.length; i++) {
         slotTops.push((cards[i - 1].bottom + cards[i].top) / 2 - laneRect.top);
       }
@@ -1040,48 +1090,59 @@
   });
 </script>
 
-<!-- statusColumn: the status band's LEFT column -- the headline card
-  (with its count chips when there are any) and, directly beneath it,
-  the fleet strip that is the headline's own countable evidence. The two
-  are one column rather than two page-level rows because the band's
-  other column is the pinned metrics rail, which is taller than either
-  of them; keeping the pair together is what the headline's
-  proximity-only connection to its evidence has always depended on, and
-  it is the order the stacked breakpoint inherits for free.
+<!-- laneHead: the PINNED cards at the top of each lane -- the headline
+  card and the fleet strip in the wide lane, the metrics rail in the
+  narrow one. They are not modules: they carry no module wrapper, no
+  data-module, no grip, no eye and no size switcher, they are absent
+  from the layout document entirely, and captureGeometry never sees them
+  (it only ever collects `:scope > .overview__module`), so a drag can
+  neither move them nor land above them.
 
-  The fleet keeps its own __visual-slot wrapper: the band still owns the
-  fleet's width, and one flex child at `flex: 1 1 0` spans the column
-  exactly. -->
-{#snippet statusColumn()}
-  <div class="overview__status-col">
-    <div class="card overview__headline-zone" class:overview__headline-zone--clear={overviewStatus.ok}>
-      <div class="overview__headline-row">
-        <span
-          class="overview__headline-dot"
-          class:overview__headline-dot--pulse={!overviewStatus.ok}
-          style={`background:${statusColor}; color:${statusColor}`}
-          aria-hidden="true"
-        ></span>
-        <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
+  They live INSIDE the lanes rather than in a band of their own because
+  that is the whole point of the unification: a lane is one continuous
+  column, so the wide lane's modules flow directly under the fleet
+  instead of waiting for the taller rail column beside them to finish.
+
+  The `overview__pinned` wrapper is the same shape `overview__module`
+  gives a draggable card -- a plain stretch column -- so both kinds of
+  lane child are laid out identically and the lane's own gap is the only
+  thing between them. -->
+{#snippet laneHead(column)}
+  {#if column === 'wide'}
+    <div class="overview__pinned overview__pinned--headline" data-pinned="headline">
+      <div class="card overview__headline-zone" class:overview__headline-zone--clear={overviewStatus.ok}>
+        <div class="overview__headline-row">
+          <span
+            class="overview__headline-dot"
+            class:overview__headline-dot--pulse={!overviewStatus.ok}
+            style={`background:${statusColor}; color:${statusColor}`}
+            aria-hidden="true"
+          ></span>
+          <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
+        </div>
+        {#if !overviewStatus.ok}
+          <section class="overview__attention">
+            <span class="microlabel">Needs a look</span>
+            <div class="overview__chips">
+              {#each chips as chip (chip.bucket)}
+                <a class="overview__chip" href={chip.href} aria-label={chip.ariaLabel} data-chip={chip.bucket}>
+                  <span class="overview__chip-count tabular-nums" aria-hidden="true">{chip.count}</span>
+                  <span class="overview__chip-noun" aria-hidden="true">{chip.noun}</span>
+                </a>
+              {/each}
+            </div>
+          </section>
+        {/if}
       </div>
-      {#if !overviewStatus.ok}
-        <section class="overview__attention">
-          <span class="microlabel">Needs a look</span>
-          <div class="overview__chips">
-            {#each chips as chip (chip.bucket)}
-              <a class="overview__chip" href={chip.href} aria-label={chip.ariaLabel} data-chip={chip.bucket}>
-                <span class="overview__chip-count tabular-nums" aria-hidden="true">{chip.count}</span>
-                <span class="overview__chip-noun" aria-hidden="true">{chip.noun}</span>
-              </a>
-            {/each}
-          </div>
-        </section>
-      {/if}
     </div>
-    <div class="overview__visual-slot overview__visual-slot--fleet">
+    <div class="overview__pinned overview__pinned--fleet" data-pinned="fleet">
       <FleetStrip containers={fleetContainers} {hostMemBytes} />
     </div>
-  </div>
+  {:else}
+    <div class="overview__pinned overview__pinned--rail" data-pinned="metrics-rail">
+      {@render metricsRail()}
+    </div>
+  {/if}
 {/snippet}
 
 <!-- eyeIcon: the hide/show toggle's own glyph, drawn rather than
@@ -1111,6 +1172,7 @@
   completely still. -->
 {#snippet moduleLane(column, ids)}
   <div class="overview__modules-lane overview__modules-{column}" data-lane={column}>
+    {@render laneHead(column)}
     {#each ids as id (id)}
       <div
         class="overview__module"
@@ -1324,28 +1386,6 @@
   <h1 class="page-title">Overview</h1>
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
-  <!-- The status band is two columns again, but split by CONTENT this
-    time rather than by "text beside pictures": everything about this
-    machine's own state -- the headline, its chips, and the fleet that
-    is the headline's evidence -- reads down the left, and the four host
-    instruments sit in their own pinned column on the right (Scott:
-    "CPU/mem/net/io should be pinned at the top right"). Which page
-    state the band is in stays legible in the DOM (__status-band vs
-    __clear-band, one shared rule set) exactly as before -- the
-    all-clear specs read that difference. Below 64rem both columns
-    collapse into the page's single stack, headline first. -->
-  {#if overviewStatus.ok}
-    <div class="overview__clear-band">
-      {@render statusColumn()}
-      {@render metricsRail()}
-    </div>
-  {:else}
-    <div class="overview__status-band">
-      {@render statusColumn()}
-      {@render metricsRail()}
-    </div>
-  {/if}
-
   <div class="overview__modules-band" class:overview__modules-band--editing={editing}>
     {#if canCustomize}
       <div class="overview__modules-bar">
@@ -1386,9 +1426,7 @@
       style={`--lane-ratio:${laneRatio}; --lane-flex-wide:${laneFlex.wide}; --lane-flex-narrow:${laneFlex.narrow}`}
       bind:this={lanesEl}
     >
-      {#if showWideLane}
-        {@render moduleLane('wide', wideIds)}
-      {/if}
+      {@render moduleLane('wide', wideIds)}
       {#if showDivider}
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <!-- svelte-ignore a11y_no_noninteractive_element_interactions -- a
@@ -1419,9 +1457,7 @@
           <span class="overview__lane-divider-grip" aria-hidden="true"></span>
         </div>
       {/if}
-      {#if showNarrowLane}
-        {@render moduleLane('narrow', narrowIds)}
-      {/if}
+      {@render moduleLane('narrow', narrowIds)}
     </div>
 
     {#if editing}
@@ -1565,22 +1601,57 @@
     flex-direction: column;
     min-width: 0;
   }
+  /* Mobile: ONE column, and one breakpoint for the whole page -- the
+     lanes' own, which is now the only two-column rule left on it.
+
+     The lanes go `display: contents` rather than stacking as two blocks,
+     so every card becomes a direct child of the single stacked column
+     and can be ORDERED across the lane boundary. That is what puts the
+     metrics rail -- the narrow lane's own head -- directly under the
+     fleet instead of below a leaderboard and an events feed. Reading
+     order down a phone is then headline, the fleet that is its evidence,
+     the four host instruments, and only then the modules: the three
+     pinned things this page exists to answer with, before anything
+     rearrangeable.
+
+     Within each of those two groups the saved arrangement still applies
+     exactly as before -- wide lane's own order, then narrow lane's. The
+     saved SPLIT deliberately does not: a single stacked column has no
+     ratio to honour, and `display: contents` drops the grow factors on
+     the floor for free.
+
+     Safe because EDITING is desktop-only (CUSTOMIZE_MEDIA is 48rem, this
+     query's own boundary): `display: contents` removes the lane's box,
+     which would otherwise take the drop indicator's containing block and
+     the lane's own empty-state with it. Neither can exist down here. */
   @media (max-width: 47.9375rem) {
+    /* align-items goes back to stretch: on the desktop ROW it is
+       flex-start, which is what lets the two lanes have independent
+       heights. Left alone on the stacked COLUMN it becomes a
+       cross-axis rule instead, and every card shrinks to the width of
+       its own content. */
     .overview__modules-lanes {
       flex-direction: column;
-      gap: 1.5rem;
+      align-items: stretch;
+      gap: 1rem;
     }
-    /* Mobile stacks the lanes, so the saved arrangement still applies
-       here -- wide lane first, then narrow, each in its own saved order.
-       The saved SPLIT deliberately does not: two full-width stacked
-       lanes have no ratio to honour, so `flex: none` simply ignores the
-       custom properties above. Only EDITING is desktop-only (see
-       CUSTOMIZE_MEDIA), which is also why the divider can never appear
-       down here -- but it is belt-and-braces'd off anyway, since a
-       stacked band's "boundary" would be meaningless. */
     .overview__modules-lane {
-      width: 100%;
-      flex: none;
+      display: contents;
+    }
+    .overview__pinned--headline {
+      order: 1;
+    }
+    .overview__pinned--fleet {
+      order: 2;
+    }
+    .overview__pinned--rail {
+      order: 3;
+    }
+    .overview__modules-wide .overview__module {
+      order: 4;
+    }
+    .overview__modules-narrow .overview__module {
+      order: 5;
     }
     .overview__lane-divider {
       display: none;
@@ -1834,58 +1905,18 @@
     padding-bottom: 1rem;
   }
 
-  /* --- Status band: the page's own top row -- headline + chips + fleet
-     down the left, the pinned metrics rail on the right (Scott:
-     "CPU/mem/net/io should be pinned at the top right").
-
-     The right column is a FIXED width rather than the modules band's
-     1.6 : 1 grow split, and the reason is that the rail is the one
-     region on this page whose height cannot answer back. Four
-     fixed-height label+value+sparkline tiles are ~600px tall whatever
-     width they are given, so a proportional column just stretches four
-     sparklines flatter on a wide display while the left column -- a
-     display-type headline and a fixed-pitch pill field that both
-     genuinely read better wider -- gives up the room. 23rem is what the
-     tiles were designed against (the narrow lane they came from sat in
-     the same range) and it leaves the fleet card the balance at 1440px.
-
-     Two class names, one rule set: the band is the same row in both
-     page states, and which state it is rendered in stays legible in the
-     DOM rather than being erased into a single neutral name -- the
-     all-clear specs read exactly that difference. ---- */
-  .overview__clear-band,
-  .overview__status-band {
-    display: flex;
-    align-items: flex-start;
-    gap: 1rem;
-  }
-  .overview__status-col {
+  /* --- Pinned lane heads: the headline card and the fleet at the top of
+     the wide lane, the metrics rail at the top of the narrow one. The
+     wrapper matches overview__module's own shape exactly (a plain
+     stretch column, min-width 0) so a pinned card and a draggable one
+     are laid out identically and the lane's gap is the only thing
+     between them -- what it deliberately does NOT carry is anything
+     from edit mode: no dashed outline, no tools row, no drag
+     transform. ------------------------------------------------- */
+  .overview__pinned {
     display: flex;
     flex-direction: column;
-    gap: 1rem;
     min-width: 0;
-    flex: 1 1 0;
-  }
-  .overview__visual-slot {
-    min-width: 0;
-    flex: 1 1 0;
-  }
-  /* Below 64rem the band is the page's ordinary single stack, and the
-     snippet order is already the one it wants: headline, then the fleet
-     that is its evidence, then the instruments. Putting the ~600px rail
-     between the headline and its own fleet strip would push the
-     countable half of the status sentence a full screen down -- the
-     proximity this page is built on, spent on scroll distance. */
-  @media (max-width: 63.9375rem) {
-    .overview__clear-band,
-    .overview__status-band {
-      flex-direction: column;
-    }
-    .overview__status-col,
-    .overview__visual-slot {
-      flex: none;
-      width: 100%;
-    }
   }
 
   .overview__headline-row {
@@ -1942,32 +1973,26 @@
     }
   }
 
-  /* --- Metrics rail: a STACK of four tiles in the status band's own
-     right column (the top-RIGHT pass -- see the snippet's own doc).
-     This is StatTile's bare mode exactly as it was designed: one tile
-     per row, each separated from the next by the hairline seam the
-     component draws itself, values pushed to the right edge by its own
-     `space-between`. The brief spell as a full-width four-across row
-     needed both of those overridden -- four seams read as underlines,
-     and each tile's right-aligned VALUE landed hard against the next
-     tile's LABEL -- and a stack needs neither override back.
+  /* --- Metrics rail: a STACK of four tiles, pinned at the head of the
+     narrow lane. This is StatTile's bare mode exactly as it was
+     designed: one tile per row, each separated from the next by the
+     hairline seam the component draws itself, values pushed to the
+     right edge by its own `space-between`. The brief spell as a
+     full-width four-across row needed both of those overridden -- four
+     seams read as underlines, and each tile's right-aligned VALUE
+     landed hard against the next tile's LABEL -- and a stack needs
+     neither override back.
 
-     The column's WIDTH is the band's (see its rule above); the rail
-     just fills it, which is why there is no grid template here at all.
-     Stacked, it stays four rows at every width, including the single
-     column the band collapses to below 64rem. ------------- */
+     It declares no width of its own: it is a lane child, so the saved
+     column split sizes it exactly as it sizes every module under it
+     (~275-435px across the ratio's own 0.60-0.75 clamps at 1440px, and
+     the full width of the single stacked column on mobile). Four
+     fixed-height rows at any of those. ------------------------- */
   .overview__metrics-rail {
     display: flex;
     flex-direction: column;
     min-width: 0;
-    flex: 0 0 23rem;
     padding: 1.2rem;
-  }
-  @media (max-width: 63.9375rem) {
-    .overview__metrics-rail {
-      flex: none;
-      width: 100%;
-    }
   }
 
   /* --- Storage: the bay schematic's own module wrapper. The schematic

@@ -8,6 +8,33 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.10] - 2026-09-03
+
+### Changed
+
+- **The container fleet is back to the original rectangular pills.** The
+  auto-sized blocks from 0.1.9 are gone; the strip is the same compact
+  pill grid it had before 0.1.8, with Running and Stopped rows, glow
+  driven by any hot metric (CPU, memory, network, disk or GPU), and
+  container names in the tooltip rather than on the block. (#64)
+- **CPU / memory / network / IO are pinned top-right.** The Overview is
+  one continuous two-lane flow: headline and needs-you counts, the
+  fleet, then the Customize modules on the left; the metrics rail heads
+  the right lane with storage beneath it. The dead space that used to
+  open between the rail and the first module is gone at every column
+  ratio, and on narrow screens the order is headline, fleet, rail, wide
+  modules, narrow modules. (#64)
+
+### Fixed
+
+- **Live IO on the container page now includes array disks.** Reads and
+  writes to `/mnt/diskN` are attributed to the container through the md
+  layer, in the Live IO section and its graph. Mounts served by Unraid's
+  user-share fuse layer (non-exclusive `/mnt/user` shares) cannot be
+  attributed per container because the host daemon does the IO; those
+  are marked as such with a note saying why, instead of reading zero.
+  (#65)
+
 ## [0.1.9] - 2026-09-02
 
 ### Changed

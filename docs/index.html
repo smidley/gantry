@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#090c12">
-  <title>Gantry — Container observability built for Unraid</title>
-  <meta name="description" content="See what your Unraid server is doing, and why. Gantry brings Docker metrics, storage, GPU monitoring, and explainable insights together in one self-hosted container.">
+  <title>Gantry — Docker and server monitoring for Unraid</title>
+  <meta name="description" content="Monitor Docker containers, storage, and GPU usage on your Unraid server. Gantry helps you track down slowdowns and is available in Community Applications.">
   <link rel="canonical" href="https://smidley.github.io/gantry/">
   <meta property="og:type" content="website">
-  <meta property="og:title" content="Gantry — Your Unraid server. In clear view.">
-  <meta property="og:description" content="Docker metrics, storage, GPU monitoring, and explainable insights. One container, on your own server.">
+  <meta property="og:title" content="Gantry — Docker monitoring built for Unraid">
+  <meta property="og:description" content="Monitor containers, disks, and GPU usage on your Unraid server. Install Gantry from Community Applications.">
   <meta property="og:url" content="https://smidley.github.io/gantry/">
   <link rel="icon" href="gantry.svg" type="image/svg+xml">
   <link rel="stylesheet" href="site.css">
@@ -27,46 +27,46 @@
   </header>
   <main id="main">
     <section class="hero wrap" aria-labelledby="hero-title">
-      <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> CONTAINER OBSERVABILITY, BUILT FOR UNRAID</p>
-      <h1 id="hero-title">Your Unraid server.<br><span>In clear view.</span></h1>
-      <p class="hero-copy">Know what’s running. See what’s slowing it down.<br class="desktop-break"> Containers, storage, and the connections between them — all in one place.</p>
+      <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> AVAILABLE IN UNRAID COMMUNITY APPS</p>
+      <h1 id="hero-title">Docker monitoring.<br><span>Built for Unraid.</span></h1>
+      <p class="hero-copy">Track container resource use, check your storage, and find out which workloads are slowing things down.</p>
       <div class="actions">
-        <a class="button primary" href="#install">Get Gantry <span aria-hidden="true">↓</span></a>
-        <a class="button secondary" href="https://github.com/smidley/gantry">Explore on GitHub <span aria-hidden="true">↗</span></a>
+        <a class="button primary" href="#install">Install Gantry <span aria-hidden="true">↓</span></a>
+        <a class="button secondary" href="https://github.com/smidley/gantry">View on GitHub <span aria-hidden="true">↗</span></a>
       </div>
       <p class="hero-note">Self-hosted <span>·</span> Open source <span>·</span> One Docker container</p>
       <figure class="dashboard">
         <div class="frame-bar"><span class="frame-dots" aria-hidden="true">● ● ●</span><span>GANTRY / SYSTEM OVERVIEW</span><span class="frame-label">DARK THEME</span></div>
         <a href="screenshots/overview-dark.png" aria-label="Open full-size Gantry overview screenshot"><img src="screenshots/overview-dark.png" width="2880" height="1800" alt="Gantry’s dark dashboard showing container health, resource contention insights, and Unraid storage status" fetchpriority="high"></a>
-        <figcaption>One view of the whole machine. <span>Actual Gantry interface with example data.</span></figcaption>
+        <figcaption>The overview dashboard. <span>Screenshots use example data.</span></figcaption>
       </figure>
     </section>
-    <section class="principles wrap" aria-label="Made for your server">
-      <div><span class="mini-label">DEPLOY SIMPLY</span><p>One container.<br>No agents to pair.</p></div>
-      <div><span class="mini-label">KEEP IT LOCAL</span><p>Your server. Your data.<br>No cloud account.</p></div>
-      <div><span class="mini-label">SEE THE CONTEXT</span><p>Beyond the numbers.<br>Understand the slowdown.</p></div>
+    <section class="principles wrap" aria-label="How Gantry runs">
+      <div><span class="mini-label">INSTALL</span><p>A single Docker container.</p></div>
+      <div><span class="mini-label">STORAGE</span><p>History stays on your server.</p></div>
+      <div><span class="mini-label">ACCESS</span><p>A local login. No cloud account.</p></div>
     </section>
     <section id="features" class="features wrap" aria-labelledby="features-title">
-      <div class="section-heading"><p class="eyebrow">01 / THE WHOLE PICTURE</p><h2 id="features-title">Less hunting.<br>More understanding.</h2><p>A busy server has a lot to tell you. Gantry connects container activity to what’s happening on the host.</p></div>
+      <div class="section-heading"><p class="eyebrow">01 / FEATURES</p><h2 id="features-title">Keep track of what<br>your server is doing.</h2><p>Check resource use across your containers, then open one for its history, logs, and storage details.</p></div>
       <div class="feature-grid">
-        <article><span class="feature-number">01</span><h3>Every container, accounted for.</h3><p>Live CPU, memory, network, disk IO, and GPU usage. Find the heavy hitters, compare containers, and follow their history down to the logs.</p><div class="tags"><span>Live metrics</span><span>Up to 30 days of history</span></div></article>
-        <article><span class="feature-number">02</span><h3>Your storage, in context.</h3><p>Array and pool health, parity progress, drive temperatures, and errors. See which containers share a disk and where the pressure is building.</p><div class="tags"><span>Array & pools</span><span>Per-drive metrics</span></div></article>
-        <article><span class="feature-number">03</span><h3>GPU activity, attributed.</h3><p>See which containers use each GPU engine. Intel and AMD work out of the box; optional Nvidia support adds utilization and VRAM tracking.</p><div class="tags"><span>Intel / AMD / Nvidia</span></div></article>
-        <article><span class="feature-number">04</span><h3>Alerts that bring the evidence.</h3><p>Send alerts to Unraid’s notification center or a webhook. Separate trip and clear thresholds keep noise down; matching insights help explain what happened.</p><div class="tags"><span>Unraid notifications</span><span>Webhooks</span></div></article>
+        <article><span class="feature-number">01</span><h3>Live container metrics</h3><p>See CPU, memory, network, disk IO, and GPU usage for each container. Compare them on the same charts, look back through their history, or open their logs.</p><div class="tags"><span>Live metrics</span><span>Up to 30 days of history</span></div></article>
+        <article><span class="feature-number">02</span><h3>Array and pool status</h3><p>Check parity progress, drive temperatures, capacity, and errors. See which disks your containers use and whether they’re struggling to keep up.</p><div class="tags"><span>Array & pools</span><span>Per-drive metrics</span></div></article>
+        <article><span class="feature-number">03</span><h3>GPU usage by container</h3><p>See which containers are using the GPU, broken down by engine. Intel and AMD need no extra setup. Nvidia support requires the Nvidia runtime and includes VRAM usage.</p><div class="tags"><span>Intel / AMD / Nvidia</span></div></article>
+        <article><span class="feature-number">04</span><h3>Alerts in Unraid</h3><p>Send alerts to Unraid’s notification center or a webhook. Choose when an alert fires and when it clears. If Gantry has found a likely cause, it includes that too.</p><div class="tags"><span>Unraid notifications</span><span>Webhooks</span></div></article>
       </div>
     </section>
     <section class="insights-section" aria-labelledby="insights-title">
       <div class="wrap">
-        <div class="insights-heading"><div><p class="eyebrow">02 / FOLLOW THE CONNECTIONS</p><h2 id="insights-title">Find the reason.<br><span>Not just the spike.</span></h2></div><p>When one container is likely slowing another, Gantry explains the connection in plain language — with a confidence level and the numbers behind it.</p></div>
-        <figure class="detail-shot"><a href="screenshots/insights-light.png" aria-label="Open full-size Gantry Insights screenshot"><img src="screenshots/insights-light.png" width="2880" height="1800" alt="Gantry Insights showing a map of containers and disks alongside evidence of resource contention" loading="lazy" decoding="async"></a><figcaption>Explore the interaction map. Inspect the evidence. Decide what needs attention.</figcaption></figure>
+        <div class="insights-heading"><div><p class="eyebrow">02 / INSIGHTS</p><h2 id="insights-title">Work out what’s<br><span>slowing things down.</span></h2></div><p>A download can saturate a disk while your media server is trying to read from it. Gantry looks for this kind of contention and shows the affected containers, measurements, and how confident it is about the cause.</p></div>
+        <figure class="detail-shot"><a href="screenshots/insights-light.png" aria-label="Open full-size Gantry Insights screenshot"><img src="screenshots/insights-light.png" width="2880" height="1800" alt="Gantry Insights showing a map of containers and disks alongside evidence of resource contention" loading="lazy" decoding="async"></a><figcaption>The Insights view shows which containers share resources and the evidence for each finding.</figcaption></figure>
       </div>
     </section>
     <section class="local-section wrap" aria-labelledby="local-title">
-      <p class="eyebrow">03 / AT HOME ON YOUR SERVER</p>
-      <div class="local-grid"><h2 id="local-title">A small addition.<br>A clearer picture.</h2><div><p>Gantry runs as one container and keeps its history in a local SQLite database. Create a username and password on first launch, and you’re in.</p><p>Monitoring is read-only. Optional Docker housekeeping lets you remove unused images and stopped containers after confirmation. Set <code>GANTRY_READ_ONLY=1</code> to disable cleanup.</p><a class="text-link" href="https://github.com/smidley/gantry/blob/main/docs/install.md">Read the installation reference <span aria-hidden="true">↗</span></a></div></div>
+      <p class="eyebrow">03 / SELF-HOSTED</p>
+      <div class="local-grid"><h2 id="local-title">No extra services<br>to maintain.</h2><div><p>Gantry stores its settings and history in SQLite on your server. There’s no separate database or agent to set up. Create a local username and password the first time you open it.</p><p>Monitoring is read-only. You can also use the Maintenance view to remove unused images and stopped containers, with a confirmation before anything is deleted. Set <code>GANTRY_READ_ONLY=1</code> to disable cleanup.</p><a class="text-link" href="https://github.com/smidley/gantry/blob/main/docs/install.md">Full installation docs <span aria-hidden="true">↗</span></a></div></div>
     </section>
     <section id="install" class="install-section wrap" aria-labelledby="install-title">
-      <div class="install-intro"><p class="eyebrow">04 / GET STARTED</p><h2 id="install-title">Meet your server.<br>Again.</h2><p>Available in Unraid Community Applications.</p><ol class="install-steps"><li>Open the <strong>Apps</strong> tab in Unraid.</li><li>Search for <strong>Gantry</strong> and click <strong>Install</strong>.</li><li>Open the web UI and create your local login.</li></ol><p>The template fills in the mounts and settings. Your dashboard is ready when you are.</p><div class="release-note"><span class="release-dot" aria-hidden="true"></span><div><strong>Prefer a manual install?</strong><p>Use the Docker command, then open <code>http://&lt;your-unraid-ip&gt;:8380/</code>.</p><a href="https://github.com/smidley/gantry/releases">View releases <span aria-hidden="true">↗</span></a></div></div></div>
+      <div class="install-intro"><p class="eyebrow">04 / INSTALL</p><h2 id="install-title">Install Gantry.</h2><p>Available in Unraid Community Applications.</p><ol class="install-steps"><li>Open the <strong>Apps</strong> tab in Unraid.</li><li>Search for <strong>Gantry</strong> and click <strong>Install</strong>.</li><li>Open the web UI and set a username and password.</li></ol><p>The template fills in the required mounts and settings.</p><div class="release-note"><span class="release-dot" aria-hidden="true"></span><div><strong>Manual Docker install</strong><p>Use the Docker command, then open <code>http://&lt;your-unraid-ip&gt;:8380/</code>.</p><a href="https://github.com/smidley/gantry/releases">View releases <span aria-hidden="true">↗</span></a></div></div></div>
       <div class="terminal"><div class="terminal-bar"><span>MANUAL INSTALL / DOCKER</span><button id="copy-install" type="button" hidden>Copy command</button></div><pre tabindex="0" aria-label="Docker installation command"><code id="install-command">docker run -d \
   --name=gantry \
   --label net.unraid.docker.icon=https://raw.githubusercontent.com/smidley/gantry/main/template/gantry-icon.png \
@@ -83,6 +83,6 @@
   ghcr.io/smidley/gantry:latest</code></pre><p id="copy-status" class="copy-status" role="status" aria-live="polite"></p><p class="terminal-note">The update-status mount is optional. If that file is absent on your host, omit its line. <a href="https://github.com/smidley/gantry/blob/main/docs/install.md">Mounts & requirements ↗</a></p></div>
     </section>
   </main>
-  <footer class="footer wrap"><div><a class="brand" href="./"><img src="gantry.svg" width="32" height="32" alt="">Gantry</a><p>Container observability. On your terms.</p></div><nav aria-label="Footer navigation"><a href="https://github.com/smidley/gantry">Source code ↗</a><a href="https://github.com/smidley/gantry/issues">Issues ↗</a><a href="https://github.com/smidley/gantry/blob/main/LICENSE">MIT license ↗</a></nav><p class="independent">An independent open-source project for Unraid.</p></footer>
+  <footer class="footer wrap"><div><a class="brand" href="./"><img src="gantry.svg" width="32" height="32" alt="">Gantry</a></div><nav aria-label="Footer navigation"><a href="https://github.com/smidley/gantry">Source code ↗</a><a href="https://github.com/smidley/gantry/issues">Issues ↗</a><a href="https://github.com/smidley/gantry/blob/main/LICENSE">MIT license ↗</a></nav><p class="independent">An independent open-source project for Unraid.</p></footer>
 </body>
 </html>

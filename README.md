@@ -6,6 +6,8 @@
 
 **A Docker and server monitor built for Unraid. One container. Set a username and password the first time you open it.**
 
+[**Website**](https://smidley.github.io/gantry/) · [**Install**](https://smidley.github.io/gantry/#install)
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f7fe0)](LICENSE)
 [![Container image](https://img.shields.io/badge/image-ghcr.io%2Fsmidley%2Fgantry-475569?logo=docker&logoColor=white)](https://github.com/smidley/gantry/pkgs/container/gantry)
 
@@ -17,7 +19,7 @@ Most self-hosted monitors are a hub plus a per-host agent you deploy and pair �
 
 Gantry monitors read-only — it reads your containers, disks and array and never changes your array configuration. The one thing it can change, only when you ask, is Docker housekeeping from the Maintenance view (clearing stopped containers and unused images), behind a confirmation and disabled entirely by a single switch.
 
-> Gantry is pre-release and under active development. The Community Applications listing is on its way; the `docker run` below works today.
+> Gantry is pre-release and under active development. Install it from Unraid Community Applications, or use the `docker run` command below.
 
 <div align="center">
 <img src="https://raw.githubusercontent.com/smidley/gantry/main/docs/screenshots/overview-light.png" alt="Gantry overview: containers, storage and cross-container insights at a glance" width="100%">
@@ -71,7 +73,7 @@ Gantry monitors read-only — it reads your containers, disks and array and neve
 
 ### Community Applications
 
-Once Gantry is listed, open the **Apps** tab in Unraid, search **Gantry**, and click **Install**. The template pre-fills every mount and flag below, so a stock install needs no edits — install it, open the web UI, done.
+Open the **Apps** tab in Unraid, search **Gantry**, and click **Install**. The template pre-fills every mount and flag below, so a stock install needs no edits — install it, open the web UI, done.
 
 ### docker run
 

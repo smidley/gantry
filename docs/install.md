@@ -10,6 +10,14 @@ The template's icon (`template/gantry-icon.png`) renders from
 `assets/icon/gantry.svg` -- edit the SVG and re-export if it ever needs
 to change.
 
+## Install from Community Applications
+
+Open the **Apps** tab in Unraid, search **Gantry**, and click **Install**.
+The template pre-fills the required mounts and flags. Open Gantry’s web UI
+and create your local username and password on first launch.
+
+For a manual install, use [the equivalent `docker run`](#the-equivalent-docker-run) below.
+
 ## What it mounts, and why
 
 | Purpose | Host path | Container path | Mode | Why |

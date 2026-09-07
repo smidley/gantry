@@ -30,7 +30,7 @@
 // span between the two markers) within one uniform band, rather than a
 // second shade this file deliberately does not add (see
 // incidentLookbackSecs' own doc).
-import type { SeriesResult } from './api';
+import type { SeriesResult, RecordedSeries } from './api';
 import { culpritNames, type InsightCulpritLike } from './insights';
 import type { ChartMarker } from './eventMarkers';
 
@@ -469,4 +469,29 @@ export function planIncidentCharts(inst: PlanInput, ctx: PlanContext = {}): Char
       // identical fallback posture (insights.ts) for the same reason.
       return [];
   }
+}
+
+/** Prefer measured history, restoring only gaps from the saved detection excerpt. */
+export function mergeRecordedHistory(results: SeriesResult[], recorded: RecordedSeries[], kind: string, entity: string): SeriesResult[] {
+  const merged = new Map(results.map((result) => [result.metric, result]));
+  for (const series of recorded.filter((s) => s.kind === kind && s.entity === entity)) {
+    const existing = merged.get(series.metric);
+    const points = new Map(series.points.map(([ts, value]) => [ts, [ts, value, value] as [number, number, number]]));
+    for (const point of existing?.points ?? []) points.set(point[0], point);
+    merged.set(series.metric, { metric: series.metric, points: [...points.values()].sort((a, b) => a[0] - b[0]) });
+  }
+  return [...merged.values()];
+}
+
+export function incidentTitle(inst: { rule_id: string; resource: string; victim: string }): string {
+  const titles: Record<string, string> = {
+    'disk-io-contention': `Disk contention on ${inst.resource}`,
+    'io-driven-cpu-load': 'Storage IO is loading the CPU',
+    'cpu-starvation': `CPU pressure affecting ${inst.victim}`,
+    'memory-squeeze': inst.victim ? `Memory pressure affecting ${inst.victim}` : 'Host memory pressure',
+    'gpu-engine-contention': `GPU contention on ${inst.resource}`,
+    'parity-slowdown': 'Parity check slowdown',
+    'disk-spinup-churn': `Frequent spin-ups on ${inst.resource}`,
+  };
+  return titles[inst.rule_id] ?? 'Resource incident';
 }

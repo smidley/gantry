@@ -1,56 +1,31 @@
 import { defineConfig, devices } from '@playwright/test';
+import { freePort } from './tests/fixtures/freePort';
 
-// Playwright smoke suite: drives the REAL binary (built with -tags
-// webdist, same as `make release`/the Dockerfile), not vite's dev
-// server -- these tests exercise the actual embedded SPA + Go API
-// together, the same artifact that ships. GANTRY_FAKE_DATA=1 synthesizes
-// a demo fleet (see internal/fake/fake.go) so the suite needs no real
-// docker/unraid host under it; GANTRY_PORT=8391 keeps it off gantry's
-// own default 8380 (and any dev instance a contributor might have
-// running locally); GANTRY_DB_PATH points at a fresh mktemp'd sqlite
-// file per run so the suite never touches a real config/gantry.db.
-//
-// webServer.command runs from this file's own directory (web/) --
-// `cd ..` first so `make release` (and the ./gantry it produces) run
-// from the repo root, matching how every other Makefile target expects
-// to be invoked.
-// 8450 rather than the 8401 this suite used on an early branch: a
-// PARALLEL WORKTREE of this repo runs the same suite on its own branch,
-// and with reuseExistingServer two suites sharing one port silently
-// adopt each other's half-matching servers (observed live: one
-// branch's auth specs failing against the sibling's pre-auth binary,
-// and both suites mutating one shared fake fleet). Each branch's suite
-// gets its own port block; tests/auth.spec.ts uses PORT+1/PORT+2. This
-// worktree's own block (insight-detail-page) is 8450-8452 -- picked
-// clear of every sibling worktree's own block at the time (8391, 8401,
-// 8420, 8430, 8440) per the same collision this comment already
-// describes.
-const PORT = 8450;
+// Each run owns a fresh server and database. An explicit port is available
+// for debugging; independent worktrees no longer adopt a stale server.
+// The fake fleet has no access to the host Docker socket, so unrelated
+// local containers cannot enter ranking or history assertions.
+const PORT = process.env.GANTRY_TEST_PORT ? Number(process.env.GANTRY_TEST_PORT) : await freePort();
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('Invalid GANTRY_TEST_PORT');
+process.env.GANTRY_TEST_PORT = String(PORT);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
-
 export default defineConfig({
   testDir: './tests',
   fullyParallel: true,
+  workers: process.env.CI ? 2 : 4,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: 'list',
-  use: {
-    baseURL: BASE_URL,
-    trace: 'retain-on-failure',
-  },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  use: { baseURL: BASE_URL, trace: 'retain-on-failure' },
+  projects: [
+    { name: 'chromium', testIgnore: /insights-pipeline/, use: { ...devices['Desktop Chrome'] } },
+    { name: 'firefox', testMatch: /accessibility.spec.ts/, use: { ...devices['Desktop Firefox'] } },
+    ...(process.env.GANTRY_PIPELINE ? [{ name: 'pipeline', testMatch: /insights-pipeline.spec.ts/, use: { ...devices['Desktop Chrome'] } }] : []),
+  ],
   webServer: {
-    // GANTRY_AUTH=none: auth is mandatory now, so the shared instance
-    // explicitly opts open -- every non-auth spec keeps its zero-friction
-    // world (no setup or login screen in the way). tests/auth.spec.ts
-    // boots its OWN instances to exercise the real setup/login flow.
-    command: `sh -c "cd .. && make release >/dev/null && GANTRY_FAKE_DATA=1 GANTRY_AUTH=none GANTRY_DB_PATH=$(mktemp -d)/g.db GANTRY_PORT=${PORT} ./gantry"`,
+    command: `sh -c 'npm run build >/dev/null && cd .. && CGO_ENABLED=0 go build -trimpath -tags webdist -o gantry ./cmd/gantry && GANTRY_BIND_ADDRESS=127.0.0.1 GANTRY_DOCKER_SOCK=/tmp/gantry-e2e-${PORT}.sock GANTRY_FAKE_DATA=1 GANTRY_AUTH=none GANTRY_DB_PATH=$(mktemp -d)/g.db GANTRY_PORT=${PORT} ./gantry'`,
     url: `${BASE_URL}/api/healthz`,
-    // make release (npm ci + vite build + go build) comfortably clears
-    // this from a cold cache; reuseExistingServer keeps local iteration
-    // fast against an already-running instance on this port while still
-    // forcing a fresh build+run on CI every time.
     timeout: 120_000,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
   },
 });

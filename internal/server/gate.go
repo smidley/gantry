@@ -141,11 +141,8 @@ func sessionTokenFrom(r *http.Request) string {
 	return c.Value
 }
 
-// requestAuthenticated reports whether r carries a live session. Long-
-// lived streams (/api/live, follow logs) are checked once at connect,
-// like the rest of the request; a session expiring mid-stream doesn't
-// sever it -- the stream carries only what the session was entitled to
-// when it opened, and the browser's next reconnect re-checks.
+// requestAuthenticated validates and touches a session at admission.
+// Streaming requests also watch session revocation and expiry in secureAPI.
 func (s *Server) requestAuthenticated(r *http.Request) bool {
 	if s.opts.Auth == nil {
 		return false
@@ -251,6 +248,11 @@ func (s *Server) secureAPI(next http.Handler) http.Handler {
 			if s.gateActive() && !authExemptPaths[reqPath] && !s.requestAuthenticated(r) {
 				writeError(w, http.StatusUnauthorized, "authentication required")
 				return
+			}
+			if s.gateActive() && (reqPath == "/api/live" || path.Base(reqPath) == "logs") {
+				ctx, cancel := s.opts.Auth.WatchSession(r.Context(), sessionTokenFrom(r))
+				defer cancel()
+				r = r.WithContext(ctx)
 			}
 		}
 		next.ServeHTTP(w, r)

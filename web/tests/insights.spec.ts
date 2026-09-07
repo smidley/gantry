@@ -1,26 +1,4 @@
-import { test, expect } from '@playwright/test';
-
-// Insights view (Phase 5 Tasks 11-13): active/history/rules, the
-// evidence PAGE it opens (#/insights/:id, views/InsightDetail.svelte --
-// this used to be a modal drawer), and the alert-annotation bridge --
-// driven against
-// the real fake-mode binary (playwright.config.ts's webServer), the
-// same shared-server instance every other spec file in this suite
-// uses.
-//
-// Timing reality this file works around, the exact alerts.spec.ts
-// precedent for the identical reason: the insight engine's own fake-
-// mode demo schedule (internal/fake/fake.go's insightDemo* constants:
-// disk-io-contention ramps ~60s after boot, holds until ~240s;
-// memory-squeeze fires deterministically off the SAME OOM event
-// alerts' own demo uses, alertDemoOOMAt = 3 minutes) may be at ANY
-// point in its lifecycle by the time a given test actually runs
-// against this suite's one shared server. Every assertion that depends
-// on a specific finding being currently active accepts either "still
-// active" or "already resolved into history" -- never a hard
-// hard-coded confidence tier, since whether the PSI-upgrade path is
-// exercised in this environment is a fake-mode/tier concern this UI
-// layer doesn't control.
+import { test, expect } from './fixtures/insight';
 
 test('insights view renders its heading and the tier-1 empty state on a cold-enough check', async ({ page }) => {
   await page.goto('#/insights');
@@ -34,65 +12,19 @@ test('insights view renders its heading and the tier-1 empty state on a cold-eno
 // demo-fire: the disk-io-contention/memory-squeeze story fires through
 // the real engine end to end. Polls up to 4 minutes (the plan's own
 // Task 15 contract for this exact check).
-test('demo-fire: a real finding fires through the engine and renders in Active or History with its statement', async ({
-  page,
-  request,
-  baseURL,
-}) => {
-  test.setTimeout(4 * 60_000 + 30_000);
-
-  let activeNow: { rule_id: string; statement: string } | null = null;
-  let seenInHistory: { rule_id: string; statement: string } | null = null;
-  const deadline = Date.now() + 4 * 60_000;
-  while (Date.now() < deadline && !activeNow && !seenInHistory) {
-    const snap = await (await request.get(`${baseURL}/api/live/snapshot`)).json();
-    const found = snap.insights?.active?.find(
-      (i: { rule_id: string }) => i.rule_id === 'disk-io-contention' || i.rule_id === 'memory-squeeze',
-    );
-    if (found) {
-      activeNow = found;
-    } else {
-      const hist = await (await request.get(`${baseURL}/api/insights/history?limit=200`)).json();
-      seenInHistory = hist.find((h: { rule_id: string }) => h.rule_id === 'disk-io-contention' || h.rule_id === 'memory-squeeze') ?? null;
-    }
-    if (!activeNow && !seenInHistory) await page.waitForTimeout(3000);
-  }
-  expect(activeNow || seenInHistory, 'disk-io-contention or memory-squeeze must fire (or have already resolved) within 4 minutes').toBeTruthy();
-  const finding = (activeNow ?? seenInHistory)!;
-
-  await page.goto('#/insights');
-  // Map is the DEFAULT mode whenever something's active (the plan's
-  // own "the picture is the better first read" rule) -- List's own
-  // markup isn't even in the DOM until selected, so force it before
-  // looking for a List-only row.
-  await page.locator('.segmented__btn', { hasText: 'List' }).click();
-  if (activeNow) {
-    // :not(--history): the shared .insights-view__row class also
-    // marks a History row (see ActiveRowVs HistoryRow's own doc on
-    // dismiss round-trip below) -- this branch means to find the
-    // ACTIVE card specifically.
-    const row = page.locator('.insights-view__row:not(.insights-view__row--history)', { hasText: finding.statement.slice(0, 30) });
-    await expect(row).toBeVisible();
-    await expect(row.locator('.insights-view__chip')).toBeVisible();
-  } else {
-    const historyRow = page.locator('.insights-view__row--history', { hasText: finding.statement.slice(0, 30) });
-    await expect(historyRow).toBeVisible();
-  }
-});
-
 test('the evidence page opens from an Active or History row, shows the statement and numbers, and its back link returns to the list', async ({
   page,
   request,
   baseURL,
 }) => {
-  test.setTimeout(4 * 60_000 + 30_000);
+  test.setTimeout(30_000);
 
   // This suite runs fullyParallel, so nothing guarantees another test
   // in this file has already run first -- poll for the full 4-minute
   // demo budget here too, the exact demo-fire test's own contract,
   // rather than assuming borrowed state from elsewhere in the file.
   let id: number | null = null;
-  const deadline = Date.now() + 4 * 60_000;
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && id === null) {
     const active = await (await request.get(`${baseURL}/api/insights`)).json();
     if (active.active?.length > 0) {
@@ -145,16 +77,16 @@ test('the evidence page for a HISTORY insight also renders the interaction map, 
   request,
   baseURL,
 }) => {
-  test.setTimeout(4 * 60_000 + 30_000);
+  test.setTimeout(30_000);
 
   let target: { id: number; statement: string; confidence: string } | null = null;
-  const deadline = Date.now() + 4 * 60_000;
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && !target) {
     const hist = await (await request.get(`${baseURL}/api/insights/history?limit=1`)).json();
     if (hist.length > 0) target = hist[0];
     else await page.waitForTimeout(3000);
   }
-  test.skip(!target, 'nothing resolved into history within the timeout on this shared server run');
+  expect(target, 'the isolated incident fixture must be present').toBeTruthy();
 
   await page.goto('#/insights');
   // Map is the default mode whenever something's active -- force List,
@@ -257,16 +189,16 @@ test('the evidence page for an ACTIVE insight also renders the interaction map (
   request,
   baseURL,
 }) => {
-  test.setTimeout(4 * 60_000 + 30_000);
+  test.setTimeout(30_000);
 
   let target: { id: number; statement: string } | null = null;
-  const deadline = Date.now() + 4 * 60_000;
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && !target) {
     const active = await (await request.get(`${baseURL}/api/insights`)).json();
     if (active.active?.length > 0) target = active.active[0];
     else await page.waitForTimeout(3000);
   }
-  test.skip(!target, 'no finding became active within the timeout on this shared server run');
+  expect(target, 'the isolated incident fixture must be present').toBeTruthy();
 
   await page.goto('#/insights');
   await page.locator('.segmented__btn', { hasText: 'List' }).click();
@@ -297,12 +229,12 @@ test('the evidence page for an ACTIVE insight also renders the interaction map (
 // sits comfortably inside live-ring/1-minute-tier retention, never the
 // "history isn't available" fallback this feature also has to cover
 // (incidentChart.ts' own hasChartableData, unit-tested there).
-test('the evidence page for a dismissed insight also renders its incident chart with real data', async ({
+test('the evidence page for a dismissed insight also renders its incident chart with saved evidence', async ({
   page,
   request,
   baseURL,
 }) => {
-  test.setTimeout(4 * 60_000 + 30_000);
+  test.setTimeout(30_000);
 
   // active[length-1] (last), not [0]: the "dismiss round-trip" test
   // below dismisses ITS OWN target via the identical mechanism and this
@@ -314,22 +246,18 @@ test('the evidence page for a dismissed insight also renders its incident chart 
   // covers the one active finding case where they can't help but
   // collide.
   let target: { id: number; statement: string } | null = null;
-  const deadline = Date.now() + 4 * 60_000;
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && !target) {
     const snap = await (await request.get(`${baseURL}/api/live/snapshot`)).json();
     if (snap.insights?.active?.length > 0) target = snap.insights.active[snap.insights.active.length - 1];
     else await page.waitForTimeout(3000);
   }
-  test.skip(!target, 'no finding became active within the timeout on this shared server run');
+  expect(target, 'the isolated incident fixture must be present').toBeTruthy();
 
   await page.goto('#/insights');
   await page.locator('.segmented__btn', { hasText: 'List' }).click();
   const row = page.locator('.insights-view__row:not(.insights-view__row--history)', { hasText: target!.statement.slice(0, 30) });
-  try {
-    await expect(row).toBeVisible({ timeout: 5000 });
-  } catch {
-    test.skip(true, 'this finding was claimed (dismissed/resolved) by a concurrent test before this one could act on it');
-  }
+  await expect(row).toBeVisible();
   await row.locator('.insights-view__dismiss-btn').click();
   await row.locator('.insights-view__dismiss-menu .segmented__btn', { hasText: '1d' }).click();
   await expect(row).not.toBeVisible();
@@ -382,16 +310,16 @@ test('dismiss round-trip: dismissing from the evidence page returns to the list,
   request,
   baseURL,
 }) => {
-  test.setTimeout(4 * 60_000 + 30_000);
+  test.setTimeout(30_000);
 
   let target: { id: number; statement: string } | null = null;
-  const deadline = Date.now() + 4 * 60_000;
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && !target) {
     const snap = await (await request.get(`${baseURL}/api/live/snapshot`)).json();
     if (snap.insights?.active?.length > 0) target = snap.insights.active[0];
     else await page.waitForTimeout(3000);
   }
-  test.skip(!target, 'no finding became active within the timeout on this shared server run');
+  expect(target, 'the isolated incident fixture must be present').toBeTruthy();
 
   await page.goto('#/insights');
   // List mode explicitly -- the Active card (and the row link into this

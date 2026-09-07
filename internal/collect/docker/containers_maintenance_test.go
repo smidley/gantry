@@ -597,7 +597,7 @@ func TestPruneContainersSkipsExitedWithUnenrichedFinishedAtUnderAgeFilter(t *tes
 	}
 	c := &Collector{ctrCli: fc}
 
-	result, err := c.PruneContainers(context.Background(), "exited", 24)
+	result, err := c.PruneContainers(context.Background(), "exited", 24, []string{"exited1", "created1"})
 
 	require.NoError(t, err)
 	require.Empty(t, result.Deleted, "an exited container with no trustworthy FinishedAt must never be pruned by an age filter, however old its Created timestamp looks")
@@ -631,7 +631,7 @@ func TestPruneContainersModeExitedOnlyRemovesExitedViaFreshClassification(t *tes
 	}
 	c := &Collector{ctrCli: fc}
 
-	result, err := c.PruneContainers(context.Background(), "exited", 0)
+	result, err := c.PruneContainers(context.Background(), "exited", 0, []string{"exited1", "created1"})
 
 	require.NoError(t, err)
 	require.Equal(t, []string{"exited1"}, fc.removeIDs)
@@ -641,7 +641,7 @@ func TestPruneContainersModeExitedOnlyRemovesExitedViaFreshClassification(t *tes
 func TestPruneContainersUnknownModeIsError(t *testing.T) {
 	c := &Collector{ctrCli: &fakeContainersClient{}}
 
-	_, err := c.PruneContainers(context.Background(), "bogus", 0)
+	_, err := c.PruneContainers(context.Background(), "bogus", 0, []string{"exited1", "created1"})
 
 	require.Error(t, err)
 }

@@ -172,7 +172,7 @@ func TestGeneratorPruneContainersExitedRemovesOnlyExited(t *testing.T) {
 	require.NoError(t, err)
 	wantDeleted := before.Summary.Exited
 
-	result, err := g.PruneContainers(context.Background(), "exited", 0)
+	result, err := g.PruneContainers(context.Background(), "exited", 0, approvedSeedContainers())
 
 	require.NoError(t, err)
 	require.Len(t, result.Deleted, wantDeleted-1, "every exited entry except the running-conflict fixture")
@@ -189,7 +189,7 @@ func TestGeneratorPruneContainersCreatedRemovesOnlyCreated(t *testing.T) {
 	before, err := g.ContainersMaintenance(context.Background())
 	require.NoError(t, err)
 
-	result, err := g.PruneContainers(context.Background(), "created", 0)
+	result, err := g.PruneContainers(context.Background(), "created", 0, approvedSeedContainers())
 
 	require.NoError(t, err)
 	require.Len(t, result.Deleted, before.Summary.Created)
@@ -205,7 +205,7 @@ func TestGeneratorPruneContainersAllStoppedRemovesEverySeedEntry(t *testing.T) {
 	before, err := g.ContainersMaintenance(context.Background())
 	require.NoError(t, err)
 
-	result, err := g.PruneContainers(context.Background(), "all-stopped", 0)
+	result, err := g.PruneContainers(context.Background(), "all-stopped", 0, approvedSeedContainers())
 
 	require.NoError(t, err)
 	require.Len(t, result.Deleted, len(before.Containers)-1, "all-stopped clears every seed entry except the manufactured running-conflict fixture")
@@ -230,7 +230,7 @@ func TestGeneratorPruneContainersOlderThanHoursFiltersRelativeToFixedEpoch(t *te
 	// A cutoff between the two seeded runners' ages (one ~2h before the
 	// fixed epoch, one ~20m before it -- see fakeContainerMaintenanceSeed)
 	// must catch only the older one.
-	result, err := g.PruneContainers(context.Background(), "created", 1)
+	result, err := g.PruneContainers(context.Background(), "created", 1, approvedSeedContainers())
 
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Deleted, "at least one created runner must be older than 1 hour before the fixed epoch")
@@ -240,7 +240,7 @@ func TestGeneratorPruneContainersOlderThanHoursFiltersRelativeToFixedEpoch(t *te
 func TestGeneratorPruneContainersUnknownModeIsError(t *testing.T) {
 	g := newTestGenerator()
 
-	_, err := g.PruneContainers(context.Background(), "bogus", 0)
+	_, err := g.PruneContainers(context.Background(), "bogus", 0, approvedSeedContainers())
 
 	require.Error(t, err)
 }
@@ -251,7 +251,7 @@ func TestGeneratorContainersMaintenanceStateIsIndependentPerInstance(t *testing.
 
 	before, err := g1.ContainersMaintenance(context.Background())
 	require.NoError(t, err)
-	_, err = g1.PruneContainers(context.Background(), "exited", 0)
+	_, err = g1.PruneContainers(context.Background(), "exited", 0, approvedSeedContainers())
 	require.NoError(t, err)
 
 	after2, err := g2.ContainersMaintenance(context.Background())
@@ -297,4 +297,12 @@ func TestGeneratorContainersMaintenanceReturnsIndependentCopySafeUnderConcurrent
 	}
 	close(stop)
 	wg.Wait()
+}
+
+func approvedSeedContainers() []string {
+	var ids []string
+	for _, item := range fakeContainerMaintenanceSeed {
+		ids = append(ids, item.ID)
+	}
+	return ids
 }

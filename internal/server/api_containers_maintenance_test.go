@@ -136,7 +136,7 @@ func TestContainersMaintenanceOptionsMethodNeverReachesHandler(t *testing.T) {
 			removeCalled = true
 			return nil, nil
 		},
-		PruneContainers: func(context.Context, string, int) (ContainerPruneResult, error) {
+		PruneContainers: func(context.Context, string, int, []string) (ContainerPruneResult, error) {
 			pruneCalled = true
 			return ContainerPruneResult{}, nil
 		},
@@ -200,7 +200,7 @@ func TestContainersPruneRequiresConfirmHeader(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"mode":"exited"}`, "")
+	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"ids":["0000000000000000000000000000000000000000000000000000000000000001"],"mode":"exited"}`, "")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusPreconditionRequired, resp.StatusCode)
 }
@@ -210,7 +210,7 @@ func TestContainersPruneRefusesWhenReadOnly(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"mode":"exited"}`, "containers")
+	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"ids":["0000000000000000000000000000000000000000000000000000000000000001"],"mode":"exited"}`, "containers")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
@@ -315,7 +315,7 @@ func TestContainersPruneRejectsOversizedBody(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	oversized := strings.Repeat(" ", 2<<20) + `{"mode":"exited"}`
+	oversized := strings.Repeat(" ", 2<<20) + `{"ids":["0000000000000000000000000000000000000000000000000000000000000001"],"mode":"exited"}`
 	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", oversized, "containers")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
@@ -337,7 +337,7 @@ func TestContainersPrune404WhenBackendNotWired(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"mode":"exited"}`, "containers")
+	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"ids":["0000000000000000000000000000000000000000000000000000000000000001"],"mode":"exited"}`, "containers")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
@@ -391,7 +391,7 @@ func TestContainersPruneRejectsInvalidMode(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"mode":"all"}`, "containers")
+	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"ids":["0000000000000000000000000000000000000000000000000000000000000001"],"mode":"all"}`, "containers")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
@@ -401,7 +401,7 @@ func TestContainersPruneRejectsNegativeOlderThanHours(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"mode":"exited","older_than_hours":-1}`, "containers")
+	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"ids":["0000000000000000000000000000000000000000000000000000000000000001"],"mode":"exited","older_than_hours":-1}`, "containers")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
@@ -419,7 +419,7 @@ func TestContainersPruneDeletesAndLogsEventPerDeletedContainerForEveryMode(t *te
 			var appendCalls []eventCall
 			s := New(Options{
 				Version: "test-1", Started: time.Now(),
-				PruneContainers: func(_ context.Context, m string, olderThanHours int) (ContainerPruneResult, error) {
+				PruneContainers: func(_ context.Context, m string, olderThanHours int, ids []string) (ContainerPruneResult, error) {
 					gotMode = m
 					gotOlderThan = olderThanHours
 					return ContainerPruneResult{
@@ -432,7 +432,7 @@ func TestContainersPruneDeletesAndLogsEventPerDeletedContainerForEveryMode(t *te
 			ts := httptest.NewServer(s.Handler())
 			defer ts.Close()
 
-			resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"mode":"`+mode+`","older_than_hours":24}`, "containers")
+			resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"ids":["0000000000000000000000000000000000000000000000000000000000000001"],"mode":"`+mode+`","older_than_hours":24}`, "containers")
 			defer func() { _ = resp.Body.Close() }()
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 			require.Equal(t, mode, gotMode)
@@ -453,7 +453,7 @@ func TestContainersPruneDefaultsOlderThanHoursToZeroWhenOmitted(t *testing.T) {
 	var gotOlderThan = -1
 	s := New(Options{
 		Version: "test-1", Started: time.Now(),
-		PruneContainers: func(_ context.Context, _ string, olderThanHours int) (ContainerPruneResult, error) {
+		PruneContainers: func(_ context.Context, _ string, olderThanHours int, ids []string) (ContainerPruneResult, error) {
 			gotOlderThan = olderThanHours
 			return ContainerPruneResult{}, nil
 		},
@@ -461,7 +461,7 @@ func TestContainersPruneDefaultsOlderThanHoursToZeroWhenOmitted(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"mode":"exited"}`, "containers")
+	resp := postContainers(t, ts.URL+"/api/containers/maintenance/prune", `{"ids":["0000000000000000000000000000000000000000000000000000000000000001"],"mode":"exited"}`, "containers")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, 0, gotOlderThan)

@@ -3,6 +3,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { freePort } from './fixtures/freePort';
 
 // The Overview's "Customize" edit mode, end to end against the real
 // binary: enter edit mode, drag a module to a new position with a REAL
@@ -25,16 +26,20 @@ import path from 'node:path';
 // tests share one layout document by definition.
 test.describe.configure({ mode: 'serial' });
 
-const PORT = 8404; // the suite's own block: config PORT+3 -- see playwright.config.ts and auth.spec.ts
-const URL = `http://127.0.0.1:${PORT}`;
+let PORT: number;
+let URL: string;
 
 let proc: ChildProcess;
 
 test.beforeAll(async () => {
+  PORT = await freePort();
+  URL = `http://127.0.0.1:${PORT}`;
   proc = spawn(path.resolve(process.cwd(), '..', 'gantry'), [], {
     env: {
       ...process.env,
       GANTRY_PORT: String(PORT),
+      GANTRY_BIND_ADDRESS: '127.0.0.1',
+      GANTRY_DOCKER_SOCK: `/tmp/gantry-e2e-${PORT}.sock`,
       GANTRY_DB_PATH: path.join(mkdtempSync(path.join(tmpdir(), 'gantry-layout-')), 'g.db'),
       GANTRY_FAKE_DATA: '1',
       GANTRY_AUTH: 'none',
@@ -400,73 +405,33 @@ test('customize: hiding a module drops it from normal mode and leaves a ghost th
   await expect(page.locator('.overview__events')).toBeVisible();
 });
 
-// A lane can no longer empty: each one leads with a PINNED head (the
-// headline + fleet on the wide side, the metrics rail on the narrow
-// one). So the rule that used to hide a moduleless lane and hand the
-// whole band to the survivor is gone, and hiding the narrow lane's last
-// module leaves the column exactly where the owner's split put it.
-test('customize: a lane with no modules left keeps its pinned head and its share of the split', async ({ page }) => {
+test('customize: an empty narrow lane is a drop target while editing and collapses when done', async ({ page }) => {
   await page.setViewportSize(DESKTOP);
   await page.goto(`${URL}/#/`);
   await settleOverview(page);
-
-  const lanes = page.locator('.overview__modules-lanes');
-  const narrow = page.locator('.overview__modules-narrow');
-  const beforeWidth = (await narrow.boundingBox())!.width;
-
   await enterEditMode(page);
   await page.getByRole('button', { name: 'Hide Storage array' }).click();
-  await expect(narrow.locator('.overview__module')).toHaveCount(0);
-  // Still a real drop target while editing, and it says so.
   await expect(page.locator('.overview__lane-empty')).toBeVisible();
-
   await page.getByRole('button', { name: 'Done' }).click();
-  // And still a real COLUMN out of edit mode -- the rail is in it.
-  await expect(narrow).toBeVisible();
-  await expect(narrow.locator('.overview__metrics-rail')).toBeVisible();
-
-  const lanesBox = (await lanes.boundingBox())!;
-  const wideBox = (await page.locator('.overview__modules-wide').boundingBox())!;
-  const narrowBox = (await narrow.boundingBox())!;
-  expect(Math.abs(narrowBox.width - beforeWidth), 'the split is unchanged by an emptied lane').toBeLessThan(2);
-  expect(wideBox.width, 'the wide lane must NOT swallow the band').toBeLessThan(lanesBox.width - 100);
+  await expect(page.locator('.overview__modules-narrow')).toHaveCount(0);
+  const band = (await page.locator('.overview__modules-lanes').boundingBox())!;
+  const wide = (await page.locator('.overview__modules-wide').boundingBox())!;
+  expect(Math.abs(band.width - wide.width)).toBeLessThan(2);
+  await enterEditMode(page);
+  await expect(page.locator('.overview__modules-narrow')).toBeVisible();
 });
 
-// The pinned heads are not drop targets and cannot be displaced: a drag
-// into the narrow lane lands UNDER the rail however high in the lane it
-// is released, and the rail stays the lane's first child.
-test('customize: a drop into the narrow lane lands below the pinned rail, never above it', async ({ page, request }) => {
+test('customize: moving a module into the narrow lane preserves metrics above both lanes', async ({ page, request }) => {
   await page.setViewportSize(DESKTOP);
   await page.goto(`${URL}/#/`);
   await settleOverview(page);
   await enterEditMode(page);
-
-  // dragModuleAbove releases 8px into the target, so aiming it at the
-  // RAIL is the most direct attempt to land above the rail there is.
-  const rail = page.locator('.overview__metrics-rail');
-  await dragModuleAbove(page, 'events', '.overview__metrics-rail');
-
+  await dragModuleAbove(page, 'events', '.overview__modules-narrow [data-module="storage"]');
   await expect.poll(() => laneOrder(page, 'narrow')).toEqual(['events', 'storage']);
-  const railBox = (await rail.boundingBox())!;
+  const rail = (await page.locator('.overview__metrics-rail').boundingBox())!;
   const moved = (await page.locator('.overview__modules-narrow [data-module="events"]').boundingBox())!;
-  expect(moved.y, 'the dropped card sits below the pinned rail').toBeGreaterThanOrEqual(
-    railBox.y + railBox.height - 1,
-  );
-
-  // The rail is still the lane's own first child, and still not a module.
-  const firstChild = await page
-    .locator('.overview__modules-narrow')
-    .evaluate((el) => (el.firstElementChild as HTMLElement).dataset.pinned ?? null);
-  expect(firstChild).toBe('metrics-rail');
-  await expect(page.locator('[data-module="metrics-rail"]')).toHaveCount(0);
-
-  // The saved document holds modules only -- no pinned id leaked in.
-  // Polled, like every other saved-document assertion here: the store's
-  // PUT is debounced, so the render lands before the write does.
-  await expect.poll(async () => (await savedLayout(request)).narrow, { timeout: 10_000 }).toEqual([
-    'events',
-    'storage',
-  ]);
+  expect(moved.y).toBeGreaterThan(rail.y + rail.height);
+  await expect.poll(async () => (await savedLayout(request)).narrow, { timeout: 10_000 }).toEqual(['events', 'storage']);
   const saved = JSON.stringify(await savedLayout(request));
   expect(saved).not.toContain('metrics-rail');
   expect(saved).not.toContain('fleet');
@@ -734,7 +699,7 @@ test('customize: the all-clear state fills around a card the owner has sized', a
   // The all-clear state really is active: the headline card is in its
   // collapsed form, at the head of the wide lane.
   await expect(page.locator('.overview__headline-text')).toHaveText('Nothing needs you');
-  await expect(page.locator('.overview__modules-wide .overview__headline-zone')).toHaveClass(
+  await expect(page.locator('.overview__headline-zone')).toHaveClass(
     /overview__headline-zone--clear/,
   );
 
@@ -766,7 +731,7 @@ test('customize: the all-clear state fills around a card the owner has sized', a
   });
   await page.reload();
 
-  await expect(page.locator('.overview__modules-wide .overview__headline-zone')).toHaveClass(
+  await expect(page.locator('.overview__headline-zone')).toHaveClass(
     /overview__headline-zone--clear/,
   );
   await expect(sized).toHaveAttribute('data-adaptive', 'true');

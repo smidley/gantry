@@ -364,24 +364,13 @@
      explicit role="listitem" on the <a> itself is invalid (an
      interactive element can't take a non-interactive ARIA role) and
      Svelte's own a11y check rejects it. */
-  /* Region-sizing pass (Scott: the strip wrapped as ragged rows of
-     blocks): a fixed-pitch GRID, not flex-wrap. auto-fill lays every
-     row on the same explicit column tracks, so a wrapped strip reads
-     as one deliberate contribution-graph grid -- columns align
-     vertically, each row holds only whole units (never a clipped
-     partial at the edge), and the sub-pitch remainder stays as quiet
-     trailing space. The wider row-gap (vs the 2px column-gap) is what
-     makes a second row read as a ROW rather than more noise, and
-     absorbs the flagged units' scaleY(1.25) overshoot (transforms
-     don't take layout space -- under flex they overlapped the line
-     above). The two groups share the pitch by construction: an 8px
-     track is an 8px track in either grid, with nothing measured and
-     nothing to keep in sync. */
+  /* Whole grid tracks keep rows aligned. Targets are 28px for a precise
+     pointer and 44px for coarse pointers, with space between each link. */
   .fleet-strip {
     display: grid;
-    grid-template-columns: repeat(auto-fill, 8px);
+    grid-template-columns: repeat(auto-fill, 28px);
     justify-content: start;
-    gap: 4px 2px;
+    gap: 6px;
     max-width: 100%;
     list-style: none;
     margin: 0;
@@ -393,9 +382,9 @@
   .fleet-unit {
     --unit-color: var(--fleet-running);
     display: block;
-    width: 8px;
-    height: 16px;
-    border-radius: 1px;
+    width: 28px;
+    height: 28px;
+    border-radius: 5px;
     background: var(--unit-color);
     flex-shrink: 0;
     transition:
@@ -508,7 +497,7 @@
     min-height: 1.2rem;
     font-size: 0.8rem;
     color: var(--ink-2);
-    opacity: 0.72;
+    opacity: 1;
     transition:
       color 150ms ease,
       opacity 150ms ease;
@@ -545,4 +534,5 @@
     animation: none;
     box-shadow: 0 0 5px 1px color-mix(in oklab, var(--unit-color) 45%, transparent);
   }
+@media (pointer: coarse) { .fleet-strip { grid-template-columns: repeat(auto-fill, 44px); } .fleet-unit { width: 44px; height: 44px; } }
 </style>

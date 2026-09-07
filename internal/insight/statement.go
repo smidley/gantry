@@ -112,18 +112,23 @@ func pluralizeIs(phrase string) string {
 // a field the current finding's template doesn't use is simply left at
 // its zero value and never rendered.
 type Evidence struct {
-	CulpritSharePct   float64  // culprit's (or culprit set's combined) share of the resource, 0-100
-	DeviceUtilPct     float64  // host diskio.<dev>.util_pct
-	AwaitMs           float64  // host diskio.<dev>.await_ms
-	VictimStallPct    float64  // PSI some_pct, confirmed-tier victim evidence
-	WindowMinutes     int      // the "last N minutes" a stall/rate figure covers
-	OtherUsers        []string // other entities also touching the resource (likely-tier co-tenancy witnesses)
-	IowaitPct         float64  // host/cpu.iowait_pct
-	HostCPUPct        float64  // host/cpu.total
-	SpinCount         int      // disk-spinup-churn: transitions observed
-	SpinWindowMinutes int      // disk-spinup-churn: the observation window
-	EngineBusyPct     float64  // gpu engine busy_pct
-	BaselinePct       float64  // parity-slowdown: current speed as % of baseline
+	AttributionVersion int // v2 preserves host-normalized percentages and separates OOM evidence from causality
+	RecordedSeries     []RecordedSeries
+	ResourceDevice     string
+	CulpritSharePct    float64  // culprit's (or culprit set's combined) share of the resource, 0-100
+	DeviceUtilPct      float64  // host diskio.<dev>.util_pct
+	AwaitMs            float64  // host diskio.<dev>.await_ms
+	VictimStallPct     float64  // PSI some_pct, confirmed-tier victim evidence
+	WindowMinutes      int      // the "last N minutes" a stall/rate figure covers
+	OtherUsers         []string // other entities also touching the resource (likely-tier co-tenancy witnesses)
+	IowaitPct          float64  // host/cpu.iowait_pct
+	HostCPUPct         float64  // host/cpu.total
+	HostMemUsedPct     float64  // host memory utilization near an OOM event
+	OOMKilled          bool     // observed failure; does not prove neighbor causality
+	SpinCount          int      // disk-spinup-churn: transitions observed
+	SpinWindowMinutes  int      // disk-spinup-churn: the observation window
+	EngineBusyPct      float64  // gpu engine busy_pct
+	BaselinePct        float64  // parity-slowdown: current speed as % of baseline
 }
 
 // Finding is EvaluateRule's answer for one (rule, victim, resource) tuple
@@ -176,7 +181,7 @@ func culpritSubject(c Culprits) string { return joinAnd(c.Names) }
 // for a possibly-shared culprit -- see pluralizeIs's own doc.
 func verbFor(f Finding) string {
 	v := Verb(f.Confidence, f.Shape)
-	if f.Culprit.Shared {
+	if f.Culprit.Shared && f.RuleID != RuleIODrivenCPULoad {
 		return pluralizeIs(v)
 	}
 	return v
@@ -189,6 +194,17 @@ func verbFor(f Finding) string {
 // which nouns) is necessarily rule-specific even when two rules share a
 // Shape's verb pair.
 func Statement(f Finding) string {
+	text := statement(f)
+	if len(f.Culprit.Names) > 1 {
+		text = strings.ReplaceAll(text, culpritSubject(f.Culprit)+" holds", culpritSubject(f.Culprit)+" hold")
+		if f.RuleID == RuleDiskIOContention {
+			text = strings.ReplaceAll(text, "it's driving", "they're driving")
+		}
+	}
+	return text
+}
+
+func statement(f Finding) string {
 	switch f.RuleID {
 	case RuleDiskIOContention:
 		return statementDiskIOContention(f)
@@ -330,6 +346,10 @@ func statementGPUEngineContention(f Finding) string {
 func statementMemorySqueeze(f Finding) string {
 	culprit := culpritSubject(f.Culprit)
 	if f.VictimKind == "container" {
+		if f.Evidence.OOMKilled {
+			return fmt.Sprintf("%s was OOM-killed while host memory was %s%% used — %s may be contributing, using %s%% of host memory. The cause of the kill is not confirmed.",
+				f.Victim, pct(f.Evidence.HostMemUsedPct), culprit, pct(f.Evidence.CulpritSharePct))
+		}
 		if f.Confidence == ConfidenceConfirmed {
 			return fmt.Sprintf("%s %s %s of memory — %s was OOM-killed while %s holds %s%% of host memory.",
 				culprit, verbFor(f), f.Victim, f.Victim, culprit, pct(f.Evidence.CulpritSharePct))

@@ -21,9 +21,11 @@
   --surface-muted: #fafbfe;
   --ink: #191c26;
   --ink-2: #626979;
-  --ink-3: #8d94a3;
+  --ink-3: #606b7d;
   --border: #e0e3eb;
   --border-strong: #cdd2de;
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
   --accent: #5269e8;
   --accent-strong: #3f53c9;
   --accent-soft: #e9edff;
@@ -31,7 +33,7 @@
   --sidebar-surface: #252936;
   --sidebar-ink: #f7f7fb;
   --sidebar-muted: #9da3b2;
-  --shadow-sm: 0 1px 2px rgb(25 31 54 / 0.05), 0 8px 24px rgb(25 31 54 / 0.055);
+  --shadow-sm: 0 1px 3px rgb(25 31 54 / 0.06);
   --shadow-md: 0 14px 44px rgb(25 31 54 / 0.1);
 
   /* Categorical series slots -- fixed order, never cycled or
@@ -54,10 +56,10 @@
   /* Status colors are reserved for health/severity meaning ONLY --
      always paired with an icon or text label, never used for series
      identity. */
-  --status-good: #18a36f;
-  --status-warning: #e7a416;
-  --status-serious: #e2783e;
-  --status-critical: #d84f5f;
+  --status-good: #137f56;
+  --status-warning: #9a6700;
+  --status-serious: #b4511f;
+  --status-critical: #bf3048;
 
   /* Sequential ramp for magnitude fills (e.g. disk-usage heat) --
      evenly interpolated between the given endpoints, same in both
@@ -89,10 +91,16 @@
     --surface-muted: #13161d;
     --ink: #f4f5f8;
     --ink-2: #a9afbc;
-    --ink-3: #747b8a;
+    --ink-3: #959eaf;
     --border: #292e3a;
     --border-strong: #3b4252;
     --accent: #8ea0ff;
+  --on-accent: #13161d;
+  --on-danger: #13161d;
+  --status-good: #55c795;
+  --status-warning: #e7ad47;
+  --status-serious: #f5a374;
+  --status-critical: #f28b98;
     --accent-strong: #aab6ff;
     --accent-soft: #282f53;
     --sidebar: #0b0d12;
@@ -123,10 +131,16 @@
   --surface-muted: #13161d;
   --ink: #f4f5f8;
   --ink-2: #a9afbc;
-  --ink-3: #747b8a;
+  --ink-3: #959eaf;
   --border: #292e3a;
   --border-strong: #3b4252;
   --accent: #8ea0ff;
+  --on-accent: #13161d;
+  --on-danger: #13161d;
+  --status-good: #55c795;
+  --status-warning: #e7ad47;
+  --status-serious: #f5a374;
+  --status-critical: #f28b98;
   --accent-strong: #aab6ff;
   --accent-soft: #282f53;
   --sidebar: #0b0d12;

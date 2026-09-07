@@ -345,26 +345,26 @@ func TestPruneDanglingNeverPassesADigestPinnedUnusedImageToImageRemove(t *testin
 	fc := &fakeImagesClient{imageListReturn: []image.Summary{digestPinned, trueDangling}}
 	c := &Collector{imgCli: fc}
 
-	result, err := c.pruneDangling(context.Background())
+	result, err := c.PruneImages(context.Background(), "dangling", []string{digestPinned.ID, trueDangling.ID})
 
 	require.NoError(t, err)
 	require.Equal(t, []string{trueDangling.ID}, fc.imageRemoveIDs, "a digest-pinned image must never reach ImageRemove via prune dangling")
-	require.Equal(t, []image.RemoveOptions{{Force: false, PruneChildren: true}}, fc.imageRemoveOptions)
+	require.Equal(t, []image.RemoveOptions{{Force: false, PruneChildren: false}}, fc.imageRemoveOptions)
 	require.Equal(t, []DeletedImage{{ID: trueDangling.ID, SizeBytes: 200}}, result.Deleted)
 	require.Equal(t, int64(200), result.ReclaimedBytes)
 }
 
-// TestRemoveImagesCallsImageRemoveWithForceFalseAndPruneChildrenTrue pins
+// TestRemoveImagesCallsImageRemoveWithForceFalseAndPruneChildrenFalse pins
 // F5's other half: RemoveImages' own doc promises Force:false (never
 // forced past an in-use conflict) and PruneChildren:true (matching
 // `docker rmi`'s own default) -- assert those are the actual options
 // reaching the real wrapper, not just the doc's word for it.
-func TestRemoveImagesCallsImageRemoveWithForceFalseAndPruneChildrenTrue(t *testing.T) {
+func TestRemoveImagesCallsImageRemoveWithForceFalseAndPruneChildrenFalse(t *testing.T) {
 	fc := &fakeImagesClient{}
 	c := &Collector{imgCli: fc}
 
 	_, err := c.RemoveImages(context.Background(), []string{"sha256:" + fmt.Sprintf("%064x", 1)})
 
 	require.NoError(t, err)
-	require.Equal(t, []image.RemoveOptions{{Force: false, PruneChildren: true}}, fc.imageRemoveOptions)
+	require.Equal(t, []image.RemoveOptions{{Force: false, PruneChildren: false}}, fc.imageRemoveOptions)
 }

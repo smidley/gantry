@@ -121,7 +121,7 @@
   // hue per line the way sequential position assignment used to (a
   // deliberate trade -- see heroLines' own doc for why identity beats
   // guaranteed-distinct here).
-  const MAX_HERO_LINES = 10;
+  const MAX_HERO_LINES = 5;
 
   let resource = $state(untrack(() => (isTopResource(initialResource) ? initialResource : 'cpu')));
   let windowKey = $state('now');
@@ -648,7 +648,7 @@
         // dotted-noise look" for the host-total reference line; muting
         // the resolved --ink-2 stroke itself keeps it visually distinct
         // from the solid container lines without the dated dashed look.
-        lines = [...lines, { entity: null, label: 'Host total', points: hostPoints, colorVar: '--ink-2', width: 1.5, strokeAlphaPct: 40 }];
+        lines = [...lines, { entity: null, label: 'Host total', points: hostPoints, colorVar: '--ink-2', width: 2.75, strokeAlphaPct: 85 }];
       }
     }
     return lines;
@@ -820,7 +820,7 @@
             class:segmented__btn--active={agg === 'peak'}
             onclick={() => (agg = 'peak')}
           >
-            Peak
+            {SUMMED_RESOURCES.has(resource) ? 'Peak upper bound' : 'Peak'}
           </button>
         </div>
       {/if}

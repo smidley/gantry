@@ -527,7 +527,7 @@ func memorySqueezeOOMIn(now int64, withVictim, withCulprit bool) In {
 	if withCulprit {
 		memPct["redis"] = seriesRange(now-100, now, 10, 42)
 	}
-	return In{Now: now, OOMEvents: events, ContainerMemPct: mkMatch(memPct)}
+	return In{Now: now, OOMEvents: events, ContainerMemPct: mkMatch(memPct), HostMemUsedPct: mkMatch(map[string][]store.Sample{"": {{TS: now, Val: 95}}})}
 }
 
 func TestEvalMemorySqueezeOOMEventFiresWithBothSides(t *testing.T) {
@@ -537,7 +537,9 @@ func TestEvalMemorySqueezeOOMEventFiresWithBothSides(t *testing.T) {
 	f := findings[0]
 	require.Equal(t, "minecraft", f.Victim)
 	require.Equal(t, "container", f.VictimKind)
-	require.Equal(t, ConfidenceConfirmed, f.Confidence, "an OOM kill is a hard event, not a correlation")
+	require.Equal(t, ConfidenceLikely, f.Confidence, "an OOM kill confirms failure, not neighbor causality")
+	require.True(t, f.Evidence.OOMKilled)
+	require.InDelta(t, 42, f.Evidence.CulpritSharePct, 0.001)
 	require.Equal(t, "alert", f.Severity)
 	require.Equal(t, []string{"redis"}, f.Culprit.Names)
 }

@@ -1,32 +1,10 @@
 import { test, expect } from '@playwright/test';
 
-// Browser-side verification for the fleet strip, the pinned metrics
-// rail and the bay schematic -- the half their svelte/server structural
-// tests can't see.
-//
-// The fleet's geometry is a FIXED PITCH again (the pill-restore pass:
-// Scott, "Container fleet boxes should go back to being rectangular.
-// The smaller size looked more elegant."), so what a browser has to
-// confirm has inverted. It is no longer "the computed size falls as the
-// fleet grows" -- that fit is deleted -- but the opposite: that an 8px
-// track and an 8x16 pill are what actually render, at every count, that
-// the rows wrap on whole aligned columns rather than scrolling or
-// pushing the page sideways, and that the card stays compact instead of
-// claiming the screen beneath it.
-//
-// Container COUNT is the independent variable in most of this, so those
-// specs route their own /api/live frame (the smoke/customize specs' own
-// idiom) rather than depending on however many containers the box
-// happens to be running. EventSource re-connects when the fulfilled
-// body ends (retry: 300) and re-receives the same frame every ~300ms.
-
-// The pill contract, in one place: the numbers FleetStrip's CSS
-// declares (an 8px column track on a 2px column gap and a 4px row gap,
-// an 8x16 unit). Restored verbatim from the pre-square strip -- see
-// FleetStrip.svelte's own pill-restore doc.
-const CELL_W = 8;
-const CELL_H = 16;
-const COL_PITCH = 10; // CELL_W + the 2px column gap
+// Verify usable fleet targets, predictable wrapping, and metrics ahead of
+// the customizable lanes. Known frames keep geometry independent of uptime.
+const CELL_W = 28;
+const CELL_H = 28;
+const COL_PITCH = 34;
 
 function frame(containers: Record<string, object>) {
   return {
@@ -122,15 +100,14 @@ async function unitBoxes(page: import('@playwright/test').Page, root = '.fleet-s
   );
 }
 
-test('fleet pills render at the fixed 8x16 pitch, on whole aligned columns', async ({ page }) => {
+test('fleet pills render at the fixed 28x28 targets, on whole aligned columns', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await showFleet(page, quietFleet(24), 24);
 
   const strip = page.locator('.fleet-strip').first();
   expect(await strip.evaluate((el) => getComputedStyle(el).display)).toBe('grid');
 
-  // Every explicit track is the same literal 8px -- the restored
-  // fixed-pitch contract. Rows break on the same whole-unit boundaries,
+  // Every explicit track is the same literal 28px -- the fixed target-size contract. Rows break on the same whole-unit boundaries,
   // columns align vertically by construction, and no unit is ever
   // clipped at the edge, because auto-fill only ever lays down whole
   // tracks.
@@ -173,7 +150,7 @@ test('fleet pills keep one pitch whatever the fleet size', async ({ page }) => {
 
 // Wrapping, not scrolling and not shrinking: a fleet too wide for one
 // line runs onto more lines at the same pitch, every line starting at
-// the same left edge and every column on the same 10px stride.
+// the same left edge and every column on the same 34px stride.
 test('a fleet too wide for one line wraps into aligned rows', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await showFleet(page, quietFleet(140), 140);
@@ -190,10 +167,10 @@ test('a fleet too wide for one line wraps into aligned rows', async ({ page }) =
     expect(Math.abs(offset - Math.round(offset / COL_PITCH) * COL_PITCH), `x ${b.x} off the ${COL_PITCH}px stride`).toBeLessThan(0.6);
   }
 
-  // Rows are on the pill's own row pitch (16px unit + 4px row gap) --
+  // Rows are on the pill's own row pitch (28px unit + 6px row gap) --
   // no row is squeezed or stretched to make the fleet fit.
   for (let i = 1; i < rows.length; i++) {
-    expect(Math.abs(rows[i] - rows[i - 1] - (CELL_H + 4)), `row ${i} pitch`).toBeLessThan(1);
+    expect(Math.abs(rows[i] - rows[i - 1] - (CELL_H + 6)), `row ${i} pitch`).toBeLessThan(1);
   }
 
   // Nothing scrolls sideways, and the strip itself has no scrollbar of
@@ -256,34 +233,16 @@ test('a fleet with nothing stopped renders no stopped row at all', async ({ page
   await expect(page.locator('.fleet-strip__group-head')).toHaveCount(1);
 });
 
-// The other half of the revert: the card is COMPACT again. It no longer
-// reserves the screen beneath it, and a bigger fleet costs only the
-// rows it actually needs.
-test('the fleet card stays compact instead of claiming the space beneath it', async ({ page }) => {
+test('the fleet card grows by the space its rows need', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-
   await showFleet(page, quietFleet(3), 3);
-  await expect(page.locator('.overview__modules-wide .fleet-strip-wrap')).toBeVisible();
-  const three = (await page.locator('.fleet-strip-wrap').boundingBox())!;
-
-  await showFleet(page, quietFleet(30), 30);
-  const thirty = (await page.locator('.fleet-strip-wrap').boundingBox())!;
-
-  // 30 quiet pills still fit on one 8px-pitch row, so the card is the
-  // SAME height as it is with three -- the count buys rows, and nothing
-  // else. The sized version grew here by design; this one must not.
-  expect(Math.abs(thirty.height - three.height), 'a one-row fleet must not grow with its count').toBeLessThan(2);
-  // A strip, not a field: a single-row fleet is a couple of hundred
-  // pixels of card, not the several hundred the space-claiming version
-  // deliberately reserved (it grew to fill the viewport beneath it).
-  expect(thirty.height, 'the fleet card is compact again').toBeLessThan(260);
-
-  // A fleet big enough to wrap costs exactly the extra rows and no
-  // reserve beyond them.
+  const small = (await page.locator('.fleet-strip-wrap').boundingBox())!;
+  expect(small.height).toBeLessThan(260);
+  const rows = async () => new Set((await unitBoxes(page)).map(b => Math.round(b.y))).size;
+  const beforeRows = await rows();
   await showFleet(page, quietFleet(140), 140);
-  const wrapped = (await page.locator('.fleet-strip-wrap').boundingBox())!;
-  expect(wrapped.height).toBeGreaterThan(thirty.height);
-  expect(wrapped.height - thirty.height, 'extra height is rows, not a reserved region').toBeLessThan(120);
+  const large = (await page.locator('.fleet-strip-wrap').boundingBox())!;
+  expect(Math.abs((large.height - small.height) - ((await rows()) - beforeRows) * 34)).toBeLessThan(2);
 });
 
 // The glow explains itself: a container elevated on something other than
@@ -318,7 +277,7 @@ test('a block glowing on disk IO names that metric in its hover label', async ({
 });
 
 // The bay schematic is a Customize MODULE -- it renders in the narrow
-// lane, under the pinned rail at that lane's head.
+// lane, beneath the full-width metrics summary.
 test('storage array renders as a module in the narrow lane', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
@@ -333,118 +292,57 @@ test('storage array renders as a module in the narrow lane', async ({ page }) =>
   expect(moduleBox.y).toBeGreaterThanOrEqual(railBox.y + railBox.height - 1);
 });
 
-// The unified band: every pinned card is the HEAD of a lane, and the
-// saved column split governs the whole page including them.
-test('each lane leads with its pinned head, sized by the saved split', async ({ page }) => {
+test('metrics and health lead the saved module lanes', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
-
   const rail = page.locator('.overview__metrics-rail');
-  await expect(rail).toBeVisible({ timeout: 20_000 });
-
-  // Pinned means not a module: no wrapper, no data-module, and so no
-  // grip, eye or size switcher can ever attach to one.
+  await expect(rail).toBeVisible();
   await expect(page.locator('[data-module="metrics-rail"]')).toHaveCount(0);
-  await expect(page.locator('.overview__pinned .overview__module')).toHaveCount(0);
-  await expect(page.locator('.overview__modules-wide > .overview__pinned')).toHaveCount(2);
-  await expect(page.locator('.overview__modules-narrow > .overview__pinned')).toHaveCount(1);
-
-  // Wide lane head: headline first, fleet under it, both at lane width.
-  const wide = (await page.locator('.overview__modules-wide').boundingBox())!;
-  const headline = (await page.locator('.overview__headline-zone').boundingBox())!;
-  const fleet = (await page.locator('.fleet-strip-wrap').boundingBox())!;
-  expect(Math.abs(headline.y - wide.y)).toBeLessThan(2);
-  expect(fleet.y).toBeGreaterThanOrEqual(headline.y + headline.height - 1);
-  expect(Math.abs(headline.width - wide.width)).toBeLessThan(2);
-  expect(Math.abs(fleet.width - wide.width)).toBeLessThan(2);
-
-  // Narrow lane head: the rail, at the lane's top and its full width --
-  // it declares no width of its own any more, so this IS the saved split
-  // applying to it.
-  const narrow = (await page.locator('.overview__modules-narrow').boundingBox())!;
-  const railBox = (await rail.boundingBox())!;
-  expect(Math.abs(railBox.y - narrow.y)).toBeLessThan(2);
-  expect(Math.abs(railBox.width - narrow.width)).toBeLessThan(2);
-  expect(railBox.x).toBeGreaterThanOrEqual(wide.x + wide.width - 1);
-  // Both lanes start level, on the band's own top edge.
-  expect(Math.abs(narrow.y - wide.y)).toBeLessThan(2);
-
-  // Four tiles, STACKED: one per row, each on the same left edge, each
-  // still drawing its own sparkline.
+  const box = async (sel: string) => (await page.locator(sel).first().boundingBox())!;
+  const metrics = await box('.overview__metrics-rail');
+  const health = await box('.overview-health');
+  const lanes = await box('.overview__modules-lanes');
+  expect(metrics.y + metrics.height).toBeLessThanOrEqual(health.y);
+  expect(health.y + health.height).toBeLessThanOrEqual(lanes.y);
+  expect(Math.abs(metrics.width - lanes.width)).toBeLessThan(2);
   const tiles = rail.locator('.stat-tile');
   await expect(tiles).toHaveCount(4);
-  const tileBoxes = await tiles.evaluateAll((els) =>
-    els.map((el) => {
-      const r = el.getBoundingClientRect();
-      return { x: r.x, y: r.y, w: r.width };
-    }),
-  );
-  for (let i = 1; i < tileBoxes.length; i++) {
-    expect(tileBoxes[i].y, `tile ${i} sits below tile ${i - 1}`).toBeGreaterThan(tileBoxes[i - 1].y);
-    expect(Math.abs(tileBoxes[i].x - tileBoxes[0].x), `tile ${i} left edge`).toBeLessThan(1);
-    expect(Math.abs(tileBoxes[i].w - tileBoxes[0].w), `tile ${i} width`).toBeLessThan(1);
+  const boxes = await tiles.evaluateAll(els => els.map(el => el.getBoundingClientRect().toJSON()));
+  for (let i = 1; i < boxes.length; i++) {
+    expect(Math.abs(boxes[i].y - boxes[0].y)).toBeLessThan(1);
+    expect(boxes[i].x).toBeGreaterThan(boxes[i - 1].x);
   }
   await expect.poll(() => rail.locator('canvas').count()).toBeGreaterThanOrEqual(4);
 });
 
-// THE anti-regression for the dead block this restructure exists to
-// delete. The wide lane's first module used to start below whichever
-// column was taller, which with a ~717px rail beside a ~406px status
-// column left roughly 300px of empty page under the fleet. A lane is one
-// continuous column now, so the module starts under the FLEET -- one
-// lane gap below it, and nowhere near the rail's bottom.
-test('the wide lane flows straight on under the fleet, not under the rail', async ({ page }) => {
+test('the wide lane flows directly from fleet to modules', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
-  await expect(page.locator('.overview__modules-wide .overview__module').first()).toBeVisible({ timeout: 20_000 });
-
+  const module = page.locator('.overview__modules-wide .overview__module').first();
+  await expect(module).toBeVisible();
   const fleet = (await page.locator('.fleet-strip-wrap').boundingBox())!;
-  const rail = (await page.locator('.overview__metrics-rail').boundingBox())!;
-  const firstModule = (await page.locator('.overview__modules-wide .overview__module').first().boundingBox())!;
-
-  const gap = firstModule.y - (fleet.y + fleet.height);
-  expect(gap, 'the first wide module starts one ordinary lane gap under the fleet').toBeGreaterThanOrEqual(-1);
-  expect(gap, `a ${Math.round(gap)}px gap under the fleet is the dead block coming back`).toBeLessThan(40);
-  // And the rail genuinely IS the taller column, so this is a real test
-  // rather than one that would pass on any layout.
-  expect(rail.y + rail.height, 'the rail must still outrun the fleet for this to prove anything').toBeGreaterThan(
-    fleet.y + fleet.height + 100,
-  );
-  expect(firstModule.y).toBeLessThan(rail.y + rail.height);
+  const next = (await module.boundingBox())!;
+  expect(next.y - fleet.y - fleet.height).toBeGreaterThanOrEqual(0);
+  expect(next.y - fleet.y - fleet.height).toBeLessThan(40);
 });
 
-// Below 48rem -- the lanes' own breakpoint, and the page's only one now
-// -- everything becomes a single column, ordered so the three PINNED
-// cards come first: headline, the fleet that is its evidence, then the
-// host instruments. The modules follow in their saved order, wide lane's
-// then narrow lane's. (`display: contents` on the lanes is what lets the
-// rail cross the lane boundary here; see the rule's own doc.)
-test('below 48rem the page is one column: headline, fleet, rail, then modules', async ({ page }) => {
-  await page.setViewportSize({ width: 700, height: 900 });
+test('phone layout leads with two-by-two metrics, health, fleet, and modules', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('#/');
-  await expect(page.locator('.overview__metrics-rail')).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator('.overview__storage')).toBeVisible({ timeout: 20_000 });
-
+  await expect(page.locator('.overview__storage')).toBeVisible();
   const box = async (sel: string) => (await page.locator(sel).first().boundingBox())!;
-  const headline = await box('.overview__headline-zone');
-  const fleet = await box('.fleet-strip-wrap');
-  const rail = await box('.overview__metrics-rail');
-  const topConsumers = await box('.overview__top');
-  const storage = await box('.overview__storage');
-
-  expect(headline.y).toBeLessThan(fleet.y);
-  expect(fleet.y).toBeLessThan(rail.y);
-  expect(rail.y).toBeLessThan(topConsumers.y);
-  expect(topConsumers.y).toBeLessThan(storage.y);
-
-  // One column: every card spans the same width, and nothing scrolls
-  // sideways.
-  const lanes = await box('.overview__modules-lanes');
-  for (const [name, b] of Object.entries({ headline, fleet, rail, topConsumers, storage })) {
-    expect(Math.abs(b.width - lanes.width), `${name} must span the single column`).toBeLessThan(2);
+  const ordered = ['.overview__metrics-rail', '.overview-health', '.fleet-strip-wrap', '.overview__top', '.overview__storage'];
+  let bottom = 0;
+  for (const sel of ordered) {
+    const b = await box(sel);
+    expect(b.y, sel).toBeGreaterThanOrEqual(bottom);
+    bottom = b.y + b.height;
   }
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-  expect(overflow).toBeLessThanOrEqual(1);
+  const tiles = await page.locator('.overview__metrics-rail .stat-tile').evaluateAll(els => els.map(el => el.getBoundingClientRect().toJSON()));
+  expect(Math.abs(tiles[0].y - tiles[1].y)).toBeLessThan(1);
+  expect(Math.abs(tiles[2].y - tiles[3].y)).toBeLessThan(1);
+  expect(tiles[2].y).toBeGreaterThan(tiles[0].y);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
 
 test('storage array fills its module and keeps its device grid stable on hover', async ({ page }) => {

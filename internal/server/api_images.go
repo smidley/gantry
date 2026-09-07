@@ -276,7 +276,7 @@ func (s *Server) handleImagesRemove(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var body imagesRemoveRequest
-	if err := dec.Decode(&body); err != nil {
+	if err := decodeSingleJSON(dec, &body); err != nil {
 		writeDecodeError(w, err)
 		return
 	}
@@ -313,7 +313,8 @@ func (s *Server) handleImagesRemove(w http.ResponseWriter, r *http.Request) {
 }
 
 type imagesPruneRequest struct {
-	Mode string `json:"mode"`
+	IDs  []string `json:"ids"`
+	Mode string   `json:"mode"`
 }
 
 // handleImagesPrune serves POST /api/images/prune.
@@ -326,7 +327,7 @@ func (s *Server) handleImagesPrune(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var body imagesPruneRequest
-	if err := dec.Decode(&body); err != nil {
+	if err := decodeSingleJSON(dec, &body); err != nil {
 		writeDecodeError(w, err)
 		return
 	}
@@ -335,11 +336,22 @@ func (s *Server) handleImagesPrune(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(body.IDs) == 0 || len(body.IDs) > mutationMaxIDs {
+		writeError(w, http.StatusBadRequest, "confirm between 1 and 100 exact IDs; refresh the preview")
+		return
+	}
+	for _, id := range body.IDs {
+		if !imageIDPattern.MatchString(id) {
+			writeError(w, http.StatusBadRequest, "invalid approved ID")
+			return
+		}
+	}
+
 	if s.opts.PruneImages == nil {
 		writeError(w, http.StatusNotFound, "image prune unavailable")
 		return
 	}
-	result, err := s.opts.PruneImages(r.Context(), body.Mode)
+	result, err := s.opts.PruneImages(r.Context(), body.Mode, body.IDs)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

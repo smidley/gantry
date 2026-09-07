@@ -105,7 +105,7 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "live stream not available")
 		return
 	}
-	flusher, ok := w.(http.Flusher)
+	_, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
@@ -117,14 +117,17 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cancel()
 
+	defer cancelStreamWrites(r.Context(), w)()
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
 	if s.opts.Current != nil {
-		writeSSEFrame(w, s.opts.Current())
-		flusher.Flush()
+		streamWriteDeadline(w)
+		if writeSSEFrame(w, s.opts.Current()) != nil || flushStream(w) != nil {
+			return
+		}
 	}
 
 	interval := s.opts.Live.PingInterval
@@ -142,11 +145,18 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 		case <-s.opts.Live.done:
 			return // shutdown draining: see Broadcaster.Drain
 		case frame := <-ch:
-			writeSSEFrame(w, frame)
-			flusher.Flush()
+			streamWriteDeadline(w)
+			if writeSSEFrame(w, frame) != nil || flushStream(w) != nil {
+				return
+			}
 		case <-ticker.C:
-			_, _ = fmt.Fprint(w, ": ping\n\n") // write failure here means the client already disconnected
-			flusher.Flush()
+			streamWriteDeadline(w)
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			if flushStream(w) != nil {
+				return
+			}
 		}
 	}
 }
@@ -154,6 +164,7 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 // writeSSEFrame writes one "event: frame" SSE event carrying data as its
 // payload. Callers still need to Flush() -- writing alone can sit in a
 // buffer.
-func writeSSEFrame(w http.ResponseWriter, data []byte) {
-	_, _ = fmt.Fprintf(w, "event: frame\ndata: %s\n\n", data) // write failure here means the client already disconnected
+func writeSSEFrame(w http.ResponseWriter, data []byte) error {
+	_, err := fmt.Fprintf(w, "event: frame\ndata: %s\n\n", data)
+	return err
 }

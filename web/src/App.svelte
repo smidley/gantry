@@ -1,8 +1,3 @@
-<!--
-  App: the route table. Every Phase 3 view (Overview through Settings,
-  Tasks 14-20) renders its real component; only the unmatched fallback
-  ("not-found") still renders a placeholder <h1>.
--->
 <script>
   import { onMount } from 'svelte';
   import Layout from './components/Layout.svelte';
@@ -11,19 +6,8 @@
   import { alertRules } from './lib/alertRules.svelte';
   import { auth } from './lib/auth.svelte';
 
-  import Overview from './views/Overview.svelte';
-  import Containers from './views/Containers.svelte';
-  import ContainerDetail from './views/ContainerDetail.svelte';
-  import Compare from './views/Compare.svelte';
-  import TopConsumers from './views/TopConsumers.svelte';
-  import Storage from './views/Storage.svelte';
-  import Maintenance from './views/Maintenance.svelte';
-  import GPU from './views/GPU.svelte';
-  import Events from './views/Events.svelte';
-  import Insights from './views/Insights.svelte';
-  import InsightDetail from './views/InsightDetail.svelte';
-  import Alerts from './views/Alerts.svelte';
-  import Settings from './views/Settings.svelte';
+  import RouteView from './components/RouteView.svelte';
+  import { installNavigation } from './lib/navigation';
   import Login from './views/Login.svelte';
   import Setup from './views/Setup.svelte';
   import LoadingState from './components/LoadingState.svelte';
@@ -40,12 +24,13 @@
   // loop.
   onMount(() => {
     auth.init();
-    return () => live.disconnect();
+    const cleanup = installNavigation();
+    return () => { live.disconnect(); cleanup(); };
   });
 
   $effect(() => {
     if (!auth.ready) return;
-    if (auth.needsSetup || auth.needsLogin) {
+    if (auth.error || auth.needsSetup || auth.needsLogin) {
       live.disconnect();
     } else {
       live.connect();
@@ -53,14 +38,13 @@
     }
   });
 
-  const ROUTE_TITLES = {
-    'not-found': 'Not found',
-  };
 </script>
 
 {#if !auth.ready}
   <!-- Nothing gate-dependent renders before the boot status answer: a
        locked box must never flash the dashboard shell. -->
+{:else if auth.error}
+  <main class="auth-unavailable"><h1>Unable to connect</h1><p role="alert">{auth.error}</p><button class="btn" onclick={() => auth.refresh()}>Try again</button></main>
 {:else if auth.needsSetup}
   <Setup />
 {:else if auth.needsLogin}
@@ -69,52 +53,14 @@
 <Layout>
   {#if LIVE_ROUTES.has($route.name) && !live.frame}
     <LoadingState title="Connecting to your server" detail="The first live system snapshot will appear here automatically." />
-  {:else if $route.name === 'overview'}
-    <Overview />
-  {:else if $route.name === 'containers'}
-    <Containers initialState={$route.params.state} />
-  {:else if $route.name === 'container-detail'}
-    <!-- Keyed on the name param: navigating straight from one
-         container's detail page to another's must fully reset every
-         per-container piece of state (live rings, fetched series,
-         events) rather than reusing the component instance with just a
-         new prop value -- see ContainerDetail's own liveRing calls,
-         which would otherwise keep accumulating points from BOTH
-         containers into the same ring. -->
-    {#key $route.params.name}
-      <ContainerDetail name={$route.params.name} />
-    {/key}
-  {:else if $route.name === 'compare'}
-    <Compare names={$route.params.names} />
-  {:else if $route.name === 'top'}
-    <TopConsumers initialResource={$route.params.resource} />
-  {:else if $route.name === 'storage'}
-    <Storage />
-  {:else if $route.name === 'maintenance'}
-    <Maintenance />
-  {:else if $route.name === 'gpu'}
-    <GPU />
-  {:else if $route.name === 'events'}
-    <Events />
-  {:else if $route.name === 'insights'}
-    <Insights mode={$route.params.mode} />
-  {:else if $route.name === 'insight-detail'}
-    <!-- Keyed on the id param, the container-detail precedent directly
-         above: the evidence page's own map links straight to ANOTHER
-         insight's page, and every piece of per-insight state there (the
-         fetched finding, the one-shot map snapshot, the incident
-         charts) has to reset rather than being reused with a new prop
-         value. -->
-    {#key $route.params.id}
-      <InsightDetail id={$route.params.id} />
-    {/key}
-  {:else if $route.name === 'alerts'}
-    <Alerts />
-  {:else if $route.name === 'settings'}
-    <Settings />
   {:else}
-    <h1>{ROUTE_TITLES[$route.name] ?? ROUTE_TITLES['not-found']}</h1>
-    <p class="microlabel">View content lands in a later task.</p>
+    {#key $route.name + ($route.params.name ?? $route.params.id ?? $route.params.resource ?? '')}
+      <RouteView current={$route} />
+    {/key}
   {/if}
 </Layout>
 {/if}
+
+<style>
+ .auth-unavailable { max-width: 36rem; margin: 15vh auto; padding: 1.5rem; }
+</style>

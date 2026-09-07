@@ -15,6 +15,8 @@
   independent.
 -->
 <script>
+  import { chartTooltip } from '../lib/chartTooltip';
+  import { distinctDashes } from '../lib/chartIdentity';
   import uPlot from 'uplot';
   import { onDestroy, onMount } from 'svelte';
   import { theme, resolveToken, withAlpha } from '../lib/theme.svelte';
@@ -539,7 +541,7 @@
               // lines around it.
               stroke: s.strokeAlphaPct != null ? withAlpha(colorHex, s.strokeAlphaPct) : colorHex,
               width: s.width ?? 2.25,
-              dash: s.dash,
+              dash: distinctDashes(series)[i],
               cap: 'round', // D2 pass: "rounded joins/caps" (joins already default to round in this uPlot version)
               points: { show: false },
               fill: seriesFill(colorHex, i + 1, isMulti),
@@ -688,6 +690,22 @@
     return unsubscribe;
   });
 
+  function keyboardScrub(event) {
+    if (!chart || !['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Escape'].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === 'Escape') { handleLeave(); tooltip = null; return; }
+    const timestamps = chart.data[0];
+    if (!timestamps?.length) return;
+    handleEnter();
+    let idx = chart.cursor.idx ?? timestamps.length - 1;
+    if (event.key === 'Home') idx = 0;
+    else if (event.key === 'End') idx = timestamps.length - 1;
+    else idx = Math.max(0, Math.min(timestamps.length - 1, idx + (event.key === 'ArrowLeft' ? -1 : 1)));
+    chart.setCursor({ left: chart.valToPos(timestamps[idx], 'x'), top: chart.bbox.height / devicePixelRatio / 2 });
+  }
+
+  let collecting = $derived(live && series.some((s) => s.points?.length > 0) && Math.min(...series.flatMap((s) => s.points?.length ? [s.points[0][0]] : [])) > Date.now() / 1000 - 850);
+
   onMount(() => {
     ro = new ResizeObserver(() => {
       if (chart && container) chart.setSize({ width: container.clientWidth || 320, height });
@@ -706,14 +724,24 @@
 
 <div
   class="time-chart"
+  role="slider"
+  aria-valuemin={series[0]?.points?.[0]?.[0] ?? 0}
+  aria-valuemax={series[0]?.points?.at(-1)?.[0] ?? 0}
+  aria-valuenow={tooltip?.ts ?? series[0]?.points?.at(-1)?.[0] ?? 0}
+  aria-valuetext={tooltip ? `${new Date(tooltip.ts * 1000).toLocaleTimeString()}: ${tooltip.rows.map((row) => `${row.label}: ${row.value ?? 'unavailable'}`).join(', ')}` : 'Latest sample'}
+  tabindex="0"
+  aria-label="Interactive chart. Use arrow keys to inspect values, Home and End to jump, Escape to return to live."
+  onkeydown={keyboardScrub}
+  onblur={handleLeave}
   bind:this={container}
   onpointerenter={handleEnter}
   onpointerleave={handleLeave}
   onpointercancel={handleLeave}
 >
   <div bind:this={plotEl}></div>
+  {#if collecting}<p class="time-chart__collecting">Collecting history · the empty portion of this range has not been recorded.</p>{/if}
   {#if tooltip}
-    <div class="time-chart__tooltip" style="left: {tooltip.x}px; top: {tooltip.y}px">
+    <div use:chartTooltip={{ x: tooltip.x, y: tooltip.y }} class="time-chart__tooltip">
       <div class="microlabel">{fmtRelTime(tooltip.ts, Date.now())}</div>
       {#each tooltip.rows as row (row.label)}
         <div class="time-chart__tooltip-row">
@@ -737,6 +765,7 @@
 </div>
 
 <style>
+ .time-chart__collecting { font-size: .75rem; color: var(--ink-2); margin: .25rem .5rem; }
   .time-chart {
     position: relative;
     width: 100%;
@@ -782,7 +811,9 @@
      read as floating ABOVE plotted lines, not as a static surface. */
   .time-chart__tooltip {
     position: absolute;
-    transform: translate(12px, 12px);
+    max-width: calc(100vw - 32px);
+    max-height: min(60vh, 28rem);
+    overflow: auto;
     min-width: 11.5rem;
     background: color-mix(in oklab, var(--surface) 96%, transparent);
     border: 1px solid var(--border);
@@ -790,7 +821,8 @@
     padding: 0.62rem 0.72rem;
     color: var(--ink);
     font-size: 0.75rem;
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
     pointer-events: none;
     z-index: 5;
     box-shadow: var(--shadow-md);

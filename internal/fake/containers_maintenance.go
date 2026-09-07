@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/smidley/gantry/internal/collect/docker"
 )
@@ -204,7 +205,7 @@ func (g *Generator) RemoveContainers(_ context.Context, ids []string) ([]docker.
 // fixed reference point to mean anything here -- against a real
 // time.Now(), every seed entry would already read as years old and
 // older_than_hours could never distinguish between them.
-func (g *Generator) PruneContainers(_ context.Context, mode string, olderThanHours int) (docker.ContainerPruneResult, error) {
+func (g *Generator) PruneContainers(_ context.Context, mode string, olderThanHours int, ids []string) (docker.ContainerPruneResult, error) {
 	if mode != "exited" && mode != "created" && mode != "all-stopped" {
 		return docker.ContainerPruneResult{}, fmt.Errorf("unknown prune mode %q", mode)
 	}
@@ -223,7 +224,7 @@ func (g *Generator) PruneContainers(_ context.Context, mode string, olderThanHou
 	var out docker.ContainerPruneResult
 	for _, ct := range g.containers {
 		matches := ct.State == mode || (mode == "all-stopped" && (ct.State == "exited" || ct.State == "created"))
-		if !matches {
+		if !matches || !slices.Contains(ids, ct.ID) {
 			kept = append(kept, ct)
 			continue
 		}

@@ -348,7 +348,7 @@
     font-size: 0.8rem;
     font-weight: 600;
     color: var(--ink);
-    opacity: 0.78;
+    opacity: 1;
     transition:
       color 150ms ease,
       opacity 150ms ease;

@@ -62,7 +62,7 @@ Gantry monitors read-only — it reads your containers, disks and array and neve
 - **Per-container drill-down.** Click any container for multi-line history — CPU (with throttling and allocation limits), memory, network, disk IO, per-engine GPU and PSI — from live down to 30 days, with event markers, an anomaly banner, its storage placement, and an embedded log viewer.
 - **Metrics.** Per-resource leaderboards (CPU, memory, network, disk IO, GPU) over Now / 1h / 24h / 7d, average or peak, above a multi-line chart that overlays every container against the host total.
 - **Storage.** Array and pools with parity status, ETA, speed and recent history; every drive as a card with its role, media type, capacity, temperature and error count; shares and Docker storage; per-drive charts for IO, usage or temperature.
-- **GPU.** Per-engine utilization (render, video, video-enhance, copy) with per-container attribution — Intel and AMD work out of the box via DRM `fdinfo`, no `/dev/dri` passthrough and nothing privileged; Nvidia is optional and adds VRAM.
+- **GPU.** Per-engine utilization (render, video, video-enhance, copy) with per-container attribution — Intel and AMD work out of the box via DRM `fdinfo`, no `/dev/dri` passthrough; host PID access and `SYS_PTRACE` are used for attribution; Nvidia is optional and adds VRAM.
 - **Insights.** An explainable cross-container engine that states, in a full sentence, when one container is likely slowing another or the array — with a confidence level, an interaction map, and an evidence drawer showing the actual numbers (culprit IO share, device utilization, await, victim stall). It runs on proxy signals without PSI, and uses kernel-measured stall when you enable `psi=1`.
 - **Alerts.** Threshold and event rules with real hysteresis — separate trip and clear thresholds, and separate sustain and clear windows — delivered to Unraid's own notification center and/or outbound webhooks, with dedup, re-notify, silencing and flap-guard. A firing alert quotes the matching insight when one exists.
 - **Maintenance.** See which images have an update available (with changelog links; Unraid's own tooling does the actual update), reclaim space from unused and dangling images, and remove stopped containers — every deletion behind a confirmation dialog that itemizes exactly what will go. `GANTRY_READ_ONLY=1` turns all of it off.
@@ -96,7 +96,7 @@ docker run -d \
   ghcr.io/smidley/gantry:latest
 ```
 
-Then open `http://<your-unraid-ip>:8380/`. The first time, you'll set a username and password.
+Then open `http://<your-unraid-ip>:8380/`. On first run, copy the setup code from `docker logs gantry`, then create a username and password.
 
 ### What each mount is for
 
@@ -118,7 +118,7 @@ See **[docs/install.md](docs/install.md)** for the line-by-line reference.
 
 ## Sign in
 
-Gantry requires a login. The first time you open it, a one-time setup screen asks you to create a username and password; every visit after that is a normal login. It's a single local account stored on your own box (the password is argon2id-hashed, never stored in the clear) — no cloud, no external service. Signing in lasts until you close your browser. See [docs/install.md](docs/install.md#authentication) for the full reference.
+Gantry requires a login. The first time you open it, a one-time setup screen asks for the owner code from local startup logs, then a username and password; every visit after that is a normal login. It's a single local account stored on your own box (the password is argon2id-hashed, never stored in the clear) — no cloud, no external service. Sessions expire after 8 hours idle or 24 hours total; browser session restoration can preserve a cookie after closing. See [docs/install.md](docs/install.md#authentication) for the full reference.
 
 - **Preseed it (headless / Community Applications).** Set both `GANTRY_USERNAME` and `GANTRY_PASSWORD` (the password masked in the CA form) to create the login at first boot and skip the setup screen. Minimum 8 characters. Changing either later changes the login and signs out every session; removing them never turns authentication off.
 - **Run it open.** `GANTRY_AUTH=none` turns authentication off entirely — only for a fully trusted network. `GANTRY_AUTH=proxy` turns Gantry's own login off for installs already behind an authenticating reverse proxy (authelia, SWAG, nginx `auth_request`). Any other value keeps the login required.
@@ -129,14 +129,15 @@ All optional — Gantry works with none of them.
 
 - **PSI.** Add `psi=1` to your flash boot device's syslinux append line and reboot. Optional; it sharpens the Insights engine with kernel-measured stall data. See **[docs/psi.md](docs/psi.md)**.
 - **Nvidia GPU.** Add `--runtime=nvidia` to Extra Parameters and set `NVIDIA_VISIBLE_DEVICES=all` — nothing else, and no special image tag; the standard image already carries the loader `nvidia-smi` needs. Without both, the GPU panel simply shows an enable hint — never an error. (Intel and AMD need nothing extra.) See **[docs/nvidia.md](docs/nvidia.md)**.
-- **`GANTRY_READ_ONLY=1`.** Makes every write-capable path — the Maintenance cleanups and webhook-target configuration — refuse to run, for a strictly look-don't-touch monitor.
+- **`GANTRY_READ_ONLY=1`.** Disables Docker cleanup and webhook-target changes. Local settings and account management remain available.
 
 ## Security
 
 - **Read-only for monitoring.** Gantry reads container stats, logs and container/disk state, and never touches your array configuration.
-- **Maintenance is the only exception, and it's opt-in.** The only writes Gantry can make are the cleanup you trigger from the Maintenance view: removing dangling and unused images, and stopped containers. Every deletion is behind a confirmation dialog, never force-removes, never touches a running container, and never removes volumes. Setting `GANTRY_READ_ONLY=1` disables all of it.
-- **No elevated access.** Gantry never runs `--privileged` and never uses host networking. It adds a single Linux capability, `SYS_PTRACE` (for per-container GPU and resource attribution), on top of Docker's default set.
-- **Required login.** A username and password — set on first run — protect the whole UI and live stream; sessions are argon2id-backed and end when you close your browser. Every mutating request additionally requires a custom header, so a drive-by web page can't reach the write paths even when authentication is turned off. Run open only on a trusted network with `GANTRY_AUTH=none`, or delegate auth to a reverse proxy with `GANTRY_AUTH=proxy`. Gantry serves plain HTTP — put a TLS-terminating proxy in front if you expose it beyond a trusted LAN.
+- **Maintenance is the only exception, and it's opt-in.** The only Docker mutations Gantry exposes are the cleanup you trigger from the Maintenance view: removing dangling and unused images, and stopped containers. Every deletion is behind a confirmation dialog, never force-removes, never touches a running container, and never removes volumes. Setting `GANTRY_READ_ONLY=1` disables all of it.
+- **Privileged integration.** The full installation runs as root with Docker's default capabilities plus `SYS_PTRACE` and host PID visibility. A read-only Docker socket mount does **not** restrict Docker API writes: raw socket access is a host-level trust boundary. `GANTRY_READ_ONLY` guards Gantry's handlers; it cannot contain a compromised process holding that socket.
+- **Owner-bound login.** Initial setup requires a code from local logs or preseeded credentials. Passwords are argon2id-hashed. Live and log streams end when a session is revoked or expires. Mutations require a custom request header, bodies and queries have resource budgets, and browser security headers apply to every response.
+- **Isolated monitoring and TLS.** Use the [monitoring deployment](docs/security.md#monitoring-only-deployment) for a non-root web process with a restricted Docker intermediary. Bind native installations with `GANTRY_BIND_ADDRESS=127.0.0.1`; bind Docker's published port to `127.0.0.1`. The [TLS proxy example](deploy/nginx.conf.example) keeps built-in authentication. Proxy-auth mode requires authentication at the proxy and an unreachable direct application port.
 
 ## How it's built
 

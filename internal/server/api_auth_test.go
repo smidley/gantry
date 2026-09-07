@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -74,6 +75,10 @@ func (f *fakeAuth) Login(ip, username, password string) (string, error) {
 	}
 	f.valid[f.loginToken] = true
 	return f.loginToken, nil
+}
+
+func (f *fakeAuth) WatchSession(ctx context.Context, _ string) (context.Context, context.CancelFunc) {
+	return context.WithCancel(ctx)
 }
 
 func (f *fakeAuth) Authenticate(token string) bool { return f.valid[token] }
@@ -252,7 +257,7 @@ func TestAuthLoginBodyValidation(t *testing.T) {
 
 func TestAuthRoutesUnavailableWithoutManagerOrGateOff(t *testing.T) {
 	// Nil manager (tests): 404 -- a write with nowhere to go.
-	s := New(Options{Version: "test-1", Started: time.Now()})
+	s := New(Options{SetupCode: "test-bootstrap-code", Version: "test-1", Started: time.Now()})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 	resp := authReq(t, http.MethodPost, ts.URL+"/api/auth/login", `{"username":"a","password":"x"}`, "")
@@ -290,7 +295,7 @@ func TestAuthLogoutDeletesSessionAndExpiresCookie(t *testing.T) {
 
 func TestAuthStatusShapes(t *testing.T) {
 	// Nil manager: a test-only open box -- reported as the disabled state.
-	s := New(Options{Version: "test-1", Started: time.Now()})
+	s := New(Options{SetupCode: "test-bootstrap-code", Version: "test-1", Started: time.Now()})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 	var st authStatusResponse
@@ -301,7 +306,7 @@ func TestAuthStatusShapes(t *testing.T) {
 
 	// Setup-pending: auto mode, no credential yet.
 	fa := newFakeAuth()
-	ss := New(Options{Version: "test-1", Started: time.Now(), Auth: fa})
+	ss := New(Options{SetupCode: "test-bootstrap-code", Version: "test-1", Started: time.Now(), Auth: fa})
 	tsSetup := httptest.NewServer(ss.Handler())
 	defer tsSetup.Close()
 	resp = authReq(t, http.MethodGet, tsSetup.URL+"/api/auth/status", "", "")
@@ -348,7 +353,7 @@ func TestAuthSetupOneShotBootstrapThenLoginGate(t *testing.T) {
 	// with no session -- the bootstrap. The fake flips credentialSet true.
 	fa := newFakeAuth()
 	fa.setupToken = "boot-token"
-	s := New(Options{Version: "test-1", Started: time.Now(), Auth: fa})
+	s := New(Options{SetupCode: "test-bootstrap-code", Version: "test-1", Started: time.Now(), Auth: fa})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
@@ -357,7 +362,7 @@ func TestAuthSetupOneShotBootstrapThenLoginGate(t *testing.T) {
 	resp := authReq(t, http.MethodGet, ts.URL+"/api/live/snapshot", "", "")
 	require.Equal(t, http.StatusUnauthorized, resp.StatusCode, "everything but setup is 401 while awaiting first-run setup")
 
-	resp = authReq(t, http.MethodPost, ts.URL+"/api/auth/setup", `{"username":"alice","password":"a-decent-password"}`, "")
+	resp = authReq(t, http.MethodPost, ts.URL+"/api/auth/setup", `{"setup_code":"test-bootstrap-code","username":"alice","password":"a-decent-password"}`, "")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "alice", fa.lastSetupUser)
 	require.Equal(t, "a-decent-password", fa.lastSetupPass)
@@ -368,7 +373,7 @@ func TestAuthSetupOneShotBootstrapThenLoginGate(t *testing.T) {
 
 	// Credential now set: a SECOND setup is refused (409, one-shot), even
 	// with the session the first one issued.
-	resp = authReq(t, http.MethodPost, ts.URL+"/api/auth/setup", `{"username":"mallory","password":"another-one"}`, "boot-token")
+	resp = authReq(t, http.MethodPost, ts.URL+"/api/auth/setup", `{"setup_code":"test-bootstrap-code","username":"mallory","password":"another-one"}`, "boot-token")
 	require.Equal(t, http.StatusConflict, resp.StatusCode, "setup is one-shot: once a credential exists it 409s")
 
 	// And the change route is now gated: no session 401s, a session
@@ -395,9 +400,9 @@ func TestAuthSetupErrorMapping(t *testing.T) {
 	} {
 		fa := newFakeAuth()
 		fa.setupErr = tc.err
-		s := New(Options{Version: "test-1", Started: time.Now(), Auth: fa})
+		s := New(Options{SetupCode: "test-bootstrap-code", Version: "test-1", Started: time.Now(), Auth: fa})
 		ts := httptest.NewServer(s.Handler())
-		resp := authReq(t, http.MethodPost, ts.URL+"/api/auth/setup", `{"username":"u","password":"p-1234567"}`, "")
+		resp := authReq(t, http.MethodPost, ts.URL+"/api/auth/setup", `{"setup_code":"test-bootstrap-code","username":"u","password":"p-1234567"}`, "")
 		require.Equal(t, tc.status, resp.StatusCode, "for %v", tc.err)
 		ts.Close()
 	}
@@ -457,7 +462,7 @@ func TestHealthzSplitsBodyByAuthentication(t *testing.T) {
 	require.Contains(t, full, "sources")
 
 	// Gate off (nil Auth): full detail, unchanged open behavior.
-	s := New(Options{Version: "test-1", Started: time.Now(), Sources: func() map[string]string { return map[string]string{"host": "ok"} }})
+	s := New(Options{SetupCode: "test-bootstrap-code", Version: "test-1", Started: time.Now(), Sources: func() map[string]string { return map[string]string{"host": "ok"} }})
 	ts2 := httptest.NewServer(s.Handler())
 	defer ts2.Close()
 	resp = authReq(t, http.MethodGet, ts2.URL+"/api/healthz", "", "")

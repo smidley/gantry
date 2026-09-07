@@ -249,6 +249,7 @@
 
 <div class="alerts-view">
   <h1 class="page-title">Alerts</h1>
+  <p class="microlabel">Silence pauses notifications for the selected rule and entity. The alert stays visible and keeps evaluating until its condition clears.</p>
 
   <div class="card alerts-view__channels">
     <span class="microlabel">Channels</span>
@@ -259,7 +260,9 @@
         {#each channelNames as name (name)}
           {@const ok = channels[name] === 'ok'}
           <li class="alerts-view__channel-row">
-            <HealthDot status={ok ? 'good' : 'warning'} label={channelLabel(name)} />
+            {#if channels[name] === 'awaiting first delivery'}
+              <span>{channelLabel(name)}</span>
+            {:else}<HealthDot status={ok ? 'good' : 'warning'} label={channelLabel(name)} />{/if}
             {#if !ok}<span class="alerts-view__channel-detail">{channels[name]}</span>{/if}
           </li>
         {/each}

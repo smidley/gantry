@@ -1,272 +1,3 @@
-<!--
-  Overview: the landing page, D2 ("plain-reading anchor") design --
-  see .superpowers/design-exploration/{direction-d2.md,mockup-d2.html}.
-  A plain-language status headline (with a countable fleet strip as its
-  own evidence) replaces the earlier fleet-summary card; an attention
-  section right under the headline's own sublines promotes whatever
-  actually needs a look, connected purely by proximity (no frame, no
-  leader line -- see the corrective-pass note below), with a miniature
-  array bay schematic when a disk itself is the reason; the top-row stat
-  tiles become a quiet instrument rail. The GPU strip is unchanged in
-  substance, restyled only. Top Consumers gained its own compact CPU/
-  Mem/Net/IO/GPU switcher (see overview__top-switcher's own doc) on top
-  of that same restyle. Everything still reads straight off the live SSE
-  frame -- no fetch, no polling -- except the events feed, exactly as
-  before.
-
-  Density pass (Scott: "reduce the amount of wasted space... panels
-  should fit together nicely"): headline-zone+rail and Top Consumers+
-  Recent events used to be two separate two-column grids stacked on top
-  of each other, which left the headline zone's own column dead below
-  the fleet strip whenever the rail (four sparkline tiles) ran taller
-  than it, a common case in the healthy/no-attention state. Fixed with
-  two independent flex columns sharing the whole page (superseded by
-  the Balance pass below, which replaced that shared-column split
-  entirely -- see its own doc).
-
-  Corrective pass (post-deploy, Scott's own read: "there's lines in the
-  middle of text that are not used"): the first cut over-decorated this
-  -- a tick ruler that measured nothing, a dotted leader line that ran
-  straight through the sublines' own text and left a dead void above
-  "Needs a look", and orphaned corner-bracket glyphs, all deleted
-  outright. The one rule that survived: a line either separates two
-  real regions or encodes real data, or it doesn't exist.
-
-  Header compaction pass (Scott: "lots of wasted space here" -- the
-  headline/fleet-strip/facts/callouts/schematic stack was spending a
-  full screen height): the status band -- headline's own facts on the
-  left, fleet strip + array schematic stacked on the right -- is now a
-  two-column row at >=768px (overview__status-band), not a single
-  vertical stack; the schematic itself moved out of the conditional
-  attention section into that right column, always visible rather than
-  only during a disk anomaly; and each attention row collapsed from a
-  title line plus a separate detail line into one inline sentence.
-  Mobile (<768px) keeps the original vertical stack.
-
-  Balance pass (Scott: "the dashboard overview needs some work. sections
-  are arranged oddly with lots of wasted space and some items are not
-  intuitive and odd sizes."): two independent problems, fixed
-  separately. First, the status band's two columns never matched height
-  -- fleet strip + bay schematic routinely ran 150-250px taller than the
-  three plain-text fact lines beside them, and "Needs a look" used to be
-  a THIRD block, full-width, below the whole band -- so it only started
-  once the taller visuals column finished, leaving a dead gap under the
-  short facts column the entire time (confirmed live: a 175px void).
-  Attention now lives inside overview__status-facts, right after the
-  fact lines it explains -- adjacent to the headline it's about, per
-  Scott's own framing, and the gap is gone because there's no longer a
-  full-width block waiting on the taller column. Second,
-  overview__body's shared two-column split (headline-zone+Top Consumers
-  stacked left, rail+events stacked right -- the Density pass above) put
-  Top Consumers and the events feed in unrelated columns for no reason
-  tied to either one's own content: Top Consumers ended up width-
-  starved (labels/bars/values cramped into ~640px) while the rail's own
-  column ran nearly DOUBLE the opposite column's total height, confirmed
-  live at 1287px vs 659px. overview__modules-band replaces that: Top
-  Consumers and Recent events now share one wide lane, stacked (so they
-  never compete for width), and the rail -- four bare label+sparkline
-  rows, the one module that's genuinely narrow by nature -- gets its own
-  dedicated lane instead of an arbitrary 50/50 split. overview__body/
-  col-left/col-right are gone entirely; the status band and modules band
-  are now two independent full-width rows, each free to pick its own
-  column split.
-
-  Adaptive all-clear pass (Scott: "When there is nothing that needs
-  attention... the other sections should be expanded to use the
-  available space and then we won't need to scroll down so far to see
-  other things"): with zero callouts the status band's left column has
-  nothing left to say -- the array facts live in BaySchematic's own
-  head now (facts-relocation pass) and the attention section doesn't
-  exist -- so the whole two-column band was conditional on
-  !overviewStatus.ok. All-clear instead renders the headline card as a
-  compact strip (overview__headline-zone--clear) and promotes the fleet
-  strip + bay schematic into overview__clear-band, a full-width row of
-  their own (side by side at >=64rem, stacked below), pulling the
-  modules band and GPU strip up the page by roughly the dead column's
-  height. (Superseded on the attention side by the counts-and-fleet
-  pass below, which gives BOTH states that same full-width row.)
-
-  Counts-and-fleet pass -- three asks, one shape:
-
-  1. "It doesn't create a list there, but instead has a count of items
-     that need you. The user can click on the number and then be brought
-     to a list of items that need attention. Alerts will go to the
-     events page, and any container contentions will go to the insights
-     page." The attention section no longer renders one CalloutRow per
-     anomaly; it renders at most two count chips over the SAME anomaly
-     list (lib/attentionCounts.ts owns the bucketing, the routing and
-     the wording). The headline's own count is still anomalies.length,
-     so the chips always sum to it, and an acknowledged concern is
-     missing from the count exactly the way it used to be missing from
-     the list -- deriveOverviewStatus drops it before either sees it.
-
-     What that costs, and the one open question this pass leaves: the
-     per-row Ack control went with the rows. Acknowledgement itself is
-     untouched -- the store, the API, the derivation filter and
-     CalloutRow (the component that owned the control) are all still
-     here and still tested -- but nothing on THIS page renders it any
-     more, and re-inventing one beside a count would just be a second,
-     quieter list. Its new home is a product call: the natural one is
-     the destination pages the chips already point at.
-
-  2. "Container fleet section should be sized to take up the available
-     screen space beneath it, and objects (containers) inside the
-     section should be auto-resized depending on quantity of
-     containers." That lives inside FleetStrip (see its own doc for the
-     measurement and the fit), but it is the reason for the layout
-     change here: the status band's two-column split existed to put a
-     TALL list of callouts beside the visuals, and two chips are not a
-     column. So the band collapsed -- the chips moved inline into the
-     headline card, and the fleet + schematic row that all-clear
-     already had became the layout for both states. The fleet is
-     therefore BESIDE the schematic rather than stacked above it, which
-     is what makes "the space beneath it" a real, empty thing to grow
-     into; the state the page is in is still legible in the DOM
-     (overview__status-band vs overview__clear-band, one shared rule
-     set). Where the two do stack -- below 64rem -- the fleet is
-     ordered last, for the same reason.
-
-  3. "Glowing Container activity should be triggered by any metric that
-     is above a threshold, not just CPU" -- entirely inside FleetStrip
-     and lib/fleetActivity.ts. The one thing it changed out here: the
-     fleet strip is handed each container's whole metrics bag plus the
-     host memory total, rather than a hand-picked cpu/mem pair.
-
-  Unified-columns pass (Scott, on the dead block the pass below left
-  under the fleet): the status band and the modules band are ONE band
-  now. Everything under the page header is a single two-lane flow --
-  each lane a continuous column, top to bottom:
-
-    WIDE lane:   headline+chips (pinned) / fleet (pinned) / the
-                 wide-lane modules in saved order
-    NARROW lane: metrics rail (pinned)   / the narrow-lane modules in
-                 saved order
-
-  The gap is gone by construction rather than by measurement: the wide
-  lane's first module starts under the FLEET, not under whichever of
-  the two columns happened to be taller. Nothing waits on the rail any
-  more, so its height stops being a layout input at all.
-
-  What the pinned heads are and are not: they are ordinary lane children
-  wrapped in `overview__pinned`, they are absent from the layout
-  document, they carry no grip, eye or size switcher, and captureGeometry
-  cannot see them (it collects `:scope > .overview__module` only) -- so a
-  drag can neither move them nor land above them, and a cross-lane drop
-  lands under the rail / under the fleet. What they DO now share with
-  the modules is width: the saved column split governs the whole page,
-  the rail included.
-
-  Two rules this retires. There is no "status band" or "clear band" in
-  the DOM any more (the all-clear state is the headline CARD's own
-  modifier, which it always was), and there is no adaptive band collapse
-  to reclaim vertical space -- a continuous flow has none to reclaim,
-  because nothing was being held open. And an emptied lane no longer
-  disappears: every lane has a pinned head, so none can empty, and the
-  split holds wherever the owner left it.
-
-  Pills-and-top-right pass -- two asks that turn out to be one layout:
-
-  1. "Container fleet boxes should go back to being rectangular. The
-     smaller size looked more elegant." A deliberate partial revert,
-     entirely inside FleetStrip (see its own doc): the fixed-pitch 8x16
-     pill strip is back verbatim, and the count-scaled square fit went
-     with it -- lib/fleetGrid.ts deleted, no ResizeObserver, no
-     space-beneath reserve. Out here that means the fleet card is
-     COMPACT again. It no longer claims the screen below it, so it no
-     longer needs a full-width row of its own to have something to grow
-     into, which is what frees the band's second column for:
-
-  2. "CPU/mem/net/io should be pinned at the top right. like it was on
-     the right before the last PR, but at the top right." The rail
-     un-does its one release as a full-width four-across row above the
-     headline and becomes a stacked column again -- the same four tiles
-     the modules band's narrow lane used to hold -- pinned in the status
-     band's right column. PINNED is unchanged: it is still not a
-     Customize module, still not hideable, still not reorderable, and
-     the module inventory (top-consumers, events, storage) and the saved
-     layout document are untouched, so there is no migration.
-
-     The band's two columns are now split by CONTENT rather than by
-     "text beside pictures": this machine's own state down the left
-     (headline, chips, and the fleet that is the headline's evidence),
-     the four host instruments on the right. The right column is a fixed
-     width rather than the modules band's proportional split, because
-     the rail's height cannot answer back -- see its rule's own doc.
-
-  Customize pass (the ask: let a user rearrange the Overview): the
-  modules band -- and ONLY the modules band -- became rearrangeable. Its
-  cards are no longer written out in a fixed order; each is one entry in
-  a keyed {#each} over lib/overviewLayout.ts's ordered id lists, which
-  are persisted server-side (GET/PUT /api/layout/overview, the
-  /api/groups whole-document precedent) so an arrangement follows the
-  owner across browsers rather than living in one browser's localStorage
-  the way topResource/theme/motion do.
-
-  What is deliberately NOT rearrangeable: the status band (headline,
-  attention chips, fleet strip, bay schematic) and the all-clear band
-  above it, plus the GPU strip below. The "needs you" surface must not be
-  buryable -- a layout gesture that can hide the reason you opened the
-  page is a bug with a UI, not a feature.
-
-  Constrained-resize pass (the follow-up ask: let a user size what they
-  rearranged): two controls, both deliberately CONSTRAINED rather than
-  freeform -- this is still a designed page with two lanes, not a canvas.
-
-  1. The COLUMN SPLIT. A hairline divider on the lanes' own boundary,
-     drawn only in edit mode, sets how the wide and narrow lanes share
-     the band. One saved number, clamped 0.60-0.75, defaulting to the
-     1.6:1 the band shipped with. Same hand-rolled pointer shape as the
-     module drag (capture, snapshot at pointerdown, Escape cancels), plus
-     arrow keys, because a drag-only control would have been this page's
-     first pointer-only affordance. The drag previews locally and commits
-     ONCE on release, so crossing the band costs one PUT, not sixty.
-     Mobile ignores the ratio outright -- stacked lanes have no split.
-
-  2. HEIGHT STEPS. compact/normal/tall on the two modules with a
-     genuinely elastic body: Top Consumers (3/5/8 leaderboard rows) and
-     Recent events (4/8/14 feed rows). A step is a ROW BUDGET, not a
-     pixel box -- both modules render a list at a fixed row pitch, so a
-     step lands on the page's existing rhythm by construction and `tall`
-     buys real content rather than padding. The rail gets no control at
-     all: four fixed label+value+sparkline tiles have no list to lengthen
-     and nothing that reads better taller, so a taller rail would be the
-     same four tiles with more air between them -- the dead space this
-     file's own layout passes have spent three rounds deleting.
-
-  Interplay with everything ADAPTIVE on this page (rule 2 below, and the
-  all-clear band reclaiming the status band's vertical space): a user-set
-  size WINS. A module left at 'normal' renders exactly the budget this
-  page shipped with and keeps its content-driven height -- it is the only
-  thing the surrounding layout can grow into; a module set to compact or
-  tall renders the owner's budget and no adaptive rule overrules it.
-  Every module at 'normal' -- the default document -- is today's page
-  exactly, in the all-clear state and out of it. The same priority holds
-  on the width side: a ratio only ever divides a band that HAS two lanes,
-  and a lone lane still spans the whole band (flex-basis 0 -- see
-  overviewLaneFlex), so hiding a lane's last module still expands the
-  survivor across the full width whatever ratio is saved.
-
-  Two rules the rest of this file leans on:
-
-  1. KEYED, POSITION-ONLY MOTION. Modules are keyed by module id and
-     animate with `animate:flip` alone. There are deliberately no
-     in:/out: transitions on the module list: an interrupted outro
-     strands DOM nodes, and these particular nodes own live uPlot
-     canvases (the rail's four sparklines, TopBarList's own rows). A
-     keyed move RELOCATES the existing element rather than destroying
-     and recreating it, so those charts keep streaming straight through
-     a reorder -- which is the whole reason the drag is hand-rolled
-     against Svelte's own keyed each instead of handed to a library that
-     wants to own the DOM.
-
-  2. VISIBILITY, NOT POSITION, drives the adaptive expansion. The
-     all-clear band already grew the fleet strip to full width whenever
-     the bay schematic had nothing to draw; the modules band now follows
-     the same principle -- a lane with no visible modules is not
-     rendered at all in normal mode, so the surviving lane takes the
-     whole band. Nothing anywhere keys off "the rail is the second
-     column" or "events sits under Top Consumers".
--->
 <script>
   import { onMount, untrack } from 'svelte';
   import { flip } from 'svelte/animate';
@@ -314,6 +45,7 @@
   import { dropTargetAt } from '../lib/dragReorder';
 
   import StatTile from '../components/StatTile.svelte';
+  import OverviewHealth from '../components/OverviewHealth.svelte';
   import FleetStrip from '../components/FleetStrip.svelte';
   import BaySchematic from '../components/BaySchematic.svelte';
   import SourcesBanner from '../components/SourcesBanner.svelte';
@@ -778,14 +510,8 @@
   let layoutIsDefault = $derived(isDefaultOverviewLayout(layoutDoc));
   let dragMotionMs = $derived(motion.reduced ? 0 : DRAG_MOTION_MS);
 
-  // Both lanes always render now, and there is no longer a rule that
-  // could hide one. Each lane owns a PINNED head (laneHead: the headline
-  // + fleet on the wide side, the metrics rail on the narrow one), so a
-  // lane with zero modules in it is still a real column with real
-  // content -- "an empty lane isn't a lane" described a band that could
-  // genuinely empty, and this one cannot. Dragging the last module out
-  // of a lane therefore leaves the split exactly where it was rather
-  // than handing the whole width to the survivor.
+  // Preserve both drop targets in edit mode; otherwise an empty narrow
+  // lane collapses so the remaining cards use the available width.
 
   // --- Column split -------------------------------------------------------
   //
@@ -800,13 +526,7 @@
   // width per lane -- see overviewLaneFlex's own doc. Mobile ignores both
   // properties outright (the lanes stack, `flex: none`).
   //
-  // The split now governs the WHOLE page below the header, pinned heads
-  // included: the metrics rail is the narrow lane's own head, so its
-  // width is the narrow lane's width and moving the divider resizes it
-  // along with everything under it. That is deliberate -- the rail was
-  // briefly a fixed 23rem column of its own, which meant the one control
-  // this page offers over its columns silently did not apply to a third
-  // of what was on screen.
+  // The split applies only to the customizable module lanes.
   let dividerRatio = $state(null);
   let laneRatio = $derived(dividerRatio ?? layoutDoc.ratio);
   let laneFlex = $derived(overviewLaneFlex(laneRatio));
@@ -1090,58 +810,11 @@
   });
 </script>
 
-<!-- laneHead: the PINNED cards at the top of each lane -- the headline
-  card and the fleet strip in the wide lane, the metrics rail in the
-  narrow one. They are not modules: they carry no module wrapper, no
-  data-module, no grip, no eye and no size switcher, they are absent
-  from the layout document entirely, and captureGeometry never sees them
-  (it only ever collects `:scope > .overview__module`), so a drag can
-  neither move them nor land above them.
-
-  They live INSIDE the lanes rather than in a band of their own because
-  that is the whole point of the unification: a lane is one continuous
-  column, so the wide lane's modules flow directly under the fleet
-  instead of waiting for the taller rail column beside them to finish.
-
-  The `overview__pinned` wrapper is the same shape `overview__module`
-  gives a draggable card -- a plain stretch column -- so both kinds of
-  lane child are laid out identically and the lane's own gap is the only
-  thing between them. -->
+<!-- The fleet stays at the wide lane's head. Metrics and health live above
+  both lanes and are excluded from the saved module arrangement. -->
 {#snippet laneHead(column)}
   {#if column === 'wide'}
-    <div class="overview__pinned overview__pinned--headline" data-pinned="headline">
-      <div class="card overview__headline-zone" class:overview__headline-zone--clear={overviewStatus.ok}>
-        <div class="overview__headline-row">
-          <span
-            class="overview__headline-dot"
-            class:overview__headline-dot--pulse={!overviewStatus.ok}
-            style={`background:${statusColor}; color:${statusColor}`}
-            aria-hidden="true"
-          ></span>
-          <h2 class="overview__headline-text">{overviewStatus.headline}</h2>
-        </div>
-        {#if !overviewStatus.ok}
-          <section class="overview__attention">
-            <span class="microlabel">Needs a look</span>
-            <div class="overview__chips">
-              {#each chips as chip (chip.bucket)}
-                <a class="overview__chip" href={chip.href} aria-label={chip.ariaLabel} data-chip={chip.bucket}>
-                  <span class="overview__chip-count tabular-nums" aria-hidden="true">{chip.count}</span>
-                  <span class="overview__chip-noun" aria-hidden="true">{chip.noun}</span>
-                </a>
-              {/each}
-            </div>
-          </section>
-        {/if}
-      </div>
-    </div>
-    <div class="overview__pinned overview__pinned--fleet" data-pinned="fleet">
-      <FleetStrip containers={fleetContainers} {hostMemBytes} />
-    </div>
-  {:else}
-    <div class="overview__pinned overview__pinned--rail" data-pinned="metrics-rail">
-      {@render metricsRail()}
-    </div>
+    <div class="overview__pinned overview__pinned--fleet" data-pinned="fleet"><FleetStrip containers={fleetContainers} {hostMemBytes} /></div>
   {/if}
 {/snippet}
 
@@ -1338,7 +1011,7 @@
 {#snippet metricsRail()}
   <div class="card overview__metrics-rail">
     <StatTile
-      bare
+      bare compact
       href="#/top/cpu"
       label="CPU"
       liveValue={host['cpu.total'] ?? 0}
@@ -1347,7 +1020,7 @@
       bandFor={(v) => band('host.cpu', v)}
     />
     <StatTile
-      bare
+      bare compact
       href="#/top/mem"
       label="Memory"
       liveValue={host['mem.used_pct'] ?? 0}
@@ -1356,7 +1029,7 @@
       bandFor={(v) => band('host.mem', v)}
     />
     <StatTile
-      bare
+      bare compact
       href="#/top/net"
       label="Network"
       liveValue={netRx}
@@ -1368,7 +1041,7 @@
       label2="↑"
     />
     <StatTile
-      bare
+      bare compact
       href="#/top/io"
       label="Disk IO"
       liveValue={ioRead}
@@ -1384,6 +1057,8 @@
 
 <div class="overview">
   <h1 class="page-title">Overview</h1>
+  <div class="overview__pinned overview__pinned--rail" data-pinned="metrics-rail">{@render metricsRail()}</div>
+  <OverviewHealth status={overviewStatus} {chips} />
   <SourcesBanner sources={live.frame?.sources ?? {}} />
 
   <div class="overview__modules-band" class:overview__modules-band--editing={editing}>
@@ -1457,7 +1132,7 @@
           <span class="overview__lane-divider-grip" aria-hidden="true"></span>
         </div>
       {/if}
-      {@render moduleLane('narrow', narrowIds)}
+      {#if editing || narrowIds.length}{@render moduleLane('narrow', narrowIds)}{/if}
     </div>
 
     {#if editing}
@@ -1496,20 +1171,7 @@
     gap: 1rem;
   }
 
-  /* --- Modules band: Top Consumers + Recent events share one wide
-     lane (stacked, so the two never compete for width -- the Balance
-     pass's own doc, top of file), the rail gets its own narrower lane
-     -- four bare label+sparkline rows are the one module here that's
-     genuinely narrow by nature, not a module that lost a fight for
-     space. Plain flex, same "independent-height columns" reasoning the
-     old overview__body had (no shared grid row to force either lane to
-     the other's height): modules-wide (Top Consumers + Events, ~490px
-     combined) and modules-narrow (the rail, ~660px, four fixed-height
-     sparklines) are never going to match, and don't need to. -------- */
-  /* The band itself is now a vertical stack -- the Customize bar, the
-     lanes row, and (in edit mode) the hidden tray -- so the two-column
-     split moved down one level onto __modules-lanes, which is otherwise
-     the exact flex row the band used to be. */
+  /* Modules form two independent columns beneath the summary. */
   .overview__modules-band {
     display: flex;
     flex-direction: column;
@@ -1601,29 +1263,8 @@
     flex-direction: column;
     min-width: 0;
   }
-  /* Mobile: ONE column, and one breakpoint for the whole page -- the
-     lanes' own, which is now the only two-column rule left on it.
-
-     The lanes go `display: contents` rather than stacking as two blocks,
-     so every card becomes a direct child of the single stacked column
-     and can be ORDERED across the lane boundary. That is what puts the
-     metrics rail -- the narrow lane's own head -- directly under the
-     fleet instead of below a leaderboard and an events feed. Reading
-     order down a phone is then headline, the fleet that is its evidence,
-     the four host instruments, and only then the modules: the three
-     pinned things this page exists to answer with, before anything
-     rearrangeable.
-
-     Within each of those two groups the saved arrangement still applies
-     exactly as before -- wide lane's own order, then narrow lane's. The
-     saved SPLIT deliberately does not: a single stacked column has no
-     ratio to honour, and `display: contents` drops the grow factors on
-     the floor for free.
-
-     Safe because EDITING is desktop-only (CUSTOMIZE_MEDIA is 48rem, this
-     query's own boundary): `display: contents` removes the lane's box,
-     which would otherwise take the drop indicator's containing block and
-     the lane's own empty-state with it. Neither can exist down here. */
+  /* On phones, fleet and saved modules share one column. The metrics
+     and health summary already precede this band. Editing stays desktop-only. */
   @media (max-width: 47.9375rem) {
     /* align-items goes back to stretch: on the desktop ROW it is
        flex-start, which is what lets the two lanes have independent
@@ -1638,14 +1279,8 @@
     .overview__modules-lane {
       display: contents;
     }
-    .overview__pinned--headline {
-      order: 1;
-    }
     .overview__pinned--fleet {
       order: 2;
-    }
-    .overview__pinned--rail {
-      order: 3;
     }
     .overview__modules-wide .overview__module {
       order: 4;
@@ -1885,115 +1520,22 @@
     font-size: 0.72rem;
   }
 
-  .overview__headline-zone {
-    display: flex;
-    flex-direction: column;
-    gap: 1.15rem;
-    min-width: 0;
-    padding: clamp(1.15rem, 2vw, 1.6rem);
-    overflow: hidden;
-    background:
-      radial-gradient(circle at 92% 5%, color-mix(in oklab, var(--accent) 11%, transparent), transparent 18rem),
-      var(--surface-raised);
-  }
-  /* All-clear: the card holds only the headline row (the adaptive
-     all-clear pass, top-of-file doc), so it slims to a strip -- the
-     vertical padding drops while the horizontal stays aligned with the
-     attention state's own. */
-  .overview__headline-zone--clear {
-    padding-top: 1rem;
-    padding-bottom: 1rem;
-  }
-
-  /* --- Pinned lane heads: the headline card and the fleet at the top of
-     the wide lane, the metrics rail at the top of the narrow one. The
-     wrapper matches overview__module's own shape exactly (a plain
-     stretch column, min-width 0) so a pinned card and a draggable one
-     are laid out identically and the lane's gap is the only thing
-     between them -- what it deliberately does NOT carry is anything
-     from edit mode: no dashed outline, no tools row, no drag
-     transform. ------------------------------------------------- */
+  /* Pinned metrics and fleet wrappers share the module width behavior. */
   .overview__pinned {
     display: flex;
     flex-direction: column;
     min-width: 0;
   }
 
-  .overview__headline-row {
-    display: flex;
-    align-items: center;
-    gap: 0.7rem;
-  }
-  .overview__headline-dot {
-    position: relative;
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .overview__headline-dot--pulse::after {
-    content: '';
-    position: absolute;
-    inset: -7px;
-    border-radius: 50%;
-    border: 1px solid currentColor;
-    opacity: 0;
-    animation: overview-headline-ping 2.6s ease-out infinite;
-  }
-  @keyframes overview-headline-ping {
-    0% {
-      opacity: 0;
-      transform: scale(0.96);
-    }
-    8% {
-      opacity: 0.6;
-      transform: scale(1);
-    }
-    32% {
-      opacity: 0;
-      transform: scale(1.12);
-    }
-    100% {
-      opacity: 0;
-      transform: scale(1.12);
-    }
-  }
-  .overview__headline-text {
-    font-family: var(--font-display);
-    font-weight: 700;
-    font-size: clamp(1.75rem, 3vw, 2.45rem);
-    line-height: 1.1;
-    letter-spacing: -0.045em;
-    margin: 0;
-    color: var(--ink);
-  }
-  @media (max-width: 47.9375rem) {
-    .overview__headline-text {
-      font-size: 1.6rem;
-    }
-  }
-
-  /* --- Metrics rail: a STACK of four tiles, pinned at the head of the
-     narrow lane. This is StatTile's bare mode exactly as it was
-     designed: one tile per row, each separated from the next by the
-     hairline seam the component draws itself, values pushed to the
-     right edge by its own `space-between`. The brief spell as a
-     full-width four-across row needed both of those overridden -- four
-     seams read as underlines, and each tile's right-aligned VALUE
-     landed hard against the next tile's LABEL -- and a stack needs
-     neither override back.
-
-     It declares no width of its own: it is a lane child, so the saved
-     column split sizes it exactly as it sizes every module under it
-     (~275-435px across the ratio's own 0.60-0.75 clamps at 1440px, and
-     the full width of the single stacked column on mobile). Four
-     fixed-height rows at any of those. ------------------------- */
+  /* Four host instruments lead the page in both responsive layouts. */
   .overview__metrics-rail {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1rem;
     min-width: 0;
-    padding: 1.2rem;
+    padding: 1rem;
   }
+  @media (max-width: 70rem) { .overview__metrics-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
   /* --- Storage: the bay schematic's own module wrapper. The schematic
      brings its whole card body -- border, padding, background, head,

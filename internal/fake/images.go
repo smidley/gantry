@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/smidley/gantry/internal/collect/docker"
@@ -120,7 +121,7 @@ func (g *Generator) RemoveImages(_ context.Context, ids []string) ([]docker.Imag
 // "unused" (mode "unused") fake image -- the same two modes
 // Collector.PruneImages accepts, kept in lockstep so fake mode exercises
 // the identical request contract a real daemon would.
-func (g *Generator) PruneImages(_ context.Context, mode string) (docker.ImagePruneResult, error) {
+func (g *Generator) PruneImages(_ context.Context, mode string, ids []string) (docker.ImagePruneResult, error) {
 	if mode != "dangling" && mode != "unused" {
 		return docker.ImagePruneResult{}, fmt.Errorf("unknown prune mode %q", mode)
 	}
@@ -131,7 +132,7 @@ func (g *Generator) PruneImages(_ context.Context, mode string) (docker.ImagePru
 	var kept []docker.ImageInfo
 	var out docker.ImagePruneResult
 	for _, im := range g.images {
-		if im.State != mode {
+		if im.State != mode || !slices.Contains(ids, im.ID) {
 			kept = append(kept, im)
 			continue
 		}

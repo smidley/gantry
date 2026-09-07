@@ -90,6 +90,12 @@
     if (userChoseMode) return;
     mode = active.length > 0 ? 'map' : 'list';
   });
+  let initialModeSeen = false;
+  $effect(() => {
+    const next = initialMode;
+    if (initialModeSeen) { mode = next === 'map' ? 'map' : 'list'; userChoseMode = true; }
+    initialModeSeen = true;
+  });
   function setMode(next) {
     mode = next;
     userChoseMode = true;

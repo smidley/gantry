@@ -221,7 +221,7 @@ func TestGeneratorRemoveImagesUnknownIDReturnsError(t *testing.T) {
 func TestGeneratorPruneImagesDanglingRemovesOnlyDangling(t *testing.T) {
 	g := newTestGenerator()
 
-	result, err := g.PruneImages(context.Background(), "dangling")
+	result, err := g.PruneImages(context.Background(), "dangling", approvedSeedImages())
 	require.NoError(t, err)
 	require.Len(t, result.Deleted, 4)
 	require.Positive(t, result.ReclaimedBytes)
@@ -236,7 +236,7 @@ func TestGeneratorPruneImagesDanglingRemovesOnlyDangling(t *testing.T) {
 func TestGeneratorPruneImagesUnusedRemovesOnlyUnused(t *testing.T) {
 	g := newTestGenerator()
 
-	result, err := g.PruneImages(context.Background(), "unused")
+	result, err := g.PruneImages(context.Background(), "unused", approvedSeedImages())
 	require.NoError(t, err)
 	require.Len(t, result.Deleted, 4)
 
@@ -250,7 +250,7 @@ func TestGeneratorPruneImagesUnusedRemovesOnlyUnused(t *testing.T) {
 func TestGeneratorPruneImagesUnknownModeIsError(t *testing.T) {
 	g := newTestGenerator()
 
-	_, err := g.PruneImages(context.Background(), "bogus")
+	_, err := g.PruneImages(context.Background(), "bogus", approvedSeedImages())
 
 	require.Error(t, err)
 }
@@ -261,10 +261,18 @@ func TestGeneratorImagesStateIsIndependentPerInstance(t *testing.T) {
 
 	before, err := g1.Images(context.Background())
 	require.NoError(t, err)
-	_, err = g1.PruneImages(context.Background(), "dangling")
+	_, err = g1.PruneImages(context.Background(), "dangling", approvedSeedImages())
 	require.NoError(t, err)
 
 	after2, err := g2.Images(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, len(before.Images), len(after2.Images), "one generator's mutation must not leak into another's")
+}
+
+func approvedSeedImages() []string {
+	var ids []string
+	for _, item := range fakeImageSeed {
+		ids = append(ids, item.ID)
+	}
+	return ids
 }

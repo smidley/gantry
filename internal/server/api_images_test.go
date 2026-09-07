@@ -196,7 +196,7 @@ func TestImagesOptionsMethodNeverReachesHandler(t *testing.T) {
 			removeCalled = true
 			return nil, nil
 		},
-		PruneImages: func(context.Context, string) (ImagePruneResult, error) {
+		PruneImages: func(context.Context, string, []string) (ImagePruneResult, error) {
 			pruneCalled = true
 			return ImagePruneResult{}, nil
 		},
@@ -356,7 +356,7 @@ func TestImagesPruneRejectsOversizedBody(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	oversized := strings.Repeat(" ", 2<<20) + `{"mode":"dangling"}`
+	oversized := strings.Repeat(" ", 2<<20) + `{"ids":["sha256:0000000000000000000000000000000000000000000000000000000000000001"],"mode":"dangling"}`
 	resp := postImages(t, ts.URL+"/api/images/prune", oversized, "images")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
@@ -430,7 +430,7 @@ func TestImagesPruneRequiresConfirmHeader(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := postImages(t, ts.URL+"/api/images/prune", `{"mode":"dangling"}`, "")
+	resp := postImages(t, ts.URL+"/api/images/prune", `{"ids":["sha256:0000000000000000000000000000000000000000000000000000000000000001"],"mode":"dangling"}`, "")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusPreconditionRequired, resp.StatusCode)
 }
@@ -440,7 +440,7 @@ func TestImagesPruneRefusesWhenReadOnly(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := postImages(t, ts.URL+"/api/images/prune", `{"mode":"dangling"}`, "images")
+	resp := postImages(t, ts.URL+"/api/images/prune", `{"ids":["sha256:0000000000000000000000000000000000000000000000000000000000000001"],"mode":"dangling"}`, "images")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
@@ -450,7 +450,7 @@ func TestImagesPruneRejectsInvalidMode(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := postImages(t, ts.URL+"/api/images/prune", `{"mode":"all"}`, "images")
+	resp := postImages(t, ts.URL+"/api/images/prune", `{"ids":["sha256:0000000000000000000000000000000000000000000000000000000000000001"],"mode":"all"}`, "images")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
@@ -460,7 +460,7 @@ func TestImagesPrune404WhenBackendNotWired(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp := postImages(t, ts.URL+"/api/images/prune", `{"mode":"unused"}`, "images")
+	resp := postImages(t, ts.URL+"/api/images/prune", `{"ids":["sha256:0000000000000000000000000000000000000000000000000000000000000001"],"mode":"unused"}`, "images")
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
@@ -472,7 +472,7 @@ func TestImagesPruneDeletesAndLogsEventPerDeletedImageForBothModes(t *testing.T)
 			var appendCalls []eventCall
 			s := New(Options{
 				Version: "test-1", Started: time.Now(),
-				PruneImages: func(_ context.Context, m string) (ImagePruneResult, error) {
+				PruneImages: func(_ context.Context, m string, ids []string) (ImagePruneResult, error) {
 					gotMode = m
 					return ImagePruneResult{
 						Deleted:        []DeletedImage{{ID: "sha256:abc", RepoTags: []string{"old:1"}, SizeBytes: 100}},
@@ -485,7 +485,7 @@ func TestImagesPruneDeletesAndLogsEventPerDeletedImageForBothModes(t *testing.T)
 			ts := httptest.NewServer(s.Handler())
 			defer ts.Close()
 
-			resp := postImages(t, ts.URL+"/api/images/prune", `{"mode":"`+mode+`"}`, "images")
+			resp := postImages(t, ts.URL+"/api/images/prune", `{"ids":["sha256:0000000000000000000000000000000000000000000000000000000000000001"],"mode":"`+mode+`"}`, "images")
 			defer func() { _ = resp.Body.Close() }()
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 			require.Equal(t, mode, gotMode)

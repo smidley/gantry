@@ -6,6 +6,7 @@
   PSI-tier hint when pressure insight isn't available on this box.
 -->
 <script>
+  import { SOURCE_NOT_APPLICABLE } from '../lib/sourceStatus';
   import { live } from '../lib/sse.svelte';
   import { fmtBytes, fmtPct } from '../lib/format';
   import { enginesPresent, GPU_ENGINE_ORDER, GPU_ENTITY_ENGINE_ORDER } from '../lib/metrics';
@@ -48,9 +49,12 @@
   // samples, still has real data worth showing). This hint is used only
   // once there's truly nothing to show, to explain WHY -- gpu's own
   // Detail preferred (the primary DRM path), falling back to nvidia's.
-  let emptyHint = $derived(
+  let rawEmptyHint = $derived(
     sources.gpu && sources.gpu !== 'ok' ? sources.gpu : sources.nvidia && sources.nvidia !== 'ok' ? sources.nvidia : null,
   );
+
+  let emptyHint = $derived(rawEmptyHint === SOURCE_NOT_APPLICABLE ? 'No supported NVIDIA GPU is present on this server.' : rawEmptyHint);
+  let availabilityTitle = $derived(!live.frame ? 'Connecting to the server…' : !live.connected ? 'GPU connection interrupted' : rawEmptyHint === SOURCE_NOT_APPLICABLE ? 'GPU source not applicable' : rawEmptyHint ? 'GPU collection unavailable' : 'Collecting GPU samples');
 
   // Attribution table: every container with at least one gpu.<engine>.
   // busy_pct metric (GPU_ENGINE_ORDER -- NOT the entity variant: Nvidia's
@@ -97,7 +101,7 @@
 
   {#if !hasAnyEngineData}
     <div class="card gpu-view__empty">
-      <p class="gpu-view__empty-title">No GPU activity detected yet.</p>
+      <p class="gpu-view__empty-title">{availabilityTitle}</p>
       {#if emptyHint}
         <p class="microlabel gpu-view__empty-hint">{emptyHint}</p>
       {/if}

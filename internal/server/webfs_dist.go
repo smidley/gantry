@@ -46,6 +46,15 @@ func webHandler() http.Handler {
 			return
 		}
 		upath := strings.TrimPrefix(r.URL.Path, "/")
+		if strings.HasPrefix(upath, "assets/") {
+			if _, err := fs.Stat(sub, upath); err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		if upath == "" {
 			upath = "."
 		}

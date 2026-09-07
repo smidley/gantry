@@ -146,13 +146,13 @@
   function openImageRemoveDialog() {
     if (selectedImagesList.length === 0) return;
     imageDialogError = null;
-    imageDialog = { kind: 'remove', targets: selectedImagesList };
+    imageDialog = { kind: 'remove', targets: selectedImagesList.slice(0, 100) };
   }
   function openImagePruneDialog(mode) {
     const targets = mode === 'dangling' ? danglingImages : unusedImages;
     if (targets.length === 0) return;
     imageDialogError = null;
-    imageDialog = { kind: 'prune', mode, targets };
+    imageDialog = { kind: 'prune', mode, targets: targets.slice(0, 100) };
   }
   function closeImageDialog() {
     if (imagePending) return;
@@ -177,7 +177,7 @@
           })),
         };
       } else {
-        const result = await pruneImages(imageDialog.mode);
+        const result = await pruneImages(imageDialog.mode, targets.map((im) => im.full_id));
         imageResults = {
           reclaimedBytes: result.reclaimed_bytes,
           entries: [
@@ -267,13 +267,13 @@
   function openContainerRemoveDialog() {
     if (selectedContainersList.length === 0) return;
     containerDialogError = null;
-    containerDialog = { kind: 'remove', targets: selectedContainersList };
+    containerDialog = { kind: 'remove', targets: selectedContainersList.slice(0, 100) };
   }
   function openContainerPruneDialog(mode) {
     const targets = mode === 'exited' ? exitedContainers : createdContainers;
     if (targets.length === 0) return;
     containerDialogError = null;
-    containerDialog = { kind: 'prune', mode, hours: parsedAgeFilterHours(), targets };
+    containerDialog = { kind: 'prune', mode, hours: parsedAgeFilterHours(), targets: targets.slice(0, 100) };
   }
   function closeContainerDialog() {
     if (containerPending) return;
@@ -310,7 +310,7 @@
           })),
         };
       } else {
-        const result = await pruneContainersMaintenance(containerDialog.mode, containerDialog.hours);
+        const result = await pruneContainersMaintenance(containerDialog.mode, containerDialog.hours, targets.map((ct) => ct.full_id));
         containerResults = {
           entries: [
             ...result.deleted.map((d) => ({ id: d.id, label: d.name, ok: true })),
@@ -341,6 +341,7 @@
 
 <div class="maintenance-view">
   <h1 class="page-title">Maintenance</h1>
+  <p class="microlabel">Each cleanup confirms up to 100 items. Larger selections are split into batches; review the refreshed list before continuing.</p>
 
   {#if readOnly}
     <p class="microlabel maintenance-view__readonly">

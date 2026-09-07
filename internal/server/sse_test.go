@@ -129,7 +129,7 @@ func TestLiveEndpointSetsSSEHeaders(t *testing.T) {
 	defer c.close()
 
 	require.Equal(t, "text/event-stream", c.resp.Header.Get("Content-Type"))
-	require.Equal(t, "no-cache", c.resp.Header.Get("Cache-Control"))
+	require.Equal(t, "no-store", c.resp.Header.Get("Cache-Control"))
 	require.Equal(t, "no", c.resp.Header.Get("X-Accel-Buffering"))
 	require.Equal(t, http.StatusOK, c.resp.StatusCode)
 }

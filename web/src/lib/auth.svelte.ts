@@ -23,9 +23,9 @@ class AuthStore {
   // the dashboard shell.
   ready = $state(false);
   mode = $state<'auto' | 'proxy' | 'none'>('auto');
-  // state defaults to 'authed' only as a pre-boot placeholder; `ready`
-  // gates every consumer until the real status arrives.
-  state = $state<AuthState>('authed');
+  // Remain gated until the server verifies the current session.
+  state = $state<AuthState>('login');
+  error = $state<string | null>(null);
   username = $state('');
   envManaged = $state(false);
   authenticated = $state(false);
@@ -38,11 +38,7 @@ class AuthStore {
     return needsLogin(this.state);
   }
 
-  // init is called once from App's onMount. A failed status fetch still
-  // marks ready (leaving the placeholder state): if the API is down
-  // entirely, the views' own loading/error states are the right surface,
-  // and the moment any later call 401s, onUnauthorized corrects the
-  // picture.
+  // A failed status request keeps the connection-error screen visible.
   async init(): Promise<void> {
     setUnauthorizedHandler(() => this.onUnauthorized());
     await this.refresh();
@@ -52,8 +48,9 @@ class AuthStore {
   async refresh(): Promise<void> {
     try {
       this.apply(await fetchAuthStatus());
+      this.error = null;
     } catch {
-      // see init's doc: an unreachable status leaves the placeholder
+      this.error = 'Gantry could not verify your session. Check the server connection and try again.';
     }
   }
 
@@ -77,8 +74,8 @@ class AuthStore {
 
   // setup / login throw (AuthActionError for 401/429) for the form to
   // render; on success the cookie is already set by the response.
-  async setup(username: string, password: string): Promise<void> {
-    await postAuthSetup(username, password);
+  async setup(username: string, password: string, setupCode: string): Promise<void> {
+    await postAuthSetup(username, password, setupCode);
     this.authenticated = true;
     this.state = 'authed';
     this.username = username.trim();

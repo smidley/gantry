@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -444,7 +445,7 @@ func (c *Collector) RemoveContainers(ctx context.Context, ids []string) ([]Conta
 // pruneDangling's own doc) -- acting on Gantry's own classification,
 // never the daemon's, is what keeps "what's prunable" from having two
 // disagreeing answers.
-func (c *Collector) PruneContainers(ctx context.Context, mode string, olderThanHours int) (ContainerPruneResult, error) {
+func (c *Collector) PruneContainers(ctx context.Context, mode string, olderThanHours int, ids []string) (ContainerPruneResult, error) {
 	if mode != "exited" && mode != "created" && mode != "all-stopped" {
 		return ContainerPruneResult{}, fmt.Errorf("unknown prune mode %q", mode)
 	}
@@ -453,6 +454,7 @@ func (c *Collector) PruneContainers(ctx context.Context, mode string, olderThanH
 		return ContainerPruneResult{}, err
 	}
 	targets := selectPruneTargets(report.Containers, mode, olderThanHours, time.Now())
+	targets = slices.DeleteFunc(targets, func(ct ContainerMaintenanceInfo) bool { return !slices.Contains(ids, ct.ID) })
 	return pruneContainersWith(targets, func(id string) error {
 		return c.ctrCli.ContainerRemove(ctx, id, container.RemoveOptions{Force: false, RemoveVolumes: false})
 	}), nil

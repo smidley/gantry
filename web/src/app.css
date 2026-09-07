@@ -50,10 +50,7 @@ body {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  background-image:
-    radial-gradient(circle at 78% -10%, color-mix(in oklab, var(--accent) 9%, transparent), transparent 32rem),
-    linear-gradient(180deg, color-mix(in oklab, var(--surface) 26%, transparent), transparent 22rem);
-  background-attachment: fixed;
+
 }
 
 ::selection {
@@ -105,7 +102,7 @@ body {
    restrained amount of tracking. */
 .microlabel {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.07em;
@@ -241,10 +238,10 @@ body :is(
   .containers-view__compare-btn,
   .maintenance-card__action
 ) {
-  color: white !important;
+  color: var(--on-accent) !important;
   background: var(--accent) !important;
   border-color: var(--accent) !important;
-  box-shadow: 0 6px 16px color-mix(in oklab, var(--accent) 18%, transparent);
+  box-shadow: none;
 }
 
 body :is(
@@ -301,4 +298,11 @@ tbody tr:hover {
   .card {
     border-radius: 12px;
   }
+}
+
+/* Reading copy uses the same typeface without the compact eyebrow treatment. */
+p.microlabel { font-size: 13px; text-transform: none; letter-spacing: normal; }
+h1:focus { outline: none; }
+@media (pointer: coarse) {
+  .segmented__btn, .btn, summary { min-height: 44px; }
 }

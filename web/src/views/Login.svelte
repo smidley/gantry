@@ -14,6 +14,8 @@
 
   let username = $state('');
   let password = $state('');
+  let showPassword = $state(false);
+  const serverAddress = typeof location === 'undefined' ? '' : location.host;
   let submitting = $state(false);
   let error = $state(null);
   let passwordField = $state(null);
@@ -83,7 +85,7 @@
     <label class="login__field">
       <span class="microlabel">Password</span>
       <input
-        type="password"
+        type={showPassword ? "text" : "password"}
         bind:value={password}
         bind:this={passwordField}
         autocomplete="current-password"
@@ -92,6 +94,10 @@
         aria-describedby={error ? 'login-error' : undefined}
       />
     </label>
+
+    <label class="login__hint"><input type="checkbox" bind:checked={showPassword} /> Show password</label>
+    <p class="login__hint">Signing in to {serverAddress}</p>
+    <details class="login__hint"><summary>Need to recover access?</summary><p>Set a new GANTRY_USERNAME and GANTRY_PASSWORD in Gantry's container settings, then restart it.</p></details>
 
     {#if error}
       <p class="login__error" id="login-error" role="alert">{error}</p>
@@ -104,6 +110,8 @@
 </main>
 
 <style>
+  .login__hint { font-size: 0.8125rem; color: var(--ink-2); }
+  .login__hint input { margin-right: .4rem; }
   .login {
     min-height: 100vh;
     display: flex;

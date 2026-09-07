@@ -183,7 +183,7 @@ func (s *Server) handleContainersMaintenanceRemove(w http.ResponseWriter, r *htt
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var body containersMaintenanceRemoveRequest
-	if err := dec.Decode(&body); err != nil {
+	if err := decodeSingleJSON(dec, &body); err != nil {
 		writeDecodeError(w, err)
 		return
 	}
@@ -220,8 +220,9 @@ func (s *Server) handleContainersMaintenanceRemove(w http.ResponseWriter, r *htt
 }
 
 type containersMaintenancePruneRequest struct {
-	Mode           string `json:"mode"`
-	OlderThanHours int    `json:"older_than_hours"`
+	IDs            []string `json:"ids"`
+	Mode           string   `json:"mode"`
+	OlderThanHours int      `json:"older_than_hours"`
 }
 
 // handleContainersMaintenancePrune serves POST
@@ -235,7 +236,7 @@ func (s *Server) handleContainersMaintenancePrune(w http.ResponseWriter, r *http
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var body containersMaintenancePruneRequest
-	if err := dec.Decode(&body); err != nil {
+	if err := decodeSingleJSON(dec, &body); err != nil {
 		writeDecodeError(w, err)
 		return
 	}
@@ -248,11 +249,22 @@ func (s *Server) handleContainersMaintenancePrune(w http.ResponseWriter, r *http
 		return
 	}
 
+	if len(body.IDs) == 0 || len(body.IDs) > mutationMaxIDs {
+		writeError(w, http.StatusBadRequest, "confirm between 1 and 100 exact IDs; refresh the preview")
+		return
+	}
+	for _, id := range body.IDs {
+		if !containerIDPattern.MatchString(id) {
+			writeError(w, http.StatusBadRequest, "invalid approved ID")
+			return
+		}
+	}
+
 	if s.opts.PruneContainers == nil {
 		writeError(w, http.StatusNotFound, "container prune unavailable")
 		return
 	}
-	result, err := s.opts.PruneContainers(r.Context(), body.Mode, body.OlderThanHours)
+	result, err := s.opts.PruneContainers(r.Context(), body.Mode, body.OlderThanHours, body.IDs)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

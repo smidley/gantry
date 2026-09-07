@@ -1,4 +1,5 @@
 import { test as base, expect } from '@playwright/test';
+import { mockLiveStream } from './liveStream';
 
 type Scenario = ReturnType<typeof makeScenario>;
 function makeScenario(frame: any) {
@@ -55,29 +56,7 @@ export const test = base.extend<{ scenario: Scenario }>({
     await use(makeScenario(frame));
   },
   page: async ({ page, scenario }, use) => {
-    // Keep the UI transport connected while the scenario responds to local
-    // snapshot requests. Authentication/stream lifecycle use real-server tests.
-    await page.addInitScript(() => {
-      class ScenarioStream extends EventTarget {
-        onopen: ((event: Event) => void) | null = null;
-        onerror: ((event: Event) => void) | null = null;
-        timer: ReturnType<typeof setInterval>;
-        closed = false;
-        constructor(_url: string) {
-          super();
-          const send = async () => {
-            const frame = await (await fetch('/api/live/snapshot')).json();
-            if (this.closed) return;
-            this.onopen?.(new Event('open'));
-            this.dispatchEvent(new MessageEvent('frame', { data: JSON.stringify(frame) }));
-          };
-          this.timer = setInterval(send, 1000);
-          void send();
-        }
-        close() { this.closed = true; clearInterval(this.timer); }
-      }
-      window.EventSource = ScenarioStream as unknown as typeof EventSource;
-    });
+    await mockLiveStream(page);
     await page.route('**/api/**', async (route) => {
       const response = scenario.response(route.request().url(), route.request().method());
       if (!response) return route.continue();

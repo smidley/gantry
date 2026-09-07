@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { mockLiveStream } from './fixtures/liveStream';
 
 // Playwright smoke suite: drives the real built binary (see
 // playwright.config.ts's webServer) in GANTRY_FAKE_DATA=1 mode, which
@@ -112,12 +113,9 @@ test('overview: the Top Consumers module metric switcher changes the module and 
 // all-clear band), and which one the real fake-mode server would show
 // depends on its own uptime (grafana's health check, the 5-minute
 // disk-errors trigger, the scripted insight demo) plus whatever acks a
-// parallel spec is briefly holding. Routing /api/live -- the same
-// route-mock pattern the events and container-storage specs use -- pins
-// the exact state each spec is about instead of skipping on the wrong
-// one. EventSource re-connects when the fulfilled body ends (retry:
-// 300) and re-receives the same frame every ~300ms -- as steady a live
-// feed as these geometry assertions could ask for.
+// parallel spec is briefly holding. A mocked snapshot and connected
+// stream pin the state without introducing a reconnect warning that
+// would shift the layout under measurement.
 function liveFrame(extraContainers: Record<string, object> = {}) {
   return {
     ts: Math.floor(Date.now() / 1000),
@@ -145,13 +143,8 @@ function liveFrame(extraContainers: Record<string, object> = {}) {
 }
 
 async function routeLiveFrame(page: import('@playwright/test').Page, frame: object) {
-  await page.route('**/api/live', (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: 'text/event-stream',
-      body: `retry: 300\nevent: frame\ndata: ${JSON.stringify(frame)}\n\n`,
-    }),
-  );
+  await page.route('**/api/live/snapshot', (route) => route.fulfill({ json: frame }));
+  await mockLiveStream(page);
 }
 
 test('overview: health names the problem and offers Inspect before the module lanes', async ({ page }) => {
@@ -174,6 +167,7 @@ test('overview: all-clear is compact and array facts remain visible on desktop a
   await page.goto('#/');
   const health = page.locator('.overview-health');
   await expect(health).toContainText('Nothing needs you');
+  await expect(page.locator('.live-state')).toHaveCount(0);
   await expect(health.locator('.overview-health__issues')).toHaveCount(0);
   await expect(health.locator('.overview__chip')).toHaveCount(0);
   expect((await health.boundingBox())!.height).toBeLessThan(100);
@@ -181,6 +175,7 @@ test('overview: all-clear is compact and array facts remain visible on desktop a
   await expect(schematic).toContainText('Array started · mover idle');
   await expect(schematic).toContainText('cache warmest at 41.5°C');
   await page.setViewportSize({ width: 375, height: 800 });
+  await expect(page.locator('.live-state')).toHaveCount(0);
   const metrics = (await page.locator('.overview__metrics-rail').boundingBox())!;
   expect(metrics.y).toBeLessThan(200);
   expect(metrics.y + metrics.height).toBeLessThanOrEqual((await health.boundingBox())!.y);

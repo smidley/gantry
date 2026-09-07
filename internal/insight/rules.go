@@ -95,6 +95,7 @@ type In struct {
 	ContainerCPUAllocCores MatchResult
 	ContainerCPUPct        MatchResult
 	ContainerMemPct        MatchResult
+	ContainerMemLimitBytes MatchResult
 
 	ParitySpeedBps    MatchResult
 	ParityProgressPct MatchResult
@@ -746,8 +747,7 @@ func cpuStarvationFinding(in In, th map[string]float64, victim string, confidenc
 	// shared set -- the plan's own table has no joint-culprit language
 	// for this rule the way disk-io-contention's Open-question-2 example
 	// does, so a leading SET is deliberately not attempted here.
-	ranked, _ := Share(parts)
-	culprits, ok := Dominant(ranked, th["culprit_cpu_pct_floor"]/100, 1)
+	culprits, ok := Dominant(HostShare(parts), th["culprit_cpu_pct_floor"]/100, 1)
 	if !ok {
 		return Finding{}, false
 	}
@@ -975,24 +975,33 @@ func evalGPUEngineContention(in In, th map[string]float64) []Finding {
 
 // --- memory-squeeze ---------------------------------------------------
 
-// evalMemorySqueeze has two independent victim paths (Task 6's table):
-// a container.oom hard event (always Confirmed + severity alert -- a
-// kill is not a correlation, it is a fact) and the host-wide
-// mem.used_pct threshold (tier 1) with a psi.mem.some_pct upgrade. Both
-// share the same culprit attribution: Dominant() over every container's
-// mem.pct.
+// An OOM kill proves the failure, not its cause. Attribute a possible
+// neighbor only with contemporaneous host pressure and no observed container
+// limit. A limited container can fail while the rest of the host is healthy.
 func evalMemorySqueeze(in In, th map[string]float64) []Finding {
 	var findings []Finding
 
 	for _, ev := range in.OOMEvents {
+		if latestVal(in.ContainerMemLimitBytes.Samples[ev.Entity]) > 0 {
+			continue
+		}
+		hostUsed := 0.0
+		for _, sample := range in.HostMemUsedPct.Samples[""] {
+			if sample.TS >= ev.TS-30 && sample.TS <= ev.TS+5 {
+				hostUsed = max(hostUsed, sample.Val)
+			}
+		}
+		if hostUsed < th["mem_used_pct_floor"] {
+			continue
+		}
 		culprits, ok := memorySqueezeCulprits(in, th, ev.Entity)
 		if !ok {
 			continue
 		}
 		findings = append(findings, Finding{
 			RuleID: RuleMemorySqueeze, VictimKind: "container", Victim: ev.Entity, Culprit: culprits, Resource: "memory",
-			Confidence: ConfidenceConfirmed, Tier: TierProxy, Shape: ShapeSlowing, Severity: "alert",
-			Evidence: Evidence{CulpritSharePct: culprits.Fraction * 100},
+			Confidence: ConfidenceLikely, Tier: TierProxy, Shape: ShapeSlowing, Severity: "alert",
+			Evidence: Evidence{CulpritSharePct: culprits.Fraction * 100, OOMKilled: true, HostMemUsedPct: hostUsed},
 		})
 	}
 
@@ -1024,6 +1033,5 @@ func memorySqueezeCulprits(in In, th map[string]float64, excludeVictim string) (
 			parts[c] = samples
 		}
 	}
-	ranked, _ := Share(parts)
-	return Dominant(ranked, th["culprit_mem_pct_floor"]/100, 3)
+	return Dominant(HostShare(parts), th["culprit_mem_pct_floor"]/100, 3)
 }

@@ -399,7 +399,13 @@ export async function putWebhookTargets(targets: WebhookTargetInput[]): Promise<
 // simply its zero value here too. insights.ts's formatEvidenceNumber
 // decides which numbers a given finding's evidence drawer actually
 // renders, rather than this type trying to encode that itself.
+export interface RecordedSeries { kind: string; entity: string; metric: string; points: [number, number][]; }
 export interface EvidenceDTO {
+  attribution_version?: number;
+  recorded_series?: RecordedSeries[];
+  resource_device?: string;
+  host_mem_used_pct?: number;
+  oom_killed?: boolean;
   culprit_share_pct: number;
   device_util_pct: number;
   await_ms: number;
@@ -660,6 +666,7 @@ export interface RetentionSettings {
 }
 
 export interface SettingsResponse {
+  database_bytes?: number;
   retention: RetentionSettings;
   env_overridden: string[];
 }
@@ -801,8 +808,8 @@ async function postAuth(url: string, body: unknown): Promise<void> {
 // postAuthSetup runs the one-shot first-run bootstrap: it creates the
 // initial username + password credential and the server hands this
 // browser a session cookie in the same response.
-export function postAuthSetup(username: string, password: string): Promise<void> {
-  return postAuth('/api/auth/setup', { username, password });
+export function postAuthSetup(username: string, password: string, setupCode: string): Promise<void> {
+  return postAuth('/api/auth/setup', { username, password, setup_code: setupCode });
 }
 
 export function postLogin(username: string, password: string): Promise<void> {
@@ -1127,8 +1134,8 @@ export function removeImages(ids: string[]): Promise<ImageRemoveResult[]> {
   return postConfirmed('/api/images/remove', 'images', { ids });
 }
 
-export function pruneImages(mode: 'dangling' | 'unused'): Promise<ImagePruneResult> {
-  return postConfirmed('/api/images/prune', 'images', { mode });
+export function pruneImages(mode: 'dangling' | 'unused', ids: string[]): Promise<ImagePruneResult> {
+  return postConfirmed('/api/images/prune', 'images', { mode, ids });
 }
 
 // ContainerMaintenanceInfo/-Summary/-DTO mirror internal/server/
@@ -1184,9 +1191,10 @@ export function removeContainersMaintenance(ids: string[]): Promise<ContainerRem
 
 export function pruneContainersMaintenance(
   mode: 'exited' | 'created' | 'all-stopped',
-  olderThanHours: number = 0,
+  olderThanHours: number,
+  ids: string[],
 ): Promise<ContainerPruneResult> {
-  return postConfirmed('/api/containers/maintenance/prune', 'containers', { mode, older_than_hours: olderThanHours });
+  return postConfirmed('/api/containers/maintenance/prune', 'containers', { mode, older_than_hours: olderThanHours, ids });
 }
 
 // probeReadOnly detects GANTRY_READ_ONLY (never exposed on any GET

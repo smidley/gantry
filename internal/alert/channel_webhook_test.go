@@ -327,7 +327,7 @@ func TestWebhookChannelHealthOKUntilAFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := noJitterChannel(testTarget(srv.URL))
-	require.Equal(t, "ok", c.Health())
+	require.Equal(t, "awaiting first delivery", c.Health())
 	c.Send(context.Background(), testNotification())
 	require.Equal(t, "ok", c.Health())
 }

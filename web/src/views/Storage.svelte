@@ -1,23 +1,11 @@
-<!--
-  Storage: the array/disk detail view. A header chart (IO/Used/Temp per
-  drive, see its own doc below), disk grid (one card per disk entity,
-  grouped parity -> data -> cache/pools -> flash), a parity card (state
-  + progress/speed/ETA + a short start/finish history), a mover chip, a
-  shares table, and a docker storage card -- all read straight off the
-  live SSE frame except the parity history, which isn't in the frame at
-  all (events never are -- see sse.svelte.ts's own doc) and is polled
-  the same way Overview polls its events feed.
--->
 <script>
   import { onMount, untrack } from 'svelte';
-  import { Tween } from 'svelte/motion';
-  import { linear } from 'svelte/easing';
   import { motion } from '../lib/motion.svelte';
   import { live } from '../lib/sse.svelte';
-  import { fetchEvents, fetchSeries } from '../lib/api';
+  import { fetchSeries } from '../lib/api';
   import { appendAfterSeed, mergeSeed, pushRing, seriesPointsToRing } from '../lib/livering';
-  import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtRelTime } from '../lib/format';
-  import { etaFromProgress, parityIsRunning, seqStep, sharesFromMetrics, sumSeriesPoints } from '../lib/metrics';
+  import { fmtBytes, fmtPct, fmtRate } from '../lib/format';
+  import { seqStep, sharesFromMetrics, sumSeriesPoints } from '../lib/metrics';
   import { seriesColorVar } from '../lib/compareColors';
   import {
     diskChartDash,
@@ -29,11 +17,11 @@
     sortDiskEntities,
   } from '../lib/disks';
   import { band, bandToken } from '../lib/thresholds';
+  import StorageArray from '../components/StorageArray.svelte';
   import HealthDot from '../components/HealthDot.svelte';
   import LiveValue from '../components/LiveValue.svelte';
   import TimeChart from '../components/TimeChart.svelte';
 
-  const EVENTS_POLL_MS = 30_000;
   const ROLE_LABEL = { parity: 'Parity', data: 'Data disk', pool: 'Cache / pool', flash: 'Boot (flash)' };
   // Four-way type badge (Scott's own report: a real box's boot flash
   // device was misread as HDD and its NVMe pools as generic SSD --
@@ -65,6 +53,11 @@
   );
   let array = $derived(live.frame?.unraid?.array ?? {});
   let dockerStorage = $derived(live.frame?.unraid?.docker ?? {});
+  let capacity = $derived.by(() => {
+    const entries = Object.entries(disks).filter(([name]) => diskRole(name) === 'data').map(([, metrics]) => metrics).filter((m) => Number.isFinite(m['fs.used_bytes']) && Number.isFinite(m['fs.free_bytes']));
+    return { count: entries.length, used: entries.reduce((n, m) => n + m['fs.used_bytes'], 0), free: entries.reduce((n, m) => n + m['fs.free_bytes'], 0) };
+  });
+  let affectedDisks = $derived(diskNames.filter((name) => (disks[name]?.errors ?? 0) > 0 || (diskUsagePct(disks[name]) ?? 0) >= 90));
   let sources = $derived(live.frame?.sources ?? {});
   let ts = $derived(live.frame?.ts ?? 0);
 
@@ -574,88 +567,7 @@
   // bars below (parity progress, per-disk usage) and to parityPctTween.
   let glideMs = $derived(motion.reduced ? 0 : live.glideMs);
 
-  let started = $derived(array['array.started']);
-  let parityPct = $derived(array['parity.progress_pct']);
-  // parityPctTween glides the percentage the progress bar/text below
-  // display -- previously a bare fmtPct(parityPct)/width binding,
-  // snapping every ~2s tick with no easing at all (this view's own
-  // instance of the same gap Overview's arrayStateSentence had -- see
-  // its doc). No scrub mechanism exists for either to mirror.
-  let parityPctTween = new Tween(untrack(() => parityPct ?? 0), { duration: untrack(() => glideMs), easing: linear });
-  $effect(() => {
-    parityPctTween.set(parityPct ?? 0, { duration: glideMs, easing: linear });
-  });
-  let paritySpeed = $derived(array['parity.speed_bps']);
-  // parityIsRunning treats an explicit 0 (the wire value var.go/fake.go
-  // now both write on finish -- see its own doc) as idle, not merely
-  // "key present" -- a bare `!== undefined` check would read that
-  // finish-zero as still running forever, right back into the bug this
-  // is fixing.
-  let parityRunning = $derived(parityIsRunning(parityPct));
-  let moverRunning = $derived(array['mover.running'] === 1);
   let shares = $derived(sharesFromMetrics(array));
-
-  // eta: identical shape to ArrayCard's own effect (see its doc for why
-  // this is derived from parity.progress_pct's own rate of change,
-  // never from speed_bps). prevSample is plain instance state -- it only
-  // needs to survive between effect runs, never to trigger one itself.
-  let prevSample = null;
-  let eta = $state(null);
-  $effect(() => {
-    if (!parityRunning || parityPct === undefined) {
-      prevSample = null;
-      eta = null;
-      return;
-    }
-    if (prevSample) {
-      eta = etaFromProgress(prevSample.ts, prevSample.pct, ts, parityPct);
-    }
-    prevSample = { ts, pct: parityPct };
-  });
-
-  // parityHistory: not in the live frame (events never are) -- fetched
-  // once on mount, then re-polled every 30s and on window focus, the
-  // same low-urgency background-refresh pattern Overview's own events
-  // feed uses (a parity run lasts many minutes to hours, so 30s latency
-  // on "did it just start/finish" is harmless; no AbortController is
-  // needed here for the same reason it isn't in Overview's loadEvents --
-  // this isn't a rapid, user-selector-driven fetch that can race itself).
-  let parityHistory = $state([]);
-
-  // parityHistorySeedPending gates the "No parity check history yet."
-  // message below the same way ContainerDetail/GPUEntityCard's own
-  // liveSeedPending gates their chart cards: while true, a truly-empty
-  // parityHistory stays silent instead of flashing that message the
-  // instant this view mounts, before the very first loadParityHistory()
-  // below has had a chance to resolve. Only ever flips false once, on
-  // that first resolution -- a later poll/focus refresh finding zero
-  // history is a real "No parity check history yet.", not a pending one.
-  let parityHistorySeedPending = $state(true);
-
-  async function loadParityHistory() {
-    try {
-      parityHistory = await fetchEvents({ kinds: ['parity.start', 'parity.finish'], limit: 5 });
-    } catch {
-      // A transient fetch failure leaves the last-good history showing
-      // rather than blanking it -- the next poll or focus tries again.
-    } finally {
-      parityHistorySeedPending = false;
-    }
-  }
-  onMount(() => {
-    loadParityHistory();
-    const interval = setInterval(loadParityHistory, EVENTS_POLL_MS);
-    window.addEventListener('focus', loadParityHistory);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', loadParityHistory);
-    };
-  });
-
-  function historyLabel(event) {
-    if (event.Kind === 'parity.start') return 'Started';
-    return event.Detail ? `Finished · ${event.Detail}` : 'Finished';
-  }
 </script>
 
 <!-- Type-at-a-glance glyphs (ask: "different types of things in the same
@@ -698,6 +610,8 @@
 
 <div class="storage-view">
   <h1 class="page-title">Storage</h1>
+
+  <StorageArray {array} {ts} {glideMs} {capacity} {affectedDisks} />
 
   <div class="card storage-chart">
     <div class="storage-chart__head">
@@ -767,63 +681,6 @@
         {/each}
       </div>
     {/if}
-  </div>
-
-  <div class="card storage-parity">
-    <div class="storage-parity__head">
-      <span class="microlabel">Array</span>
-      {#if started === 1}
-        <HealthDot status="good" label="Started" />
-      {:else if started === 0}
-        <HealthDot status="serious" label="Stopped" />
-      {:else}
-        <span class="microlabel storage-parity__unknown">Unknown</span>
-      {/if}
-    </div>
-
-    <div class="storage-parity__section">
-      <span class="microlabel">Parity check</span>
-      {#if parityRunning}
-        <div class="storage-parity__progress">
-          <div class="storage-parity__progress-track">
-            <div
-              class="storage-parity__progress-fill"
-              style="width: {Math.min(100, Math.max(0, parityPctTween.current))}%; transition-duration: {glideMs}ms"
-            ></div>
-          </div>
-          <span class="tabular-nums storage-parity__progress-pct">{fmtPct(parityPctTween.current)}</span>
-          <span class="storage-parity__progress-detail tabular-nums">
-            {fmtRate(paritySpeed ?? 0)} &middot; ETA {eta === null ? 'calculating…' : fmtDuration(eta)}
-          </span>
-        </div>
-      {:else}
-        <span class="storage-parity__idle">No check running</span>
-      {/if}
-    </div>
-
-    <div class="storage-parity__chips">
-      <span class="storage-parity__chip" class:storage-parity__chip--active={moverRunning}>
-        Mover {moverRunning ? 'running' : 'idle'}
-      </span>
-    </div>
-
-    <div class="storage-parity__section">
-      <span class="microlabel">Recent checks</span>
-      {#if parityHistorySeedPending}
-        <!-- first loadParityHistory() call hasn't settled yet -- see parityHistorySeedPending's own doc -->
-      {:else if parityHistory.length === 0}
-        <p class="microlabel storage-parity__empty">No parity check history yet.</p>
-      {:else}
-        <ul class="storage-parity__history">
-          {#each parityHistory as event (event.ID)}
-            <li>
-              <span>{historyLabel(event)}</span>
-              <span class="microlabel storage-parity__history-time">{fmtRelTime(event.TS)}</span>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </div>
   </div>
 
   {#if diskNames.length === 0}
@@ -1027,103 +884,6 @@
      disabled treatment) -- it's a live, click-to-restore choice. */
   .storage-chart__chip--off {
     opacity: 0.45;
-  }
-
-  .storage-parity {
-    padding: 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-  .storage-parity__head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .storage-parity__unknown {
-    color: var(--ink-2);
-  }
-  .storage-parity__section {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-  .storage-parity__progress {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-  }
-  .storage-parity__progress-track {
-    flex: 1;
-    min-width: 6rem;
-    height: 10px;
-    border-radius: 5px;
-    background: color-mix(in oklab, var(--ink) 8%, transparent);
-    overflow: hidden;
-  }
-  .storage-parity__progress-fill {
-    height: 100%;
-    background: var(--series-1);
-    /* duration is inline (transition-duration, above) -- see
-       BaySchematic's matching fill for why a plain CSS transition
-       (rather than a Tween/headState) is enough for one interpolated
-       property. */
-    transition-property: width;
-    transition-timing-function: linear;
-  }
-  .storage-parity__progress-pct {
-    font-family: var(--font-mono);
-    font-size: 0.85rem;
-    min-width: 3.2em;
-  }
-  .storage-parity__progress-detail {
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    color: var(--ink-2);
-  }
-  .storage-parity__idle {
-    color: var(--ink-2);
-    font-size: 0.85rem;
-  }
-  .storage-parity__chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
-  .storage-parity__chip {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.3rem 0.55rem;
-    border-radius: 999px;
-    background: color-mix(in oklab, var(--ink) 7%, transparent);
-    color: var(--ink-2);
-  }
-  .storage-parity__chip--active {
-    background: color-mix(in oklab, var(--status-good) 18%, transparent);
-    color: var(--status-good);
-  }
-  .storage-parity__empty {
-    margin: 0;
-  }
-  .storage-parity__history {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-  }
-  .storage-parity__history li {
-    display: flex;
-    justify-content: space-between;
-    gap: 0.75rem;
-    font-size: 0.85rem;
-  }
-  .storage-parity__history-time {
-    white-space: nowrap;
   }
 
   .storage-disks {

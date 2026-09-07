@@ -1,47 +1,9 @@
-<!--
-  Events: a filterable feed over /api/events -- kind multi-select (a
-  fixed known-kinds list; none checked means no kind filter at all, not
-  "show nothing"), an entity text filter (exact match, matching the
-  API's own `entity = ?` semantics -- see fetchEvents/api_history.go),
-  and a time-range preset. "Load more" pages backward via a before-
-  cursor (to = the oldest loaded event's ts, minus one so that inclusive
-  boundary isn't re-fetched) -- see loadMore's own doc for the one
-  known edge case that cursor shape accepts, per the brief's own spec.
-
-  Auto-refresh: this is a monitoring page, so it can't rely on the user
-  ever re-triggering the filter effect below -- left open, it would show
-  the same page-load snapshot forever. refreshFirstPage() re-fetches just
-  the first page on a 30s interval and on window focus, the same
-  onMount + setInterval + focus-listener shape Overview's loadEvents and
-  Storage's loadParityHistory both already use for their own out-of-frame
-  event fetches. See refreshFirstPage's own doc for why a background
-  refresh REPLACES the whole list (discarding any extra "Load more" pages)
-  rather than trying to preserve or re-fetch them.
-
-  Needs you strip (the counts pass's own open question, finally
-  answered -- Overview's alerts chip promises "click on the number and
-  then be brought to a list of items that need attention," and this is
-  that list): the SAME derivation Overview's chip reads
-  (deriveOverviewStatus), scoped down to attentionCounts.ts's alerts
-  bucket -- every kind except an insight-backed contention, which the
-  chip's OTHER half already sends to Insights instead. Wired
-  independently of Overview's own identical derivation rather than
-  sharing a hook: this view otherwise reads no live-frame state at all,
-  and the duplication is small enough that a shared module would cost
-  more than it saved for its only two call sites. One CalloutRow per
-  anomaly, the exact per-item row Overview itself rendered before the
-  counts pass -- Ack control included, same store, so acking a row here
-  drops the Overview headline's own count on the very next reactive
-  tick, no reload (acks.svelte.ts is a shared singleton). The strip
-  disappears the instant its last row is acked or the concern itself
-  clears; it never renders at all while the bucket is empty, so a
-  healthy fleet costs this page nothing.
--->
 <script>
   import { onMount } from 'svelte';
   import { flip } from 'svelte/animate';
   import { fade, fly } from 'svelte/transition';
   import { motion } from '../lib/motion.svelte';
+  import { eventLabel } from '../lib/eventLabels';
   import { fetchEvents } from '../lib/api';
   import { debounce } from '../lib/debounce';
   import { live } from '../lib/sse.svelte';
@@ -145,6 +107,7 @@
   }, ENTITY_DEBOUNCE_MS);
 
   let events = $state([]);
+  let entitySuggestions = $derived([...new Set([...Object.keys(live.frame?.containers ?? {}), ...Object.keys(live.frame?.disks ?? {}), ...events.map((event) => event.Entity).filter(Boolean)])].sort());
   let loading = $state(false);
   let failed = $state(false);
   let hasMore = $state(false);
@@ -356,6 +319,7 @@
   {#if needsYouAnomalies.length > 0}
     <section class="card events-view__attention">
       <span class="microlabel">Needs you</span>
+      <p class="microlabel">Acknowledge hides a concern from attention lists until the selected time. It does not silence alert notifications.</p>
       <div class="events-view__attention-rows">
         {#each needsYouAnomalies as anomaly (anomalyRowKey(anomaly))}
           <div class="events-view__attention-row">
@@ -372,15 +336,16 @@
       {#each KNOWN_KINDS as kind (kind)}
         <label class="events-view__kind-checkbox">
           <input type="checkbox" checked={selectedKinds.has(kind)} onchange={() => toggleKind(kind)} />
-          <span>{kind}</span>
+          <span title={kind}>{eventLabel(kind)}</span>
         </label>
       {/each}
     </fieldset>
 
     <div class="events-view__filter-row">
       <label class="events-view__entity-field">
-        <span class="microlabel">Entity</span>
-        <input type="text" placeholder="Entity name (exact match)…" bind:value={entityFilter} />
+        <span class="microlabel">Container or disk</span>
+        <input type="text" placeholder="Choose a container or disk…" list="event-entities" bind:value={entityFilter} />
+        <datalist id="event-entities">{#each entitySuggestions as entity}<option value={entity}></option>{/each}</datalist>
       </label>
 
       <div class="segmented" role="group" aria-label="Time range">

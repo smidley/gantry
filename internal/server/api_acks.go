@@ -123,8 +123,8 @@ func (s *Server) handleAcksPost(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var body ackCreateRequest
-	if err := dec.Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+	if err := decodeSingleJSON(dec, &body); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if body.Hours < minAckHours || body.Hours > maxAckHours {

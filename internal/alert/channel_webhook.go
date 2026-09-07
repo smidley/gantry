@@ -194,6 +194,7 @@ type WebhookChannel struct {
 
 	mu         sync.Mutex
 	failed     bool
+	attempted  bool
 	failStatus int
 	failErr    string
 }
@@ -227,16 +228,14 @@ func NewWebhookChannel(target WebhookTarget, version string, clock func() time.T
 
 func (c *WebhookChannel) ID() string { return "webhook:" + c.Target.ID }
 
-// Health reports "ok" or "last delivery failed: <status> <error> (<age>)"
-// -- the Settings channels card's own text, verbatim (Task 8, not built
-// on this branch, but the string this method returns is already exactly
-// what that card will render). The age is computed fresh on every call
-// from the stored failure timestamp, never baked in at failure time, so
-// it keeps counting up correctly across repeated Health() calls.
+// Health distinguishes an untested target from the last delivery result.
 func (c *WebhookChannel) Health() string {
 	c.mu.Lock()
-	failed, status, errStr := c.failed, c.failStatus, c.failErr
+	failed, status, errStr, attempted := c.failed, c.failStatus, c.failErr, c.attempted
 	c.mu.Unlock()
+	if !attempted {
+		return "awaiting first delivery"
+	}
 	if !failed {
 		return "ok"
 	}
@@ -246,6 +245,7 @@ func (c *WebhookChannel) Health() string {
 func (c *WebhookChannel) recordHealth(ok bool, status int, errStr string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.attempted = true
 	c.failed = !ok
 	c.failStatus = status
 	c.failErr = errStr

@@ -105,14 +105,45 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad to")
 		return
 	}
+	if from < 0 || to <= from || to-from > 400*24*60*60 || to > now+60 {
+		writeError(w, http.StatusBadRequest, "history range must be ordered, within 400 days, and not in the future")
+		return
+	}
+	metrics := splitCSV(q.Get("metrics"))
+	if len(metrics) > 16 {
+		writeError(w, http.StatusBadRequest, "request at most 16 metrics")
+		return
+	}
+	seen := make(map[string]bool, len(metrics))
+	unique := make([]string, 0, len(metrics))
+	for _, metric := range metrics {
+		if len(metric) > 128 {
+			writeError(w, http.StatusBadRequest, "metric name is too long")
+			return
+		}
+		if !seen[metric] {
+			unique = append(unique, metric)
+			seen[metric] = true
+		}
+	}
 
 	if s.opts.Query == nil {
 		writeJSON(w, []seriesResponseDTO{})
 		return
 	}
-	results, err := s.opts.Query(r.Context(), q.Get("kind"), q.Get("entity"), splitCSV(q.Get("metrics")), from, to)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	results, err := s.opts.Query(ctx, q.Get("kind"), q.Get("entity"), unique, from, to)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	points := 0
+	for _, result := range results {
+		points += len(result.Points)
+	}
+	if points > 20000 {
+		writeError(w, http.StatusUnprocessableEntity, "too many history points; request fewer metrics or a smaller range")
 		return
 	}
 	writeJSON(w, toSeriesResponse(results))

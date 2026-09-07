@@ -73,6 +73,17 @@ func Share(parts map[string][]store.Sample) (ranked []EntityShare, total float64
 	return ranked, total
 }
 
+// HostShare ranks percentages that are already normalized to host capacity.
+// Dividing these by the observed containers' total would instead describe a
+// share of that subset, overstating both attribution and threshold crossings.
+func HostShare(parts map[string][]store.Sample) []EntityShare {
+	ranked, _ := Share(parts)
+	for i := range ranked {
+		ranked[i].Fraction = ranked[i].Value / 100
+	}
+	return ranked
+}
+
 // Dominant applies the dominance rule (Open question 2): the top entity
 // alone when it clears floor; otherwise the smallest leading set (in
 // ranked's own descending order, capped at maxN entities) whose combined

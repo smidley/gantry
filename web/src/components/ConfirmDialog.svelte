@@ -18,6 +18,7 @@
 -->
 <script>
   import { onMount } from 'svelte';
+  import { modal } from '../lib/modal';
 
   let {
     title,
@@ -48,9 +49,9 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="confirm-dialog__overlay" onclick={handleOverlayClick} role="presentation">
-  <div class="confirm-dialog card" role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+  <div use:modal class="confirm-dialog card" role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title" aria-describedby={description ? 'confirm-dialog-description' : undefined}>
     <h2 id="confirm-dialog-title" class="confirm-dialog__title">{title}</h2>
-    {#if description}<p class="confirm-dialog__description">{description}</p>{/if}
+    {#if description}<p id="confirm-dialog-description" class="confirm-dialog__description">{description}</p>{/if}
     {#if caveat}<p class="confirm-dialog__caveat">{caveat}</p>{/if}
 
     {#if items.length > 0}
@@ -202,7 +203,7 @@
   .confirm-dialog__confirm {
     border: 1px solid color-mix(in oklab, var(--status-critical) 60%, transparent);
     background: var(--status-critical);
-    color: white;
+    color: var(--on-danger);
     font-weight: 600;
   }
   .confirm-dialog__confirm:hover {

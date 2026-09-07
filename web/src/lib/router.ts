@@ -119,7 +119,11 @@ export function parseHash(hash: string): Route {
     for (let i = 0; i < def.pattern.length; i++) {
       const part = def.pattern[i];
       if (part.startsWith(':')) {
-        params[part.slice(1)] = decodeURIComponent(segments[i]);
+        try {
+          params[part.slice(1)] = decodeURIComponent(segments[i]);
+        } catch {
+          return { name: 'not-found', params: {} };
+        }
       } else if (part !== segments[i]) {
         matched = false;
         break;

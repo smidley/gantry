@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -272,76 +273,29 @@ func (c *Collector) RemoveImages(ctx context.Context, ids []string) ([]ImageRemo
 		}
 	}
 	return removeImagesWith(ids, pre, func(id string) error {
-		_, err := c.imgCli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
+		_, err := c.imgCli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: false})
 		return err
 	}), nil
 }
 
-// PruneImages deletes either every dangling image (mode "dangling") or
-// every image this same package's own classifyImages currently calls
-// "unused" (mode "unused") -- any other mode is a caller bug, not a
-// runtime condition (the HTTP handler already whitelists these two
-// values before ever reaching here).
-func (c *Collector) PruneImages(ctx context.Context, mode string) (ImagePruneResult, error) {
-	switch mode {
-	case "dangling":
-		return c.pruneDangling(ctx)
-	case "unused":
-		return c.pruneUnused(ctx)
-	default:
+// PruneImages revalidates eligibility and removes only the approved IDs.
+// Inventory changes after preview can never add targets to the operation.
+func (c *Collector) PruneImages(ctx context.Context, mode string, ids []string) (ImagePruneResult, error) {
+	if mode != "dangling" && mode != "unused" {
 		return ImagePruneResult{}, fmt.Errorf("unknown prune mode %q", mode)
 	}
-}
-
-// pruneDangling removes every image this package's own classifyImages
-// currently calls "dangling", one ImageRemove at a time -- deliberately
-// NOT the daemon's own ImagesPrune(dangling=true), even though
-// "dangling" sounds like the one unambiguous, daemon-agreed definition
-// here. moby's two image stores disagree on it: the containerd store's
-// isDanglingImage is name-based and leaves a digest-pinned image alone,
-// but the classic store -- what Unraid actually runs -- prunes anything
-// lacking a NamedTagged ref (only a real tag exempts an image there),
-// which sweeps up digest-pinned images this package classifies as
-// "unused", not "dangling". Same
-// one-source-of-truth reasoning as pruneUnused: acting on Gantry's own
-// classification, never the daemon's, is what keeps "what's dangling"
-// from having two disagreeing answers.
-func (c *Collector) pruneDangling(ctx context.Context) (ImagePruneResult, error) {
 	report, err := c.Images(ctx)
 	if err != nil {
 		return ImagePruneResult{}, err
 	}
-	var dangling []ImageInfo
+	var targets []ImageInfo
 	for _, im := range report.Images {
-		if im.State == "dangling" {
-			dangling = append(dangling, im)
+		if im.State == mode && slices.Contains(ids, im.ID) {
+			targets = append(targets, im)
 		}
 	}
-	return pruneImagesWith(dangling, func(id string) error {
-		_, err := c.imgCli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
-		return err
-	}), nil
-}
-
-// pruneUnused deletes this package's own computed "unused" set via
-// per-image ImageRemove -- deliberately NOT ImagesPrune with
-// dangling=false (docker's own `-a`/all-unused prune), which has subtly
-// different semantics than classifyImages' container-join rule. Running
-// both would give two different answers to "what's unused"; this keeps
-// one source of truth.
-func (c *Collector) pruneUnused(ctx context.Context) (ImagePruneResult, error) {
-	report, err := c.Images(ctx)
-	if err != nil {
-		return ImagePruneResult{}, err
-	}
-	var unused []ImageInfo
-	for _, im := range report.Images {
-		if im.State == "unused" {
-			unused = append(unused, im)
-		}
-	}
-	return pruneImagesWith(unused, func(id string) error {
-		_, err := c.imgCli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: true})
+	return pruneImagesWith(targets, func(id string) error {
+		_, err := c.imgCli.ImageRemove(ctx, id, image.RemoveOptions{Force: false, PruneChildren: false})
 		return err
 	}), nil
 }

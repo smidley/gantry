@@ -128,59 +128,31 @@ test('metrics: the host-total header value glides between frames instead of step
 });
 
 test('metrics: the hero chart canvas repaints continuously between frames', async ({ page }) => {
-  test.setTimeout(120_000);
-  await page.goto('#/top/cpu');
-  await expect(page.locator('.top-consumers__header canvas')).toBeVisible({ timeout: 30_000 });
-  await expect.poll(() => page.locator('.top-consumers__chip').count(), { timeout: 30_000 }).toBeGreaterThan(1);
-
-  // Ten canvas snapshots 250ms apart: the live x-window slides (and every
-  // line's head eases) on the shared driver's ~30fps tick, so MOST
-  // adjacent pairs differ -- not all: a 250ms slide of the 900s window is
-  // well under a pixel, so two snapshots can legitimately rasterize
-  // identically -- while a chart that only repainted per ~2s SSE frame
-  // can't change more than once per arrival. Same elapsed-relative bound
-  // as the text sampling above.
-  const { changedPairs, elapsedMs } = await page.evaluate(async () => {
-    const canvas = document.querySelector('.top-consumers__header canvas') as HTMLCanvasElement;
-    const shots: string[] = [];
-    const start = performance.now();
-    for (let i = 0; i < 10; i++) {
-      shots.push(canvas.toDataURL());
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    let changed = 0;
-    for (let i = 1; i < shots.length; i++) {
-      if (shots[i] !== shots[i - 1]) changed++;
-    }
-    return { changedPairs: changed, elapsedMs: performance.now() - start };
+  test.setTimeout(45_000);
+  await page.addInitScript(() => {
+    const paints = new WeakMap<HTMLCanvasElement, number>();
+    (window as any).__chartPaints = paints;
+    const original = CanvasRenderingContext2D.prototype.clearRect;
+    CanvasRenderingContext2D.prototype.clearRect = function (...args) {
+      paints.set(this.canvas, (paints.get(this.canvas) ?? 0) + 1);
+      return original.apply(this, args);
+    };
   });
-  // A per-arrival stepper changes at most one adjacent pair per
-  // 1900ms-bounded arrival, plus one in flight -- gliding repaints clear
-  // that with room to spare (~7 of 9 pairs at this spacing). The same
-  // observation-count cap as glideFloor keeps a stretched elapsed from
-  // demanding more changed pairs than ten snapshots' nine gaps can show.
-  const maxPairs = 9;
-  const stepperPairs = Math.min(Math.floor(elapsedMs / 1900) + 1, maxPairs - 2);
-  // That strict proof holds only where rAF actually DELIVERS the frames
-  // it samples for. On CI's 2-core, software-rendered runner the shared
-  // driver is starved to a few fps AND the live x-window's per-frame
-  // slide is sub-pixel (250ms of a 900s window is far under one pixel on
-  // a ~600px-wide canvas), so two adjacent snapshots routinely rasterize
-  // byte-identical and the glide's changed-pair count collapses toward
-  // the stepper's own (observed in CI: 1-2 of 9, failing `> 2`). That is
-  // not the chart reverting to per-arrival stepping -- it is the
-  // compositor unable to produce the distinct frames the proof counts --
-  // and no sampling window can conjure frames a software renderer won't
-  // paint. So under CI keep only a did-repaint-at-all floor (the canvas
-  // is live, not frozen -- it repaints between the ~2s SSE arrivals at
-  // the window's own edges), and keep the real glide-beats-stepper proof
-  // on the local run, where GPU-composited rAF delivers its ~30fps and
-  // ~7 of 9 pairs change every time.
-  if (process.env.CI) {
-    expect(changedPairs, `over ${Math.round(elapsedMs)}ms`).toBeGreaterThan(0);
-  } else {
-    expect(changedPairs, `over ${Math.round(elapsedMs)}ms`).toBeGreaterThan(stepperPairs);
-  }
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.goto('#/top/cpu');
+  const canvas = page.locator('.top-consumers__header canvas');
+  await expect(canvas).toBeVisible();
+  await canvas.scrollIntoViewIfNeeded();
+  await expect.poll(() => page.locator('.top-consumers__chip').count()).toBeGreaterThan(1);
+  // Measure actual drawing. At a 15-minute scale a 250ms movement is
+  // subpixel, so identical PNGs never proved that a canvas was frozen.
+  const result = await canvas.evaluate(async (element) => {
+    const paints = (window as any).__chartPaints as WeakMap<HTMLCanvasElement, number>;
+    const start = performance.now(), count = paints.get(element as HTMLCanvasElement) ?? 0;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    return { elapsed: performance.now()-start, draws: (paints.get(element as HTMLCanvasElement) ?? 0)-count };
+  });
+  expect(result.draws, `actual repaints over ${Math.round(result.elapsed)}ms`).toBeGreaterThan(Math.floor(result.elapsed/1500)+2);
 });
 
 test('storage: the per-disk usage percentage ticks with the live frame', async ({ page }) => {

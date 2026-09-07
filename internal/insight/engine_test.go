@@ -123,7 +123,18 @@ func newOOMEngine(t *testing.T) (*Engine, *fakeInsightStore, *store.Live, *time.
 	now := time.Unix(2_000_000, 0)
 
 	eng := New(fs)
-	eng.MatchSince = live.MatchSince
+	eng.MatchSince = func(kind, metric string, since int64) (map[string][]store.Sample, map[string]int64) {
+		if kind == "host" && metric == "mem.used_pct" {
+			var samples []store.Sample
+			for _, ev := range fs.events {
+				if ev.Kind == "container.oom" && ev.TS >= since && ev.TS <= now.Unix() {
+					samples = append(samples, store.Sample{TS: ev.TS, Val: 95})
+				}
+			}
+			return map[string][]store.Sample{"": samples}, map[string]int64{"": now.Unix()}
+		}
+		return live.MatchSince(kind, metric, since)
+	}
 	eng.MatchPrefixSince = live.MatchPrefixSince
 	eng.Clock = func() time.Time { return now }
 	eng.ClearForSecs = 180
@@ -159,7 +170,7 @@ func TestEngineTickCreatesActiveInsightAndAppendsDetectedEvent(t *testing.T) {
 	require.Equal(t, RuleMemorySqueeze, inst.RuleID)
 	require.Equal(t, "minecraft", inst.Victim)
 	require.Equal(t, "active", inst.State)
-	require.Equal(t, "confirmed", inst.Confidence)
+	require.Equal(t, "likely", inst.Confidence)
 	require.Equal(t, "alert", inst.Severity)
 	require.Equal(t, "redis", inst.Culprit)
 
@@ -345,7 +356,18 @@ func TestEngineSeamInvariant7NeverEmitsBothSingleAndSharedCulpritForSameTuple(t 
 	now := time.Unix(3_000_000, 0)
 
 	eng := New(fs)
-	eng.MatchSince = live.MatchSince
+	eng.MatchSince = func(kind, metric string, since int64) (map[string][]store.Sample, map[string]int64) {
+		if kind == "host" && metric == "mem.used_pct" {
+			var samples []store.Sample
+			for _, ev := range fs.events {
+				if ev.Kind == "container.oom" && ev.TS >= since && ev.TS <= now.Unix() {
+					samples = append(samples, store.Sample{TS: ev.TS, Val: 95})
+				}
+			}
+			return map[string][]store.Sample{"": samples}, map[string]int64{"": now.Unix()}
+		}
+		return live.MatchSince(kind, metric, since)
+	}
 	eng.MatchPrefixSince = live.MatchPrefixSince
 	eng.Clock = func() time.Time { return now }
 	eng.Slots = func() map[string]SlotMeta { return map[string]SlotMeta{"disk3": {Device: "sde", Rotational: true}} }
@@ -415,7 +437,18 @@ func TestEngineCulpritShapeFlipPreservesStartedAtAndSuppressesNewDetectedEvent(t
 	startedAt := now.Unix()
 
 	eng := New(fs)
-	eng.MatchSince = live.MatchSince
+	eng.MatchSince = func(kind, metric string, since int64) (map[string][]store.Sample, map[string]int64) {
+		if kind == "host" && metric == "mem.used_pct" {
+			var samples []store.Sample
+			for _, ev := range fs.events {
+				if ev.Kind == "container.oom" && ev.TS >= since && ev.TS <= now.Unix() {
+					samples = append(samples, store.Sample{TS: ev.TS, Val: 95})
+				}
+			}
+			return map[string][]store.Sample{"": samples}, map[string]int64{"": now.Unix()}
+		}
+		return live.MatchSince(kind, metric, since)
+	}
 	eng.MatchPrefixSince = live.MatchPrefixSince
 	eng.Clock = func() time.Time { return now }
 	eng.Slots = func() map[string]SlotMeta { return map[string]SlotMeta{"disk3": {Device: "sde", Rotational: true}} }
@@ -481,7 +514,18 @@ func TestEngineGlobalCapKeepsHigherPriorityAndDropsTheRest(t *testing.T) {
 	now := time.Unix(4_000_000, 0)
 
 	eng := New(fs)
-	eng.MatchSince = live.MatchSince
+	eng.MatchSince = func(kind, metric string, since int64) (map[string][]store.Sample, map[string]int64) {
+		if kind == "host" && metric == "mem.used_pct" {
+			var samples []store.Sample
+			for _, ev := range fs.events {
+				if ev.Kind == "container.oom" && ev.TS >= since && ev.TS <= now.Unix() {
+					samples = append(samples, store.Sample{TS: ev.TS, Val: 95})
+				}
+			}
+			return map[string][]store.Sample{"": samples}, map[string]int64{"": now.Unix()}
+		}
+		return live.MatchSince(kind, metric, since)
+	}
 	eng.MatchPrefixSince = live.MatchPrefixSince
 	eng.Clock = func() time.Time { return now }
 	eng.MaxActive = 3
@@ -533,7 +577,18 @@ func TestEngineCappedThenRoomFreesRefiresImmediatelyNoCooldown(t *testing.T) {
 	now := time.Unix(4_100_000, 0)
 
 	eng := New(fs)
-	eng.MatchSince = live.MatchSince
+	eng.MatchSince = func(kind, metric string, since int64) (map[string][]store.Sample, map[string]int64) {
+		if kind == "host" && metric == "mem.used_pct" {
+			var samples []store.Sample
+			for _, ev := range fs.events {
+				if ev.Kind == "container.oom" && ev.TS >= since && ev.TS <= now.Unix() {
+					samples = append(samples, store.Sample{TS: ev.TS, Val: 95})
+				}
+			}
+			return map[string][]store.Sample{"": samples}, map[string]int64{"": now.Unix()}
+		}
+		return live.MatchSince(kind, metric, since)
+	}
 	eng.MatchPrefixSince = live.MatchPrefixSince
 	eng.Clock = func() time.Time { return now }
 	eng.MaxActive = 1

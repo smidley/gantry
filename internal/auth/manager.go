@@ -153,6 +153,7 @@ type Manager struct {
 	cachedUsername string
 	envManaged     bool
 	failures       map[string]*failureState
+	sessionChanged chan struct{}
 
 	// setupMu makes Setup's CredentialSet guard and its writes one
 	// critical section, so two concurrent first-run calls can't both
@@ -188,13 +189,14 @@ func New(o Options) (*Manager, error) {
 		o.Mode = ModeAuto
 	}
 	m := &Manager{
-		sessions:    o.Sessions,
-		settings:    o.Settings,
-		appendEvent: o.AppendEvent,
-		now:         o.Now,
-		mode:        o.Mode,
-		limiter:     newLoginLimiter(o.Now),
-		failures:    make(map[string]*failureState),
+		sessions:       o.Sessions,
+		settings:       o.Settings,
+		appendEvent:    o.AppendEvent,
+		now:            o.Now,
+		mode:           o.Mode,
+		limiter:        newLoginLimiter(o.Now),
+		failures:       make(map[string]*failureState),
+		sessionChanged: make(chan struct{}),
 	}
 	hash, _, err := o.Settings.SettingGet(passwordHashKey)
 	if err != nil {
@@ -410,6 +412,7 @@ func (m *Manager) Logout(token string) {
 	if err := m.sessions.DeleteSession(HashToken(token)); err != nil {
 		log.Printf("auth: logout: %v", err)
 	}
+	m.notifySessionChange()
 }
 
 // Setup is the one-shot first-run bootstrap: it creates the initial
@@ -449,7 +452,7 @@ func (m *Manager) Setup(ip, username, password string) (string, error) {
 	if err := m.storeUsername(u); err != nil {
 		return "", err
 	}
-	if _, err := m.sessions.DeleteAllSessions(); err != nil {
+	if _, err := m.deleteAllSessions(); err != nil {
 		return "", err
 	}
 	token, err := m.createSession()
@@ -505,7 +508,7 @@ func (m *Manager) UpdateCredential(ip, current, newUsername, newPassword string)
 	}
 	// Log out other sessions: every token minted before the change dies
 	// with it; the caller alone gets a fresh one below.
-	if _, err := m.sessions.DeleteAllSessions(); err != nil {
+	if _, err := m.deleteAllSessions(); err != nil {
 		return "", err
 	}
 	token, err := m.createSession()
@@ -565,7 +568,7 @@ func (m *Manager) EnsureEnvCredential(username, password string) error {
 // session is issued (there's no browser at boot), all existing ones go,
 // and the change is audited.
 func (m *Manager) createSessionlessWipeEvent() (int64, error) {
-	n, err := m.sessions.DeleteAllSessions()
+	n, err := m.deleteAllSessions()
 	if err != nil {
 		return 0, err
 	}
@@ -671,4 +674,10 @@ func (m *Manager) event(kind, entity, severity, detail string) {
 	if _, err := m.appendEvent(store.Event{Kind: kind, Entity: entity, Severity: severity, Detail: detail}); err != nil {
 		log.Printf("auth: append %s: %v", kind, err)
 	}
+}
+
+func (m *Manager) deleteAllSessions() (int64, error) {
+	n, err := m.sessions.DeleteAllSessions()
+	m.notifySessionChange()
+	return n, err
 }

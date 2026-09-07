@@ -1,11 +1,3 @@
-<!--
-  Settings: Sources status, the Access (password) card, the retention
-  editor (Task 10's four fields), Gantry's own footprint receipt, the
-  theme control, and an About card.
-  Retention is the one piece with real server round-trips (GET on
-  mount, PUT on save) -- everything else reads straight off the live
-  frame or the theme store.
--->
 <script>
   import { onMount } from 'svelte';
   import { live } from '../lib/sse.svelte';
@@ -13,12 +5,11 @@
   import { motion } from '../lib/motion.svelte';
   import { liveRing } from '../lib/livering.svelte';
   import { seriesPointsToRing } from '../lib/livering';
-  import { fetchSeries, fetchSettings, fetchVersion, putSettings, fetchWebhookTargets, putWebhookTargets, postAuthCredential } from '../lib/api';
-  import { auth } from '../lib/auth.svelte';
-  import { credentialFormError, loginErrorMessage } from '../lib/auth';
+  import { fetchSeries, fetchSettings, fetchVersion, putSettings, fetchWebhookTargets, putWebhookTargets } from '../lib/api';
   import { fmtBytes, fmtPct } from '../lib/format';
   import { SOURCE_NOT_APPLICABLE } from '../lib/sourceStatus';
   import HealthDot from '../components/HealthDot.svelte';
+  import SettingsAccess from '../components/SettingsAccess.svelte';
   import StatTile from '../components/StatTile.svelte';
 
   const LIVE_WINDOW_SEC = 900;
@@ -31,9 +22,9 @@
   const NOT_APPLICABLE_COPY = { nvidia: 'No NVIDIA GPU detected.' };
 
   const RETENTION_FIELDS = [
-    { key: 'r1_hours', label: 'R1 (1 min resolution) retention, hours', min: 1, max: 168 },
-    { key: 'r2_days', label: 'R2 (10 min resolution) retention, days', min: 1, max: 90 },
-    { key: 'r3_days', label: 'R3 (1 hour resolution) retention, days', min: 30, max: 1095 },
+    { key: 'r1_hours', label: 'Detailed history · 1-minute samples, hours', min: 1, max: 168 },
+    { key: 'r2_days', label: 'Trends · 10-minute samples, days', min: 1, max: 90 },
+    { key: 'r3_days', label: 'Archive · hourly samples, days', min: 30, max: 1095 },
     { key: 'size_cap_mb', label: 'Database size cap, MB', min: 64, max: 4096 },
   ];
   const THEME_OPTIONS = [
@@ -93,6 +84,12 @@
   });
 
   // --- Retention editor -----------------------------------------------
+  const RETENTION_PRESET = { r1_hours: 48, r2_days: 30, r3_days: 390, size_cap_mb: 1024 };
+  function useRetentionPreset() {
+    for (const [key, value] of Object.entries(RETENTION_PRESET)) if (!envOverridden.has(key)) formValues[key] = value;
+    saveSuccess = false;
+  }
+  let databaseBytes = $state(null);
   let retentionLoaded = $state(false);
   let loadError = $state(null);
   let envOverridden = $state(new Set());
@@ -103,6 +100,7 @@
   let saveError = $state(null);
 
   function applySettingsResponse(resp) {
+    databaseBytes = resp.database_bytes ?? null;
     envOverridden = new Set(resp.env_overridden);
     formValues = Object.fromEntries(RETENTION_FIELDS.map((f) => [f.key, resp.retention[f.key]]));
   }
@@ -283,76 +281,11 @@
     }
   }
 
-  // --- Access (mandatory login) -----------------------------------------
-  // The card runs off the auth store (refreshed on mount so it reflects
-  // reality, not the boot snapshot). Auth is always on now; this card
-  // changes the username and/or password. The change round-trips through
-  // /api/auth/credential: it signs out every other session (the server's
-  // own contract) and this browser keeps a fresh cookie from the same
-  // response, so it never logs the user out of the tab they're standing
-  // in. A blank new password is a username-only change. Passwords live in
-  // these fields only for the duration of the request and are never
-  // echoed anywhere.
-  let pwCurrent = $state('');
-  let newUsername = $state('');
-  let pwNew = $state('');
-  let pwConfirm = $state('');
-  let pwSaving = $state(false);
-  let pwError = $state(null);
-  let pwSuccess = $state(null);
-
-  // Seed the username field from the current one the first time the store
-  // reports it (the boot status arrives after this component mounts),
-  // then leave the user's edits alone.
-  let usernameSeeded = false;
-  $effect(() => {
-    if (!usernameSeeded && auth.username) {
-      newUsername = auth.username;
-      usernameSeeded = true;
-    }
-  });
-
-  async function submitCredential(e) {
-    e.preventDefault();
-    pwError = null;
-    pwSuccess = null;
-    const problem = credentialFormError({
-      username: newUsername,
-      password: pwNew,
-      confirm: pwConfirm,
-      passwordRequired: false,
-    });
-    if (problem) {
-      pwError = problem;
-      return;
-    }
-    pwSaving = true;
-    try {
-      await postAuthCredential(pwCurrent, newUsername, pwNew);
-      pwSuccess = 'Login updated. Every other session was signed out.';
-      pwCurrent = '';
-      pwNew = '';
-      pwConfirm = '';
-      await auth.refresh();
-    } catch (err) {
-      pwError = loginErrorMessage(err);
-    } finally {
-      pwSaving = false;
-    }
-  }
-
-  function logout() {
-    // App's own gate effect tears down the SSE connection and swaps to
-    // the login screen the moment authenticated flips.
-    auth.logout();
-  }
-
   // --- About -----------------------------------------------------------
   let version = $state(null);
   onMount(() => {
     loadSettings();
     loadWebhookTargets();
-    auth.refresh();
     fetchVersion()
       .then((v) => {
         version = v.version;
@@ -365,100 +298,13 @@
 
 <div class="settings-view">
   <h1 class="page-title">Settings</h1>
+  <nav class="settings-view__nav" aria-label="Settings sections">
+    {#each ['Access', 'Data', 'Notifications', 'Appearance', 'Diagnostics'] as section}
+      <button type="button" onclick={() => document.getElementById(`settings-${section.toLowerCase()}`)?.scrollIntoView({ block: 'start' })}>{section}</button>
+    {/each}
+  </nav>
 
-  <div class="card settings-sources">
-    <span class="microlabel">Sources</span>
-    <ul class="settings-sources__list">
-      {#each sourceNames as name (name)}
-        {@const detail = sources[name]}
-        {@const ok = detail === 'ok'}
-        {@const notApplicable = detail === SOURCE_NOT_APPLICABLE}
-        <li class="settings-sources__row">
-          <HealthDot status={ok || notApplicable ? 'good' : 'warning'} label={name} />
-          {#if !ok}
-            <span class="settings-sources__detail">
-              {notApplicable ? (NOT_APPLICABLE_COPY[name] ?? 'Not applicable on this system.') : detail}
-              {#if name === 'pressure'}
-                <a
-                  class="settings-sources__learn-more"
-                  href="https://github.com/smidley/gantry/blob/main/docs/psi.md"
-                  target="_blank"
-                  rel="noopener"
-                >
-                  Learn more &rarr;
-                </a>
-              {/if}
-            </span>
-          {/if}
-        </li>
-      {/each}
-    </ul>
-  </div>
-
-  <div class="card settings-access">
-    <span class="microlabel">Access</span>
-    {#if auth.mode === 'proxy'}
-      <p class="settings-access__note">
-        Authentication is handled by your reverse proxy (GANTRY_AUTH=proxy). Gantry's built-in login is off, and
-        credentials are managed at the proxy, not here.
-      </p>
-    {:else if auth.mode === 'none'}
-      <p class="settings-access__note">
-        Authentication is turned off (GANTRY_AUTH=none) — anyone who can reach this dashboard can view and manage it.
-        Remove that variable to require a login again.
-      </p>
-    {:else}
-      <p class="settings-access__note">
-        Signed in as <strong>{auth.username}</strong>. Signing in lasts until you close your browser.
-      </p>
-      {#if auth.envManaged}
-        <p class="settings-access__note settings-access__note--env">
-          The login comes from the GANTRY_USERNAME / GANTRY_PASSWORD container variables at every start — a change made
-          here lasts only until the next restart re-applies them. Update the variables in the container template to make
-          a change stick. Removing the variables does <em>not</em> turn authentication off.
-        </p>
-      {/if}
-
-      <form class="settings-access__form" onsubmit={submitCredential} novalidate>
-        <label class="settings-access__field">
-          <span class="microlabel">Current password</span>
-          <input type="password" bind:value={pwCurrent} autocomplete="current-password" disabled={pwSaving} />
-        </label>
-        <label class="settings-access__field">
-          <span class="microlabel">Username</span>
-          <input
-            type="text"
-            bind:value={newUsername}
-            autocomplete="username"
-            autocapitalize="none"
-            autocorrect="off"
-            spellcheck="false"
-            disabled={pwSaving}
-          />
-        </label>
-        <label class="settings-access__field">
-          <span class="microlabel">New password <span class="settings-access__optional">— leave blank to keep</span></span>
-          <input type="password" bind:value={pwNew} autocomplete="new-password" disabled={pwSaving} />
-        </label>
-        <label class="settings-access__field">
-          <span class="microlabel">Confirm new password</span>
-          <input type="password" bind:value={pwConfirm} autocomplete="new-password" disabled={pwSaving} />
-        </label>
-        <div class="settings-access__actions">
-          <button type="submit" class="settings-access__save" disabled={pwSaving}>
-            {pwSaving ? 'Saving…' : 'Update login'}
-          </button>
-          <span class="microlabel">Updating your login signs out every other session.</span>
-        </div>
-        {#if pwError}<p class="microlabel settings-access__error" role="alert">{pwError}</p>{/if}
-        {#if pwSuccess}<p class="microlabel settings-access__success">{pwSuccess}</p>{/if}
-      </form>
-
-      <div class="settings-access__session-row">
-        <button type="button" class="settings-access__secondary" onclick={logout}>Log out</button>
-      </div>
-    {/if}
-  </div>
+  <SettingsAccess />
 
   <!-- novalidate: min/max stay as real DOM attributes (a11y + the
        brief's own "ranges as min/max attrs" contract), but native
@@ -470,8 +316,10 @@
        only feedback the user ever sees, consistent for every failure
        mode (empty input, out of range, a 400/409 from the server) rather
        than a browser-native tooltip for just one of them. -->
-  <form class="card settings-retention" onsubmit={saveRetention} novalidate>
-    <span class="microlabel">Retention</span>
+  <form id="settings-data" class="card settings-retention" onsubmit={saveRetention} novalidate>
+    <h2 class="section-title">Data</h2>
+    <p class="microlabel">Older samples become less detailed. The size cap can shorten the requested history; actual storage depends on the number of containers and metrics.</p>
+    <p class="microlabel">Current database: {databaseBytes === null ? 'unavailable' : fmtBytes(databaseBytes)} · configured storage budget: {fmtBytes((formValues.size_cap_mb || 0) * 1024 * 1024)}.</p>
     {#if loadError}
       <p class="microlabel settings-retention__error">{loadError}</p>
     {:else if !retentionLoaded}
@@ -500,6 +348,7 @@
         {/each}
       </div>
       <div class="settings-retention__actions">
+        <button type="button" class="settings-retention__save" onclick={useRetentionPreset} disabled={saving}>Use balanced defaults</button>
         <button type="submit" class="settings-retention__save" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
         {#if saveSuccess}<span class="microlabel settings-retention__success">Saved.</span>{/if}
         {#if saveError}<span class="microlabel settings-retention__save-error">{saveError}</span>{/if}
@@ -507,8 +356,9 @@
     {/if}
   </form>
 
-  <div class="card settings-webhooks">
-    <span class="microlabel">Webhook targets</span>
+  <div id="settings-notifications" class="card settings-webhooks">
+    <h2 class="section-title">Notifications</h2>
+    <p class="microlabel">Webhook targets receive alert deliveries. Enabled means configured to send; delivery status reports the last attempt.</p>
     {#if webhookLoadError}
       <p class="microlabel settings-webhooks__error">{webhookLoadError}</p>
     {:else if !webhookLoaded}
@@ -578,8 +428,14 @@
                   </div>
                 </form>
               {:else}
+                {@const delivery = live.frame?.alerts?.channels?.[`webhook:${t.id}`]}
                 <div class="settings-webhooks__row">
-                  <HealthDot status={t.enabled ? 'good' : 'warning'} label={t.name || t.id} />
+                  <strong>{t.name || t.id}</strong>
+                  <span class="microlabel">{t.enabled ? 'Enabled' : 'Disabled'}</span>
+                  {#if t.enabled && delivery && delivery !== 'awaiting first delivery'}
+                    <HealthDot status={delivery === 'ok' ? 'good' : 'warning'} label={delivery === 'ok' ? 'Delivery healthy' : 'Delivery failed'} />
+                    {#if delivery !== 'ok'}<span class="settings-webhooks__error">{delivery}</span>{/if}
+                  {:else if t.enabled}<span class="microlabel">Awaiting delivery status</span>{/if}
                   <span class="settings-webhooks__url">{t.url}</span>
                   <span class="microlabel settings-webhooks__secret-state">
                     {t.header_set ? 'Secret set' : 'No secret'}
@@ -646,17 +502,8 @@
     {/if}
   </div>
 
-  <div class="settings-view__row">
-    <div class="card settings-footprint">
-      <span class="microlabel">Gantry footprint</span>
-      <div class="settings-footprint__tiles">
-        <StatTile bare label="CPU" liveValue={cpuPct ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
-        <StatTile bare label="Memory" liveValue={rssBytes ?? 0} formatValue={fmtBytes} sparklinePoints={rssRing.points} />
-      </div>
-      <p class="microlabel settings-footprint__caption">Budget: core &le;2% &middot; RSS &le;100MB</p>
-    </div>
-
-    <div class="card settings-theme">
+    <div id="settings-appearance" class="card settings-theme">
+      <h2 class="section-title">Appearance</h2>
       <span class="microlabel">Theme</span>
       <div class="segmented" role="group" aria-label="Theme">
         {#each THEME_OPTIONS as opt (opt.key)}
@@ -686,6 +533,48 @@
       </div>
     </div>
 
+
+  <div id="settings-diagnostics" class="card settings-sources">
+    <h2 class="section-title">Diagnostics</h2>
+    <span class="microlabel">Sources</span>
+    <ul class="settings-sources__list">
+      {#each sourceNames as name (name)}
+        {@const detail = sources[name]}
+        {@const ok = detail === 'ok'}
+        {@const notApplicable = detail === SOURCE_NOT_APPLICABLE}
+        <li class="settings-sources__row">
+          <HealthDot status={ok || notApplicable ? 'good' : 'warning'} label={name} />
+          {#if !ok}
+            <span class="settings-sources__detail">
+              {notApplicable ? (NOT_APPLICABLE_COPY[name] ?? 'Not applicable on this system.') : detail}
+              {#if name === 'pressure'}
+                <a
+                  class="settings-sources__learn-more"
+                  href="https://github.com/smidley/gantry/blob/main/docs/psi.md"
+                  target="_blank"
+                  rel="noopener"
+                >
+                  Learn more &rarr;
+                </a>
+              {/if}
+            </span>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  </div>
+
+
+  <div class="settings-view__row">
+    <div class="card settings-footprint">
+      <span class="microlabel">Gantry footprint</span>
+      <div class="settings-footprint__tiles">
+        <StatTile bare label="CPU" liveValue={cpuPct ?? 0} formatValue={fmtPct} sparklinePoints={cpuRing.points} />
+        <StatTile bare label="Memory" liveValue={rssBytes ?? 0} formatValue={fmtBytes} sparklinePoints={rssRing.points} />
+      </div>
+      <p class="microlabel settings-footprint__caption">Budget: core &le;2% &middot; RSS &le;100MB</p>
+    </div>
+
     <div class="card settings-about">
       <span class="microlabel">About</span>
       <dl class="settings-about__list">
@@ -702,6 +591,11 @@
 </div>
 
 <style>
+  .settings-view__nav { display: flex; flex-wrap: wrap; gap: .5rem; }
+  .settings-view__nav button { border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); border-radius: 6px; padding: .6rem .9rem; }
+  .settings-view :global([id^="settings-"]) { scroll-margin-top: 5rem; }
+  .section-title { margin: 0; font-size: 1rem; font-weight: 600; }
+
   .settings-view {
     display: flex;
     flex-direction: column;
@@ -735,7 +629,7 @@
   .settings-sources__learn-more {
     margin-left: 0.4em;
     color: var(--series-1);
-    text-decoration: none;
+    text-decoration: underline;
     white-space: nowrap;
   }
   .settings-sources__learn-more:hover {
@@ -818,97 +712,6 @@
   }
   .settings-retention__save-error {
     color: var(--status-warning);
-  }
-
-  .settings-access {
-    padding: 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-  }
-  .settings-access__note {
-    margin: 0;
-    font-size: 0.82rem;
-    color: var(--ink-2);
-  }
-  .settings-access__optional {
-    color: var(--ink-2);
-    font-weight: 400;
-    text-transform: none;
-    letter-spacing: 0;
-  }
-  .settings-access__note--env {
-    padding: 0.5rem 0.6rem;
-    border-radius: 8px;
-    background: color-mix(in oklab, var(--status-warning) 10%, transparent);
-    color: var(--ink);
-  }
-  .settings-access__form {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-  }
-  .settings-access__field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    max-width: 18rem;
-  }
-  .settings-access__field input {
-    min-height: 40px;
-    padding: 0 0.75rem;
-    border-radius: 6px;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    background: var(--surface);
-    color: var(--ink);
-    font-size: 0.9rem;
-  }
-  .settings-access__field input:disabled {
-    opacity: 0.6;
-  }
-  .settings-access__actions {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-  }
-  .settings-access__save {
-    min-height: 40px;
-    padding: 0 1.25rem;
-    border-radius: 6px;
-    border: 1px solid var(--series-1);
-    background: color-mix(in oklab, var(--series-1) 15%, transparent);
-    color: var(--series-1);
-    font-size: 0.85rem;
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .settings-access__secondary {
-    min-height: 40px;
-    padding: 0 0.9rem;
-    border-radius: 6px;
-    border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
-    background: transparent;
-    color: var(--ink);
-    font-size: 0.8rem;
-    cursor: pointer;
-  }
-  .settings-access__save:disabled,
-  .settings-access__secondary:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .settings-access__session-row {
-    display: flex;
-    gap: 0.6rem;
-  }
-  .settings-access__error {
-    color: var(--status-warning);
-    margin: 0;
-  }
-  .settings-access__success {
-    color: var(--status-good);
-    margin: 0;
   }
 
   .settings-webhooks {

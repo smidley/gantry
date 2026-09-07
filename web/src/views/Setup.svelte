@@ -12,6 +12,8 @@
   import { credentialFormError, loginErrorMessage } from '../lib/auth';
 
   let username = $state('');
+  let setupCode = $state('');
+  let showPassword = $state(false);
   let password = $state('');
   let confirm = $state('');
   let submitting = $state(false);
@@ -28,7 +30,7 @@
     submitting = true;
     error = null;
     try {
-      await auth.setup(username, password);
+      await auth.setup(username, password, setupCode.trim());
       password = '';
       confirm = '';
     } catch (err) {
@@ -66,6 +68,11 @@
     </div>
 
     <label class="setup__field">
+      <span class="microlabel">Setup code</span>
+      <input type="text" bind:value={setupCode} autocomplete="off" spellcheck="false" disabled={submitting} aria-describedby="setup-code-help" />
+    </label>
+    <p id="setup-code-help" class="setup__hint">Open Gantry's container logs on your server and copy the one-time setup code. This verifies that you own this installation.</p>
+    <label class="setup__field">
       <span class="microlabel">Username</span>
       <!-- svelte-ignore a11y_autofocus -- this page IS the setup prompt;
            focusing the first field first is the least surprising thing. -->
@@ -86,7 +93,7 @@
     <label class="setup__field">
       <span class="microlabel">Password</span>
       <input
-        type="password"
+        type={showPassword ? "text" : "password"}
         bind:value={password}
         autocomplete="new-password"
         disabled={submitting}
@@ -98,7 +105,7 @@
     <label class="setup__field">
       <span class="microlabel">Confirm password</span>
       <input
-        type="password"
+        type={showPassword ? "text" : "password"}
         bind:value={confirm}
         autocomplete="new-password"
         disabled={submitting}
@@ -107,7 +114,8 @@
       />
     </label>
 
-    <p class="setup__hint">At least 8 characters.</p>
+    <label class="setup__hint"><input type="checkbox" bind:checked={showPassword} /> Show passwords</label>
+    <p class="setup__hint">At least 8 characters. Recovery: set a new GANTRY_USERNAME and GANTRY_PASSWORD in the container settings and restart Gantry.</p>
 
     {#if error}
       <p class="setup__error" id="setup-error" role="alert">{error}</p>

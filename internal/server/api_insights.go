@@ -93,18 +93,23 @@ type InsightsIface interface {
 // its zero value here too, and the UI's evidence drawer renders only
 // the numbers a given rule's Statement actually quoted.
 type EvidenceDTO struct {
-	CulpritSharePct   float64  `json:"culprit_share_pct"`
-	DeviceUtilPct     float64  `json:"device_util_pct"`
-	AwaitMs           float64  `json:"await_ms"`
-	VictimStallPct    float64  `json:"victim_stall_pct"`
-	WindowMinutes     int      `json:"window_minutes"`
-	OtherUsers        []string `json:"other_users"`
-	IowaitPct         float64  `json:"iowait_pct"`
-	HostCPUPct        float64  `json:"host_cpu_pct"`
-	SpinCount         int      `json:"spin_count"`
-	SpinWindowMinutes int      `json:"spin_window_minutes"`
-	EngineBusyPct     float64  `json:"engine_busy_pct"`
-	BaselinePct       float64  `json:"baseline_pct"`
+	AttributionVersion int                      `json:"attribution_version"`
+	RecordedSeries     []insight.RecordedSeries `json:"recorded_series,omitempty"`
+	ResourceDevice     string                   `json:"resource_device,omitempty"`
+	CulpritSharePct    float64                  `json:"culprit_share_pct"`
+	DeviceUtilPct      float64                  `json:"device_util_pct"`
+	AwaitMs            float64                  `json:"await_ms"`
+	VictimStallPct     float64                  `json:"victim_stall_pct"`
+	WindowMinutes      int                      `json:"window_minutes"`
+	OtherUsers         []string                 `json:"other_users"`
+	IowaitPct          float64                  `json:"iowait_pct"`
+	HostCPUPct         float64                  `json:"host_cpu_pct"`
+	HostMemUsedPct     float64                  `json:"host_mem_used_pct"`
+	OOMKilled          bool                     `json:"oom_killed"`
+	SpinCount          int                      `json:"spin_count"`
+	SpinWindowMinutes  int                      `json:"spin_window_minutes"`
+	EngineBusyPct      float64                  `json:"engine_busy_pct"`
+	BaselinePct        float64                  `json:"baseline_pct"`
 }
 
 // ToEvidenceDTO decodes an insight_instances.evidence JSON blob (written
@@ -472,8 +477,8 @@ func (s *Server) handleInsightsRulesPut(w http.ResponseWriter, r *http.Request) 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var body insightRulesPutRequest
-	if err := dec.Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+	if err := decodeSingleJSON(dec, &body); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if len(body.Rules) > maxInsightRulesSubmission {
@@ -544,8 +549,8 @@ func (s *Server) handleInsightDismiss(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var body insightDismissRequest
-	if err := dec.Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+	if err := decodeSingleJSON(dec, &body); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if body.Days < minInsightDismissDays || body.Days > maxInsightDismissDays {

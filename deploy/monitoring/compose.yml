@@ -1,0 +1,37 @@
+# Monitoring only. Initialize the config directory as documented in security.md.
+services:
+  docker-proxy:
+    image: haproxy:3.2.23-alpine
+    user: "0:65532"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - proxy-socket:/run/proxy
+    restart: unless-stopped
+  gantry:
+    build:
+      context: ../..
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports: ["127.0.0.1:8380:8380"]
+    environment:
+      GANTRY_AUTH: auto
+      GANTRY_READ_ONLY: "1"
+      GANTRY_DOCKER_SOCK: /run/proxy/docker.sock
+      GANTRY_HOST_PROC: /host/proc
+    volumes:
+      - proxy-socket:/run/proxy:ro
+      - ./config:/config
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      # Unraid hosts can add /var/local/emhttp:/unraid:ro.
+    depends_on: [docker-proxy]
+    restart: unless-stopped
+volumes:
+  proxy-socket:

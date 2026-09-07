@@ -77,6 +77,7 @@ func overriddenNames(overridden map[string]bool) []string {
 }
 
 type settingsGetResponse struct {
+	DatabaseBytes *int64            `json:"database_bytes,omitempty"`
 	Retention     RetentionSettings `json:"retention"`
 	EnvOverridden []string          `json:"env_overridden"`
 }
@@ -91,7 +92,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	ret, overridden := s.opts.Settings.Get()
-	writeJSON(w, settingsGetResponse{Retention: ret, EnvOverridden: overriddenNames(overridden)})
+	writeJSON(w, s.settingsResponse(ret, overridden))
 }
 
 // settingsPutRequest is decoded with DisallowUnknownFields, so any key
@@ -135,8 +136,8 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var body settingsPutRequest
-	if err := dec.Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+	if err := decodeSingleJSON(dec, &body); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 
@@ -191,5 +192,15 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ret, overridden := s.opts.Settings.Get()
-	writeJSON(w, settingsGetResponse{Retention: ret, EnvOverridden: overriddenNames(overridden)})
+	writeJSON(w, s.settingsResponse(ret, overridden))
+}
+
+func (s *Server) settingsResponse(ret RetentionSettings, overridden map[string]bool) settingsGetResponse {
+	out := settingsGetResponse{Retention: ret, EnvOverridden: overriddenNames(overridden)}
+	if usage, ok := s.opts.Settings.(interface{ DatabaseBytes() (int64, error) }); ok {
+		if bytes, err := usage.DatabaseBytes(); err == nil {
+			out.DatabaseBytes = &bytes
+		}
+	}
+	return out
 }

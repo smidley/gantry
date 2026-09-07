@@ -1,0 +1,4 @@
+[
+  {"id":"GO-2026-4887","module":"github.com/docker/docker","version":"v28.5.2+incompatible","expires":"2026-12-07","reason":"Docker daemon AuthZ handler; Gantry imports its API client only. See docs/security.md."},
+  {"id":"GO-2026-4883","module":"github.com/docker/docker","version":"v28.5.2+incompatible","expires":"2026-12-07","reason":"Docker daemon plugin installation; Gantry does not embed this service. See docs/security.md."}
+]

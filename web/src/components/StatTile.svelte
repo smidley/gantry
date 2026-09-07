@@ -97,6 +97,7 @@
 
   let {
     label,
+    compact = false,
     liveValue,
     formatValue = (v) => String(v),
     unit = '',
@@ -229,6 +230,7 @@
   class="stat-tile"
   class:card={!bare}
   class:stat-tile--bare={bare}
+  class:stat-tile--compact={compact}
   class:stat-tile--link={!!href}
 >
   {#if bare}
@@ -258,7 +260,7 @@
         color={sparklineColor}
         points2={value2Points}
         color2={sparklineColor2}
-        height={BARE_SPARKLINE_HEIGHT}
+        height={compact ? 48 : BARE_SPARKLINE_HEIGHT}
       />
     {/if}
   {:else}
@@ -454,4 +456,11 @@
   .stat-tile__value2-label {
     color: var(--ink-2);
   }
+  .stat-tile--compact, .stat-tile--compact:first-child, .stat-tile--compact:last-child {
+    padding: 0; border: 0; gap: .4rem;
+  }
+  .stat-tile--compact .stat-tile__row { flex-direction: column; align-items: flex-start; gap: .4rem; }
+  .stat-tile--compact .stat-tile__row-value-stack { align-items: flex-start; min-width: 0; min-height: 3.6rem; }
+  .stat-tile--compact .stat-tile__number, .stat-tile--compact .stat-tile__value2 { font-size: clamp(1.15rem, 2vw, 1.6rem); white-space: nowrap; }
+  .stat-tile--compact :global(.sparkline) { min-width: 0; width: 100%; }
 </style>

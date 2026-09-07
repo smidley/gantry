@@ -39,7 +39,7 @@
       </span>
       <span class="sources-panel__summary-copy">
         <strong>{dockerDegraded ? 'A core data source needs attention' : `${otherDegraded.length} optional ${otherDegraded.length === 1 ? 'source' : 'sources'} unavailable`}</strong>
-        <small>{dockerDegraded ? 'Some monitoring data may be incomplete.' : 'Gantry is monitoring everything else normally.'}</small>
+        <small class:optional={!dockerDegraded}>{dockerDegraded ? 'Some monitoring data may be incomplete.' : 'Gantry is monitoring everything else normally.'}</small>
       </span>
       <span class="sources-panel__chevron" aria-hidden="true">
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 8 4 4 4-4"/></svg>
@@ -80,6 +80,8 @@
 {/if}
 
 <style>
+ .sources-panel__summary-copy small.optional { display: none; }
+ .sources-panel:not([open]) { box-shadow: none; }
   .sources-panel {
     overflow: hidden;
     background: color-mix(in oklab, var(--surface) 90%, var(--accent-soft));
@@ -162,7 +164,7 @@
   .sources-banner__learn-more {
     margin-left: 0.4em;
     color: var(--accent);
-    text-decoration: none;
+    text-decoration: underline;
     white-space: nowrap;
   }
   .sources-banner__learn-more:hover {

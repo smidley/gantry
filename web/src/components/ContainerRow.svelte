@@ -47,7 +47,7 @@
   // Set; this row just reflects/toggles its own membership in it, same
   // "parent owns the state, row is a dumb reflection of one slice of it"
   // shape registerSeedTarget already uses for seeding.
-  let { name, registerSeedTarget = undefined, showState = false, selected = false, onToggleSelect } = $props();
+  let { name, registerSeedTarget = undefined, showState = false, compact = false, selected = false, onToggleSelect } = $props();
 
   let cpuRing = liveRing((f) => f.containers[name]?.metrics['cpu.pct']);
 
@@ -149,7 +149,7 @@
     </td>
     <td class="container-row__cpu-cell">
       <span class="tabular-nums">{fmtPct(cpuTween.current)}</span>
-      <Sparkline points={cpuRing.points} height={46} />
+      <Sparkline points={cpuRing.points} height={compact ? 26 : 40} />
     </td>
     <td class="tabular-nums container-row__nowrap container-row__num">
       {fmtBytes(memBytesTween.current)}
@@ -245,10 +245,10 @@
   }
   .container-row__cpu-cell :global(.sparkline) {
     /* 170px -> 220px, Scott: "too small to see the correct detail
-       level" -- ContainerRow's height={46} above needs the wider track
+       level" -- ContainerRow's height={compact ? 26 : 40} above needs the wider track
        to still read as one continuous line rather than a cramped
        zigzag; Containers.svelte's own colgroup cpu width grows to match. */
-    width: 220px;
+    width: 120px;
     flex-shrink: 0;
   }
   .container-row__nowrap {

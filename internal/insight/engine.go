@@ -411,6 +411,17 @@ func (e *Engine) upsertFinding(f Finding, culprit, culprits string, existing []s
 		e.resolve(existing[i], now, "superseded")
 	}
 
+	// Keep the original detection window through refreshes and resolution.
+	f.Evidence.AttributionVersion = 2
+	if keep != nil {
+		var previous Evidence
+		if json.Unmarshal([]byte(keep.Evidence), &previous) == nil {
+			f.Evidence.RecordedSeries, f.Evidence.ResourceDevice = previous.RecordedSeries, previous.ResourceDevice
+		}
+	}
+	if keep == nil || f.Evidence.RecordedSeries == nil {
+		f.Evidence.RecordedSeries, f.Evidence.ResourceDevice = e.captureExcerpt(f, now)
+	}
 	evidence, err := json.Marshal(f.Evidence)
 	if err != nil {
 		log.Printf("insight engine: marshal evidence (%s/%s/%s): %v", f.RuleID, f.Victim, f.Resource, err)
@@ -634,6 +645,7 @@ func (e *Engine) gather(ctx context.Context, now int64) In {
 	in.ContainerCPUAllocCores = match("container", "cpu.alloc_cores", now-EvidenceWindowSecs)
 	in.ContainerCPUPct = match("container", "cpu.pct", now-EvidenceWindowSecs)
 	in.ContainerMemPct = match("container", "mem.pct", now-EvidenceWindowSecs)
+	in.ContainerMemLimitBytes = match("container", "mem.limit_bytes", now-EvidenceWindowSecs)
 	in.ParitySpeedBps = match("unraid", "parity.speed_bps", now-BaselineLookbackSecs)
 	in.ParityProgressPct = match("unraid", "parity.progress_pct", now-EvidenceWindowSecs)
 	in.DiskSpunUp = match("disk", "spun_up", now-SpinupLookbackSecs)

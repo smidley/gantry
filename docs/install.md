@@ -107,8 +107,9 @@ password -- stored on your own box; there's no cloud account and no
 external service. There are two ways the credential gets set:
 
 - **First-run setup (the default).** The first time you open a box with
-  no credential, Gantry shows a one-time setup screen: pick a username
-  and a password (minimum 8 characters), and it signs you straight in.
+  no credential, Gantry prints a random owner setup code in its local
+  logs (`docker logs gantry`). Enter that code, then choose a username
+  and password (minimum 8 characters). Gantry signs you in immediately.
   Every visit after that is a normal login. Change either later in
   **Settings → Access** (the current password is required; a change
   signs out every other session).
@@ -121,14 +122,12 @@ external service. There are two ways the credential gets set:
   (or a password under 8 characters) is ignored with a log line, and the
   box falls back to the setup screen rather than booting half-configured.
 
-The first-run setup endpoint (`POST /api/auth/setup`) is reachable
-without a session -- there's nothing yet to authenticate against -- but
-only until a credential exists; afterward it answers 409. During that
-first-boot window everything else is already gated (a data route with no
-session gets a 401, which is exactly what shows the setup screen), and a
-drive-by web page still can't reach it: every mutating route requires a
-custom header no cross-site page can set. Set the credential promptly on
-a network you don't fully trust.
+The first-run setup endpoint (`POST /api/auth/setup`) requires the owner
+setup code and accepts it only until a credential exists; afterward it
+answers 409. A generated code changes on restart. Managed provisioning
+can supply `GANTRY_SETUP_CODE` (at least 16 characters); keep it secret
+and remove it after setup. All other data routes already require a
+session. Mutations also require the custom Gantry request header.
 
 One deliberate asymmetry: **removing `GANTRY_USERNAME`/`GANTRY_PASSWORD`
 does NOT turn authentication off.** The stored login stays; auth is
@@ -149,7 +148,7 @@ What the login actually does:
 - Every API route and the live stream require a session. The session
   cookie is a **session cookie** (`HttpOnly`, `SameSite=Lax`, `Secure`
   when served through a TLS-terminating proxy, and no fixed lifetime),
-  so it's cleared **when you close your browser**. Server-side backstops
+  so browsers usually clear it on close, although session restoration can preserve it. Server-side backstops
   still expire an idle session after 8 hours and any session after 24
   hours, so a never-closed kiosk browser can't stay signed in forever.
   The token is stored only as a SHA-256 digest and the password only as
@@ -228,3 +227,12 @@ the switch's purpose. Use both for a locked, look-don't-touch monitor.
   installed from a local path and confirmed to need zero edits -- that
   verification belongs to the on-box validation checklist, not this
   change.
+
+
+## Owner setup and network binding
+
+On an uninitialized server, `docker logs gantry` prints a random setup code. Enter it on the setup screen before creating the local account. The code stops working after the account exists and a generated code changes on restart. Alternatively preseed `GANTRY_USERNAME` and `GANTRY_PASSWORD`. For managed provisioning, `GANTRY_SETUP_CODE` supplies a code of at least 16 characters; keep it secret and remove it after setup.
+
+`GANTRY_BIND_ADDRESS` selects the native HTTP listening address (default: all interfaces). Use `127.0.0.1` behind a same-host proxy, or `::1` for IPv6 loopback. Inside a Docker bridge, leave the listener available to the bridge and publish `127.0.0.1:8380:8380`. `GANTRY_HOST_PROC` selects the host metric collector's proc mount (default `/proc`); it does not grant GPU process access.
+
+See [security and deployment](security.md) for the restricted monitoring profile, TLS example, credential recovery, and dependency triage.

@@ -3,6 +3,7 @@
   import { routes } from '../lib/router';
   import { live } from '../lib/sse.svelte';
   import { theme } from '../lib/theme.svelte';
+  import { modal } from '../lib/modal';
 
   let open = $state(false);
   let query = $state('');
@@ -131,9 +132,9 @@
 </button>
 
 {#if open}
-  <div class="command-palette" role="presentation">
+  <div use:modal class="command-palette" role="dialog" aria-modal="true" aria-label="Search Gantry">
     <button type="button" class="command-palette__backdrop" onclick={close} aria-label="Close search"></button>
-    <div class="command-palette__panel" role="dialog" aria-modal="true" aria-label="Search Gantry">
+    <div class="command-palette__panel">
       <div class="command-palette__input-wrap">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
           <circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4 4"></path>

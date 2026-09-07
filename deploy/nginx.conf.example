@@ -1,0 +1,20 @@
+# Include inside nginx's http {}. Replace the hostname and certificate paths.
+server {
+    listen 443 ssl;
+    server_name gantry.example.com;
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 1m;
+    location / {
+        proxy_pass http://127.0.0.1:8380;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 75s;
+        # Keep GANTRY_AUTH=auto unless this location also enforces authentication.
+    }
+}

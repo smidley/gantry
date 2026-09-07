@@ -3,6 +3,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { freePort } from './fixtures/freePort';
 
 // Auth flow, end to end against the real binary. Auth is mandatory now,
 // so the shared webServer instance (playwright.config.ts) runs
@@ -31,8 +32,12 @@ function startGantry(port: number, extraEnv: Record<string, string>): ChildProce
     env: {
       ...process.env,
       GANTRY_PORT: String(port),
+      GANTRY_DOCKER_SOCK: `/tmp/gantry-e2e-${port}.sock`,
       GANTRY_DB_PATH: path.join(mkdtempSync(path.join(tmpdir(), 'gantry-auth-')), 'g.db'),
       GANTRY_FAKE_DATA: '1',
+      GANTRY_AUTH: 'auto',
+      GANTRY_BIND_ADDRESS: '127.0.0.1',
+      GANTRY_SETUP_CODE: 'gantry-test-owner-proof',
       ...extraEnv,
     },
     stdio: 'ignore',
@@ -54,11 +59,12 @@ async function waitForHealthz(port: number): Promise<void> {
 }
 
 test.describe('login gate (preseeded instance)', () => {
-  const PORT = 8451; // the suite's own block: config PORT+1 -- see playwright.config.ts
-  const URL = `http://127.0.0.1:${PORT}`;
+  let PORT: number;
+  let URL: string;
   let proc: ChildProcess;
 
   test.beforeAll(async () => {
+    PORT = await freePort(); URL = `http://127.0.0.1:${PORT}`;
     proc = startGantry(PORT, { GANTRY_USERNAME: USERNAME, GANTRY_PASSWORD: PASSWORD });
     await waitForHealthz(PORT);
   });
@@ -162,11 +168,12 @@ test.describe('login gate (preseeded instance)', () => {
 });
 
 test.describe('first-run setup (unconfigured instance)', () => {
-  const PORT = 8452; // config PORT+2
-  const URL = `http://127.0.0.1:${PORT}`;
+  let PORT: number;
+  let URL: string;
   let proc: ChildProcess;
 
   test.beforeAll(async () => {
+    PORT = await freePort(); URL = `http://127.0.0.1:${PORT}`;
     proc = startGantry(PORT, {}); // no credential env: first-run setup
     await waitForHealthz(PORT);
   });
@@ -185,6 +192,7 @@ test.describe('first-run setup (unconfigured instance)', () => {
     expect(closed.status()).toBe(401);
 
     const card = page.locator('.setup__card');
+    await card.getByLabel('Setup code', { exact: true }).fill('gantry-test-owner-proof');
     const newPw = () => card.locator('input[autocomplete="new-password"]');
 
     // Mismatched confirm: the local check answers, no request needed.
@@ -228,7 +236,7 @@ test.describe('first-run setup (unconfigured instance)', () => {
 
     const card = page.locator('.settings-access');
     await expect(card).toContainText(`Signed in as ${USERNAME}`);
-    await expect(card).toContainText('Signing in lasts until you close your browser');
+    await expect(card).toContainText('Sessions expire after 8 hours idle or 24 hours total');
 
     // Change both the username and the password. Current password is
     // required; the username field is prefilled with the current one.

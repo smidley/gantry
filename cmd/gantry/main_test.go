@@ -285,7 +285,15 @@ func TestRunServesHealthzAndShutsDown(t *testing.T) {
 	// the server package's own tests.
 	require.Equal(t, http.StatusForbidden, pruneResp.StatusCode)
 
-	pruneReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), strings.NewReader(`{"mode":"unused"}`))
+	var approvedIDs []string
+	for _, im := range imagesBody.Images {
+		if im.State == "unused" {
+			approvedIDs = append(approvedIDs, im.FullID)
+		}
+	}
+	pruneJSON, err := json.Marshal(map[string]any{"mode": "unused", "ids": approvedIDs})
+	require.NoError(t, err)
+	pruneReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/images/prune", port), strings.NewReader(string(pruneJSON)))
 	require.NoError(t, err)
 	pruneReq.Header.Set("X-Gantry-Confirm", "images")
 	pruneResp2, err := http.DefaultClient.Do(pruneReq)
@@ -2745,6 +2753,7 @@ func runGantry(t *testing.T, env map[string]string) (string, func()) {
 	t.Helper()
 	port := freePort(t)
 	env["GANTRY_PORT"] = fmt.Sprint(port)
+	env["GANTRY_SETUP_CODE"] = "test-bootstrap-code"
 	if env["GANTRY_FAKE_DATA"] == "" {
 		env["GANTRY_FAKE_DATA"] = "1"
 	}
@@ -2784,7 +2793,7 @@ func TestRunAuthFirstRunSetup(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, resp.StatusCode, "everything but setup is 401 before first-run setup")
 
 	// Create the credential.
-	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/setup", `{"username":"admin","password":"first-run-password"}`, "")
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/setup", `{"setup_code":"test-bootstrap-code","username":"admin","password":"first-run-password"}`, "")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var token string
 	for _, c := range resp.Cookies() {
@@ -2812,7 +2821,7 @@ func TestRunAuthFirstRunSetup(t *testing.T) {
 	require.Equal(t, "admin", st.Username)
 
 	// One-shot: a second setup is refused now that a credential exists.
-	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/setup", `{"username":"mallory","password":"another-password"}`, "")
+	resp = authTestRequest(t, http.MethodPost, base+"/api/auth/setup", `{"setup_code":"test-bootstrap-code","username":"mallory","password":"another-password"}`, "")
 	drainAndClose(resp)
 	require.Equal(t, http.StatusConflict, resp.StatusCode, "setup must 409 once a credential exists")
 
@@ -2837,7 +2846,7 @@ func TestRunAuthPreseedSkipsSetup(t *testing.T) {
 
 	require.Equal(t, "login", authStatusState(t, base), "a preseeded credential skips the setup screen")
 
-	resp := authTestRequest(t, http.MethodPost, base+"/api/auth/setup", `{"username":"x","password":"y-1234567"}`, "")
+	resp := authTestRequest(t, http.MethodPost, base+"/api/auth/setup", `{"setup_code":"test-bootstrap-code","username":"x","password":"y-1234567"}`, "")
 	drainAndClose(resp)
 	require.Equal(t, http.StatusConflict, resp.StatusCode, "setup must 409 when a credential was preseeded")
 

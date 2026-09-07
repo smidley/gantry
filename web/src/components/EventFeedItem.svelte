@@ -1,31 +1,7 @@
-<!--
-  EventFeedItem: one row for the Overview/Events feeds. `event` is a
-  GantryEvent (api.ts) -- store.Event's wire shape has no json tags, so
-  its capitalized Go field names (ID, TS, Kind, Entity, Severity,
-  Detail) are the JSON/prop keys as-is.
-
-  showAbsoluteTime (additive, optional -- Task 20) renders the event's
-  browser-local absolute timestamp for the Events view's own "relative +
-  absolute time" contract, on its OWN line below the kind/entity/
-  relative-time head row -- NOT crammed inline after it: a full
-  toLocaleString() date+time ("8/26/2026, 7:04:20 PM") is wide enough
-  that appending it inside the head row's own nowrap time span
-  overflowed the card (and, since nothing there clips overflow, the
-  whole page) on narrow viewports once real event data was on screen --
-  reproduced live while building the Events view. Overview's compact
-  feed leaves it false (its default), keeping that view's exact original
-  single-line rendering untouched.
-
-  Clickable (Scott: "recent events should be clickable and take you to
-  the thing that's going on"): eventHref (pure, see its own doc) maps
-  this event's kind to wherever that "thing" lives -- a container's own
-  detail page, or the Storage page for anything array/disk-flavored.
-  null (image.* for now, or an unrecognized kind) renders the plain
-  <div> this always was.
--->
 <script>
   import HealthDot from './HealthDot.svelte';
   import { fmtRelTime } from '../lib/format';
+  import { eventLabel } from '../lib/eventLabels';
   import { eventHref } from '../lib/eventHref';
 
   let { event, showAbsoluteTime = false } = $props();
@@ -47,7 +23,7 @@
   <HealthDot status={SEVERITY_STATUS[event.Severity] ?? 'good'} />
   <div class="event-feed-item__body">
     <div class="event-feed-item__head">
-      <span class="event-feed-item__kind">{event.Kind}</span>
+      <span class="event-feed-item__kind" title={event.Kind}>{eventLabel(event.Kind)}</span>
       {#if event.Entity}<span class="event-feed-item__entity">{event.Entity}</span>{/if}
       <span class="microlabel event-feed-item__time">{fmtRelTime(event.TS)}</span>
     </div>
@@ -89,7 +65,6 @@
     gap: 0.5rem;
   }
   .event-feed-item__kind {
-    font-family: var(--font-mono);
     font-weight: 500;
     color: var(--ink);
   }

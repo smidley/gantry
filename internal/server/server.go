@@ -3,20 +3,28 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"time"
 
+	"github.com/smidley/gantry/internal/auth"
 	"github.com/smidley/gantry/internal/store"
 )
 
 type Options struct {
-	Port    int
-	Version string
-	Store   *store.Store
-	Started time.Time
+	// BindAddress limits the listening interface; empty retains the container-friendly default.
+	BindAddress string
+	// SetupCode is a one-time bootstrap proof; generated when omitted.
+	SetupCode string
+	Port      int
+	Version   string
+	Store     *store.Store
+	Started   time.Time
 
 	// Sources reports collector name -> "ok" | unavailability detail, for
 	// healthz. Nil in tests that don't wire a registry — healthz then
@@ -134,7 +142,7 @@ type Options struct {
 	// "unused") for POST /api/images/prune (main wiring:
 	// docker.Collector.PruneImages / fake.Generator.PruneImages). Nil in
 	// tests that don't wire one — see RemoveImages.
-	PruneImages func(ctx context.Context, mode string) (ImagePruneResult, error)
+	PruneImages func(ctx context.Context, mode string, ids []string) (ImagePruneResult, error)
 	// ContainersMaintenance lists every non-running container (see
 	// docker.ContainerMaintenanceInfo's own doc for the exact state set:
 	// exited/created/dead, paused/running excluded) plus per-state summary
@@ -156,7 +164,7 @@ type Options struct {
 	// /api/containers/maintenance/prune (main wiring:
 	// docker.Collector.PruneContainers / fake.Generator.PruneContainers).
 	// Nil in tests that don't wire one — see RemoveImages.
-	PruneContainers func(ctx context.Context, mode string, olderThanHours int) (ContainerPruneResult, error)
+	PruneContainers func(ctx context.Context, mode string, olderThanHours int, ids []string) (ContainerPruneResult, error)
 	// ReadOnly, when true, makes every /api/images and
 	// /api/containers/maintenance mutating route answer 403 without ever
 	// calling the corresponding Remove*/Prune* closure (both GET routes
@@ -240,11 +248,17 @@ type Server struct {
 	// and always allocated by New, and a nil channel in a select
 	// simply never becomes ready, which is the correct default for any
 	// caller that somehow got a zero-value Server.
-	drain chan struct{}
+	drain    chan struct{}
+	logSlots chan struct{}
 }
 
 func New(o Options) *Server {
-	s := &Server{opts: o, mux: http.NewServeMux(), drain: make(chan struct{})}
+	if o.Auth != nil && o.Auth.Mode() == auth.ModeAuto && !o.Auth.CredentialSet() && o.SetupCode == "" {
+		o.SetupCode = rand.Text()
+		log.Printf("auth: first-run setup code: %s (expires when a login is created or Gantry restarts)", o.SetupCode)
+	}
+
+	s := &Server{opts: o, mux: http.NewServeMux(), drain: make(chan struct{}), logSlots: make(chan struct{}, 16)}
 
 	// Every route gets gzip EXCEPT /api/live and the logs stream: both
 	// are long-lived streaming responses that must flush each write
@@ -329,7 +343,7 @@ func New(o Options) *Server {
 	s.mux.Handle("POST /api/insights/{id}/dismiss", withGzip(http.HandlerFunc(s.handleInsightDismiss)))
 
 	s.mux.Handle("GET /", withGzip(webHandler()))
-	s.root = s.secureAPI(s.mux)
+	s.root = securityHeaders(s.secureAPI(s.mux))
 	return s
 }
 
@@ -389,9 +403,13 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // ListenAndServe serves until ctx is cancelled, then shuts down gracefully.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	hs := &http.Server{
-		Addr:              fmt.Sprintf(":%d", s.opts.Port),
+		Addr:              net.JoinHostPort(s.opts.BindAddress, fmt.Sprint(s.opts.Port)),
 		Handler:           s.root,
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+		IdleTimeout:       60 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- hs.ListenAndServe() }()

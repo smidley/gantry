@@ -38,6 +38,7 @@
   lib/insightDetail.ts' parseInsightId/isNotFoundError).
 -->
 <script>
+  import { incidentTitle, mergeRecordedHistory } from '../lib/incidentChart';
   import { onMount, untrack } from 'svelte';
   import { live } from '../lib/sse.svelte';
   import { fetchInsight, fetchInsights, fetchInsightHistory, dismissInsight, fetchSeries } from '../lib/api';
@@ -202,7 +203,7 @@
   async function loadCharts(inst) {
     const xDomain = incidentChartWindow(inst, Math.floor(Date.now() / 1000));
     const plans = planIncidentCharts(inst, {
-      diskMeta: live.frame?.disk_meta ?? {},
+      diskMeta: { ...live.frame?.disk_meta, ...(inst.evidence?.resource_device ? { [inst.resource]: { device: inst.evidence.resource_device } } : {}) },
       gpuEntities: Object.keys(live.frame?.gpu ?? {}),
     });
 
@@ -217,14 +218,17 @@
 
     const settled = await Promise.all(
       [...pairs.entries()].map(([key, { kind, entity, metrics }]) =>
-        fetchSeries({ kind, entity, metrics: [...metrics], from: xDomain[0], to: xDomain[1] })
+        fetchSeries({ kind, entity, metrics: [...metrics], from: Math.max(0, xDomain[0]), to: Math.min(xDomain[1], Math.floor(Date.now() / 1000)) })
           .then((results) => [key, results])
           .catch(() => [key, []]),
       ),
     );
     if (!alive) return;
 
-    const resultsByPair = new Map(settled);
+    const resultsByPair = new Map(settled.map(([key, results]) => {
+      const pair = pairs.get(key);
+      return [key, mergeRecordedHistory(results, inst.evidence?.recorded_series ?? [], pair.kind, pair.entity)];
+    }));
     const hasDataByPair = new Map([...resultsByPair].map(([key, results]) => [key, hasChartableData(results)]));
 
     charts = plans.map((plan) => ({
@@ -236,6 +240,17 @@
         return { label: line.label, colorVar: line.colorVar, points: sumSeriesByMetric(byMetric, line.metrics) };
       }),
     }));
+    const deviceRecords = (inst.evidence?.recorded_series ?? []).filter((s) => s.metric.startsWith('live:io.'));
+    if (deviceRecords.length) {
+      const entities = [...new Set(deviceRecords.map((s) => s.entity))];
+      charts.push({ key: 'recorded-device-io', title: `Recorded IO on ${inst.resource}`, formatter: 'rate', hasData: true,
+        series: entities.map((entity, index) => {
+          const records = deviceRecords.filter((s) => s.entity === entity);
+          const byMetric = Object.fromEntries(records.map((s) => [s.metric, s.points.map(([ts, value]) => [ts, value, value])]));
+          return { label: entity, colorVar: `--series-${index + 1}`, points: sumSeriesByMetric(byMetric, records.map((s) => s.metric)) };
+        }),
+      });
+    }
     chartXDomain = xDomain;
     chartMarkers = incidentMarkers(inst);
     chartBand = incidentBand(inst, Math.floor(Date.now() / 1000));
@@ -265,7 +280,12 @@
   <div class="insight-detail__head">
     <a class="insight-detail__back" href="#/insights">&larr; Back to Insights</a>
     {#if insight}
-      <h1 class="page-title insight-detail__title">{insight.statement}</h1>
+      <h1 class="page-title insight-detail__title">{incidentTitle(insight)}</h1>
+      <p class="insight-detail__explanation">{insight.statement}</p>
+      {#if ['cpu-starvation', 'memory-squeeze'].includes(insight.rule_id) && (insight.evidence?.attribution_version ?? 0) < 2}
+        <p class="microlabel">Legacy incident: this record predates the host-percentage correction. Its contributor percentages and causal confidence should not be treated as verified.</p>
+      {/if}
+      <p class="microlabel">{insight.evidence?.recorded_series?.length ? 'A bounded excerpt of the measurements at detection is saved with this incident. Missing periods were not recorded.' : 'This incident has no saved measurement excerpt. Charts depend on the remaining history.'} {insight.confidence === 'likely' ? 'The proposed cause is an inference from concurrent activity.' : 'The victim’s distress was measured; shared activity identifies a likely contributor.'}</p>
       <div class="insight-detail__facts">
         <span class="insight-detail__chip insight-detail__chip--{insight.confidence}">{confidenceLabel(insight.confidence)}</span>
         <span class="microlabel">{insight.tier === 'psi' ? 'PSI tier' : 'tier 1 (proxy)'}</span>
@@ -347,6 +367,7 @@
 
     <div class="card insight-detail__panel insight-detail__dismiss">
       <span class="microlabel">Dismiss</span>
+      <p class="microlabel">Dismiss this incident and suppress the same rule, victim, contributor, and resource for the selected period. Alert rules keep their own notification settings.</p>
       <div class="insight-detail__dismiss-row">
         {#each DISMISS_PRESETS as p (p.days)}
           <button type="button" onclick={() => dismiss(p.days)}>{p.label}</button>
@@ -358,6 +379,7 @@
 </div>
 
 <style>
+  .insight-detail__explanation { font-size: .9rem; line-height: 1.6; color: var(--ink-2); max-width: 78ch; }
   .insight-detail {
     display: flex;
     flex-direction: column;

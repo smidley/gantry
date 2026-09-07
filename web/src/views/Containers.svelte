@@ -71,7 +71,7 @@
     { key: 'select', label: '', ariaName: 'Compare', sortable: false, width: '1.75rem' },
     { key: 'health', label: 'ST', ariaName: 'Health', sortable: true, width: '2.25rem' },
     { key: 'name', label: 'Name', sortable: true, width: '10.5rem' },
-    { key: 'cpu', label: 'CPU', sortable: true, numeric: true, width: '18.5rem' }, // icon+sparkline(220px, flex-shrink:0)+text -- matches ContainerRow's own cpu-cell sizing
+    { key: 'cpu', label: 'CPU', sortable: true, numeric: true, width: '12.5rem' }, // icon+sparkline(220px, flex-shrink:0)+text -- matches ContainerRow's own cpu-cell sizing
     { key: 'mem', label: 'Mem', sortable: true, numeric: true, width: '9rem' }, // e.g. "888.8 MiB (88.8%)"
     { key: 'net', label: 'Net', sortable: true, numeric: true, width: '7.5rem' }, // stacked "↓ 888.8 KB/s" / "↑ 888.8 KB/s"
     { key: 'io', label: 'IO', sortable: true, numeric: true, width: '7.5rem' }, // stacked "r 888.8 KB/s" / "w 888.8 KB/s"
@@ -167,6 +167,9 @@
   });
 
   let filterText = $state('');
+  let density = $state('comfortable');
+  onMount(() => { try { density = localStorage.getItem('gantry.container-density') === 'compact' ? 'compact' : 'comfortable'; } catch {} });
+  function setDensity(value) { density = value; try { localStorage.setItem('gantry.container-density', value); } catch {} }
   let sortColumn = $state('cpu');
   let sortDir = $state('desc');
   let stoppedExpanded = $state(false);
@@ -322,8 +325,14 @@
   let notRunningOpen = $derived(stateFilter === 'stopped' || stoppedExpanded);
 </script>
 
-<div class="containers-view">
+<div class="containers-view" class:containers-view--compact={density === 'compact'}>
   <h1 class="page-title">Containers</h1>
+  <p class="microlabel">CPU and memory percentages show each container’s share of the host. Container limits appear on its detail page.</p>
+  <div class="segmented containers-view__density" role="group" aria-label="Row density">
+    {#each ['comfortable', 'compact'] as value}
+      <button class="segmented__btn" class:segmented__btn--active={density === value} aria-pressed={density === value} onclick={() => setDensity(value)}>{value === 'compact' ? 'Compact' : 'Comfortable'}</button>
+    {/each}
+  </div>
 
   {#if composeGroupsList.length > 0 || groups.list.length > 0}
     <!-- Groups: one chip per docker-compose project with >=2 currently-
@@ -466,7 +475,7 @@
         </thead>
         <tbody>
           {#each runningNames as name (name)}
-            <ContainerRow {name} {registerSeedTarget} selected={selectedNames.has(name)} onToggleSelect={() => toggleSelected(name)} />
+            <ContainerRow compact={density === 'compact'} {name} {registerSeedTarget} selected={selectedNames.has(name)} onToggleSelect={() => toggleSelected(name)} />
           {/each}
         </tbody>
       </table>
@@ -539,7 +548,7 @@
             </colgroup>
             <tbody>
               {#each notRunningNames as name (name)}
-                <ContainerRow {name} {registerSeedTarget} showState selected={selectedNames.has(name)} onToggleSelect={() => toggleSelected(name)} />
+                <ContainerRow compact={density === 'compact'} {name} {registerSeedTarget} showState selected={selectedNames.has(name)} onToggleSelect={() => toggleSelected(name)} />
               {/each}
             </tbody>
           </table>
@@ -601,6 +610,13 @@
 </div>
 
 <style>
+  .containers-view__density { align-self: flex-start; }
+  .containers-view--compact :global(.container-row td) { padding-top: .25rem; padding-bottom: .25rem; }
+  /* Keep the sticky table's overflow inside its scroll area. Without paint
+     containment, its full row height can add blank space to the page. */
+  .containers-view__table-wrap { max-height: 72vh; overflow: auto; contain: paint; }
+  .containers-table thead { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+
   .containers-view {
     display: flex;
     flex-direction: column;
@@ -764,10 +780,7 @@
     color: var(--ink-2);
     font-family: var(--font-mono);
   }
-  /* Same rule as ContainerRow.svelte's own .container-row__select --
-     duplicated rather than shared, since Svelte scopes each component's
-     <style> block independently and this class is used here (the mobile
-     card's own checkbox) as well as there (the desktop table's). */
+  /* Mobile and desktop selection controls share the same accent. */
   .container-row__select {
     accent-color: var(--series-1);
     cursor: pointer;

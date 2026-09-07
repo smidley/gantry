@@ -154,133 +154,49 @@ async function routeLiveFrame(page: import('@playwright/test').Page, frame: obje
   );
 }
 
-// Unified-columns pass: there is ONE band under the page header, and
-// its two lanes each run top to bottom -- headline, fleet, then the
-// wide-lane modules on the left; the pinned rail, then the narrow-lane
-// modules on the right. "Needs a look" is still two count chips inline
-// in the headline card. The frame carries one unhealthy container so the
-// attention layout is guaranteed, not dependent on the server's own mood.
-test('overview: with something needing you, the chips sit in the headline card and each lane flows unbroken', async ({
-  page,
-}) => {
-  await routeLiveFrame(
-    page,
-    liveFrame({ 'mock-pager': { state: 'running', health: 'unhealthy', icon: '', metrics: { 'cpu.pct': 0.3, 'mem.bytes': 1e8 } } }),
-  );
+test('overview: health names the problem and offers Inspect before the module lanes', async ({ page }) => {
+  await routeLiveFrame(page, liveFrame({ 'mock-pager': { state: 'running', health: 'unhealthy', icon: '', metrics: {} } }));
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
-
-  await expect(page.locator('.overview__headline-text')).toHaveText('1 thing needs you');
-
-  // The attention section is inside the headline card, not a column of
-  // its own beside the visuals.
-  await expect(page.locator('.overview__headline-zone .overview__attention')).toHaveCount(1);
-  await expect(page.locator('.overview__status-facts')).toHaveCount(0);
-  await expect(page.locator('.overview__status-visuals')).toHaveCount(0);
-  // The separate status/clear band is gone -- the page is the lanes.
-  await expect(page.locator('.overview__status-band, .overview__clear-band')).toHaveCount(0);
-
-  const wide = page.locator('.overview__modules-wide');
-  const narrow = page.locator('.overview__modules-narrow');
-  const wideBox = await wide.boundingBox();
-  const narrowBox = await narrow.boundingBox();
-  const zoneBox = await wide.locator('.overview__headline-zone').boundingBox();
-  const fleetBox = await wide.locator('.fleet-strip-wrap').boundingBox();
-  const railBox = await narrow.locator('.overview__metrics-rail').boundingBox();
-  const topBox = await wide.locator('.overview__top').boundingBox();
-
-  // Wide lane, unbroken: headline, the fleet under it, then the first
-  // module under THAT -- not under the taller lane beside it.
-  expect(Math.abs(zoneBox.y - wideBox.y)).toBeLessThan(2);
-  expect(fleetBox.y).toBeGreaterThanOrEqual(zoneBox.y + zoneBox.height - 4);
-  expect(topBox.y).toBeGreaterThanOrEqual(fleetBox.y + fleetBox.height - 4);
-  expect(topBox.y - (fleetBox.y + fleetBox.height), 'no dead block under the fleet').toBeLessThan(40);
-  for (const b of [zoneBox, fleetBox, topBox]) expect(Math.abs(b.width - wideBox.width)).toBeLessThan(2);
-
-  // Narrow lane: the rail is its head, at lane width, level with the
-  // wide lane's top, and the storage module follows under it.
-  expect(Math.abs(railBox.y - narrowBox.y)).toBeLessThan(2);
-  expect(Math.abs(railBox.width - narrowBox.width)).toBeLessThan(2);
-  expect(Math.abs(narrowBox.y - wideBox.y)).toBeLessThan(2);
-  expect(narrowBox.x).toBeGreaterThanOrEqual(wideBox.x + wideBox.width - 1);
-  const storageBox = await narrow.locator('.overview__storage').boundingBox();
-  expect(storageBox.y).toBeGreaterThanOrEqual(railBox.y + railBox.height - 4);
+  const health = page.locator('.overview-health');
+  await expect(health).toContainText('1 thing needs you');
+  await expect(health).toContainText('mock-pager is unhealthy');
+  await expect(health.getByRole('link', { name: 'Inspect mock-pager is unhealthy' })).toHaveAttribute('href', '#/containers/mock-pager');
+  const healthBox = (await health.boundingBox())!;
+  const lanes = (await page.locator('.overview__modules-lanes').boundingBox())!;
+  expect(healthBox.y + healthBox.height).toBeLessThan(lanes.y);
+  await expect(health.locator('.overview__chip')).toHaveCount(1);
 });
 
-// All-clear, after the unification. There is no band left to collapse
-// and no vertical space being held open to reclaim -- a continuous flow
-// never had any. What survives is the state itself: zero callouts
-// collapses the HEADLINE CARD to a strip (its own --clear modifier,
-// which is now the whole of the DOM difference), and everything under it
-// in that lane simply starts higher by the attention row's height.
-test('overview: all-clear collapses the headline card and the lanes flow on unchanged', async ({ page }) => {
+test('overview: all-clear is compact and array facts remain visible on desktop and phone', async ({ page }) => {
   await routeLiveFrame(page, liveFrame());
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('#/');
-
-  await expect(page.locator('.overview__headline-text')).toHaveText('Nothing needs you');
-  await expect(page.locator('.overview__attention')).toHaveCount(0);
-  await expect(page.locator('.overview__headline-zone')).toHaveClass(/overview__headline-zone--clear/);
-  // The two band names this state used to be told apart by are both gone.
-  await expect(page.locator('.overview__status-band, .overview__clear-band')).toHaveCount(0);
-
-  // The relocated array facts render inside the storage card, not as
-  // orphaned sub-lines (the facts-relocation pass).
+  const health = page.locator('.overview-health');
+  await expect(health).toContainText('Nothing needs you');
+  await expect(health.locator('.overview-health__issues')).toHaveCount(0);
+  await expect(health.locator('.overview__chip')).toHaveCount(0);
+  expect((await health.boundingBox())!.height).toBeLessThan(100);
   const schematic = page.locator('.bay-schematic');
   await expect(schematic).toContainText('Array started · mover idle');
   await expect(schematic).toContainText('cache warmest at 41.5°C');
-
-  // The lanes are the same two lanes they are in the attention state --
-  // only the headline card's own height differs.
-  const wide = page.locator('.overview__modules-wide');
-  const narrow = page.locator('.overview__modules-narrow');
-  const wideBox = (await wide.boundingBox())!;
-  const zoneBox = (await wide.locator('.overview__headline-zone').boundingBox())!;
-  const fleetBox = (await wide.locator('.fleet-strip-wrap').boundingBox())!;
-  const topBox = (await wide.locator('.overview__top').boundingBox())!;
-  expect(Math.abs(fleetBox.width - zoneBox.width)).toBeLessThan(2);
-  expect(fleetBox.y).toBeGreaterThanOrEqual(zoneBox.y + zoneBox.height - 4);
-  expect(topBox.y - (fleetBox.y + fleetBox.height), 'no dead block under the fleet').toBeLessThan(40);
-  await expect(wide.locator('.bay-schematic')).toHaveCount(0);
-
-  // The rail leads the narrow lane, level with the wide lane's top.
-  const railBox = (await narrow.locator('.overview__metrics-rail').boundingBox())!;
-  expect(Math.abs(railBox.y - wideBox.y)).toBeLessThan(2);
-  expect(railBox.x).toBeGreaterThanOrEqual(wideBox.x + wideBox.width - 1);
-
-  // Both of the page's live modules are reachable without a long
-  // scroll, which is what the all-clear state buys now: the leaderboard
-  // is in the first viewport, and the schematic is one screen in.
-  expect(topBox.y).toBeLessThan(900);
-  const storageBox = (await page.locator('.overview__storage').boundingBox())!;
-  expect(storageBox.y).toBeLessThan(1100);
-
-  // Mobile: one column, pinned cards first (headline, fleet, rail), then
-  // the modules in saved order -- wide lane's, then narrow lane's.
   await page.setViewportSize({ width: 375, height: 800 });
-  const y = async (sel: string) => (await page.locator(sel).first().boundingBox())!.y;
-  const fleetMobile = await y('.fleet-strip-wrap');
-  const railMobile = await y('.overview__metrics-rail');
-  const topMobile = await y('.overview__top');
-  const storageMobile = await y('.overview__storage');
-  expect(await y('.overview__headline-zone')).toBeLessThan(fleetMobile);
-  expect(fleetMobile).toBeLessThan(railMobile);
-  expect(railMobile).toBeLessThan(topMobile);
-  expect(topMobile).toBeLessThan(storageMobile);
+  const metrics = (await page.locator('.overview__metrics-rail').boundingBox())!;
+  expect(metrics.y).toBeLessThan(200);
+  expect(metrics.y + metrics.height).toBeLessThanOrEqual((await health.boundingBox())!.y);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
 });
 
 // Counts pass: "Needs a look" is one short row inside the headline
 // card -- the label plus at most two chips -- not a column of rows. It
 // must stay a single line at desktop width; the moment it grows past
 // one the two-column band it replaced would have been the better shape.
-test('overview: needs-a-look is one short inline row inside the headline card', async ({ page }) => {
+test('overview: attention chips remain compact inside the health card', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
+  await routeLiveFrame(page, liveFrame({ 'mock-pager': { state: 'running', health: 'unhealthy', icon: '', metrics: {} } }));
   await page.goto('#/');
 
   const attention = page.locator('.overview__attention');
-  if ((await attention.count()) === 0) {
-    test.skip(true, 'fake fleet booted all-clear for this run -- nothing to check');
-  }
   await expect(attention).toBeVisible();
 
   const zoneBox = await page.locator('.overview__headline-zone').boundingBox();
@@ -346,14 +262,11 @@ test('overview: Top Consumers and Recent events share one wide column, wider tha
 // src/lib/attentionCounts.test.ts; the navigation is in
 // tests/overview-attention.spec.ts.)
 test('overview: the attention chips always sum to the headline count', async ({ page }) => {
+  await routeLiveFrame(page, liveFrame({ 'mock-pager': { state: 'running', health: 'unhealthy', icon: '', metrics: {} } }));
   await page.goto('#/');
 
   const headline = page.locator('.overview__headline-text');
   await expect(headline).toBeVisible();
-  if ((await headline.textContent()) === 'Nothing needs you') {
-    await expect(page.locator('.overview__attention')).toHaveCount(0);
-    test.skip(true, 'fake fleet booted all-clear for this run -- nothing to count');
-  }
 
   await expect(async () => {
     const text = (await headline.textContent()) ?? '';
@@ -1280,7 +1193,7 @@ test('events: container/storage events are clickable and navigate; image/unknown
   const containerRow = page.locator('.event-feed-item', { hasText: 'jellyfin' });
   await expect(containerRow).toHaveAttribute('href', '#/containers/jellyfin');
 
-  const diskRow = page.locator('.event-feed-item', { hasText: 'disk.errors' });
+  const diskRow = page.locator('.event-feed-item', { hasText: 'Disk errors detected' });
   await expect(diskRow).toHaveAttribute('href', '#/storage');
 
   const imageRow = page.locator('.event-feed-item', { hasText: 'image.pull' });

@@ -1,24 +1,7 @@
 import { test, expect } from '@playwright/test';
 
-// The "needs you" surface as COUNTS (Scott: "it doesn't create a list
-// there, but instead has a count of items that need you. The user can
-// click on the number and then be brought to a list of items that need
-// attention. Alerts will go to the events page, and any container
-// contentions will go to the insights page.").
-//
-// What lives here: that the chips render the right numbers for a known
-// state, that pressing one lands on the page the owner chose, and that
-// an acknowledgement takes its item out of the count -- the wire half
-// of acks is in acks.spec.ts, the bucketing and wording in
-// src/lib/attentionCounts.test.ts.
-//
-// The chip-count specs route their own /api/live frame (the smoke spec's
-// own idiom): which anomalies the real fake-mode server is showing at
-// any instant depends on its uptime (grafana's boot health check, the
-// 5-minute disk-errors trigger, the scripted insight demo) and on
-// whatever acks a parallel spec is briefly holding, none of which these
-// assertions are about. The ack spec at the bottom deliberately does NOT
-// route -- it is about the live derivation, end to end.
+// Known live frames verify health counts, named concerns, navigation, and
+// acknowledgement behavior independently of the demo's incident schedule.
 
 function frame(over: { containers?: Record<string, object>; insights?: object[]; alerts?: object[]; disks?: object } = {}) {
   return {
@@ -68,7 +51,7 @@ const CONTENTION = {
   fired_at: Math.floor(Date.now() / 1000) - 120,
 };
 
-test('the attention section is two count chips, not a list of rows', async ({ page }) => {
+test('health shows count chips and at most three named issues with Inspect actions', async ({ page }) => {
   await routeLiveFrame(page, frame({ containers: UNHEALTHY, insights: [CONTENTION] }));
   await page.goto('#/');
 
@@ -86,8 +69,11 @@ test('the attention section is two count chips, not a list of rows', async ({ pa
   await expect(chips.nth(0)).toHaveAttribute('aria-label', '2 alerts need you, view events');
   await expect(chips.nth(1)).toHaveAttribute('aria-label', '1 contention needs you, view insights');
 
-  // No per-item rows anywhere on the page any more.
-  await expect(page.locator('.callout-row')).toHaveCount(0);
+  const issues = page.locator('.overview-health__issues li');
+  await expect(issues).toHaveCount(3);
+  await expect(issues.getByRole('link', { name: /^Inspect / })).toHaveCount(3);
+  await expect(page.locator('.overview-health__issues')).toContainText('mock-pager');
+  await expect(page.locator('.overview-health__issues')).toContainText('mock-relay');
 });
 
 test('a zero bucket renders no chip at all', async ({ page }) => {

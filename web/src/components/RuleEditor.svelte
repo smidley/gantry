@@ -15,6 +15,7 @@
   for a reason this local check didn't catch).
 -->
 <script>
+  import { untrack } from 'svelte';
   let {
     rule,
     isNew = false,
@@ -41,7 +42,7 @@
   // from a prop on purpose without Svelte's state_referenced_locally
   // warning firing for every field (that warning exists for the far
   // more common case of ACCIDENTALLY forgetting a prop can change).
-  const seed = rule;
+  const seed = untrack(() => rule);
 
   let name = $state(seed.name);
   let enabled = $state(seed.enabled);

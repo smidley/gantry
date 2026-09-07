@@ -720,15 +720,14 @@
     gap: 0.6rem;
     min-height: 28px;
   }
-  /* Plain understated text button (matches overview__top-link/
-     compare__hint-link's own treatment), not a bordered pill -- this is
-     a secondary action, not a peer of the member chips above it. */
+  /* Match the shared action treatment with a usable keyboard/touch target. */
   .compare__save-group-open {
-    padding: 0;
+    min-height: 36px;
+    padding: 0.4rem 0.75rem;
     border: none;
     background: transparent;
     color: var(--series-1);
-    font-size: 0.78rem;
+    font-size: 0.8125rem;
     cursor: pointer;
   }
   .compare__save-group-open:hover {
@@ -736,11 +735,12 @@
   }
   .compare__save-group-form {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
   }
   .compare__save-group-input {
-    min-height: 28px;
+    min-height: 36px;
     padding: 0 0.6rem;
     border-radius: 6px;
     border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
@@ -750,7 +750,7 @@
     width: 12rem;
   }
   .compare__save-group-btn {
-    min-height: 28px;
+    min-height: 36px;
     padding: 0 0.75rem;
     border-radius: 6px;
     border: 1px solid var(--series-1);
@@ -764,7 +764,8 @@
     cursor: not-allowed;
   }
   .compare__save-group-cancel {
-    padding: 0;
+    min-height: 36px;
+    padding: 0.4rem 0.5rem;
     border: none;
     background: transparent;
     color: var(--ink-2);

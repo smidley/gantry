@@ -40,6 +40,14 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown container "+name)
 		return
 	}
+	select {
+	case s.logSlots <- struct{}{}:
+		defer func() { <-s.logSlots }()
+	default:
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusTooManyRequests, "too many open log streams")
+		return
+	}
 	rc, err := s.opts.Logs(r.Context(), name, follow, tail)
 	if err != nil {
 		// Both an unknown name and a currently-unreachable docker daemon
@@ -56,13 +64,15 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	// no-op, which is all a discarded `_ =` return value needs.
 	defer func() { _ = rc.Close() }()
 
-	flusher, ok := w.(http.Flusher)
+	_, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
 
+	defer cancelStreamWrites(r.Context(), w)()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	streamWriteDeadline(w)
 	w.WriteHeader(http.StatusOK)
 	// Flush immediately: WriteHeader alone only records the status --
 	// net/http doesn't actually put it on the wire until the first
@@ -70,7 +80,9 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	// container has nothing new to log yet would see no response at
 	// all (not even headers) until the first log line arrives, which
 	// for a quiet container could be a very long wait.
-	flusher.Flush()
+	if flushStream(w) != nil {
+		return
+	}
 
 	// handlerDone closes the moment this handler returns, for ANY
 	// reason (stream end, client gone, or the watcher's own drain-
@@ -102,6 +114,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		case <-s.drain:
 			_ = rc.Close()
 		case <-r.Context().Done():
+			_ = rc.Close()
 		case <-handlerDone:
 		}
 	}()
@@ -110,10 +123,13 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	for {
 		n, rerr := rc.Read(buf)
 		if n > 0 {
+			streamWriteDeadline(w)
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return // client disconnected
 			}
-			flusher.Flush()
+			if flushStream(w) != nil {
+				return
+			}
 		}
 		if rerr != nil {
 			return // stream end (non-follow), ctx-cancel (client gone), or drain (server shutting down -- matters most for a still-blocked follow=1 read, but applies to any in-flight request)

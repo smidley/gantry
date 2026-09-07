@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -37,6 +39,7 @@ type AuthIface interface {
 	// Authenticate reports whether token names a live session, sliding
 	// its expiry.
 	Authenticate(token string) bool
+	WatchSession(context.Context, string) (context.Context, context.CancelFunc)
 	// Logout deletes token's session; idempotent.
 	Logout(token string)
 	// UpdateCredential changes the username and/or password (current
@@ -109,7 +112,7 @@ func decodeAuthBody(w http.ResponseWriter, r *http.Request, into any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, authMaxRequestBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(into); err != nil {
+	if err := decodeSingleJSON(dec, into); err != nil {
 		writeDecodeError(w, err)
 		return false
 	}
@@ -171,10 +174,15 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username  string `json:"username"`
+		Password  string `json:"password"`
+		SetupCode string `json:"setup_code"`
 	}
 	if !decodeAuthBody(w, r, &body) {
+		return
+	}
+	if !s.opts.Auth.CredentialSet() && (s.opts.SetupCode == "" || subtle.ConstantTimeCompare([]byte(body.SetupCode), []byte(s.opts.SetupCode)) != 1) {
+		writeError(w, http.StatusForbidden, "Enter the setup code from the Gantry server logs.")
 		return
 	}
 	token, err := s.opts.Auth.Setup(clientIP(r), body.Username, body.Password)

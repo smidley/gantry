@@ -8,6 +8,74 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.12] - 2026-09-07
+
+### Added
+
+- **New incidents retain their original measurements.** Bounded evidence
+  excerpts survive incident updates and resolution, including available
+  device-specific disk IO. Older incidents keep their existing records
+  and identify attribution that predates the corrected calculations. (#70)
+- **An optional restricted monitoring deployment** runs Gantry as a
+  non-root user with dropped capabilities, a read-only root filesystem,
+  and a separate Docker API allowlist proxy. Security, TLS, and
+  performance guides explain deployment choices and their limits. (#70)
+- A project landing page and clearer Community Applications installation
+  guidance.
+
+### Changed
+
+- **The Overview leads with CPU, memory, network, and disk IO**, arranged
+  two-by-two on phones. Its health summary names up to three issues with
+  Inspect links, and fleet targets are easier to select. Container lists
+  gain comfortable/compact density controls and sticky headers. (#70)
+- **Both themes are easier to read and navigate.** Stronger text and
+  status contrast, keyboard chart inspection, phone-safe readouts, dialog
+  focus handling, and Back-position restoration improve daily use. (#70)
+- **Storage and Settings are easier to scan.** Storage groups array
+  capacity, parity progress, and recent checks at the top. Settings adds
+  section navigation, clearer retention presets, database-size reporting,
+  and separate webhook configuration and delivery status. (#70)
+- **Pages load their code as needed.** The entry JavaScript file is about
+  76% smaller, with other route chunks loaded separately. Versioned assets
+  receive long-lived caching. (#70)
+
+### Fixed
+
+- **CPU and memory attribution uses total host capacity.** Small
+  neighboring containers can no longer appear dominant because their
+  percentages were normalized against a subset. OOM contributor inference
+  requires host memory pressure near the event and excludes known
+  container memory-limit cases. (#70)
+- **Cleanup removes only the approved objects that remain eligible.**
+  Newly eligible objects cannot join an existing approval, and image
+  removal cannot silently remove unlisted parent images. (#70)
+- Linux browser layout checks keep their simulated live feed connected,
+  avoiding a reconnect banner that incorrectly shifted the measured
+  layout. Browser, accessibility, and real incident-pipeline coverage are
+  expanded. (#70)
+
+### Security
+
+- **Logout, expiry, and credential changes close existing live and log
+  streams.** New installations require a setup owner code from local
+  logs or provisioning. Authentication-status failures show a retry state
+  while keeping data access closed. (#70)
+- Request-body, history-query, and concurrent log-reader limits, server
+  deadlines, and browser security headers bound resource use and tighten
+  access. (#70)
+
+### Upgrade notes
+
+- Existing stored accounts continue to work. The owner setup code is
+  required only when creating the first account.
+- External cleanup clients must send the approved full object IDs;
+  mode-only prune requests are rejected. Recorded incident excerpts apply
+  to new incidents and cannot reconstruct measurements already missing
+  from older records.
+- The optional monitoring deployment has reduced capabilities; privileged
+  GPU attribution and cleanup require an appropriate deployment profile.
+
 ## [0.1.11] - 2026-09-03
 
 ### Changed

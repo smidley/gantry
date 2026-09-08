@@ -116,6 +116,62 @@ describe('fetchSeries / fetchTop abort support', () => {
   });
 });
 
+describe('fetchSeries metric batches', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('restores a large host history within the API limit, preserving order and range', async () => {
+    const metrics = ['cpu.total', 'mem.used_pct', ...Array.from({ length: 24 }, (_, i) => `diskio.disk${i}.read_bps`)];
+    const calls: URL[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const query = new URL(url, 'http://gantry.test');
+      calls.push(query);
+      const batch = query.searchParams.get('metrics')!.split(',');
+      if (batch.length > 16) return new Response('request at most 16 metrics', { status: 400 });
+      return Response.json(batch.map(metric => ({ metric, points: [[100, 12, 12]] })));
+    }));
+
+    const result = await fetchSeries({ kind: 'host', entity: '', metrics, from: 100, to: 1000 });
+
+    expect(result).toEqual(metrics.map(metric => ({ metric, points: [[100, 12, 12]] })));
+    expect(calls).toHaveLength(2);
+    for (const { searchParams } of calls) {
+      expect(searchParams.get('kind')).toBe('host');
+      expect(searchParams.get('entity')).toBe('');
+      expect(searchParams.get('from')).toBe('100');
+      expect(searchParams.get('to')).toBe('1000');
+    }
+  });
+
+  it('cancels the remaining history batches when the page is left', async () => {
+    const controller = new AbortController();
+    const metrics = Array.from({ length: 33 }, (_, i) => `metric.${i}`);
+    const mock = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (mock.mock.calls.length === 1) return Response.json([]);
+      expect(init?.signal).toBe(controller.signal);
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+        controller.abort();
+      });
+    });
+    vi.stubGlobal('fetch', mock);
+
+    await expect(fetchSeries({ kind: 'host', entity: '', metrics, signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(mock).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a failed later batch instead of returning incomplete history', async () => {
+    const mock = vi.fn()
+      .mockResolvedValueOnce(Response.json([{ metric: 'cpu.total', points: [] }]))
+      .mockResolvedValueOnce(new Response('unavailable', { status: 503 }));
+    vi.stubGlobal('fetch', mock);
+
+    await expect(fetchSeries({ kind: 'host', entity: '', metrics: Array.from({ length: 33 }, (_, i) => `metric.${i}`) }))
+      .rejects.toThrow('503');
+    expect(mock).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('putSettings error shape', () => {
   const realFetch = global.fetch;
   afterEach(() => {

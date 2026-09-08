@@ -859,7 +859,11 @@ async function getJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
-export function fetchSeries(params: {
+// Matches handleSeries in internal/server/api_history.go. Overview's
+// per-device metrics can exceed this even on an eight-disk host.
+const SERIES_METRICS_PER_REQUEST = 16;
+
+export async function fetchSeries(params: {
   kind: string;
   entity: string;
   metrics: string[];
@@ -870,11 +874,19 @@ export function fetchSeries(params: {
   const q = new URLSearchParams({
     kind: params.kind,
     entity: params.entity,
-    metrics: params.metrics.join(','),
   });
   if (params.from !== undefined) q.set('from', String(params.from));
   if (params.to !== undefined) q.set('to', String(params.to));
-  return getJSON<SeriesResult[]>(`/api/series?${q.toString()}`, params.signal);
+  const metrics = [...new Set(params.metrics)];
+  const results: SeriesResult[] = [];
+  // Fetch sequentially to bound server work, preserve metric order, and
+  // stop on failure or navigation without handing charts partial totals.
+  for (let start = 0; start < metrics.length; start += SERIES_METRICS_PER_REQUEST) {
+    params.signal?.throwIfAborted();
+    q.set('metrics', metrics.slice(start, start + SERIES_METRICS_PER_REQUEST).join(','));
+    results.push(...await getJSON<SeriesResult[]>(`/api/series?${q.toString()}`, params.signal));
+  }
+  return results;
 }
 
 export function fetchTop(params: {

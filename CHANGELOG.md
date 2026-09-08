@@ -8,6 +8,16 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.13] - 2026-09-07
+
+### Fixed
+
+- **Overview restores recent metrics history after a page refresh.**
+  Hosts with many disks or network interfaces now load history in smaller
+  batches within the existing server limits, preventing an oversized
+  request from leaving all four charts empty. Regression tests cover a
+  full page refresh, cancellation, and failed history batches.
+
 ## [0.1.12] - 2026-09-07
 
 ### Added

@@ -80,7 +80,7 @@ jobs:
       # Stage 1 of the Dockerfile builds webdist (the Svelte app) inside
       # the image itself -- no setup-node and no `make web` needed here.
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true

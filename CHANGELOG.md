@@ -8,6 +8,47 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.14] - 2026-09-29
+
+### Fixed
+
+- **Container health alerts honor their configured delay.** Gantry waits
+  for a running container to remain unhealthy for that duration. If it
+  recovers, stops, or disappears during the delay, the pending alert closes
+  quietly. Immediate health alerts also check the live container state
+  before notifying. (#82)
+- **Recovery notifications follow an actual alert notification.** An
+  alert that fires while silenced and recovers before notifying no longer
+  sends a standalone recovery message. (#82)
+- **Event alert rules can be edited and saved correctly.** The rule editor
+  shows relevant settings, validates delays in whole seconds, and no
+  longer blocks event rules with unrelated threshold validation. (#82)
+
+### Changed
+
+- Update the Go build toolchain to 1.26, along with the cryptography and
+  SQLite dependencies. (#72)
+- Update Svelte, Vite, Playwright, the Svelte Vite plugin, and Vitest. (#76,
+  #81)
+- Update the build, Node setup, and container scanning actions. (#71, #74,
+  #77)
+
+### Documentation
+
+- Add guidance on health delays, restart grace periods, and silences for
+  reducing backup notification noise. (#82)
+- Document how to repair the launch-day Community Applications template's
+  database startup error while retaining the existing configuration and
+  database. (#83)
+
+### Upgrade notes
+
+- Existing alert settings are preserved. To filter brief backup
+  interruptions, open **Alerts → Rules → Container unhealthy → Edit** and
+  set **Unhealthy for (seconds)** to a delay such as **300** (five minutes).
+  **0** keeps immediate notification. A container that remains running and
+  unhealthy beyond the delay still alerts normally.
+
 ## [0.1.13] - 2026-09-07
 
 ### Fixed

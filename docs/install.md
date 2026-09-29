@@ -55,6 +55,33 @@ Unraid creates owned by the array (not root). That write uses the
 so no extra flag is needed for it, and it can't go missing by accident.
 Gantry does not run `--privileged` and does not use host networking.
 
+## Troubleshooting: database fails to open on startup
+
+An installation made from the launch-day Community Applications template
+(September 1, 2026) may exit immediately with:
+
+```text
+open store at /config/gantry.db: unable to open database file (14)
+```
+
+That template included `--cap-drop=ALL`, which removed the permission Gantry
+needs to write to Unraid's appdata folder. Updating the image alone does
+not remove saved extra parameters.
+
+In Unraid, open **Docker → Gantry → Edit → Extra Parameters**. Remove
+`--cap-drop=ALL` and keep the required parameters:
+
+```text
+--pid=host --cap-add=SYS_PTRACE
+```
+
+Keep any other parameters your setup requires, such as `--runtime=nvidia`,
+then click **Apply**. Gantry should start and its web UI should open. The
+existing `/config` mount and database stay in place; no data reset is needed.
+Fresh installations from September 2 onward already use the corrected
+template. See [issue #51](https://github.com/smidley/gantry/issues/51) for
+the original support notice.
+
 ## The equivalent `docker run`
 
 Everything the CA template does, spelled out, so it can be reproduced (or

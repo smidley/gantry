@@ -65,6 +65,15 @@ func TestValidateRuleAcceptsValidDefaults(t *testing.T) {
 	require.NoError(t, ValidateRule(validEvent()))
 }
 
+func TestValidateRuleRejectsNegativeDelay(t *testing.T) {
+	for _, rule := range []store.AlertRule{validThreshold(), unhealthyRule()} {
+		rule.ForSeconds = -1
+		require.Error(t, ValidateRule(rule))
+		rule.ForSeconds = 0
+		require.NoError(t, ValidateRule(rule))
+	}
+}
+
 func TestValidateRuleRejectsUnknownType(t *testing.T) {
 	r := validThreshold()
 	r.Type = "bogus"

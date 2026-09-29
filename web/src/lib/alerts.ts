@@ -354,7 +354,6 @@ function describeThresholdComparison(metric: string, op: string, threshold: numb
 // event_kinds-derived formula could read for a fixed five-rule
 // vocabulary.
 const EVENT_RULE_DESCRIPTIONS: Record<string, string> = {
-  'container-unhealthy': 'Alert when any container becomes unhealthy',
   'container-oom': 'Alert when any container is killed for using too much memory',
   'container-exit-nonzero': 'Warn when any container exits with an error',
   'disk-errors': 'Alert when any disk reports new errors',
@@ -373,6 +372,10 @@ const EVENT_RULE_DESCRIPTIONS: Record<string, string> = {
 // description at all.
 export function describeRule(id: string, r: DescribableRule): string {
   if (r.type === 'event') {
+    if (id === 'container-unhealthy') {
+      const delay = r.for_seconds > 0 ? ` for ${describeDurationWords(r.for_seconds)}` : '';
+      return `${severityVerb(r.severity)} when ${describeScope(r.kind, r.entity_glob, r.entity_class)} is running and unhealthy${delay}`;
+    }
     return EVENT_RULE_DESCRIPTIONS[id] ?? `${severityVerb(r.severity)} on ${r.event_kinds || 'a matching event'}`;
   }
   if (r.metric === 'array.started') {

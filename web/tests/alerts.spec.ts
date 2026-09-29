@@ -138,6 +138,53 @@ test('demo-fire: disk-temp-high on disk4 actually fires through the real engine,
 // same server-side rule/target save. ---------------------------------
 
 test.describe.serial('rule editor and band unification', () => {
+  test('health alert delay can be edited without irrelevant threshold validation', async ({ page, request, baseURL }, testInfo) => {
+    const original = await (await request.get(`${baseURL}/api/alerts/rules`)).json();
+    try {
+      await page.goto('#/alerts');
+      const row = page.locator('.alerts-view__rule-row[data-rule-id="container-unhealthy"]');
+      await row.getByRole('button', { name: 'Edit' }).click();
+      await expect(row.getByLabel('Threshold (fire)', { exact: true })).toHaveCount(0);
+      await expect(row.getByLabel('Clear threshold', { exact: true })).toHaveCount(0);
+      await expect(row).toContainText('Recovery during the delay stays quiet');
+
+      const delay = row.getByLabel('Unhealthy for (seconds)', { exact: true });
+      for (const invalid of ['', '-1', '1.5', '3601']) {
+        await delay.fill(invalid);
+        await row.getByRole('button', { name: 'Save', exact: true }).click();
+        await expect(row.locator('.rule-editor__field-error')).toContainText('whole number between 0 and 3600');
+      }
+      await delay.fill('300');
+      for (const [label, viewport] of [
+        ['desktop', { width: 1280, height: 900 }],
+        ['mobile', { width: 390, height: 844 }],
+      ] as const) {
+        await page.setViewportSize(viewport);
+        expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+        await row.screenshot({ path: testInfo.outputPath(`health-delay-${label}.png`) });
+      }
+      await row.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(row.locator('.rule-editor')).toHaveCount(0);
+      await expect(row).toContainText('running and unhealthy for 5 minutes');
+
+      await page.reload();
+      await row.getByRole('button', { name: 'Edit' }).click();
+      await expect(row.getByLabel('Unhealthy for (seconds)', { exact: true })).toHaveValue('300');
+      await row.getByRole('button', { name: 'Cancel' }).click();
+
+      const oom = page.locator('.alerts-view__rule-row[data-rule-id="container-oom"]');
+      await oom.getByRole('button', { name: 'Edit' }).click();
+      await expect(oom.getByLabel(/Sustained for|Unhealthy for|Restart grace period/)).toHaveCount(0);
+      await oom.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(oom.locator('.rule-editor')).toHaveCount(0);
+    } finally {
+      const restored = await request.put(`${baseURL}/api/alerts/rules`, {
+        headers: { 'X-Requested-With': 'gantry' }, data: original,
+      });
+      expect(restored.ok()).toBe(true);
+    }
+  });
+
   // Located by the row's own stable data-rule-id, NOT a text filter:
   // once editing opens, the rule's name only exists as an <input>
   // VALUE, which textContent/hasText can't see -- a hasText-filtered

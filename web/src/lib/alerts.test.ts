@@ -279,7 +279,7 @@ describe('describeRule', () => {
 
   it('every builtin event rule gets its own hand-written sentence', () => {
     expect(describeRule('container-unhealthy', DEFAULT_RULES['container-unhealthy'])).toBe(
-      'Alert when any container becomes unhealthy',
+      'Alert when any container is running and unhealthy',
     );
     expect(describeRule('container-oom', DEFAULT_RULES['container-oom'])).toBe(
       'Alert when any container is killed for using too much memory',
@@ -291,6 +291,12 @@ describe('describeRule', () => {
     expect(describeRule('parity-errors', DEFAULT_RULES['parity-errors'])).toBe(
       'Alert when a parity check finishes with a warning or worse',
     );
+  });
+
+  it('describes the configured health delay and severity', () => {
+    expect(describeRule('container-unhealthy', {
+      ...DEFAULT_RULES['container-unhealthy'], for_seconds: 300, severity: 'warning', entity_glob: 'sonarr',
+    })).toBe('Warn when container "sonarr" is running and unhealthy for 5 minutes');
   });
 
   it('an unrecognized event rule id falls back to a generic sentence rather than throwing', () => {

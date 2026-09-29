@@ -142,8 +142,8 @@ func ValidateRule(r store.AlertRule) error {
 			return fmt.Errorf("alert rule %q: for_seconds %d exceeds %ds, the longest window a %q ring can prove coverage for", r.ID, r.ForSeconds, max, r.Kind)
 		}
 	}
-	if r.ForSeconds > 3600 {
-		return fmt.Errorf("alert rule %q: for_seconds %d exceeds the 3600s cap", r.ID, r.ForSeconds)
+	if r.ForSeconds < 0 || r.ForSeconds > 3600 {
+		return fmt.Errorf("alert rule %q: for_seconds %d outside 0-3600 seconds", r.ID, r.ForSeconds)
 	}
 	if r.RenotifyHours < 0 || r.RenotifyHours > 168 {
 		return fmt.Errorf("alert rule %q: renotify_hours %d outside 0-168", r.ID, r.RenotifyHours)

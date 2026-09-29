@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
       # Node/web setup moved ahead of lint: `make lint` now also compiles
       # the -tags webdist build (see the Makefile's own comment on that),
       # which needs internal/server/webdist populated first -- `make web`
@@ -47,7 +47,7 @@ jobs:
       - run: python3 scripts/check_go_vulns.py
       - run: docker build -t gantry:ci .
       - run: python3 scripts/test_docker_proxy.py
-      - uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0; pinned after upstream remediation
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0; pinned after upstream remediation
         with:
           image-ref: gantry:ci
           severity: HIGH,CRITICAL
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
       - uses: actions/setup-node@v7
         with:
           node-version: "22"

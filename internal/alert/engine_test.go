@@ -384,7 +384,7 @@ func TestFiringResolvesAfterSustainedClear(t *testing.T) {
 	st := newFakeStore(rule)
 	id, err := st.UpsertAlertInstance(store.AlertInstance{
 		RuleID: rule.ID, Kind: "host", Entity: "", Metric: rule.Metric, State: "firing",
-		Severity: rule.Severity, Value: 90, Threshold: rule.Threshold, StartedAt: now - 300, FiredAt: now - 300,
+		Severity: rule.Severity, Value: 90, Threshold: rule.Threshold, StartedAt: now - 300, FiredAt: now - 300, NotifyCount: 1,
 	})
 	require.NoError(t, err)
 
@@ -854,7 +854,7 @@ func TestNarrowedGlobResolvesStillBreachingFiringStrayOutOfScope(t *testing.T) {
 	st := newFakeStore(rule)
 	id, err := st.UpsertAlertInstance(store.AlertInstance{
 		RuleID: rule.ID, Kind: "container", Entity: "plex", Metric: rule.Metric, State: "firing",
-		Severity: rule.Severity, Value: 90, Threshold: rule.Threshold, StartedAt: now - 300, FiredAt: now - 300,
+		Severity: rule.Severity, Value: 90, Threshold: rule.Threshold, StartedAt: now - 300, FiredAt: now - 300, NotifyCount: 1,
 	})
 	require.NoError(t, err)
 
@@ -1287,23 +1287,12 @@ func TestChurnProbationDoesNotAffectBootSeedingOfOtherEventRules(t *testing.T) {
 	require.Equal(t, "firing", active[0].State, "boot-seeding must still fire immediately, unaffected by an unrelated probation-enabled rule")
 }
 
-// TestForSecondsSetOnContainerUnhealthyDoesNotArmChurnProbation pins the
-// fix for a column-overload bug: churnProbationRules, not a bare
-// for_seconds > 0 check, is what decides whether a currently-running
-// entity means "routine restart." Before this registry existed, a user
-// simply tuning "how long unhealthy before firing" on container-
-// unhealthy would have armed the exact fleet-running check
-// resolveRestarted uses -- but running is container-unhealthy's own
-// NORMAL state for the entire time it's firing, so it would insta-
-// resolve as "restarted" on literally the next tick. container-
-// unhealthy is not in churnProbationRules, so for_seconds here must
-// stay inert: boot-seeding fires it immediately (never pending), and it
-// survives a later tick with the entity still reading running+
-// unhealthy.
+// A running, unhealthy container must finish its health delay instead of
+// being mistaken for a successful restart by the exit-rule probation.
 func TestForSecondsSetOnContainerUnhealthyDoesNotArmChurnProbation(t *testing.T) {
 	now := int64(2_000_000_000)
 	rule := unhealthyRule()
-	rule.ForSeconds = 30 // the user edit the bug report names -- must have zero effect here
+	rule.ForSeconds = 30
 	st := newFakeStore(rule)
 	clk := &clockAt{t: now}
 	fleet := func() []FleetMember {
@@ -1316,8 +1305,8 @@ func TestForSecondsSetOnContainerUnhealthyDoesNotArmChurnProbation(t *testing.T)
 	require.NoError(t, eng.Tick(context.Background())) // boot tick
 
 	inst := st.soleActive(t)
-	require.Equal(t, "firing", inst.State, "boot-seeding must still fire immediately, not enter pending")
-	require.Equal(t, []string{"fired"}, notes)
+	require.Equal(t, "pending", inst.State, "boot-seeding must honor the configured health delay")
+	require.Empty(t, notes)
 
 	// Still running+unhealthy a tick later -- the exact condition that
 	// would insta-resolve a REAL probation rule as "restarted".

@@ -41,11 +41,11 @@ package store
 //     signal, no sustain tracking needed.
 //   - container-exit-nonzero's for_seconds (120) is a second, unrelated
 //     meaning of that column: alert/engine.go's churn-probation window,
-//     not a threshold rule's sustained-for. for_seconds is otherwise
-//     dead weight on an event rule (ValidateRule's 3600s cap is the only
-//     thing that ever reads it), so reusing it needed no migration and
-//     comes for free as a per-rule, user-tunable number in the rule
-//     editor rather than a hardcoded Go constant. A fresh fire enters
+//     not a threshold rule's sustained-for. container-unhealthy also
+//     honors for_seconds as a configurable health delay: it must stay
+//     running and unhealthy for that window before notifying. Zero
+//     keeps immediate notification after the live health check. Other
+//     event rules remain immediate. A fresh nonzero exit enters
 //     pending for this long; if Fleet() shows the entity running again
 //     before it elapses -- Unraid's Appdata Backup and CA auto-update
 //     plugins both stop-then-restart every container on their own

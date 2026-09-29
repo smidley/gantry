@@ -43,6 +43,10 @@
   // warning firing for every field (that warning exists for the far
   // more common case of ACCIDENTALLY forgetting a prop can change).
   const seed = untrack(() => rule);
+  const isThreshold = seed.type === 'threshold';
+  const isUnhealthy = seed.id === 'container-unhealthy';
+  const isExit = seed.id === 'container-exit-nonzero';
+  const hasDelay = isThreshold || isUnhealthy || isExit;
 
   let name = $state(seed.name);
   let enabled = $state(seed.enabled);
@@ -88,13 +92,16 @@
       errs.id = 'Use lowercase letters, numbers, and hyphens only.';
     }
     if (isNew && !metric.trim()) errs.metric = 'Metric is required.';
-    if (forSeconds < 0 || forSeconds > 3600) {
-      errs.for_seconds = 'Must be between 0 and 3600 seconds.';
+    if (hasDelay && (!Number.isInteger(forSeconds) || forSeconds < 0 || forSeconds > 3600)) {
+      errs.for_seconds = 'Enter a whole number between 0 and 3600 seconds.';
     }
-    if (renotifyHours < 0 || renotifyHours > 168) {
-      errs.renotify_hours = 'Must be between 0 and 168 hours.';
+    if (!Number.isInteger(clearSeconds) || clearSeconds < 0) {
+      errs.clear_seconds = 'Enter a whole number of seconds, 0 or greater.';
     }
-    if (threshold === clearThreshold && clearSeconds > 0) {
+    if (!Number.isInteger(renotifyHours) || renotifyHours < 0 || renotifyHours > 168) {
+      errs.renotify_hours = 'Enter a whole number between 0 and 168 hours.';
+    }
+    if (isThreshold && threshold === clearThreshold && clearSeconds > 0) {
       errs.clear_threshold = 'Threshold and clear threshold must differ when clear seconds is set.';
     }
     return errs;
@@ -186,35 +193,49 @@
     {#if fieldErrors.name}<span class="microlabel rule-editor__field-error">{fieldErrors.name}</span>{/if}
   </label>
 
-  <div class="rule-editor__row">
-    <label class="rule-editor__field">
-      <span class="microlabel">Threshold (fire)</span>
-      <input type="number" step="any" bind:value={threshold} />
-    </label>
-    <label class="rule-editor__field">
-      <span class="microlabel">Clear threshold</span>
-      <input type="number" step="any" bind:value={clearThreshold} />
-      {#if fieldErrors.clear_threshold}<span class="microlabel rule-editor__field-error">{fieldErrors.clear_threshold}</span>{/if}
-    </label>
-    <label class="rule-editor__field">
-      <span class="microlabel">Warn threshold</span>
-      <input type="number" step="any" bind:value={warnThreshold} />
-    </label>
-    <label class="rule-editor__field">
-      <span class="microlabel">Critical threshold</span>
-      <input type="number" step="any" bind:value={criticalThreshold} />
-    </label>
-  </div>
+  {#if isThreshold}
+    <div class="rule-editor__row">
+      <label class="rule-editor__field">
+        <span class="microlabel">Threshold (fire)</span>
+        <input type="number" step="any" bind:value={threshold} />
+      </label>
+      <label class="rule-editor__field">
+        <span class="microlabel">Clear threshold</span>
+        <input type="number" step="any" bind:value={clearThreshold} />
+        {#if fieldErrors.clear_threshold}<span class="microlabel rule-editor__field-error">{fieldErrors.clear_threshold}</span>{/if}
+      </label>
+      <label class="rule-editor__field">
+        <span class="microlabel">Warn threshold</span>
+        <input type="number" step="any" bind:value={warnThreshold} />
+      </label>
+      <label class="rule-editor__field">
+        <span class="microlabel">Critical threshold</span>
+        <input type="number" step="any" bind:value={criticalThreshold} />
+      </label>
+    </div>
+  {/if}
 
   <div class="rule-editor__row">
+    {#if hasDelay}
+      <label class="rule-editor__field">
+        <span class="microlabel" id={`delay-label-${seed.id}`}>{isUnhealthy ? 'Unhealthy for (seconds)' : isExit ? 'Restart grace period (seconds)' : 'Sustained for (seconds)'}</span>
+        <input
+          type="number" min="0" max="3600" step="1" bind:value={forSeconds}
+          oninput={() => { fieldErrors.for_seconds = undefined; }}
+          aria-labelledby={`delay-label-${seed.id}`}
+          aria-invalid={!!fieldErrors.for_seconds}
+          aria-describedby={[
+            isUnhealthy || isExit ? `delay-help-${seed.id}` : null,
+            fieldErrors.for_seconds ? `delay-error-${seed.id}` : null,
+          ].filter(Boolean).join(' ') || undefined}
+        />
+        {#if fieldErrors.for_seconds}<span class="microlabel rule-editor__field-error" id={`delay-error-${seed.id}`}>{fieldErrors.for_seconds}</span>{/if}
+      </label>
+    {/if}
     <label class="rule-editor__field">
-      <span class="microlabel">Sustained for (seconds)</span>
-      <input type="number" min="0" max="3600" bind:value={forSeconds} />
-      {#if fieldErrors.for_seconds}<span class="microlabel rule-editor__field-error">{fieldErrors.for_seconds}</span>{/if}
-    </label>
-    <label class="rule-editor__field">
-      <span class="microlabel">Clear for (seconds)</span>
+      <span class="microlabel">{isThreshold ? 'Clear for (seconds)' : 'Auto-close after (seconds)'}</span>
       <input type="number" min="0" bind:value={clearSeconds} />
+      {#if fieldErrors.clear_seconds}<span class="microlabel rule-editor__field-error">{fieldErrors.clear_seconds}</span>{/if}
     </label>
     <label class="rule-editor__field">
       <span class="microlabel">Severity</span>
@@ -228,6 +249,12 @@
       {#if fieldErrors.renotify_hours}<span class="microlabel rule-editor__field-error">{fieldErrors.renotify_hours}</span>{/if}
     </label>
   </div>
+
+  {#if isUnhealthy}
+    <p class="rule-editor__hint" id={`delay-help-${seed.id}`}>Notify only when a running container stays unhealthy for this long. Try 300 seconds for brief backup interruptions; 0 notifies immediately. Recovery during the delay stays quiet.</p>
+  {:else if isExit}
+    <p class="rule-editor__hint" id={`delay-help-${seed.id}`}>Ignore exits when the container restarts within this time. Set 0 to notify immediately.</p>
+  {/if}
 
   <label class="rule-editor__enabled">
     <input type="checkbox" bind:checked={enabled} />
@@ -275,10 +302,16 @@
     border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
     background: var(--surface);
     color: var(--ink);
-    font-size: 0.85rem;
+    font-size: 1rem;
   }
   .rule-editor__field-error {
     color: var(--status-warning);
+  }
+  .rule-editor__hint {
+    margin: 0;
+    max-width: 65ch;
+    font-size: 0.875rem;
+    color: var(--ink);
   }
   .rule-editor__enabled {
     display: flex;

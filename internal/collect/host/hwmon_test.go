@@ -120,3 +120,24 @@ func TestScanHwmonDedupeIsScopedPerKind(t *testing.T) {
 	require.Equal(t, "chip_main", temp.label)
 	require.Equal(t, "chip_main", fan.label, "same label in a different kind must not get an instance suffix")
 }
+
+// A drivetemp chip is a SATA/SAS drive's own temperature sensor, and
+// reading its temp1_input issues a SMART/SCT command to that drive. The
+// kernel's own drivetemp docs say reading it "may reset the spin down
+// timer" and, at any interval shorter than the spin-down delay, affected
+// drives "will never spin down" -- scanHwmon runs every 2s. Unraid already
+// reports every drive's temperature in disks.ini (emhttpd polls standby-
+// aware), so scanHwmon must skip the whole chip, not just drop its value.
+func TestScanHwmonSkipsDrivetempChips(t *testing.T) {
+	sysRoot := buildHwmonTree(t)
+	drive := filepath.Join(sysRoot, "class", "hwmon", "hwmon7")
+	require.NoError(t, os.MkdirAll(drive, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(drive, "name"), []byte("drivetemp\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(drive, "temp1_input"), []byte("41000\n"), 0o644))
+
+	readings := scanHwmon(sysRoot)
+	require.Len(t, readings, 2, "coretemp temp + nct6779 fan only; the drive's sensor must not appear")
+	for _, r := range readings {
+		require.NotContains(t, r.label, "drivetemp")
+	}
+}

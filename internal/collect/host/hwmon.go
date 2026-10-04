@@ -45,6 +45,18 @@ func scanHwmon(sysRoot string) []hwmonReading {
 		if chipName == "" {
 			chipName = chip.Name()
 		}
+		// drivetemp is a SATA/SAS drive's own sensor, and reading its
+		// temp1_input sends a SMART/SCT command to the drive. The kernel's
+		// drivetemp docs warn that this "may reset the spin down timer"
+		// and that drives polled more often than their spin-down delay
+		// "will never spin down" -- this scan runs every 2s. Unraid's
+		// disks.ini already carries every drive's temperature from
+		// emhttpd's standby-aware poll (unraid/disks.go records it as
+		// disk.<slot>.temp.c), so skipping the whole chip loses nothing
+		// and keeps Gantry from being the reason an array never sleeps.
+		if chipName == "drivetemp" {
+			continue
+		}
 		files, err := os.ReadDir(chipDir)
 		if err != nil {
 			continue

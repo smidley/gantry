@@ -8,6 +8,20 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.15] - 2026-10-04
+
+### Fixed
+
+- **Gantry no longer keeps drives from spinning down.** The host sensor
+  scan read every hwmon temperature every two seconds, including the
+  `drivetemp` sensors a drive exposes when that kernel module is loaded
+  (the Dynamix System Temperature plugin can load it). Each of those
+  reads sends a SMART command to the drive, which resets its spin-down
+  timer, so an array could never go idle while Gantry ran. The scan now
+  skips `drivetemp` chips entirely. Drive temperatures are unaffected:
+  they come from Unraid's own standby-aware readings in `disks.ini`, as
+  before. Boxes without the module loaded never had the problem. (#84)
+
 ## [0.1.14] - 2026-09-29
 
 ### Fixed

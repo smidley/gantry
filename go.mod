@@ -2,6 +2,8 @@ module github.com/smidley/gantry
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/docker/docker v28.5.2+incompatible

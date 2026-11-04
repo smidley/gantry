@@ -211,8 +211,7 @@
     font-family: var(--font-mono);
     font-size: 0.61rem;
     font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
+    letter-spacing: 0.01em;
   }
   .sidebar__item {
     position: relative;

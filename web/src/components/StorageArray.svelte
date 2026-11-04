@@ -197,8 +197,7 @@
   .storage-parity__chip {
     font-family: var(--font-mono);
     font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     padding: 0.3rem 0.55rem;
     border-radius: 999px;
     background: color-mix(in oklab, var(--ink) 7%, transparent);

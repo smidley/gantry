@@ -46,7 +46,7 @@ test('a cpuset-pinned container shows its actual pin set and CPU allocation perc
   // Allocation rides as its own chart series (same pattern as the
   // existing Throttled line) -- a second legend row confirms it's
   // actually plotted, not just named in the stat text.
-  await expect(cpuCard.getByText('Allocation', { exact: true })).toBeVisible();
+  await expect(cpuCard.getByText('Allocation', { exact: true })).toBeAttached();
 });
 
 test('a fully-unlimited container shows no limits chrome beyond the universal pids ceiling', async ({ page }) => {

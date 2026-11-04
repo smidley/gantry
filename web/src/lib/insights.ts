@@ -2,7 +2,7 @@
 // impact panel (Task 12), and the alert annotation bridge (Task 13) --
 // kept DOM-free and vitest-tested, the exact split alerts.ts's own doc
 // names as this app's standing convention.
-import { fmtDuration, fmtPct } from './format';
+import { fmtDuration } from './format';
 import type { GraphEdgeDTO, GraphNodeDTO, InsightDTO, InsightGraphDTO } from './api';
 
 // --- confidence -----------------------------------------------------------
@@ -152,8 +152,10 @@ const EVIDENCE_UNIT: Record<string, EvidenceUnit> = {
 // key is named above) falls back to a bare number rather than throwing.
 export function formatEvidenceNumber(key: string, value: number): string {
   switch (EVIDENCE_UNIT[key]) {
-    case 'pct':
-      return fmtPct(value);
+    case 'pct': {
+      const pct = Math.round(Math.min(100, Math.max(0, value)) * 10) / 10;
+      return Number.isInteger(pct) ? `${pct}%` : `${pct.toFixed(1)}%`;
+    }
     case 'ms':
       return `${value.toFixed(0)} ms`;
     case 'minutes':

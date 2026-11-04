@@ -142,6 +142,7 @@
   const scrubSourceId = {};
   let applyingBusCursor = false;
   let pointerInside = false;
+  let hovering = $state(false);
 
   // prevShape is the last-built chart's structural shape (see
   // lib/chartRebuild.ts) -- compared against the current one on every
@@ -450,12 +451,14 @@
   function handleEnter() {
     if (pointerInside) return;
     pointerInside = true;
+    hovering = true;
     scrubBus.enter();
   }
 
   function handleLeave() {
     if (!pointerInside) return;
     pointerInside = false;
+    hovering = false;
     scrubBus.leave();
     tooltip = null;
     hoverMarker = null;
@@ -724,6 +727,7 @@
 
 <div
   class="time-chart"
+  class:time-chart--hover={hovering}
   role="slider"
   aria-valuemin={series[0]?.points?.[0]?.[0] ?? 0}
   aria-valuemax={series[0]?.points?.at(-1)?.[0] ?? 0}
@@ -775,11 +779,27 @@
   .time-chart :global(.uplot) {
     border-radius: inherit;
   }
+  /* The readout only means something under the cursor ("--" at rest),
+     so it stays hidden until the pointer is inside; visibility keeps its
+     height reserved so the card never jumps. */
   .time-chart :global(.u-legend) {
     color: var(--ink);
     font-family: var(--font-mono);
     font-size: 0.75rem;
     padding-top: 0.35rem;
+    margin: 0;
+    text-align: left;
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 150ms ease, visibility 150ms;
+  }
+  .time-chart--hover :global(.u-legend),
+  .time-chart:focus-visible :global(.u-legend) {
+    visibility: visible;
+    opacity: 1;
+  }
+  .time-chart :global(.u-legend th) {
+    font-weight: 400;
   }
   .time-chart :global(.u-legend .u-marker) {
     border-radius: 999px !important;

@@ -130,9 +130,16 @@ function groupByColumn(nodes: GraphNodeDTO[], edges: GraphEdgeDTO[]): Record<Col
 // viewport.h, so sizing policy (how tall) and spacing policy (how far
 // apart) stay cleanly separated.
 export function suggestedHeight(graph: InsightGraphDTO): number {
+  return Math.max(MIN_MAP_HEIGHT, contentHeight(graph));
+}
+
+// contentHeight is the height the laid-out nodes actually occupy, with
+// no MIN_MAP_HEIGHT floor -- the `fit` variant's own sizing, for a host
+// that would rather the card shrink to the graph than pad it out.
+export function contentHeight(graph: InsightGraphDTO): number {
   const byColumn = groupByColumn(graph?.nodes ?? [], graph?.edges ?? []);
   const maxCount = Math.max(byColumn.culprit.length, byColumn.resource.length, byColumn.victim.length, 1);
-  return Math.max(MIN_MAP_HEIGHT, 2 * MARGIN_Y + (maxCount - 1) * GAP_Y);
+  return 2 * MARGIN_Y + (maxCount - 1) * GAP_Y;
 }
 
 // layoutMap is pure and deterministic: the SAME graph and viewport

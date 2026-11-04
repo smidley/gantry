@@ -162,8 +162,7 @@
     color: var(--sidebar-muted);
     font-family: var(--font-mono);
     font-size: 0.63rem;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.01em;
   }
   .tab-bar__more-title {
     display: inline-flex;

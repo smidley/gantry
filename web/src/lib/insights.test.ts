@@ -115,9 +115,9 @@ describe('deviceSharePct', () => {
 });
 
 describe('formatEvidenceNumber', () => {
-  it('formats percentage fields with fmtPct', () => {
-    expect(formatEvidenceNumber('culprit_share_pct', 78)).toBe('78.0%');
-    expect(formatEvidenceNumber('device_util_pct', 98)).toBe('98.0%');
+  it('formats percentage fields with a decimal only when not whole', () => {
+    expect(formatEvidenceNumber('culprit_share_pct', 78)).toBe('78%');
+    expect(formatEvidenceNumber('device_util_pct', 78.23)).toBe('78.2%');
   });
 
   it('formats latency in whole milliseconds', () => {

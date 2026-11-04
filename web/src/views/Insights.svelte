@@ -321,7 +321,7 @@
                     <span class="insights-view__row-arrow">←</span>
                     {#if culpritHref}<a href={culpritHref}>{i.culprits || i.culprit}</a>{:else}<span>{i.culprits || i.culprit}</span>{/if}
                   {/if}
-                  <span class="microlabel insights-view__row-duration">active for {activeDuration(i.started_at, nowSec)}</span>
+                  <span class="microlabel insights-view__row-duration">Active for {activeDuration(i.started_at, nowSec)}</span>
                 </div>
               </div>
               <div class="insights-view__dismiss-control">
@@ -364,7 +364,7 @@
               <a class="insights-view__statement-link" href="#/insights/{h.id}">{h.statement}</a>
               <div class="insights-view__row-meta">
                 <span class="insights-view__chip insights-view__chip--{h.confidence}">{confidenceLabel(h.confidence)}</span>
-                <span class="microlabel">{h.resolve_reason} · lasted {activeDuration(h.started_at, h.resolved_at)}</span>
+                <span class="microlabel">{h.resolve_reason.charAt(0).toUpperCase() + h.resolve_reason.slice(1)} · lasted {activeDuration(h.started_at, h.resolved_at)}</span>
               </div>
             </div>
           </li>
@@ -394,7 +394,7 @@
               <div class="insights-view__rule-text">
                 <span class="insights-view__rule-name">
                   {rule.title}
-                  <span class="insights-view__tier-badge">{rule.tier === 'psi' ? 'PSI' : 'tier 1'}</span>
+                  <span class="insights-view__tier-badge">{rule.tier === 'psi' ? 'PSI' : 'Tier 1'}</span>
                 </span>
                 <span class="insights-view__rule-desc">{describeRule(rule.rule_id, rule.thresholds, rule.title)}</span>
               </div>
@@ -527,8 +527,7 @@
     flex-shrink: 0;
     font-family: var(--font-mono);
     font-size: 0.62rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     padding: 0.1rem 0.4rem;
     border-radius: 999px;
     border: 1px solid currentColor;
@@ -619,8 +618,7 @@
   .insights-view__tier-badge {
     font-family: var(--font-mono);
     font-size: 0.62rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     padding: 0.1rem 0.4rem;
     border-radius: 999px;
     background: color-mix(in oklab, var(--ink) 8%, transparent);

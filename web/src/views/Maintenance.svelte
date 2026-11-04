@@ -57,6 +57,7 @@
 
   const EMPTY_IMAGES_SUMMARY = { in_use: 0, unused: 0, dangling: 0, reclaimable_bytes: 0, note: '' };
   const EMPTY_CONTAINERS_SUMMARY = { exited: 0, created: 0, dead: 0 };
+  const IMAGE_STATE_LABEL = { 'in-use': 'In use', unused: 'Unused', dangling: 'Dangling' };
 
   let readOnly = $state(false);
   onMount(() => {
@@ -259,7 +260,7 @@
         id: ct.full_id,
         primary: ct.name,
         secondary: `${ct.image} · ${fmtRelTime(containerAge(ct))}`,
-        warning: managedBadge(ct.managed) ?? (ct.restart_policy ? 'restarts on boot' : ''),
+        warning: managedBadge(ct.managed) ?? (ct.restart_policy ? 'Restarts on boot' : ''),
       })),
     };
   }
@@ -455,7 +456,7 @@
                 </td>
                 <td class="tabular-nums maintenance-table__mono">{im.id}</td>
                 <td class="maintenance-table__tags">{imageLabel(im)}</td>
-                <td><span class="maintenance-badge">{im.state}</span></td>
+                <td><span class="maintenance-badge">{IMAGE_STATE_LABEL[im.state] ?? im.state}</span></td>
                 <td class="tabular-nums maintenance-table__th--numeric">{fmtBytes(im.size_bytes)}</td>
                 <td class="tabular-nums">{fmtRelTime(im.created)}</td>
               </tr>
@@ -478,7 +479,7 @@
               <div class="maintenance-mobile-row__title">{imageLabel(im)}</div>
               <div class="maintenance-mobile-row__meta tabular-nums">
                 <span class="maintenance-table__mono">{im.id}</span>
-                <span class="maintenance-badge">{im.state}</span>
+                <span class="maintenance-badge">{IMAGE_STATE_LABEL[im.state] ?? im.state}</span>
                 <span>{fmtBytes(im.size_bytes)}</span>
                 <span>{fmtRelTime(im.created)}</span>
               </div>
@@ -565,7 +566,7 @@
                   <span>{ct.name}</span>
                   {#if managed}<span class="maintenance-badge">{managed}</span>{/if}
                   {#if ct.restart_policy}
-                    <span class="maintenance-badge maintenance-badge--warn" title={ct.restart_policy}>restarts on boot</span>
+                    <span class="maintenance-badge maintenance-badge--warn" title={ct.restart_policy}>Restarts on boot</span>
                   {/if}
                 </td>
                 <td class="maintenance-table__tags">{ct.image}</td>
@@ -595,7 +596,7 @@
                 <span class="maintenance-mobile-row__title">{ct.name}</span>
                 {#if managed}<span class="maintenance-badge">{managed}</span>{/if}
                 {#if ct.restart_policy}
-                  <span class="maintenance-badge maintenance-badge--warn" title={ct.restart_policy}>restarts on boot</span>
+                  <span class="maintenance-badge maintenance-badge--warn" title={ct.restart_policy}>Restarts on boot</span>
                 {/if}
               </div>
               <div class="maintenance-mobile-row__meta tabular-nums">
@@ -882,8 +883,7 @@
   .maintenance-badge {
     font-family: var(--font-mono);
     font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     padding: 0.15rem 0.45rem;
     border-radius: 999px;
     background: color-mix(in oklab, var(--ink) 8%, transparent);

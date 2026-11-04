@@ -76,12 +76,25 @@ export function evidenceRows(evidence: EvidenceDTO | undefined): EvidenceRow[] {
   }));
 }
 
-// formatInstant renders one stored unix second as a local date+time,
-// the EventFeedItem/ContainerDetail convention (toLocaleString) -- 0 is
-// the store's own "never happened" sentinel (an active insight's
-// resolved_at), which gets the same em dash every other absent value in
-// this app gets rather than 1970.
+// formatInstant renders one stored unix second as a short local
+// date+time ("Nov 4, 12:48 pm"), the one format this page's facts and
+// its chart axes share -- 0 is the store's own "never happened"
+// sentinel (an active insight's resolved_at), which gets the same em
+// dash every other absent value in this app gets rather than 1970.
 export function formatInstant(ts: number): string {
   if (!ts) return '—';
-  return new Date(ts * 1000).toLocaleString();
+  return new Date(ts * 1000)
+    .toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
+    .replace(/\s?(AM|PM)$/i, (m) => m.toLowerCase());
+}
+
+// formatDuration renders an incident's length for the facts row:
+// "45s", "2 min", "3h 5m", "2d 4h", zero parts trimmed.
+export function formatDuration(secs: number): string {
+  const s = Math.max(0, Math.floor(secs));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min`;
+  const [big, small, bigUnit, smallUnit] =
+    s < 86400 ? [Math.floor(s / 3600), Math.floor((s % 3600) / 60), 'h', 'm'] : [Math.floor(s / 86400), Math.floor((s % 86400) / 3600), 'd', 'h'];
+  return small ? `${big}${bigUnit} ${small}${smallUnit}` : `${big}${bigUnit}`;
 }

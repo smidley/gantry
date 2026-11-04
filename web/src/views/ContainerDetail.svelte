@@ -1122,7 +1122,7 @@
     white-space: nowrap;
   }
   /* Prose, not a .microlabel: this is a sentence naming real share
-     names, and microlabel's uppercase mono would mangle both. Sized and
+     names, and microlabel's mono register would mangle both. Sized and
      coloured like .storage-mount__placement instead -- the panel's other
      quiet explanatory line. */
   .container-detail__storage-shfs-note {
@@ -1152,8 +1152,7 @@
     border-bottom: 1px solid color-mix(in oklab, var(--ink) 12%, transparent);
     font-family: var(--font-mono);
     font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     color: var(--ink-2);
   }
   .storage-device-header--value {

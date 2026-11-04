@@ -72,9 +72,13 @@
       inside its own capped box, with the legend and hover-label row
       (both OUTSIDE that box) always staying in view. The evidence page
       leaves it off: a whole page has the room a modal did not.
+    - fit: sizes the canvas to the graph itself (mapLayout.ts'
+      contentHeight, no minimum) and caps it at 360px with a scrollbar --
+      the evidence page's own variant, so a two-node map isn't padded
+      out to a mostly empty card.
 -->
 <script>
-  import { layoutMap, suggestedHeight, legendPresence, showLegend } from '../lib/mapLayout';
+  import { layoutMap, suggestedHeight, contentHeight, legendPresence, showLegend } from '../lib/mapLayout';
   import { containerColor } from '../lib/containerColor';
   import { fallbackLetter } from '../lib/containerIcon';
   import { motion } from '../lib/motion.svelte';
@@ -99,6 +103,7 @@
     onOpenInsight = () => {},
     focusInsightId = null,
     compact = false,
+    fit = false,
   } = $props();
 
   let containerEl = $state();
@@ -118,7 +123,7 @@
   // scales illegibly small at 375px the way a fixed abstract viewBox
   // would -- see mapLayout.ts's own doc on why suggestedHeight is a
   // SEPARATE sizing pass from layoutMap's fixed spacing).
-  let viewport = $derived({ w: measuredWidth, h: suggestedHeight(graph) });
+  let viewport = $derived({ w: measuredWidth, h: fit ? contentHeight(graph) : suggestedHeight(graph) });
   let layout = $derived(layoutMap(graph, viewport));
   let nodeByID = $derived(new Map(layout.nodes.map((n) => [n.id, n])));
 
@@ -264,7 +269,7 @@
   let transitionMs = $derived(motion.reduced ? 0 : 150);
 </script>
 
-<div class="interaction-map" class:interaction-map--compact={compact}>
+<div class="interaction-map" class:interaction-map--compact={compact} class:interaction-map--fit={fit}>
   {#if layout.nodes.length === 0}
     <div class="interaction-map__empty">
       <p class="interaction-map__empty-line">No container is currently contending with another.</p>
@@ -377,6 +382,12 @@
      scroll out of view. */
   .interaction-map--compact .interaction-map__canvas {
     max-height: 17.5rem;
+    overflow-y: auto;
+  }
+  /* fit (the evidence page): the canvas is only as tall as the graph,
+     capped so a large overlapping set scrolls instead of growing the card. */
+  .interaction-map--fit .interaction-map__canvas {
+    max-height: 360px;
     overflow-y: auto;
   }
   .interaction-map--compact .interaction-map__empty {

@@ -148,8 +148,7 @@
   .impact-panel__direction-label {
     font-family: var(--font-mono);
     font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.01em;
     color: var(--ink-2);
   }
   .impact-panel__empty-direction {
@@ -172,8 +171,7 @@
     flex-shrink: 0;
     font-family: var(--font-mono);
     font-size: 0.62rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     padding: 0.1rem 0.4rem;
     border-radius: 999px;
     border: 1px solid currentColor;

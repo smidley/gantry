@@ -123,8 +123,7 @@
      smaller/denser context than a disk card. */
   .storage-device__kind {
     font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.01em;
     padding: 0.1rem 0.4rem;
     border-radius: 999px;
     color: var(--ink-2);

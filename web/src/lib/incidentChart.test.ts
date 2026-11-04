@@ -4,6 +4,7 @@ import {
   EVIDENCE_WINDOW_SECS,
   MAX_PAD_SEC,
   MIN_PAD_SEC,
+  assignSeriesColors,
   hasChartableData,
   incidentBand,
   incidentChartWindow,
@@ -180,6 +181,11 @@ describe('hasChartableData', () => {
   it('true when at least one result carries a point, even if others are empty', () => {
     expect(hasChartableData([{ metric: 'a', points: [] }, { metric: 'b', points: [[1, 2, 2]] }])).toBe(true);
   });
+
+  it('ignores points outside the chart window', () => {
+    expect(hasChartableData([{ metric: 'a', points: [[5, 1, 1]] }], [10, 20])).toBe(false);
+    expect(hasChartableData([{ metric: 'a', points: [[5, 1, 1], [15, 1, 1]] }], [10, 20])).toBe(true);
+  });
 });
 
 // dto builds a minimal PlanInput for planIncidentCharts' own tests --
@@ -276,5 +282,17 @@ describe('planIncidentCharts', () => {
 
   it('an unrecognized rule id returns no charts rather than throwing (the library is fixed and closed)', () => {
     expect(planIncidentCharts(dto({ rule_id: 'made-up-rule' }))).toEqual([]);
+  });
+});
+
+describe('assignSeriesColors', () => {
+  it('gives a container the same color on every chart, in first-appearance order', () => {
+    const line = (entity: string, kind = 'container') => ({ kind, entity, metrics: ['m'], label: entity, colorVar: '' });
+    const plans = assignSeriesColors([
+      { key: 'a', title: 'A', formatter: 'pct', lines: [line('', 'host'), line('qbittorrent'), line('plex')] },
+      { key: 'b', title: 'B', formatter: 'rate', lines: [line('plex'), line('qbittorrent')] },
+    ]);
+    expect(plans[0].lines.map((l) => l.colorVar)).toEqual(['--series-1', '--series-2', '--series-3']);
+    expect(plans[1].lines.map((l) => l.colorVar)).toEqual(['--series-3', '--series-2']);
   });
 });

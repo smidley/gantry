@@ -980,8 +980,7 @@
   .storage-disk__chip {
     font-family: var(--font-mono);
     font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     padding: 0.2rem 0.5rem;
     border-radius: 999px;
     background: color-mix(in oklab, var(--ink) 7%, transparent);

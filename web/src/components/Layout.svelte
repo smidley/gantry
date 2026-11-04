@@ -94,8 +94,7 @@
     color: var(--ink-3);
     font-family: var(--font-mono);
     font-size: 0.69rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    letter-spacing: 0.01em;
   }
   .layout__context-divider {
     color: var(--border-strong);

@@ -160,8 +160,7 @@
     flex-shrink: 0;
     font-family: var(--font-mono);
     font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     padding: 0.15rem 0.45rem;
     border-radius: 999px;
     background: color-mix(in oklab, var(--status-warning) 18%, transparent);

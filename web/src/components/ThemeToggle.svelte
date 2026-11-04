@@ -59,8 +59,7 @@
   .theme-toggle__label {
     font-family: var(--font-mono);
     font-size: 0.64rem;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: 0.01em;
     color: var(--ink-2);
   }
   @media (max-width: 34rem) {

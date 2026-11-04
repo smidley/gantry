@@ -241,9 +241,11 @@ export function incidentMarkers(inst: IncidentMarkerLike): ChartMarker[] {
 // never-recorded window, it simply comes back with an empty points array
 // (internal/store/query.go's own QuerySeries: an unknown series id is a
 // plain `continue`, not a failure) -- so an empty result is the ONLY
-// signal this ever has to read.
-export function hasChartableData(results: SeriesResult[]): boolean {
-  return results.some((r) => r.points.length > 0);
+// signal this ever has to read. With a window, only points inside it
+// count: a recorded excerpt that falls outside the chart's own x-range
+// would otherwise draw an empty full-height plot.
+export function hasChartableData(results: { points: number[][] }[], window?: [number, number]): boolean {
+  return results.some((r) => r.points.some(([ts]) => !window || (ts >= window[0] && ts <= window[1])));
 }
 
 // --- rule -> series mapping ---------------------------------------------
@@ -366,6 +368,26 @@ export interface PlanInput extends InsightCulpritLike {
 // always-resolvable total already answers honestly: "how much disk IO
 // was this culprit driving overall during the incident."
 export function planIncidentCharts(inst: PlanInput, ctx: PlanContext = {}): ChartPlan[] {
+  return assignSeriesColors(planCharts(inst, ctx));
+}
+
+// assignSeriesColors gives each container one series color for the
+// whole page, in first-appearance order across every plan, so the same
+// culprit reads as the same line on every chart. Non-container lines
+// key on their own kind/entity/label.
+export function assignSeriesColors(plans: ChartPlan[]): ChartPlan[] {
+  const colors = new Map<string, string>();
+  return plans.map((plan) => ({
+    ...plan,
+    lines: plan.lines.map((line) => {
+      const key = line.kind === 'container' ? line.entity : `${line.kind}|${line.entity}|${line.label}`;
+      if (!colors.has(key)) colors.set(key, `--series-${(colors.size % 9) + 1}`);
+      return { ...line, colorVar: colors.get(key) as string };
+    }),
+  }));
+}
+
+function planCharts(inst: PlanInput, ctx: PlanContext): ChartPlan[] {
   const diskMeta = ctx.diskMeta ?? {};
   const gpuEntities = ctx.gpuEntities ?? [];
   const IO_METRICS = ['io.read_bps', 'io.write_bps'];

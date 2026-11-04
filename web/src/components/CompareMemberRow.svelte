@@ -106,7 +106,7 @@
       {m['meta.started_at'] !== undefined ? fmtDuration(ts - m['meta.started_at']) : '—'}
     </td>
   {:else}
-    <td colspan="7" class="microlabel compare-member-row__gone">no longer present</td>
+    <td colspan="7" class="microlabel compare-member-row__gone">No longer present</td>
   {/if}
 </tr>
 

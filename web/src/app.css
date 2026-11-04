@@ -89,10 +89,10 @@ body {
    renders its own. */
 .page-title {
   font-family: var(--font-display);
-  font-weight: 680;
+  font-weight: 600;
   font-size: clamp(1.65rem, 2vw, 2.15rem);
   line-height: 1.12;
-  letter-spacing: -0.035em;
+  letter-spacing: -0.02em;
   color: var(--ink);
   margin: 0 0 0.35rem 0;
 }
@@ -104,8 +104,8 @@ body {
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
+  text-transform: none;
+  letter-spacing: 0.01em;
   color: var(--ink-2);
 }
 

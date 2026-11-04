@@ -492,7 +492,7 @@
   const CUSTOMIZE_MEDIA = '(min-width: 48rem)';
 
   // SIZE_GLYPHS: the height switcher's own labels. One letter each, in
-  // the same tiny mono/uppercase register as the Top Consumers switcher
+  // the same tiny mono register as the Top Consumers switcher
   // this control is modeled on -- the toolbar floats over the gap above
   // a card and has no room for three spelled-out words, and every button
   // carries the real word in its accessible name and its tooltip.
@@ -1293,7 +1293,7 @@
     }
   }
 
-  /* --- Customize bar: quiet by default, in the same mono/uppercase
+  /* --- Customize bar: quiet by default, in the same mono
      register as the Top Consumers switcher right below it, and pushed
      to the band's top-right corner where it stays out of the way until
      it's wanted. ------------------------------------------------- */
@@ -1318,8 +1318,7 @@
     color: var(--ink-2);
     font-family: var(--font-mono);
     font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     cursor: pointer;
   }
   .overview__customize-btn:hover:not(:disabled) {
@@ -1673,8 +1672,7 @@
     color: var(--ink-2);
     font-family: var(--font-mono);
     font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     cursor: pointer;
   }
   .overview__top-switch--active {

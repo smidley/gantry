@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evidenceRows, formatInstant, isNotFoundError, parseInsightId } from './insightDetail';
+import { evidenceRows, formatDuration, formatInstant, isNotFoundError, parseInsightId } from './insightDetail';
 import type { EvidenceDTO } from './api';
 
 // A fully-zeroed bundle, the shape the Go side always sends (it omits
@@ -64,7 +64,8 @@ describe('evidenceRows', () => {
     const rows = evidenceRows(evidence({ await_ms: 42, culprit_share_pct: 71 }));
     expect(rows.map((r) => r.key)).toEqual(['culprit_share_pct', 'await_ms']);
     expect(rows[0].label).not.toBe('culprit_share_pct'); // a real human label, not the raw key
-    expect(rows[1].text).toContain('42');
+    expect(rows[0].text).toBe('71%');
+    expect(rows[1].text).toBe('42 ms');
   });
 
   it('omits zero-valued fields rather than claiming a measured zero', () => {
@@ -81,7 +82,30 @@ describe('formatInstant', () => {
     expect(formatInstant(0)).toBe('—');
   });
 
-  it('renders a real second as a local date+time', () => {
-    expect(formatInstant(1756900000)).toBe(new Date(1756900000 * 1000).toLocaleString());
+  it('renders a real second as a short local date+time without seconds', () => {
+    const text = formatInstant(1756900000);
+    expect(text).toMatch(/^[A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2}\s?(am|pm)$/);
+  });
+});
+
+describe('formatDuration', () => {
+  it('uses seconds under a minute', () => {
+    expect(formatDuration(0)).toBe('0s');
+    expect(formatDuration(45)).toBe('45s');
+  });
+
+  it('uses whole minutes under an hour', () => {
+    expect(formatDuration(120)).toBe('2 min');
+    expect(formatDuration(3599)).toBe('59 min');
+  });
+
+  it('uses hours and minutes under a day, trimming a zero part', () => {
+    expect(formatDuration(3600)).toBe('1h');
+    expect(formatDuration(3 * 3600 + 5 * 60)).toBe('3h 5m');
+  });
+
+  it('uses days and hours beyond that', () => {
+    expect(formatDuration(86400)).toBe('1d');
+    expect(formatDuration(2 * 86400 + 4 * 3600 + 59)).toBe('2d 4h');
   });
 });

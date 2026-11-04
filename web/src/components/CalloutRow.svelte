@@ -182,8 +182,7 @@
     color: var(--ink-2);
     font-family: var(--font-mono);
     font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     cursor: pointer;
   }
   .callout-row__ack-btn:hover:not(:disabled) {

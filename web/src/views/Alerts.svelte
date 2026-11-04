@@ -297,7 +297,7 @@
                     <span class="alerts-view__row-entity">{a.entity}</span>
                   {/if}
                 {/if}
-                <span class="microlabel alerts-view__row-duration">firing for {firingDuration(a.fired_at, nowSec)}</span>
+                <span class="microlabel alerts-view__row-duration">Firing for {firingDuration(a.fired_at, nowSec)}</span>
               </div>
               {#if a.metric}
                 <div class="alerts-view__row-value">
@@ -578,8 +578,7 @@
     color: var(--ink-3);
     font-size: 0.66rem;
     font-weight: 650;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    letter-spacing: 0.01em;
   }
   .alerts-view__guidance p a {
     color: var(--accent-strong);
@@ -684,8 +683,7 @@
   .alerts-view__builtin-badge {
     font-family: var(--font-mono);
     font-size: 0.65rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.01em;
     padding: 0.1rem 0.4rem;
     border-radius: 999px;
     background: color-mix(in oklab, var(--ink) 8%, transparent);

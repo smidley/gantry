@@ -4,9 +4,8 @@
   just open a whole new page instead of trying to pack all of the info
   into the little popup." Everything the evidence drawer used to cram
   into a 30rem modal, with room: the statement AS the page title, the
-  fact chips, the incident's own timeline charts and the interaction map
-  side by side at desktop width, then the evidence table and the dismiss
-  controls.
+  fact chips, the incident's own timeline charts beside a right column
+  of the interaction map, the evidence table and the dismiss controls.
 
   Reached only by clicking an Insights row or a map edge (never through
   nav) -- the container-detail precedent, down to App.svelte keying this
@@ -26,8 +25,8 @@
       /api/insights/history?from=<anchor>): who else was contending at
       this insight's own instant, this one's edges emphasized
       (focusInsightId) and every concurrent other muted but present.
-      Rendered FULL size here, not `compact` -- the cap that variant
-      exists for was the drawer's own layout, which is gone.
+      Rendered `fit` here, not `compact`: the canvas is only as tall
+      as the graph, so a small map doesn't pad out its card.
     - the charts (incidentChart.ts' planIncidentCharts over the existing
       GET /api/series): how bad and when. TimeChart's own default height
       here, again for the room the drawer didn't have.
@@ -44,13 +43,12 @@
   import { fetchInsight, fetchInsights, fetchInsightHistory, dismissInsight, fetchSeries } from '../lib/api';
   import {
     confidenceLabel,
-    activeDuration,
     drawerMapAnchor,
     selectOverlappingInsights,
     buildInsightGraph,
   } from '../lib/insights';
-  import { evidenceRows, formatInstant, isNotFoundError, parseInsightId } from '../lib/insightDetail';
-  import { incidentChartWindow, incidentBand, incidentMarkers, hasChartableData, planIncidentCharts } from '../lib/incidentChart';
+  import { evidenceRows, formatDuration, formatInstant, isNotFoundError, parseInsightId } from '../lib/insightDetail';
+  import { incidentChartWindow, incidentBand, hasChartableData, planIncidentCharts } from '../lib/incidentChart';
   import { sumSeriesByMetric } from '../lib/metrics';
   import { fmtPct, fmtRate } from '../lib/format';
   import InteractionMap from '../components/InteractionMap.svelte';
@@ -104,7 +102,6 @@
 
   let charts = $state([]);
   let chartXDomain = $state(undefined);
-  let chartMarkers = $state([]);
   let chartBand = $state(undefined);
   let chartsLoading = $state(insightID !== null);
 
@@ -197,9 +194,9 @@
   // line across every returned chart is grouped by its own (kind, entity)
   // pair first, so a pair more than one line needs is still only fetched
   // once. hasChartableData decides each chart's real-vs-fallback rendering
-  // straight off the RAW per-pair fetch result, before sumSeriesByMetric
-  // folds multiple metrics into one line's points -- an empty result is
-  // never an error here, only a quiet "nothing to show."
+  // off the summed line points inside the chart window -- a recorded
+  // excerpt for a metric no line draws must not count as data, and an
+  // empty result is never an error here, only a quiet "nothing to show."
   async function loadCharts(inst) {
     const xDomain = incidentChartWindow(inst, Math.floor(Date.now() / 1000));
     const plans = planIncidentCharts(inst, {
@@ -229,17 +226,14 @@
       const pair = pairs.get(key);
       return [key, mergeRecordedHistory(results, inst.evidence?.recorded_series ?? [], pair.kind, pair.entity)];
     }));
-    const hasDataByPair = new Map([...resultsByPair].map(([key, results]) => [key, hasChartableData(results)]));
-
-    charts = plans.map((plan) => ({
-      ...plan,
-      hasData: plan.lines.some((line) => hasDataByPair.get(`${line.kind}|${line.entity}`)),
-      series: plan.lines.map((line) => {
+    charts = plans.map((plan) => {
+      const series = plan.lines.map((line) => {
         const results = resultsByPair.get(`${line.kind}|${line.entity}`) ?? [];
         const byMetric = Object.fromEntries(results.map((r) => [r.metric, r.points]));
         return { label: line.label, colorVar: line.colorVar, points: sumSeriesByMetric(byMetric, line.metrics) };
-      }),
-    }));
+      });
+      return { ...plan, series, hasData: hasChartableData(series, xDomain) };
+    });
     const deviceRecords = (inst.evidence?.recorded_series ?? []).filter((s) => s.metric.startsWith('live:io.'));
     if (deviceRecords.length) {
       const entities = [...new Set(deviceRecords.map((s) => s.entity))];
@@ -252,7 +246,6 @@
       });
     }
     chartXDomain = xDomain;
-    chartMarkers = incidentMarkers(inst);
     chartBand = incidentBand(inst, Math.floor(Date.now() / 1000));
     chartsLoading = false;
   }
@@ -285,14 +278,13 @@
       {#if ['cpu-starvation', 'memory-squeeze'].includes(insight.rule_id) && (insight.evidence?.attribution_version ?? 0) < 2}
         <p class="microlabel">Legacy incident: this record predates the host-percentage correction. Its contributor percentages and causal confidence should not be treated as verified.</p>
       {/if}
-      <p class="microlabel">{insight.evidence?.recorded_series?.length ? 'A bounded excerpt of the measurements at detection is saved with this incident. Missing periods were not recorded.' : 'This incident has no saved measurement excerpt. Charts depend on the remaining history.'} {insight.confidence === 'likely' ? 'The proposed cause is an inference from concurrent activity.' : 'The victim’s distress was measured; shared activity identifies a likely contributor.'}</p>
       <div class="insight-detail__facts">
-        <span class="insight-detail__chip insight-detail__chip--{insight.confidence}">{confidenceLabel(insight.confidence)}</span>
-        <span class="microlabel">{insight.tier === 'psi' ? 'PSI tier' : 'tier 1 (proxy)'}</span>
+        <span class="insight-detail__confidence insight-detail__confidence--{insight.confidence}">{confidenceLabel(insight.confidence)}</span>
+        <span class="microlabel">{insight.tier === 'psi' ? 'PSI tier' : 'Tier 1 (proxy)'}</span>
         <span class="microlabel">
           {insight.state === 'active'
-            ? `active for ${activeDuration(insight.started_at, nowSec)}`
-            : `resolved (${insight.resolve_reason}) after ${activeDuration(insight.started_at, insight.resolved_at)}`}
+            ? `Active for ${formatDuration(nowSec - insight.started_at)}`
+            : `Resolved after ${formatDuration(insight.resolved_at - insight.started_at)}`}
         </span>
         <span class="microlabel tabular-nums">Started {formatInstant(insight.started_at)}</span>
         {#if insight.resolved_at}
@@ -326,7 +318,6 @@
                 <TimeChart
                   series={chart.series}
                   formatValue={CHART_FORMATTERS[chart.formatter]}
-                  markers={chartMarkers}
                   band={chartBand}
                   xDomain={chartXDomain}
                 />
@@ -338,42 +329,45 @@
         {/if}
       </div>
 
-      <div class="card insight-detail__panel insight-detail__map">
-        <span class="microlabel">Interaction map</span>
-        {#if mapLoading}
-          <p class="microlabel">Loading…</p>
-        {:else}
-          <InteractionMap {graph} {statementsById} tier={insight.tier} onOpenInsight={openInsight} focusInsightId={insight.id} />
-        {/if}
-      </div>
-    </div>
+      <div class="insight-detail__side">
+        <div class="card insight-detail__panel insight-detail__map">
+          <span class="microlabel">Interaction map</span>
+          {#if mapLoading}
+            <p class="microlabel">Loading…</p>
+          {:else}
+            <InteractionMap {graph} {statementsById} tier={insight.tier} onOpenInsight={openInsight} focusInsightId={insight.id} fit />
+          {/if}
+        </div>
 
-    <div class="card insight-detail__panel insight-detail__evidence-card">
-      <span class="microlabel">Evidence</span>
-      {#if rows.length > 0}
-        <dl class="insight-detail__evidence">
-          {#each rows as row (row.key)}
-            <dt>{row.label}</dt>
-            <dd class="tabular-nums">{row.text}</dd>
-          {/each}
-        </dl>
-      {:else}
-        <p class="microlabel insight-detail__chart-empty">This finding carries no measured numbers of its own.</p>
-      {/if}
-      {#if otherUsers.length > 0}
-        <p class="microlabel insight-detail__other-users">Also touching this resource: {otherUsers.join(', ')}</p>
-      {/if}
-    </div>
+        <div class="card insight-detail__panel insight-detail__evidence-card">
+          <span class="microlabel">Evidence</span>
+          {#if rows.length > 0}
+            <dl class="insight-detail__evidence">
+              {#each rows as row (row.key)}
+                <dt>{row.label}</dt>
+                <dd class="tabular-nums">{row.text}</dd>
+              {/each}
+            </dl>
+          {:else}
+            <p class="microlabel insight-detail__chart-empty">This finding carries no measured numbers of its own.</p>
+          {/if}
+          {#if otherUsers.length > 0}
+            <p class="microlabel insight-detail__other-users">Also touching this resource: {otherUsers.join(', ')}</p>
+          {/if}
+          <p class="microlabel insight-detail__method">{insight.evidence?.recorded_series?.length ? 'A bounded excerpt of the measurements at detection is saved with this incident. Missing periods were not recorded.' : 'This incident has no saved measurement excerpt. Charts depend on the remaining history.'} {insight.confidence === 'likely' ? 'The proposed cause is an inference from concurrent activity.' : 'The victim’s distress was measured; shared activity identifies a likely contributor.'}</p>
+        </div>
 
-    <div class="card insight-detail__panel insight-detail__dismiss">
-      <span class="microlabel">Dismiss</span>
-      <p class="microlabel">Dismiss this incident and suppress the same rule, victim, contributor, and resource for the selected period. Alert rules keep their own notification settings.</p>
-      <div class="insight-detail__dismiss-row">
-        {#each DISMISS_PRESETS as p (p.days)}
-          <button type="button" onclick={() => dismiss(p.days)}>{p.label}</button>
-        {/each}
+        <div class="card insight-detail__panel insight-detail__dismiss">
+          <span class="microlabel">Dismiss</span>
+          <p class="microlabel">Dismiss this incident and suppress the same rule, victim, contributor, and resource for the selected period. Alert rules keep their own notification settings.</p>
+          <div class="insight-detail__dismiss-row">
+            {#each DISMISS_PRESETS as p (p.days)}
+              <button type="button" onclick={() => dismiss(p.days)}>{p.label}</button>
+            {/each}
+          </div>
+          {#if dismissError}<p class="insight-detail__error">{dismissError}</p>{/if}
+        </div>
       </div>
-      {#if dismissError}<p class="insight-detail__error">{dismissError}</p>{/if}
     </div>
   {/if}
 </div>
@@ -383,19 +377,19 @@
   .insight-detail {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 16px;
   }
   .insight-detail__head {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 8px;
   }
   /* Plain understated text link, the compare__hint-link treatment --
      a way back, not a peer of the page's own actions. */
   .insight-detail__back {
     align-self: flex-start;
     color: var(--series-1);
-    font-size: 0.82rem;
+    font-size: 13px;
   }
   .insight-detail__title {
     margin: 0;
@@ -403,57 +397,54 @@
   .insight-detail__facts {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
+    gap: 12px;
     flex-wrap: wrap;
   }
-  /* Confidence chip -- the same shape Insights' own rows use, restated
-     here because Svelte scopes a component's styles to that component.
-     Colour is never the only signal: the label itself reads
-     "confirmed"/"likely". */
-  .insight-detail__chip {
-    flex-shrink: 0;
-    font-family: var(--font-mono);
-    font-size: 0.62rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.1rem 0.4rem;
-    border-radius: 999px;
-    border: 1px solid currentColor;
+  /* Confidence as plain text, first in the facts row. Colour is never
+     the only signal: the word itself reads "Confirmed"/"Likely". */
+  .insight-detail__confidence {
+    font-size: 12px;
+    font-weight: 500;
   }
-  .insight-detail__chip--likely {
+  .insight-detail__confidence--likely {
     color: var(--ink-2);
   }
-  .insight-detail__chip--confirmed {
+  .insight-detail__confidence--confirmed {
     color: var(--status-warning);
   }
   .insight-detail__state {
-    margin: 0.5rem 0;
+    margin: 8px 0;
     color: var(--ink-2);
   }
   .insight-detail__error {
     margin: 0;
-    font-size: 0.82rem;
+    font-size: 13px;
     color: var(--status-critical);
   }
-  /* Two columns at desktop width -- the whole point of this page over
-     the drawer it replaced: the timeline and the map are two answers to
-     the same question (how bad and when, vs. who) and read better side
-     by side than stacked. */
+  /* Two columns at desktop width: the timeline on the left (how bad and
+     when), and on the right the map (who), the measured evidence and the
+     dismiss controls stacked under it. */
   .insight-detail__columns {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
-    gap: 0.75rem;
+    gap: 16px;
     align-items: start;
+  }
+  .insight-detail__side {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
   }
   /* min-width:0 -- a grid item's default min-width:auto lets the uPlot
      canvas inside act as its track's minimum, pinning the track at a
      stale width the ResizeObserver can then never shrink; the
      ContainerDetail__chart-card idiom, same reason. */
   .insight-detail__panel {
-    padding: 1rem;
+    padding: 20px;
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: 12px;
     min-width: 0;
   }
   /* The app's standard narrow breakpoint (Overview/ContainerDetail both
@@ -466,48 +457,53 @@
   .insight-detail__chart {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 8px;
   }
   .insight-detail__chart-title {
     color: var(--ink-2);
   }
   .insight-detail__chart-empty {
     margin: 0;
-    padding: 0.75rem 0;
+    padding: 12px 0;
   }
   .insight-detail__evidence {
     margin: 0;
     display: grid;
     grid-template-columns: 1fr auto;
-    gap: 0.35rem 1rem;
+    gap: 8px 16px;
   }
   .insight-detail__evidence dt {
     color: var(--ink-2);
-    font-size: 0.82rem;
+    font-size: 14px;
   }
   .insight-detail__evidence dd {
     margin: 0;
-    font-size: 0.85rem;
+    font-size: 14px;
     color: var(--ink);
     text-align: right;
   }
   .insight-detail__other-users {
     margin: 0;
   }
+  .insight-detail__method {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+  }
   .insight-detail__dismiss-row {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 8px;
     flex-wrap: wrap;
   }
   .insight-detail__dismiss-row button {
     min-height: 36px;
-    padding: 0 0.7rem;
+    padding: 0 12px;
     border-radius: 6px;
     border: 1px solid color-mix(in oklab, var(--ink) 15%, transparent);
     background: transparent;
     color: var(--ink);
-    font-size: 0.8rem;
+    font-size: 13px;
     cursor: pointer;
   }
 </style>

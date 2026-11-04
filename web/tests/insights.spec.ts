@@ -356,7 +356,7 @@ test('dismiss round-trip: dismissing from the evidence page returns to the list,
   // i.e. the first match.
   const historyRow = page.locator('.insights-view__row--history', { hasText: target!.statement.slice(0, 30) }).first();
   await expect(historyRow).toBeVisible();
-  await expect(historyRow).toContainText('dismissed');
+  await expect(historyRow).toContainText('Dismissed');
 });
 
 test('List/Map segmented toggle switches modes and updates the URL', async ({ page }) => {

@@ -243,7 +243,7 @@ test('a restart_policy hint renders as an amber "restarts on boot" badge, distin
   await page.goto('#/maintenance');
   const row = page.locator('.maintenance-table tr', { hasText: 'always-on' });
   await expect(row).toBeVisible();
-  await expect(row.locator('.maintenance-badge--warn')).toHaveText('restarts on boot');
+  await expect(row.locator('.maintenance-badge--warn')).toHaveText('Restarts on boot');
   await expect(row.locator('.maintenance-badge')).toHaveCount(1); // no managed badge on this fixture
   await expect(row.locator('input[type="checkbox"]')).not.toBeChecked();
 });

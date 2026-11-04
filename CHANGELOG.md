@@ -8,6 +8,31 @@ uses [Semantic Versioning](https://semver.org/).
 the GitHub Release body, so a section lands here under its own `##
 [x.y.z]` heading before that tag is pushed, not after.
 
+## [0.1.16] - 2026-11-04
+
+### Changed
+
+- **Labels are sentence case everywhere.** Section titles, chips,
+  legends and the breadcrumb no longer shout in tracked uppercase, and
+  page titles sit a step lighter. Identifiers such as the S/M/L size
+  buttons and acronyms are unchanged. (#96)
+- **The insight evidence page is tidier.** The timeline keeps the left
+  column; the interaction map, evidence and dismiss controls stack on
+  the right so neither column runs empty. The map is as tall as its
+  graph. Confidence reads as plain text, durations as `2 min`, times as
+  `Nov 4, 1:11 pm`, and percentages drop a `.0`. A container keeps one
+  colour across every chart on the page, a chart with nothing in the
+  window says so instead of drawing an empty frame, the incident window
+  is the only marker, and the hover readout under multi-series charts
+  appears only while the cursor is over the chart. The methodology note
+  moved from the header to the evidence card. (#96)
+
+### Fixed
+
+- **Image builds no longer carry openssl.** The runtime image is now
+  distroless `base-nossl-debian12`; nothing in Gantry links openssl, and
+  the package was failing the vulnerability scan on every build. (#97)
+
 ## [0.1.15] - 2026-10-04
 
 ### Fixed

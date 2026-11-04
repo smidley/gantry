@@ -38,7 +38,7 @@ RUN CGO_ENABLED=0 go build -trimpath -tags webdist -ldflags "-s -w -X main.versi
 # Nvidia hardware the container toolkit expects a normal glibc layout it
 # can ldconfig against -- so a complete, coherent userland wins over a few
 # saved MB.
-FROM gcr.io/distroless/base-debian12
+FROM gcr.io/distroless/base-nossl-debian12
 COPY --from=build /out/gantry /gantry
 COPY --from=build /usr/local/go/lib/time/zoneinfo.zip /zoneinfo.zip
 ENV ZONEINFO=/zoneinfo.zip
